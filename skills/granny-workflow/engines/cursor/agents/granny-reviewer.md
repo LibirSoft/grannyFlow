@@ -1,6 +1,6 @@
 ---
 name: granny-reviewer
-description: granny-workflow reviewer for the "agent" engine. Reviews one stage's diff for bugs, regressions, missing tests and contract breaks. Use only when the granny-workflow skill asks for a stage review and the reviewer engine is "agent".
+description: granny-workflow reviewer for reviewers on the "agent" engine. Reviews one stage's diff for bugs, regressions, missing tests and contract breaks. Use only when the granny-workflow skill asks for a stage review by a reviewer whose engine is "agent".
 model: inherit
 readonly: true
 ---

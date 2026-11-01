@@ -31,6 +31,20 @@ describe('skill docs', () => {
     }
   })
 
+  it('describes the reviewers list and mentions roles.reviewer only as the migration', () => {
+    const docs: Record<string, string> = { 'README.md': readRoot('README.md'), 'SKILL.md': read('SKILL.md') }
+    for (const f of readdirSync(join(skill, 'references'))) docs[`references/${f}`] = read(`references/${f}`)
+    for (const f of readdirSync(join(skill, 'engines/cursor/agents'))) docs[`cursor/${f}`] = read(`engines/cursor/agents/${f}`)
+    for (const [file, text] of Object.entries(docs)) {
+      const stale = text.split('\n').filter(l => l.includes('roles.reviewer') && !/no `roles\.reviewer`|leftover `roles\.reviewer`/.test(l))
+      expect({ file, stale }).toEqual({ file, stale: [] })
+    }
+    const config = read('references/config.md')
+    expect(config).toContain('A P2 that duplicates a P1 is scored on its own')
+    expect(config).toContain('A reviewer that labels everything P0/P1 bypasses the judge')
+    expect(read('references/claude-code.md')).toContain('Claude models only')
+  })
+
   it('points every repo reference at LibirSoft/grannyFlow', () => {
     expect(readRoot('README.md')).toContain('npx skills add LibirSoft/grannyFlow')
     const docs: Record<string, string> = {

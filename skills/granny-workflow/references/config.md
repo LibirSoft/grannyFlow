@@ -7,7 +7,7 @@ Layers, later wins:
 3. `<repo>/granny.config.json` - project, safe to commit
 4. the run's `config` argument
 
-`roles.<role>` objects merge key by key (set a key to `null` to drop it); every other key replaces the lower layer. Unknown keys and invalid values stop the run before any agent starts, with every problem listed.
+`roles.<role>` objects merge key by key (set a key to `null` to drop it); every other key, `reviewers` included, replaces the lower layer. Unknown keys and invalid values stop the run before any agent starts, with every problem listed and its path (`reviewers[2].focus ...`).
 
 ## Keys
 
@@ -15,9 +15,9 @@ Layers, later wins:
 |---|---|---|
 | `roles.granny` | `{}` | model/effort for granny's helper steps: the review-command runner (Claude Code), the extraction fallback, the final PR-ready check |
 | `roles.implementer` | `{}` | builds each stage and fixes accepted findings |
-| `roles.reviewer` | `{ "engine": "auto" }` | `engine`: `auto`, `codex-plugin`, `codex` or `agent`; `mode` and `focus` for the Codex plugin - see [Reviewer](#reviewer). `model`: with the Codex engines a string passed as `-m`; with `agent` a host model. `command`: custom review command, see below |
-| `roles.judge` | `{ "model": { "claude-code": "sonnet" } }` | scores each finding 0-100 |
-| `threshold` | `70` | a finding is sent back to the implementer when it is P0/P1 (also `critical`/`high`), when the judge gave it no score, or when its score is **strictly above** this. The overall review score gates nothing |
+| `roles.judge` | `{ "model": { "claude-code": "sonnet" } }` | scores each finding that is not P0/P1 0-100 and marks duplicates |
+| `reviewers` | `[{ "name": "codex", "engine": "auto" }]` | the reviewers; every one of them reviews every round, all at the same time - see [Reviewers](#reviewers) |
+| `threshold` | `70` | a finding is sent back to the implementer when it is P0/P1 (also `critical`/`high`; these skip the judge), when the judge gave it no score, or when its score is **strictly above** this. The overall review score gates nothing |
 | `maxRounds` | `4` | review rounds per stage; the stage ends `round-cap` after the last one |
 | `base` | `"main"` | branch never to touch; the run's `base` argument overrides it |
 | `gates` | `"auto"` | `"auto"`: agents discover the project's test/lint/build/typecheck commands. Or a list, e.g. `["bun test", "bun run check", "bun run build"]` |
@@ -26,9 +26,11 @@ Layers, later wins:
 | `aiAttribution` | `false` | `false` forbids Co-Authored-By / "Generated with" lines and the final check greps for them |
 | `rules` | red-green tests; code comments default none | extra house rules appended to every working prompt; `[]` removes them |
 
+There is no `roles.reviewer`: a config that has one is rejected with the migration - move its keys into `"reviewers": [{ "name": "codex", ...the same keys }]`, and a custom `command` into an entry with `"engine": "command"`.
+
 ## Models per host
 
-A role's `model` is either one string for every host, or an object keyed by host:
+A role's or a reviewer's `model` is either one string for every host, or an object keyed by host:
 
 ```json
 { "model": { "claude-code": "opus", "opencode": "anthropic/claude-opus-5-5" } }
@@ -38,16 +40,76 @@ A role's `model` is either one string for every host, or an object keyed by host
 - **opencode** needs `provider/model`, optionally `#variant` (`anthropic/claude-sonnet-5-5#high`); list them with `opencode models`. `effort` is ignored - use the variant suffix. A role with no model uses the model of the session that called `granny_run`.
 - **Cursor** reads no config; set `model:` in the subagent files (see cursor.md).
 
-A host key that is missing means "inherit" on that host.
+A host key that is missing means "inherit" on that host. Reviewers take `model` and `effort` from their own entry, never from a role.
 
-## Reviewer
+## Reviewers
+
+`reviewers` is a list, one entry per reviewer. Every round all of them review the stage in parallel: on Claude Code as concurrent `agent()` calls, on opencode as concurrent child sessions and commands.
+
+| key | values | |
+|---|---|---|
+| `name` | unique; `a-z`, `0-9`, `-` | names the reviewer's output files, log lines and finding ids. Omitted: `<engine>-<n>`, with `n` its 1-based position (`agent-2`) |
+| `engine` | `auto` (default), `codex`, `codex-plugin`, `agent`, `command` | which reviewer runs, below |
+| `model` | a string or an object keyed by host | the Codex engines pass it as `-m`; `agent` runs that host model; `command` puts it in `{model}` |
+| `effort` | `low`, `medium`, `high`, `xhigh`, `max` | the agent's reasoning effort, for engine `agent` on Claude Code; the other engines do not use it |
+| `mode`, `focus` | | the Codex plugin only (engines `auto` and `codex-plugin`) - see [The Codex plugin](#the-codex-plugin) |
+| `command` | a command template | engine `command` only, and required there - see [Command reviewers](#command-reviewers) |
 
 | `engine` | runs |
 |---|---|
 | `auto` (default) | on Claude Code: the Codex plugin when its companion script is installed and `node` is on `PATH`, otherwise the Codex CLI. On opencode: always the Codex CLI |
-| `codex-plugin` | OpenAI's Codex plugin for Claude Code, on either host. When the companion script is missing, or `node` is not on `PATH`, the review fails with a note saying so - it never falls back to the CLI |
+| `codex-plugin` | OpenAI's Codex plugin for Claude Code, on either host. When the companion script is missing, or `node` is not on `PATH`, the reviewer fails with a note saying so - it never falls back to the CLI |
 | `codex` | the Codex CLI: `codex exec review` |
-| `agent` | a model reviews the diff with the reviewer prompt; `model` is a host model |
+| `agent` | a read-only host subagent reviews the diff with the "Reviewer - agent engine" prompt, on this entry's `model` and `effort`. On Claude Code that means Claude models only (`opus`, `sonnet`, `haiku`, a Claude model ID); to have GLM or another provider review there, use engine `command` with a CLI that reaches it, such as `opencode run`. On opencode, any `provider/model` the server has |
+| `command` | your command, any CLI - see [Command reviewers](#command-reviewers) |
+
+Codex, Opus and GLM reviewing every stage. On opencode the GLM reviewer is an agent on a provider model:
+
+```json
+{
+  "reviewers": [
+    { "name": "codex", "engine": "auto" },
+    { "name": "opus", "engine": "agent", "model": { "opencode": "anthropic/claude-opus-5-5" } },
+    { "name": "glm", "engine": "agent", "model": { "opencode": "opencode/glm-5.3-flash-free" } }
+  ]
+}
+```
+
+On Claude Code it goes through `opencode run`, because a Claude Code agent runs Claude models only:
+
+```json
+{
+  "reviewers": [
+    { "name": "codex", "engine": "auto" },
+    { "name": "opus", "engine": "agent", "model": "opus", "effort": "high" },
+    { "name": "glm", "engine": "command", "command": "opencode run -m opencode/glm-5.3-flash-free {prompt}" }
+  ]
+}
+```
+
+### Each reviewer on its own
+
+- Output files: `<workDir>/review-<stage>-r<n>-<name>.md` and `.log`.
+- Log line every round: `<stage> r<n> <name>: reviewer: <backend>`.
+- Finding ids: `<name>-F1`, `<name>-F2`, … Each finding also carries `reviewer: "<name>"` into the judge prompt, the fix prompt, the round history, residual and unresolved.
+- Codex plugin broker: `<workDir>/codex-plugin-<name>` (below).
+
+### A reviewer that does not run
+
+A reviewer did not run when its command exits non-zero, when the Codex plugin says it got no usable result (below), when an agent reviewer returns nothing, or when an extraction of its output stays short (below). It is run once more, on its own - the other reviewers keep their results - with labels and log lines tagged `#2`, after the log line `<stage> r<n> <name>: did not run - retrying once. <why>`. If it fails again, the stage ends `review-failed`: the note names every reviewer that failed with its last error, and `unresolved` keeps the findings of the reviewers that did run (and the failed reviewer's findings from the round before), so nothing is lost. A stage is `clean` only when every reviewer ran and none reported a finding.
+
+### Judge routing
+
+1. P0/P1 findings (also `critical`/`high`) go straight to the implementer. They are never sent to the judge and have no score.
+2. The judge is called only when there are other findings. It scores each of them 0-100 and may mark one `duplicateOf: <id>` when it reports the same problem as another finding in its list. The duplicate is merged into the finding it points at, which is reported once, lists the merged ids in `duplicates` and takes the highest score of the group (none when any of them is unscored), so a merge never drops a finding that would have been fixed. The log says `<stage> r<n>: judge merged <id> into <id> (duplicate)`. A `duplicateOf` that points at itself, at an id not in the list, or back in a cycle is ignored.
+3. A finding above `threshold`, or one the judge gave no score (also when the judge returned nothing), goes to the implementer; the rest are residual for the user.
+
+Two consequences:
+
+- Dedupe happens only among the findings that are not P0/P1. A P2 that duplicates a P1 is scored on its own, and may reach the implementer next to the P1.
+- A reviewer that labels everything P0/P1 bypasses the judge: every finding it reports goes to the implementer.
+
+### The Codex plugin
 
 The plugin path runs the newest `${CLAUDE_CONFIG_DIR:-$HOME/.claude}/plugins/cache/openai-codex/codex/<version>/scripts/codex-companion.mjs` from the repo - the highest `<version>`, compared numerically field by field (`1.10.0` after `1.9.3`) with `sort -t. -k1,1n -k2,2n -k3,3n`, which BSD/macOS `sort` runs too:
 
@@ -56,23 +118,23 @@ node <companion> review --wait --base <stage start sha> --scope branch [-m <mode
 node <companion> adversarial-review --wait --base <stage start sha> --scope branch [-m <model>] [-- <focus>]
 ```
 
-Its stdout goes to the round's `.md` file and its progress to the `.log`, the same files the CLI uses. The plugin needs `node` on `PATH` (checked with `command -v node` before the companion runs), and the Codex CLI installed and logged in (the companion drives it). The engine logs which backend ran each round, so you can see what `auto` chose:
+Its stdout goes to the reviewer's `.md` file and its progress to the `.log`, the same files the CLI uses. The plugin needs `node` on `PATH` (checked with `command -v node` before the companion runs), and the Codex CLI installed and logged in (the companion drives it). The engine logs which backend ran each round, so you can see what `auto` chose:
 
 ```
-<stage> r<n>: reviewer: codex-plugin review (<companion path>)
-<stage> r<n>: reviewer: codex CLI (codex exec review) - no Codex plugin companion at <dir>/<version>/scripts/codex-companion.mjs
-<stage> r<n>: reviewer: codex CLI (codex exec review) - node is not on PATH for the Codex plugin companion at <companion path>
-<stage> r<n>: reviewer: codex-plugin review unavailable - node is not on PATH for the Codex plugin companion at <companion path>; install Node.js
+<stage> r<n> <name>: reviewer: codex-plugin review (<companion path>)
+<stage> r<n> <name>: reviewer: codex CLI (codex exec review) - no Codex plugin companion at <dir>/<version>/scripts/codex-companion.mjs
+<stage> r<n> <name>: reviewer: codex CLI (codex exec review) - node is not on PATH for the Codex plugin companion at <companion path>
+<stage> r<n> <name>: reviewer: codex-plugin review unavailable - node is not on PATH for the Codex plugin companion at <companion path>; install Node.js
 ```
 
-The companion talks to Codex through an app-server broker it starts in the background (`app-server-broker.mjs` with a `codex app-server` child) and leaves running when it exits. Granny gives the companion its own plugin data directory, `<workDir>/codex-plugin` (as `CLAUDE_PLUGIN_DATA`), so a review never shares or stops the broker of a Claude Code session working in the same repo, and stops its own broker with the plugin's `scripts/session-lifecycle-hook.mjs SessionEnd` when the review script exits - after the review, after a failure, and on SIGTERM, SIGINT or SIGHUP (so `granny_cancel` on opencode stops it too). A SIGKILL skips that step and leaves the broker running.
+The companion talks to Codex through an app-server broker it starts in the background (`app-server-broker.mjs` with a `codex app-server` child) and leaves running when it exits. Granny gives each plugin reviewer its own plugin data directory, `<workDir>/codex-plugin-<name>` (as `CLAUDE_PLUGIN_DATA`), so a review never shares or stops the broker of another reviewer running next to it or of a Claude Code session working in the same repo, and stops its own broker with the plugin's `scripts/session-lifecycle-hook.mjs SessionEnd` when the review script exits - after the review, after a failure, and on SIGTERM, SIGINT or SIGHUP (so `granny_cancel` on opencode stops it too). A SIGKILL skips that step and leaves the broker running.
 
 | key | values | |
 |---|---|---|
-| `mode` | `review` (default), `adversarial-review` | `review` is Codex's built-in reviewer; `adversarial-review` is the plugin's skeptical, ship/no-ship review with `critical`/`high`/`medium`/`low` findings. It needs the plugin: engine `codex-plugin`, or `auto` on Claude Code, where a missing companion or a missing `node` fails the review instead of running a plain CLI review |
+| `mode` | `review` (default), `adversarial-review` | `review` is Codex's built-in reviewer; `adversarial-review` is the plugin's skeptical, ship/no-ship review with `critical`/`high`/`medium`/`low` findings. It needs the plugin: engine `codex-plugin`, or `auto` on Claude Code, where a missing companion or a missing `node` fails the reviewer instead of running a plain CLI review |
 | `focus` | non-empty string | extra instructions for `adversarial-review` only (the plain review takes no focus text), passed shell-quoted after `--` |
 
-Rejected before any agent starts: `adversarial-review` with engine `codex` or `agent`, or with `auto` on opencode (where `auto` means the CLI); `focus` without `adversarial-review`; `command` with `codex-plugin`, or with `adversarial-review`.
+Rejected before any agent starts: `mode` on engines `codex`, `agent` and `command`; `adversarial-review` with `auto` on opencode (where `auto` means the CLI); `focus` without `adversarial-review`.
 
 An adversarial review on both hosts:
 
@@ -80,9 +142,36 @@ An adversarial review on both hosts:
 { "reviewers": [{ "name": "codex", "engine": "codex-plugin", "mode": "adversarial-review", "focus": "data loss, retries and auth" }] }
 ```
 
-## Custom review command
+### Command reviewers
 
-`roles.reviewer.command` replaces `codex exec review --base {base} -o {out}` (plus `-m {model}` when a codex model is set) for engines `codex` and `auto` - with `auto` a custom command always runs and the plugin is not looked for. Placeholders: `{base}` (required - the stage start sha), `{out}` (file the review should be written to), `{model}`. They are substituted already shell-quoted, so do not put quotes around them. The command runs in the repo; the engine deletes `{out}` and the round's log first, then reads `{out}` when the command left it non-empty, otherwise everything the command printed. A non-zero exit ends the stage as `review-failed`.
+Engine `command` runs the entry's `command` from the repo. Placeholders:
+
+| placeholder | filled with |
+|---|---|
+| `{base}` | the stage start sha |
+| `{out}` | the file the review should be written to |
+| `{model}` | the entry's `model` for this host; empty without one |
+| `{prompt}` | a review prompt the engine writes for the stage - one line, asking for the finding format below ("Reviewer - command engine" in [prompts.md](prompts.md)) |
+
+The template must contain `{base}` or `{prompt}`. Every value is substituted already shell-quoted, in one pass, so do not put quotes around a placeholder. The engine deletes `{out}` and the reviewer's log first, then reads `{out}` when the command left it non-empty, otherwise everything the command printed. A non-zero exit means the reviewer did not run.
+
+With `{prompt}`, any CLI that answers a prompt can review:
+
+```json
+{
+  "reviewers": [
+    { "name": "glm", "engine": "command", "command": "opencode run -m opencode/glm-5.3-flash-free {prompt}" },
+    { "name": "claude", "engine": "command", "command": "claude -p {prompt}" },
+    { "name": "gemini", "engine": "command", "command": "gemini -p {prompt}" }
+  ]
+}
+```
+
+With `{base}`, the command reviews the diff itself, the way `codex exec review --base {base} -o {out}` does - for example `my-review --since {base} --out {out}`.
+
+A command reviewer runs with the permissions its CLI grants. The prompt tells it not to edit, stage or commit, but granny does not enforce that; use the CLI's read-only mode or agent where it has one.
+
+### Reading the output
 
 Findings are read from lines shaped like Codex's output - the built-in reviewer's form, and the Codex plugin's `adversarial-review` form:
 
@@ -95,7 +184,7 @@ Findings are read from lines shaped like Codex's output - the built-in reviewer'
   Recommendation: what to change.
 ```
 
-The word severities map to `critical` → P0, `high` → P1, `medium` → P2, `low` → P3; for them the location is the last parenthesised part of the line (an ` — ` location is accepted too). Other bracketed words (`[note]`) are not findings. A marker bullet indented under a finding belongs to that finding's detail; it is neither a finding nor a marker. If the output has more markers than parseable findings, a granny helper agent extracts them instead. If it recovers fewer findings than markers, it is asked once more with the expected count; still short, the stage ends `review-failed` with the marker, parser and extraction counts and the raw review output in its note - findings are never dropped silently and the stage is never reported clean. Output in which the Codex plugin says it got no usable result (`Codex did not return valid structured JSON.`, `Codex returned JSON with an unexpected review shape.`, `Codex review completed without any stdout output.`) also ends the stage `review-failed`, even when the command exited 0. Output with no marker at all reads as a clean review, and `codex exec review` can produce that when it could not review: with its sandbox unable to run commands (for example `bubblewrap` missing from `PATH`) it exits 0 with a sentence like `Review could not be completed: ... No code was inspected`. Check the round's `.md` when a stage ends clean suspiciously fast.
+The word severities map to `critical` → P0, `high` → P1, `medium` → P2, `low` → P3; for them the location is the last parenthesised part of the line (an ` — ` location is accepted too). Other bracketed words (`[note]`) are not findings. A marker bullet indented under a finding belongs to that finding's detail; it is neither a finding nor a marker. If the output has more markers than parseable findings, a granny helper agent extracts them instead. If it recovers fewer findings than markers, it is asked once more with the expected count; still short, the reviewer did not run (above), and when the retry ends short too, the stage ends `review-failed` with the marker, parser and extraction counts and the raw review output in its note - findings are never dropped silently and the stage is never reported clean. Output in which the Codex plugin says it got no usable result (`Codex did not return valid structured JSON.`, `Codex returned JSON with an unexpected review shape.`, `Codex review completed without any stdout output.`) also means the reviewer did not run, even when the command exited 0. Output with no marker at all reads as a clean review, and `codex exec review` can produce that when it could not review: with its sandbox unable to run commands (for example `bubblewrap` missing from `PATH`) it exits 0 with a sentence like `Review could not be completed: ... No code was inspected`. Check the reviewer's `.md` when a stage ends clean suspiciously fast.
 
 ## Example: everything set
 

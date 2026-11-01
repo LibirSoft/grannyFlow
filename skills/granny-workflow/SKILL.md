@@ -1,6 +1,6 @@
 ---
 name: granny-workflow
-description: Run a planned implementation through the granny loop - an implementer agent builds each stage of a plan on a feature branch, a reviewer (Codex by default) reviews the stage, a judge scores every finding, findings above the threshold (default 70) and every P0/P1 go back to the implementer, and the loop repeats until the review is clean; ends PR-ready without pushing and waits for the user. The model of each role (granny, implementer, reviewer, judge), the threshold and the round cap are configurable. Use when the user says "implement this plan", "run granny", "granny workflow", "implement → review → fix", or hands over a plan or work orders to build.
+description: Run a planned implementation through the granny loop - an implementer agent builds each stage of a plan on a feature branch, any number of reviewers (Codex by default; also any host model or CLI) review the stage in parallel, every P0/P1 goes straight back to the implementer, a judge scores the other findings and merges duplicates, those above the threshold (default 70) go back too, and the loop repeats until the review is clean; ends PR-ready without pushing and waits for the user. The model of each role (granny, implementer, judge), the reviewers, the threshold and the round cap are configurable. Use when the user says "implement this plan", "run granny", "granny workflow", "implement → review → fix", or hands over a plan or work orders to build.
 ---
 
 # granny-workflow
@@ -9,9 +9,10 @@ You are **Granny**: you prepare the run, launch the engine, and report the resul
 
 ```
 for each stage:
-  implementer builds the stage ─► reviewer reviews (base = stage start sha)
-     ├─ no findings ─────────────────────────────► stage clean
-     └─ judge scores each finding 0-100
+  implementer builds the stage ─► every reviewer reviews it, in parallel (base = stage start sha)
+     ├─ a reviewer fails, then fails its one retry ─► stage review-failed
+     ├─ no reviewer reports a finding ─────────────► stage clean
+     └─ P0/P1 findings go straight to the implementer; the judge scores the rest 0-100 and merges duplicates
           ├─ any P0/P1, or score > threshold ─► implementer fixes those ─► review again
           └─ none ─► stage done; the rest are "residual" for the user
      cap: maxRounds reviews per stage
@@ -22,8 +23,8 @@ after the last stage: granny's final check (gates, clean tree, no AI trailers, P
 |---|---|---|
 | granny | you; plus the engine's helper steps: review-command runner (Claude Code), extraction fallback, final PR-ready check | session model |
 | implementer | builds each stage, fixes accepted findings, commits | session model |
-| reviewer | reviews each stage: engine `auto` (default) runs OpenAI's Codex plugin when it is installed on Claude Code and `node` is on `PATH`, otherwise the Codex CLI (`codex exec review`); `codex-plugin` forces the plugin (and allows `mode: "adversarial-review"`), `codex` the CLI, `agent` a model | Codex's default |
-| judge | scores each finding; the overall review score is informational only | `sonnet` on Claude Code, session model on opencode |
+| reviewers | config `reviewers`, a list; every reviewer reviews every stage, all at the same time. Engines: `auto` (default) runs OpenAI's Codex plugin when it is installed on Claude Code and `node` is on `PATH`, otherwise the Codex CLI (`codex exec review`); `codex-plugin` forces the plugin (and allows `mode: "adversarial-review"`), `codex` the CLI, `agent` a host model, `command` any CLI | one reviewer, `codex`, on Codex's default model |
+| judge | scores each finding that is not P0/P1 and merges duplicates; the overall review score is informational only | `sonnet` on Claude Code, session model on opencode |
 
 ## Pick your host path
 
@@ -50,7 +51,7 @@ Stage split: one stage for a small plan. For a larger plan put a review checkpoi
 
 ## 2. Config
 
-Three layers, later wins: `~/.config/granny/config.json` (user), `<repo>/granny.config.json` (project, committable), the run's `config` argument. Roles merge key by key; arrays replace. Unknown keys are rejected, so typos fail loudly. Full reference: [references/config.md](references/config.md).
+Three layers, later wins: `~/.config/granny/config.json` (user), `<repo>/granny.config.json` (project, committable), the run's `config` argument. Roles merge key by key; arrays, `reviewers` included, replace. Unknown keys are rejected, so typos fail loudly; a leftover `roles.reviewer` fails with the move to `reviewers`. Full reference: [references/config.md](references/config.md).
 
 ```json
 {
@@ -73,20 +74,21 @@ Three layers, later wins: `~/.config/granny/config.json` (user), `<repo>/granny.
 1. The plan is current: if dependency versions or upstream behaviour moved since it was written, update the plan first (a dated "rN deltas" section at the top) and tell the user what changed.
 2. `git -C <repo> status --short` is clean; create and check out `branch`; never work on `base`.
 3. The work dir (default `.granny/`) is in `.git/info/exclude` - for a worktree, the common git dir's `info/exclude`. It holds the PR body, review outputs and run journals.
-4. Reviewer, by the engine that will run (see [references/config.md](references/config.md#reviewer)):
+4. Reviewers - for each entry of `reviewers`, by the engine that will run (see [references/config.md](references/config.md#reviewers)):
    - Codex CLI (engine `codex`, or `auto` on opencode, or `auto` on Claude Code without the plugin or without `node`): `codex --version` works and Codex is logged in (`codex login status`).
    - Codex plugin (engine `codex-plugin`, or `auto` on Claude Code when it is installed and `command -v node` finds `node`): `node --version` works; `ls "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/cache/openai-codex/codex/*/scripts/codex-companion.mjs` finds the companion (for `codex-plugin` on opencode: with the opencode server's `HOME` and `CLAUDE_CONFIG_DIR`); `codex --version` works and Codex is logged in - the companion drives the CLI.
-   - Engine `agent`: nothing to check.
-   Tell the user which reviewer `auto` will pick.
+   - Engine `agent`: the model exists on this host - on Claude Code only Claude models; for any other provider there, the reviewer needs engine `command`.
+   - Engine `command`: the CLI in the template is on `PATH` where the review runs (on opencode: the server's) and logged in to its provider.
+   Tell the user which reviewers will run and what `auto` will pick. A reviewer that fails twice in a round ends the stage `review-failed`.
 5. No other session already runs the same job (other agents, `git reflog`).
 
 ## 4. Launch
 
-Follow your host reference. Then tell the user, in their language: the run id, the stages, threshold and round cap, the models per role, and that nothing will be pushed. Do not poll; you are notified when the run ends.
+Follow your host reference. Then tell the user, in their language: the run id, the stages, threshold and round cap, the models per role, the reviewers, and that nothing will be pushed. Do not poll; you are notified when the run ends.
 
 ## 5. When it completes
 
-Read the result. Report per stage: commits, gate numbers, review rounds, outcome (`clean`, `residual-only`, `round-cap`, `review-failed`, `review-skipped`, `skipped`), residual and unresolved findings; then the final check, the PR body path, and deviations and untested items from the implementers. Before repeating a load-bearing claim from an agent, verify it yourself (open the file, rerun the gate).
+Read the result. Report per stage: commits, gate numbers, review rounds, outcome (`clean`, `residual-only`, `round-cap`, `review-failed` with the reviewers its note names, `review-skipped`, `skipped`), residual and unresolved findings with the reviewer each came from (ids are `<reviewer>-F<n>`); then the final check, the PR body path, and deviations and untested items from the implementers. Before repeating a load-bearing claim from an agent, verify it yourself (open the file, rerun the gate).
 
 Then STOP and wait. No push, no `git remote add`, no PR, no tag - the user decides.
 

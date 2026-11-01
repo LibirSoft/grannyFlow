@@ -1,12 +1,13 @@
 # granny-workflow
 
-An agent skill that takes a plan to a PR-ready branch: an **implementer** builds it stage by stage, a **reviewer** reviews every stage, a **judge** scores each finding, and the findings that matter go back to the implementer until the review is clean. **Granny** - the agent you talk to - prepares the run, launches it, and reports. Nothing is pushed; you decide what happens next.
+An agent skill that takes a plan to a PR-ready branch: an **implementer** builds it stage by stage, any number of **reviewers** - Codex, a host model, any CLI - review every stage in parallel, P0/P1 findings go straight back to the implementer, a **judge** scores the rest and merges duplicates, and the findings that matter go back to the implementer until the review is clean. **Granny** - the agent you talk to - prepares the run, launches it, and reports. Nothing is pushed; you decide what happens next.
 
 ```
 for each stage:
-  implementer builds the stage ─► reviewer reviews (base = stage start sha)
-     ├─ no findings ─────────────────────────────► stage clean
-     └─ judge scores each finding 0-100
+  implementer builds the stage ─► every reviewer reviews it, in parallel (base = stage start sha)
+     ├─ a reviewer fails, then fails its one retry ─► stage review-failed
+     ├─ no reviewer reports a finding ─────────────► stage clean
+     └─ P0/P1 findings go straight to the implementer; the judge scores the rest 0-100 and merges duplicates
           ├─ any P0/P1, or score > threshold ─► implementer fixes those ─► review again
           └─ none ─► stage done; the rest are "residual" for you
      cap: maxRounds reviews per stage
@@ -19,8 +20,8 @@ The loop is code, not a prompt: on Claude Code and opencode an engine drives eve
 
 | host | engine | status |
 |---|---|---|
-| Claude Code | Workflow script (`engines/claude-code/workflow.js`): every role is an `agent()` call with its own model, effort and JSON schema | full |
-| opencode 2.x | server plugin (`engines/opencode/plugin/granny-workflow/`): every role is a child session with its own model and permissions; the review command runs directly | full |
+| Claude Code | Workflow script (`engines/claude-code/workflow.js`): every role is an `agent()` call with its own model, effort and JSON schema; the reviewers are concurrent calls | full |
+| opencode 2.x | server plugin (`engines/opencode/plugin/granny-workflow/`): every role is a child session with its own model and permissions; review commands run directly, concurrently with agent reviewers | full |
 | Cursor | none - the skill walks the agent through the same loop with three subagents | manual, not deterministic |
 
 ## Install
@@ -46,7 +47,7 @@ This puts `skills/granny-workflow/` where your agents look for skills. Then, per
   cp <skill-dir>/engines/cursor/agents/*.md ~/.cursor/agents/
   ```
 
-The default reviewer is [Codex](https://github.com/openai/codex); install it and log in, or switch the reviewer to a model with `"engine": "agent"`. With the default engine `auto`, Claude Code runs the review through OpenAI's [Codex plugin for Claude Code](https://github.com/openai/codex-plugin-cc) when it is installed and `node` is on `PATH`, and through the Codex CLI (`codex exec review`) otherwise; opencode always uses the CLI unless you set `"engine": "codex-plugin"`. The run log says which one ran.
+The default is one reviewer, [Codex](https://github.com/openai/codex); install it and log in, or configure other reviewers: a host model (`"engine": "agent"`) or any CLI that answers a prompt (`"engine": "command"`, e.g. `"opencode run -m <provider/model> {prompt}"`). With the default engine `auto`, Claude Code runs the Codex review through OpenAI's [Codex plugin for Claude Code](https://github.com/openai/codex-plugin-cc) when it is installed and `node` is on `PATH`, and through the Codex CLI (`codex exec review`) otherwise; opencode always uses the CLI unless you set `"engine": "codex-plugin"`. The run log says which one ran.
 
 ## Use
 
@@ -81,9 +82,10 @@ Three layers, later wins: `~/.config/granny/config.json`, `<repo>/granny.config.
 |---|---|---|
 | `roles.<role>.model` | session model; judge `sonnet` on Claude Code | one string for every host, or `{ "claude-code": …, "opencode": … }` |
 | `roles.<role>.effort` | inherit | Claude Code only; on opencode use a `#variant` model suffix |
-| `roles.reviewer.engine` | `auto` | `auto`: the Codex plugin when installed and `node` is on `PATH` (Claude Code only), else the Codex CLI; `codex-plugin`: the plugin, required; `codex`: the CLI (customisable with `command`); `agent`: a model |
-| `roles.reviewer.mode` | `review` | `adversarial-review` runs the Codex plugin's adversarial review, optionally steered by `roles.reviewer.focus` |
-| `threshold` | `70` | findings scoring strictly above it are fixed; P0/P1 always are |
+| `reviewers` | `[{ "name": "codex", "engine": "auto" }]` | all review every round, in parallel; each has a unique `name`, an `engine` and its own `model`/`effort` |
+| `reviewers[].engine` | `auto` | `auto`: the Codex plugin when installed and `node` is on `PATH` (Claude Code only), else the Codex CLI; `codex-plugin`: the plugin, required; `codex`: the CLI; `agent`: a host model (Claude models only on Claude Code); `command`: any CLI, with `{base}`, `{out}`, `{model}` and `{prompt}` placeholders |
+| `reviewers[].mode` | `review` | `adversarial-review` runs the Codex plugin's adversarial review, optionally steered by `focus` |
+| `threshold` | `70` | findings scoring strictly above it are fixed; P0/P1 always are, without the judge |
 | `maxRounds` | `4` | review rounds per stage |
 | `gates` | `auto` | agents discover test/lint/build/typecheck, or list them |
 | `aiAttribution` | `false` | forbid Co-Authored-By / "Generated with" lines |

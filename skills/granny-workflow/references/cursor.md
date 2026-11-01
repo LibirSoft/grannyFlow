@@ -6,7 +6,7 @@ Cursor has subagents but no workflow engine, so you run the loop yourself, step 
 
 Copy `engines/cursor/agents/*.md` to `~/.cursor/agents/` (all projects) or `<project>/.cursor/agents/`, and set `model:` in each file (`inherit` uses the chat's model). Cursor sometimes ignores a subagent's `model:`; check which model actually ran when it matters.
 
-Config: read `~/.config/granny/config.json` and `<repo>/granny.config.json` yourself and apply the layering in [config.md](config.md); only `threshold`, `maxRounds`, `base`, `gates`, `workDir`, `language`, `aiAttribution`, `rules` and the reviewer engine apply here.
+Config: read `~/.config/granny/config.json` and `<repo>/granny.config.json` yourself and apply the layering in [config.md](config.md); only `threshold`, `maxRounds`, `base`, `gates`, `workDir`, `language`, `aiAttribution`, `rules` and `reviewers` apply here - of a reviewer, its `name`, `engine`, `mode`, `focus`, `command`, and `model` where the engine passes it on. An `agent` reviewer runs `granny-reviewer` on whatever model that subagent has.
 
 ## The loop
 
@@ -15,18 +15,26 @@ Prompts: [prompts.md](prompts.md). Each subagent ends its answer with a JSON blo
 For each stage, from `fromStage` on:
 
 1. **Implement.** Delegate to `granny-implementer` with the "Implementer - stage" prompt. Keep its `startSha`.
-2. **Review**, round N (N starts at 1; skip the loop when the stage has `review: false`):
+2. **Review**, round N (N starts at 1; skip the loop when the stage has `review: false`). Run every reviewer in `reviewers` - at the same time where you can (terminal commands in the background, subagents in parallel), otherwise one after another. For a reviewer named `<name>`:
    - engine `codex`, or `auto` (the default; here it means the Codex CLI): run in the terminal, from the repo:
-     `codex exec review --base <startSha> -o <workDir>/review-<stage>-rN.md > <workDir>/review-<stage>-rN.log 2>&1`
-     It can take over 10 minutes; let it finish. Non-zero exit → the stage ends `review-failed`; never invent findings.
-     Read the findings from `- [P1] Title — file:line` lines and number them F1, F2, ….
-   - engine `codex-plugin`: the same, with the plugin command from [config.md](config.md#reviewer) (`node <companion> review --wait --base <startSha> --scope branch > ….md 2> ….log`, or `adversarial-review … -- <focus>`). No companion, or no `node` on `PATH` → `review-failed`. Adversarial findings read `- [high] Title (file:line)`: critical/high/medium/low are P0/P1/P2/P3.
+     `codex exec review --base <startSha> -o <workDir>/review-<stage>-rN-<name>.md > <workDir>/review-<stage>-rN-<name>.log 2>&1`
+     It can take over 10 minutes; let it finish.
+   - engine `codex-plugin`: the same, with the plugin command from [config.md](config.md#the-codex-plugin) (`node <companion> review --wait --base <startSha> --scope branch > ….md 2> ….log`, or `adversarial-review … -- <focus>`), with `CLAUDE_PLUGIN_DATA=<workDir>/codex-plugin-<name>` exported for it. No companion, or no `node` on `PATH`, is a failure. Adversarial findings read `- [high] Title (file:line)`: critical/high/medium/low are P0/P1/P2/P3.
    - engine `agent`: delegate to `granny-reviewer` with the "Reviewer - agent engine" prompt.
-   - No findings → stage `clean`.
-3. **Judge.** Delegate to `granny-judge` with the "Judge" prompt and the findings.
-4. **Triage**, exactly: a finding is sent back when its severity is P0/P1 (or critical/high), when the judge gave it no score, or when its score is **strictly greater** than `threshold` (default 70). Everything else is residual for the user.
+   - engine `command`: run the reviewer's `command` from the repo, with `{base}` = `startSha`, `{out}` = `<workDir>/review-<stage>-rN-<name>.md`, `{model}` = its model, `{prompt}` = the "Reviewer - command engine" prompt - each value shell-quoted.
+
+   Read the findings from `- [P1] Title — file:line` lines (from the `.md`, or what the command printed when the `.md` is empty) and number each reviewer's findings `<name>-F1`, `<name>-F2`, …, noting the reviewer on each. Never invent findings.
+
+   A reviewer that exits non-zero, prints that Codex got no usable result, or (agent) returns no JSON block did not run: run that reviewer once more. If it fails again, the stage ends `review-failed`; name the failed reviewer(s) and keep the findings of the reviewers that ran as unresolved.
+
+   No reviewer reported a finding → stage `clean`.
+3. **Route.** Every P0/P1 finding (also critical/high) goes to the implementer as it is - do not give it to the judge.
+4. **Judge** - only when there are other findings. Delegate to `granny-judge` with the "Judge" prompt and only those findings. A finding it marks `duplicateOf: <id>` (an id in that same list, not itself, not a cycle) is merged into that finding: report it once, list the merged ids on it, and give it the highest score of the group.
+5. **Triage**, exactly: a finding is sent back when its severity is P0/P1 (or critical/high), when the judge gave it no score, or when its score is **strictly greater** than `threshold` (default 70). Everything else is residual for the user.
    - Nothing to send → stage `residual-only`.
    - Otherwise delegate to `granny-implementer` with the "Implementer - fix" prompt and only the findings to send, then go to step 2 with N+1.
    - After `maxRounds` (default 4) reviews without reaching `clean` or `residual-only` → stage `round-cap`; the last round's findings are unresolved.
+
+Dedupe happens only among the findings that are not P0/P1, so a P2 that repeats a P1 is judged on its own; and a reviewer that labels everything P0/P1 never reaches the judge.
 
 After the last stage, do the "Granny - final check" yourself, then report per SKILL.md section 5 and wait.
