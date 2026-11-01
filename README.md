@@ -2,6 +2,14 @@
 
 An agent skill that takes a plan to a PR-ready branch: an **implementer** builds it stage by stage, any number of **reviewers** - Codex, a host model, any CLI - review every stage in parallel, P0/P1 findings go straight back to the implementer, a **judge** scores the rest and merges duplicates, and the findings that matter go back to the implementer until the review is clean. **Granny** - the agent you talk to - prepares the run, launches it, and reports. Nothing is pushed; you decide what happens next.
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/loop-dark.svg">
+  <img src="docs/images/loop-light.svg" alt="The granny loop: plan review, then for each stage the implementer builds, reviewers review in parallel, P0/P1 go straight back, the judge scores the rest, and a final check ends with a PR-ready branch that is not pushed">
+</picture>
+
+<details>
+<summary>The same loop as text</summary>
+
 ```
 before the first stage: reuse the branch's worktree or create one; everything below runs there
 given a plan: plan review ─► the same reviewers, routing and cap; the implementer fixes the plan in place (never committed)
@@ -18,6 +26,8 @@ for each stage:
 after the last stage: final check (gates, clean tree, no AI trailers, PR body) ─► report ─► wait
 ```
 
+</details>
+
 The loop is code, not a prompt: on Claude Code and opencode an engine drives every step, so the threshold, round cap and stop conditions hold every time.
 
 - **Worktree** - the run works in the branch's own git worktree: the one that already has the branch checked out, or a new one next to the repo. Your main checkout stays as it is, and granny never removes the worktree.
@@ -26,6 +36,11 @@ The loop is code, not a prompt: on Claude Code and opencode an engine drives eve
 - **Judge** - P0/P1 findings skip it and go straight to the implementer. It scores every other finding 0-100 and merges duplicates across reviewers; findings above the threshold are fixed, the rest are left for you as residual.
 
 ## Hosts
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/hosts-dark.svg">
+  <img src="docs/images/hosts-light.svg" alt="One core engine in src/core is built into a Claude Code Workflow script and an opencode plugin; Cursor follows the same rules by hand. Roles: granny, implementer, reviewers, judge, each with its own model and effort">
+</picture>
 
 | host | engine | status |
 |---|---|---|

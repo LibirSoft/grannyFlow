@@ -1,0 +1,79 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="790" viewBox="0 0 1000 790" role="img" aria-label="granny-workflow: plan review, then implement, review, judge and fix for every stage">
+<title>granny-workflow: plan review, then implement, review, judge and fix for every stage</title>
+<defs><marker id="a-neutral" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#656c76"/></marker><marker id="a-blue" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#4493f8"/></marker><marker id="a-purple" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#ab7df8"/></marker><marker id="a-amber" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#d29922"/></marker><marker id="a-red" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#f85149"/></marker><marker id="a-green" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#3fb950"/></marker><marker id="a-muted" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#656c76"/></marker></defs>
+<text x="24" y="34" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="11.5" font-weight="700" fill="#9198a1" text-anchor="start" letter-spacing="1.2">BEFORE STAGE 1 · GIVEN A PLAN</text>
+<rect x="24" y="52" width="150" height="70" rx="10" fill="#151b23" stroke="#656c76" stroke-width="1.5"/>
+<text x="99" y="82.5" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="15" font-weight="600" fill="#e6edf3" text-anchor="middle">Plan files</text>
+<text x="99" y="101.5" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="12.5" font-weight="400" fill="#9198a1" text-anchor="middle">your plan</text>
+<path d="M174,87 L222,87" fill="none" stroke="#656c76" stroke-width="2" marker-end="url(#a-neutral)"/>
+<rect x="224" y="52" width="230" height="70" rx="10" fill="#231537" stroke="#ab7df8" stroke-width="1.5"/>
+<text x="339" y="73" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="15" font-weight="600" fill="#e6edf3" text-anchor="middle">Plan review</text>
+<text x="339" y="92" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="12.5" font-weight="400" fill="#9198a1" text-anchor="middle">reviewers check it</text>
+<text x="339" y="111" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="12.5" font-weight="400" fill="#9198a1" text-anchor="middle">against the real repo</text>
+<path d="M454,74 L540,74" fill="none" stroke="#ab7df8" stroke-width="2" marker-end="url(#a-purple)"/>
+<text x="497" y="66" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="12" font-weight="600" fill="#ab7df8" text-anchor="middle">findings</text>
+<rect x="542" y="52" width="230" height="70" rx="10" fill="#0d2240" stroke="#4493f8" stroke-width="1.5"/>
+<text x="657" y="82.5" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="15" font-weight="600" fill="#e6edf3" text-anchor="middle">Implementer fixes plan</text>
+<text x="657" y="101.5" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="12.5" font-weight="400" fill="#9198a1" text-anchor="middle">in place, never committed</text>
+<path d="M542,100 L456,100" fill="none" stroke="#4493f8" stroke-width="2" marker-end="url(#a-blue)"/>
+<text x="499" y="117" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="12" font-weight="600" fill="#4493f8" text-anchor="middle">review again</text>
+<path d="M772,87 L830,87" fill="none" stroke="#f85149" stroke-width="2" stroke-dasharray="5 4" marker-end="url(#a-red)"/>
+<text x="801" y="79" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="12" font-weight="600" fill="#f85149" text-anchor="middle">cap</text>
+<rect x="832" y="52" width="144" height="70" rx="10" fill="#3a1416" stroke="#f85149" stroke-width="1.5"/>
+<text x="904" y="82.5" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="15" font-weight="600" fill="#e6edf3" text-anchor="middle">Stop</text>
+<text x="904" y="101.5" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="12.5" font-weight="400" fill="#9198a1" text-anchor="middle">nothing is built</text>
+<path d="M339,122 L339,152 L135,152 L135,226" fill="none" stroke="#3fb950" stroke-width="2" marker-end="url(#a-green)"/>
+<text x="345" y="145" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="12" font-weight="600" fill="#3fb950" text-anchor="start">clean or residual-only</text>
+<rect x="12" y="186" width="976" height="404" rx="14" fill="none" stroke="#3d444d" stroke-width="1.5" stroke-dasharray="7 5"/>
+<text x="970" y="210" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="11.5" font-weight="700" fill="#9198a1" text-anchor="end" letter-spacing="1.2">FOR EACH STAGE · IN THE BRANCH’S OWN GIT WORKTREE</text>
+<rect x="40" y="228" width="190" height="82" rx="10" fill="#0d2240" stroke="#4493f8" stroke-width="1.5"/>
+<text x="135" y="255" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="15" font-weight="600" fill="#e6edf3" text-anchor="middle">Implementer</text>
+<text x="135" y="274" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="12.5" font-weight="400" fill="#9198a1" text-anchor="middle">builds the stage</text>
+<text x="135" y="293" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="12.5" font-weight="400" fill="#9198a1" text-anchor="middle">and commits</text>
+<path d="M230,269 L278,269" fill="none" stroke="#4493f8" stroke-width="2" marker-end="url(#a-blue)"/>
+<rect x="280" y="222" width="230" height="238" rx="10" fill="#231537" stroke="#ab7df8" stroke-width="1.5"/>
+<text x="395" y="346" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="15" font-weight="600" fill="#e6edf3" text-anchor="middle"></text>
+<text x="395" y="248" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="15" font-weight="600" fill="#e6edf3" text-anchor="middle">Reviewers</text>
+<text x="395" y="266" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="12.5" font-weight="400" fill="#9198a1" text-anchor="middle">all in parallel</text>
+<rect x="298" y="282" width="194" height="34" rx="10" fill="#151b23" stroke="#656c76" stroke-width="1.5"/>
+<text x="395" y="304" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="15" font-weight="600" fill="#e6edf3" text-anchor="middle"></text>
+<text x="395" y="304" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#e6edf3" text-anchor="middle">Codex CLI / plugin</text>
+<rect x="298" y="326" width="194" height="34" rx="10" fill="#151b23" stroke="#656c76" stroke-width="1.5"/>
+<text x="395" y="348" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="15" font-weight="600" fill="#e6edf3" text-anchor="middle"></text>
+<text x="395" y="348" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="13" font-weight="400" fill="#e6edf3" text-anchor="middle">host model (agent)</text>
+<rect x="298" y="370" width="194" height="34" rx="10" fill="#151b23" stroke="#656c76" stroke-width="1.5"/>
+<text x="395" y="392" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="15" font-weight="600" fill="#e6edf3" text-anchor="middle"></text>
+<text x="395" y="392" font-family="ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace" font-size="13" font-weight="400" fill="#e6edf3" text-anchor="middle">any CLI  {prompt}</text>
+<text x="395" y="434" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="11.5" font-weight="400" fill="#9198a1" text-anchor="middle">one that fails twice →</text>
+<text x="395" y="449" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="11.5" font-weight="400" fill="#9198a1" text-anchor="middle">stage review-failed</text>
+<path d="M510,250 L630,250" fill="none" stroke="#3fb950" stroke-width="2" marker-end="url(#a-green)"/>
+<text x="570" y="242" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="12" font-weight="600" fill="#3fb950" text-anchor="middle">no findings</text>
+<rect x="632" y="224" width="344" height="52" rx="10" fill="#0f2a18" stroke="#3fb950" stroke-width="1.5"/>
+<text x="804" y="255" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="15" font-weight="600" fill="#e6edf3" text-anchor="middle">Stage clean → next stage</text>
+<path d="M510,342 L630,342" fill="none" stroke="#d29922" stroke-width="2" marker-end="url(#a-amber)"/>
+<text x="570" y="334" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="12" font-weight="600" fill="#d29922" text-anchor="middle">P2 / P3</text>
+<rect x="632" y="304" width="170" height="76" rx="10" fill="#2e2208" stroke="#d29922" stroke-width="1.5"/>
+<text x="717" y="328" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="15" font-weight="600" fill="#e6edf3" text-anchor="middle">Judge</text>
+<text x="717" y="347" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="12.5" font-weight="400" fill="#9198a1" text-anchor="middle">scores 0–100,</text>
+<text x="717" y="366" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="12.5" font-weight="400" fill="#9198a1" text-anchor="middle">merges duplicates</text>
+<path d="M802,330 L852,330" fill="none" stroke="#656c76" stroke-width="2" marker-end="url(#a-muted)"/>
+<text x="827" y="322" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="12" font-weight="600" fill="#656c76" text-anchor="middle">≤ 70</text>
+<rect x="854" y="304" width="122" height="52" rx="10" fill="#151b23" stroke="#656c76" stroke-width="1.5"/>
+<text x="915" y="325.5" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="15" font-weight="600" fill="#e6edf3" text-anchor="middle">Residual</text>
+<text x="915" y="344.5" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="12.5" font-weight="400" fill="#9198a1" text-anchor="middle">reported to you</text>
+<path d="M510,412 L560,412 L560,530 L135,530 L135,312" fill="none" stroke="#f85149" stroke-width="2" marker-end="url(#a-red)"/>
+<text x="566" y="430" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="12" font-weight="600" fill="#f85149" text-anchor="start">P0 / P1: skip the judge</text>
+<path d="M722,380 L722,530 L560,530" fill="none" stroke="#d29922" stroke-width="2"/>
+<text x="730" y="410" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="12" font-weight="600" fill="#d29922" text-anchor="start">&gt; 70</text>
+<text x="340" y="555" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="12.5" font-weight="400" fill="#9198a1" text-anchor="middle">implementer fixes them → every reviewer reviews again · cap: maxRounds</text>
+<path d="M500,590 L500,632" fill="none" stroke="#656c76" stroke-width="2" marker-end="url(#a-neutral)"/>
+<text x="510" y="616" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="12" font-weight="600" fill="#656c76" text-anchor="start">after the last stage</text>
+<rect x="40" y="634" width="430" height="80" rx="10" fill="#151b23" stroke="#656c76" stroke-width="1.5"/>
+<text x="255" y="669.5" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="15" font-weight="600" fill="#e6edf3" text-anchor="middle">Final check</text>
+<text x="255" y="688.5" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="12.5" font-weight="400" fill="#9198a1" text-anchor="middle">gates · clean tree · no AI trailers · PR body</text>
+<path d="M470,674 L528,674" fill="none" stroke="#3fb950" stroke-width="2" marker-end="url(#a-green)"/>
+<rect x="530" y="634" width="446" height="80" rx="10" fill="#0f2a18" stroke="#3fb950" stroke-width="1.5"/>
+<text x="753" y="669.5" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="15" font-weight="600" fill="#e6edf3" text-anchor="middle">PR-ready branch</text>
+<text x="753" y="688.5" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="12.5" font-weight="400" fill="#9198a1" text-anchor="middle">nothing is pushed: you review and decide</text>
+<text x="500" y="760" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif" font-size="12.5" font-weight="400" fill="#9198a1" text-anchor="middle">The loop is code, not a prompt: thresholds, caps and stop conditions hold on every run.</text>
+</svg>
