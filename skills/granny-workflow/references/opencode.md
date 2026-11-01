@@ -23,7 +23,7 @@ Requires opencode 2.x (`opencode --version`). V1 plugins and this plugin are not
 
 3. `opencode service restart`, then start a new session. `granny_run` should be listed among your tools.
 
-Run granny from the TUI, the desktop app or `opencode run` against the background service. `opencode run --standalone` stops its private server when the command exits, which kills a background run.
+Run granny from the TUI, the desktop app or `opencode run` against the background service. `opencode run --standalone` stops its private server when the command exits, which ends a background run ([When the server stops mid-run](#when-the-server-stops-mid-run)).
 
 ## Launch
 
@@ -44,7 +44,11 @@ Models are `provider/model[#variant]` (`opencode models`). A role without a mode
 
 Every child session runs the `build` agent with these session rules: everything allowed except questions, `git push`, `git remote add`, `git stash`, `git rebase`, `git reset --hard` and `gh pr`. Read-only roles (judge, agent reviewer, extraction) additionally cannot edit, `git add` or `git commit`.
 
-The review command runs in the opencode server's environment: `codex` must be on that PATH and logged in. It runs in its own process group, so stopping the opencode server does not stop a review that is in progress; use `granny_cancel` first.
+The review command runs in the opencode server's environment: `codex` must be on that PATH and logged in.
+
+## When the server stops mid-run
+
+The run lives in the opencode server; the review command does not. It runs in its own session and process group, so when the server exits - Ctrl+C, SIGTERM, SIGKILL or a crash - nothing signals the review: it runs to the end and writes `<workDir>/review-<stage>-r<n>.md` and `.log` (with `codex-plugin` it then stops its app-server broker), but nobody reads them. Everything else stops with the server: `status.json` keeps `"status": "running"` without `finishedAt`, the journal ends at the review `command` entry, there is no `result.json` and no message to your session. After a restart, `granny_status` still reports `running` and `granny_cancel` answers `No running granny run "<id>"`, because the run table is in memory. Call `granny_cancel` before stopping the server; after an unplanned exit, relaunch with the same arguments and `fromStage` - the next review round deletes and rewrites the orphaned files.
 
 ## Reviewer
 
