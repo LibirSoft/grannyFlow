@@ -161,6 +161,61 @@ describe('runGranny', () => {
     expect(f.calls.some(c => c.kind === 'score' || c.label.startsWith('fix'))).toBe(false)
   })
 
+  const extracted = (...titles: string[]) => ({
+    findings: titles.map((title, i) => ({ id: `F${i + 1}`, severity: 'P1', file: 'x.ts', title, detail: 'd' })),
+  })
+  const twoUnparseable = '- [P1] first without a location\n  d\n- [P2] second without a location\n  d'
+
+  it('asks again with the expected count when extraction recovers fewer findings than markers', async () => {
+    const answers = [extracted('Only one'), extracted('One', 'Two')]
+    const f = fakeHost({
+      reviews: [twoUnparseable, 'No issues.'],
+      scores: [{ F1: 90, F2: 90 }],
+      override: req => (req.kind === 'findings' ? answers.shift() : undefined),
+    })
+    const r = await runGranny(f.host, input())
+    const extracts = f.calls.filter(c => c.kind === 'findings')
+    expect(extracts.map(c => c.label)).toEqual(['extract core r1', 'extract core r1 retry'])
+    expect(extracts[1]!.prompt).toContain('2 finding marker(s)')
+    expect(extracts[1]!.prompt).toContain('returned 1')
+    expect(f.logs).toContain('core r1: extraction recovered 1/2 findings - asking once more with the expected count')
+    expect(r.stages[0]).toMatchObject({ outcome: 'clean', rounds: 2 })
+    expect(r.stages[0]!.history[0]!.findings.map(x => x.title)).toEqual(['One', 'Two'])
+  })
+
+  it('fails the review with both counts when extraction stays short after the retry', async () => {
+    const f = fakeHost({ reviews: [twoUnparseable], override: req => (req.kind === 'findings' ? extracted('Only one') : undefined) })
+    const r = await runGranny(f.host, input())
+    expect(f.calls.filter(c => c.kind === 'findings')).toHaveLength(2)
+    expect(r.stages[0]).toMatchObject({ outcome: 'review-failed', rounds: 1 })
+    expect(r.stages[0]!.note).toContain('2 finding marker(s), parser read 0')
+    expect(r.stages[0]!.note).toContain('extraction recovered 1, then 1 on a retry that named the count')
+    expect(r.stages[0]!.note).toContain('second without a location')
+    expect(f.calls.some(c => c.kind === 'score' || c.label.startsWith('fix'))).toBe(false)
+  })
+
+  it('does not drop the unparsed rest when extraction returns only what the parser already read', async () => {
+    const f = fakeHost({
+      reviews: [review(finding('P2', 'Parsed one'), '- [P1] unparseable\n  d')],
+      override: req => (req.kind === 'findings' ? extracted('Parsed one') : undefined),
+    })
+    const r = await runGranny(f.host, input())
+    expect(r.stages[0]).toMatchObject({ outcome: 'review-failed', rounds: 1 })
+    expect(r.stages[0]!.note).toContain('2 finding marker(s), parser read 1')
+    expect(f.calls.some(c => c.kind === 'score' || c.label.startsWith('fix'))).toBe(false)
+  })
+
+  it('accepts an extraction that recovers more findings than markers', async () => {
+    const f = fakeHost({
+      reviews: ['- [P1] no location here\n  detail', 'No issues.'],
+      scores: [{ F1: 90, F2: 90 }],
+      override: req => (req.kind === 'findings' ? extracted('A', 'B') : undefined),
+    })
+    const r = await runGranny(f.host, input())
+    expect(f.calls.filter(c => c.kind === 'findings')).toHaveLength(1)
+    expect(r.stages[0]!.history[0]!.findings.map(x => x.title)).toEqual(['A', 'B'])
+  })
+
   it('uses an agent reviewer when configured, with no shell command', async () => {
     const f = fakeHost({
       override: req => (req.kind === 'findings' ? { findings: [] } : undefined),

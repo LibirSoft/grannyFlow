@@ -216,9 +216,11 @@ Review the changes of stage "${name}": \`cd ${p.repo} && git diff ${reviewBase}.
 Look for correctness bugs, regressions, missing tests for changed behaviour, security problems and contract breaks. Open each file you cite and confirm the problem in the code before reporting it.
 Return findings with id (F1, F2, ...), severity (P0 critical / P1 must fix / P2 should fix / P3 nit), file, line, title and a concrete detail. Zero findings means the stage is clean.`;
 }
-function extractPrompt(name, output) {
+function extractPrompt(name, output, short) {
+  const count = short ? `
+The output has ${short.markers} finding marker(s) (\`- [P0]\` ... \`- [P3]\` bullets); an earlier extraction returned ${short.got}. Return all ${short.markers}.` : "";
   return `Below is the raw output of an automated code review for stage "${name}". Do not run anything and do not judge the findings.
-Extract every finding it reports - each one, none merged, none dropped, none invented - with id (F1, F2, ...), severity exactly as written (e.g. P1), file, line, title and the full detail text.
+Extract every finding it reports - each one, none merged, none dropped, none invented - with id (F1, F2, ...), severity exactly as written (e.g. P1), file, line, title and the full detail text.${count}
 
 RAW REVIEW OUTPUT:
 ${output}`;
@@ -462,13 +464,21 @@ async function runGranny(host, input) {
     if (parsed.markers <= parsed.findings.length)
       return { ran, findings: parsed.findings };
     host.log(`${name} r${round}: parser read ${parsed.findings.length}/${parsed.markers} findings - asking an agent to extract them`);
-    const r = await call("granny", "findings", `extract ${name} r${round}`, "Review", extractPrompt(name, output), "read-only");
-    if (r?.findings?.length)
-      return { ran, findings: r.findings };
+    const extract = async (label, prompt) => {
+      const r = await call("granny", "findings", label, "Review", prompt, "read-only");
+      return Array.isArray(r?.findings) ? r.findings : [];
+    };
+    const first = await extract(`extract ${name} r${round}`, extractPrompt(name, output));
+    if (first.length >= parsed.markers)
+      return { ran, findings: first };
+    host.log(`${name} r${round}: extraction recovered ${first.length}/${parsed.markers} findings - asking once more with the expected count`);
+    const second = await extract(`extract ${name} r${round} retry`, extractPrompt(name, output, { markers: parsed.markers, got: first.length }));
+    if (second.length >= parsed.markers)
+      return { ran, findings: second };
     return {
       ran: false,
       findings: [],
-      note: `review reported ${parsed.markers} finding marker(s), parser read ${parsed.findings.length} and the extraction agent returned none: ${output.slice(-2000)}`
+      note: `review reported ${parsed.markers} finding marker(s), parser read ${parsed.findings.length}; extraction recovered ${first.length}, then ${second.length} on a retry that named the count: ${output.slice(-2000)}`
     };
   };
   const reviewLoop = async (name, reviewBase) => {

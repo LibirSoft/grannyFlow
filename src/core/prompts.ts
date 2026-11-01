@@ -77,9 +77,12 @@ Look for correctness bugs, regressions, missing tests for changed behaviour, sec
 Return findings with id (F1, F2, ...), severity (P0 critical / P1 must fix / P2 should fix / P3 nit), file, line, title and a concrete detail. Zero findings means the stage is clean.`
 }
 
-export function extractPrompt(name: string, output: string): string {
+export function extractPrompt(name: string, output: string, short?: { markers: number; got: number }): string {
+  const count = short
+    ? `\nThe output has ${short.markers} finding marker(s) (\`- [P0]\` ... \`- [P3]\` bullets); an earlier extraction returned ${short.got}. Return all ${short.markers}.`
+    : ''
   return `Below is the raw output of an automated code review for stage "${name}". Do not run anything and do not judge the findings.
-Extract every finding it reports - each one, none merged, none dropped, none invented - with id (F1, F2, ...), severity exactly as written (e.g. P1), file, line, title and the full detail text.
+Extract every finding it reports - each one, none merged, none dropped, none invented - with id (F1, F2, ...), severity exactly as written (e.g. P1), file, line, title and the full detail text.${count}
 
 RAW REVIEW OUTPUT:
 ${output}`

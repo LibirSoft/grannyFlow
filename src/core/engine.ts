@@ -116,12 +116,20 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
     if (parsed.markers <= parsed.findings.length) return { ran, findings: parsed.findings }
 
     host.log(`${name} r${round}: parser read ${parsed.findings.length}/${parsed.markers} findings - asking an agent to extract them`)
-    const r = await call('granny', 'findings', `extract ${name} r${round}`, 'Review', extractPrompt(name, output), 'read-only')
-    if (r?.findings?.length) return { ran, findings: r.findings }
+    const extract = async (label: string, prompt: string): Promise<Finding[]> => {
+      const r = await call('granny', 'findings', label, 'Review', prompt, 'read-only')
+      return Array.isArray(r?.findings) ? r.findings : []
+    }
+    const first = await extract(`extract ${name} r${round}`, extractPrompt(name, output))
+    if (first.length >= parsed.markers) return { ran, findings: first }
+
+    host.log(`${name} r${round}: extraction recovered ${first.length}/${parsed.markers} findings - asking once more with the expected count`)
+    const second = await extract(`extract ${name} r${round} retry`, extractPrompt(name, output, { markers: parsed.markers, got: first.length }))
+    if (second.length >= parsed.markers) return { ran, findings: second }
     return {
       ran: false,
       findings: [],
-      note: `review reported ${parsed.markers} finding marker(s), parser read ${parsed.findings.length} and the extraction agent returned none: ${output.slice(-2000)}`,
+      note: `review reported ${parsed.markers} finding marker(s), parser read ${parsed.findings.length}; extraction recovered ${first.length}, then ${second.length} on a retry that named the count: ${output.slice(-2000)}`,
     }
   }
 

@@ -51,7 +51,7 @@ Findings are read from lines shaped like Codex's output:
   Detail, indented, any number of lines.
 ```
 
-A `- [Px]` bullet indented under a finding belongs to that finding's detail; it is neither a finding nor a marker. If the output has more `[P0-3]` markers than parseable findings, a granny helper agent extracts them instead. If that agent returns none, the stage ends `review-failed` with the raw review output in its note - it is never reported clean.
+A `- [Px]` bullet indented under a finding belongs to that finding's detail; it is neither a finding nor a marker. If the output has more `[P0-3]` markers than parseable findings, a granny helper agent extracts them instead. If it recovers fewer findings than markers, it is asked once more with the expected count; still short, the stage ends `review-failed` with the marker, parser and extraction counts and the raw review output in its note - findings are never dropped silently and the stage is never reported clean.
 
 ## Example: everything set
 
