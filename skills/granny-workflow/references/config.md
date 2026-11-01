@@ -28,6 +28,7 @@ Layers, later wins:
 | `language` | `"English"` | language of code, comments, commits and the PR body |
 | `aiAttribution` | `false` | `false` forbids Co-Authored-By / "Generated with" lines and the final check greps for them |
 | `rules` | red-green tests; code comments default none | extra house rules appended to every working prompt; `[]` removes them |
+| `$schema` | | accepted and ignored, so an editor can point a config file at a JSON schema of your own; granny ships none |
 
 There is no `roles.reviewer`: a config that has one is rejected with the migration - move its keys into `"reviewers": [{ "name": "codex", ...the same keys }]`, and a custom `command` into an entry with `"engine": "command"`.
 

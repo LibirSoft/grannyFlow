@@ -2,7 +2,7 @@ import { describe, expect, it } from 'bun:test'
 import { readdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { renderPrompts } from '../scripts/build'
-import { resolveConfig } from '../src/core/config'
+import { DEFAULT_CONFIG, resolveConfig } from '../src/core/config'
 
 const root = join(import.meta.dir, '..')
 const skill = join(root, 'skills/granny-workflow')
@@ -31,6 +31,23 @@ describe('skill docs', () => {
         expect({ file, host, block, problem }).toEqual({ file, host, block, problem: undefined })
       }
     }
+  })
+
+  it('documents every config key once in the config reference, with the engine default', () => {
+    const config = read('references/config.md')
+    const keysTable = config.slice(config.indexOf('## Keys'), config.indexOf('\n## ', config.indexOf('## Keys') + 1))
+    const rows = [...keysTable.matchAll(/^\| `([^`]+)` \|([^|]*)\|/gm)].map(m => ({ key: m[1]!, value: m[2]!.trim() }))
+    const expected = [
+      '$schema',
+      ...Object.keys(DEFAULT_CONFIG.roles).map(r => `roles.${r}`),
+      'worktreeDir',
+      ...Object.keys(DEFAULT_CONFIG).filter(k => k !== 'roles'),
+    ]
+    expect(rows.map(r => r.key).sort()).toEqual(expected.sort())
+    for (const key of ['threshold', 'maxRounds', 'planReview', 'base', 'gates', 'workDir', 'worktree', 'language', 'aiAttribution', 'reviewers'] as const) {
+      expect({ key, value: JSON.parse(rows.find(r => r.key === key)!.value.slice(1, -1)) }).toEqual({ key, value: DEFAULT_CONFIG[key] })
+    }
+    expect(() => resolveConfig([{ $schema: './granny.schema.json' }])).not.toThrow()
   })
 
   it('shows a Codex, Opus and GLM reviewer list in the README for opencode and for Claude Code', () => {
