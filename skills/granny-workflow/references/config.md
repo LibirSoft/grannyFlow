@@ -49,7 +49,7 @@ A host key that is missing means "inherit" on that host.
 | `codex` | the Codex CLI: `codex exec review` |
 | `agent` | a model reviews the diff with the reviewer prompt; `model` is a host model |
 
-The plugin path runs the newest `~/.claude/plugins/cache/openai-codex/codex/<version>/scripts/codex-companion.mjs` (version-sorted) from the repo:
+The plugin path runs the newest `${CLAUDE_CONFIG_DIR:-$HOME/.claude}/plugins/cache/openai-codex/codex/<version>/scripts/codex-companion.mjs` from the repo - the highest `<version>`, compared numerically field by field (`1.10.0` after `1.9.3`) with a plain `sort -t. -n` that BSD/macOS `sort` runs too:
 
 ```
 node <companion> review --wait --base <stage start sha> --scope branch [-m <model>]

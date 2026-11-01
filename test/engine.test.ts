@@ -269,7 +269,10 @@ describe('runGranny', () => {
     await runGranny(f.host, input())
     const runner = f.calls.find(c => c.kind === 'command')!
     expect(runner.role).toBe('granny')
-    expect(runner.prompt).toContain('cd /work/repo && mkdir -p .granny && rm -f .granny/review-core-r1.md .granny/review-core-r1.log && companion=$(')
+    expect(runner.prompt).toContain(
+      'cd /work/repo && mkdir -p .granny && rm -f .granny/review-core-r1.md .granny/review-core-r1.log && codex_plugins="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/plugins/cache/openai-codex/codex"; companion_version=$(',
+    )
+    expect(runner.prompt).not.toContain('sort -V')
     expect(runner.prompt).toContain('node "$companion" review --wait --base start1 --scope branch > .granny/review-core-r1.md 2> .granny/review-core-r1.log;')
     expect(runner.prompt).toContain('codex exec review --base start1 -o .granny/review-core-r1.md > .granny/review-core-r1.log 2>&1;')
     expect(runner.prompt).toContain(`never cut it short):\n${f.commands[0]}\n\nSet ran=true`)
@@ -415,11 +418,11 @@ describe('the review script in a real shell', () => {
     rmSync(bin, { recursive: true, force: true })
     rmSync(home, { recursive: true, force: true })
   })
-  const shell = () => ({ env: { PATH: `${bin}:${process.env.PATH}`, HOME: home } })
-  const companionDir = (version: string) => join(home, '.claude/plugins/cache/openai-codex/codex', version, 'scripts')
-  const installCompanion = (version: string, stdout?: string) => {
-    mkdirSync(companionDir(version), { recursive: true })
-    writeFileSync(join(companionDir(version), 'codex-companion.mjs'), fakeCompanion(version, join(home, 'calls.jsonl'), stdout))
+  const shell = (env: Record<string, string> = {}) => ({ env: { PATH: `${bin}:${process.env.PATH}`, HOME: home, CLAUDE_CONFIG_DIR: '', ...env } })
+  const companionDir = (version: string, root = join(home, '.claude')) => join(root, 'plugins/cache/openai-codex/codex', version, 'scripts')
+  const installCompanion = (version: string, stdout?: string, root?: string) => {
+    mkdirSync(companionDir(version, root), { recursive: true })
+    writeFileSync(join(companionDir(version, root), 'codex-companion.mjs'), fakeCompanion(version, join(home, 'calls.jsonl'), stdout))
   }
   const installCompanions = () => {
     installCompanion('1.0.9', '- [P0] Old companion ran — old.js:1\n')
@@ -442,6 +445,43 @@ describe('the review script in a real shell', () => {
     expect(f.logs).toContain(`core r1: reviewer: codex-plugin review (${companionDir('1.0.10')}/codex-companion.mjs)`)
     expect(readFileSync(join(repo, workDir, 'review-core-r1.md'), 'utf8')).toBe(readFileSync(join(FIXTURES, 'codex-plugin-review.md'), 'utf8'))
     expect(readFileSync(join(repo, workDir, 'review-core-r1.log'), 'utf8')).toBe('[codex] progress\n')
+  })
+
+  it('looks for the companion under CLAUDE_CONFIG_DIR instead of ~/.claude when it is set', async () => {
+    installCompanions()
+    const config = join(home, 'relocated claude config')
+    installCompanion('1.0.3', undefined, config)
+    const f = fakeHost({ name: 'claude-code', direct: false, shell: shell({ CLAUDE_CONFIG_DIR: config }), scores: [{ F1: 90, F2: 90 }] })
+    await runGranny(f.host, input({ repo, config: { maxRounds: 1, workDir } }))
+    expect(companionCalls().map(c => c.version)).toEqual(['1.0.3'])
+    expect(f.logs).toContain(`core r1: reviewer: codex-plugin review (${companionDir('1.0.3', config)}/codex-companion.mjs)`)
+  })
+
+  it('names the CLAUDE_CONFIG_DIR it searched when it falls back to the Codex CLI', async () => {
+    installCompanions()
+    const config = join(home, 'empty claude config')
+    mkdirSync(config)
+    const f = fakeHost({ name: 'claude-code', direct: false, shell: shell({ CLAUDE_CONFIG_DIR: config }), scores: [{ F1: 90 }] })
+    const r = await runGranny(f.host, input({ repo, config: { maxRounds: 1, workDir } }))
+    expect(titles(r)).toEqual([['P1', 'Reviewed start1']])
+    expect(companionCalls()).toEqual([])
+    expect(f.logs).toContain(
+      `core r1: reviewer: codex CLI (codex exec review) - no Codex plugin companion at ${config}/plugins/cache/openai-codex/codex/<version>/scripts/codex-companion.mjs`,
+    )
+  })
+
+  it('picks the highest companion version with a sort that has no -V, as on BSD and macOS', async () => {
+    writeFileSync(
+      join(bin, 'sort'),
+      `#!/usr/bin/env bash\nfor a in "$@"; do case "$a" in -*V*|--version-sort|--sort=*) echo "sort: invalid option -- 'V'" >&2; exit 2 ;; esac; done\nexec ${Bun.which('sort')} "$@"\n`,
+      { mode: 0o755 },
+    )
+    for (const version of ['0.99.99', '1.0.9', '1.9.3', '1.0.10']) installCompanion(version, '- [P0] Older companion ran — old.js:1\n')
+    installCompanion('1.10.0')
+    const f = fakeHost({ name: 'claude-code', direct: false, shell: shell(), scores: [{ F1: 90, F2: 90 }] })
+    const r = await runGranny(f.host, input({ repo, config: { maxRounds: 1, workDir } }))
+    expect(companionCalls().map(c => c.version)).toEqual(['1.10.0'])
+    expect(titles(r).map(([, title]) => title)).toEqual(['Include the first item in the cart total', 'Restore discount percentage bounds validation'])
   })
 
   it('fails the review when the companion exits 0 but Codex printed no review', async () => {

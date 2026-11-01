@@ -4,7 +4,8 @@ import type { HostName } from './types'
 
 const SAID = '[granny] reviewer: '
 const BACKEND_LINE = /^\[granny\] reviewer: (.*)$/m
-const COMPANION = '.claude/plugins/cache/openai-codex/codex/*/scripts/codex-companion.mjs'
+const PLUGINS = 'codex_plugins="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/plugins/cache/openai-codex/codex"'
+const COMPANION = 'scripts/codex-companion.mjs'
 
 export interface ReviewPlan {
   script: string
@@ -33,14 +34,15 @@ export function reviewPlan(c: GrannyConfig, host: HostName, base: string, stem: 
     return { script: wrap(cli), backend: cliLabel }
   }
 
-  const missing = `no Codex plugin companion at $HOME/${COMPANION.replace('*', '<version>')}`
+  const missing = `no Codex plugin companion at $codex_plugins/<version>/${COMPANION}`
   const fallback =
     engine === 'auto' && mode === 'review'
       ? `echo "${SAID}${cliLabel} - ${missing}" && ${cli}`
       : `{ echo "${SAID}codex-plugin ${mode} unavailable - ${missing}; install OpenAI's Codex plugin for Claude Code" > ${log}; false; }`
-  const find = `companion=$(printf '%s\\n' "$HOME"/${COMPANION} | sort -V | tail -n 1)`
+  const versions = `for d in "$codex_plugins"/*/; do d=\${d%/}; d=\${d##*/}; [ -f "$codex_plugins/$d/${COMPANION}" ] && printf '%s\\n' "$d"; done`
+  const find = `${PLUGINS}; companion_version=$(${versions} | sort -t. -k1,1n -k2,2n -k3,3n | tail -n 1); companion="$codex_plugins/$companion_version/${COMPANION}"`
   const plugin = `echo "${SAID}codex-plugin ${mode} ($companion)" && ${companionCommand(c, base)} > ${md} 2> ${log}`
-  return { script: wrap(`${find}; if [ -f "$companion" ]; then ${plugin}; else ${fallback}; fi`) }
+  return { script: wrap(`${find}; if [ -n "$companion_version" ]; then ${plugin}; else ${fallback}; fi`) }
 }
 
 export function reportedBackend(output: string): string | undefined {

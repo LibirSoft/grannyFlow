@@ -72,7 +72,7 @@ Three layers, later wins: `~/.config/granny/config.json` (user), `<repo>/granny.
 3. The work dir (default `.granny/`) is in `.git/info/exclude` - for a worktree, the common git dir's `info/exclude`. It holds the PR body, review outputs and run journals.
 4. Reviewer, by the engine that will run (see [references/config.md](references/config.md#reviewer)):
    - Codex CLI (engine `codex`, or `auto` on opencode, or `auto` on Claude Code without the plugin): `codex --version` works and Codex is logged in (`codex login status`).
-   - Codex plugin (engine `codex-plugin`, or `auto` on Claude Code when it is installed): `node --version` works; `ls ~/.claude/plugins/cache/openai-codex/codex/*/scripts/codex-companion.mjs` finds the companion (for `codex-plugin` on opencode: in the home directory of the opencode server); `codex --version` works and Codex is logged in - the companion drives the CLI.
+   - Codex plugin (engine `codex-plugin`, or `auto` on Claude Code when it is installed): `node --version` works; `ls "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/cache/openai-codex/codex/*/scripts/codex-companion.mjs` finds the companion (for `codex-plugin` on opencode: with the opencode server's `HOME` and `CLAUDE_CONFIG_DIR`); `codex --version` works and Codex is logged in - the companion drives the CLI.
    - Engine `agent`: nothing to check.
    Tell the user which reviewer `auto` will pick.
 5. No other session already runs the same job (other agents, `git reflog`).
