@@ -73,13 +73,13 @@ export function reviewPlan(rv: ReviewerConfig, c: GrannyConfig, host: HostName, 
   })
 }
 
-export function planReviewScript(rv: ReviewerConfig, c: GrannyConfig, host: HostName, stem: string, prompt: string): ReviewPlan | undefined {
+export function planReviewScript(rv: ReviewerConfig, c: GrannyConfig, host: HostName, base: string, stem: string, prompt: string): ReviewPlan | undefined {
   if (rv.engine === 'agent' || (rv.engine === 'command' && !rv.command?.includes('{prompt}'))) return undefined
   const m = resolveModel(rv.model, host)
   const model = m ? ` -m ${shellQuote(m)}` : ''
   const cli =
     rv.engine === 'command'
-      ? cliCommand(rv, host, c.base, `${stem}.md`, prompt)
+      ? cliCommand(rv, host, base, `${stem}.md`, prompt)
       : `codex exec --sandbox read-only${model} -o ${shellQuote(`${stem}.md`)} ${shellQuote(prompt)} </dev/null`
   return script(rv, c, host, stem, {
     cli,

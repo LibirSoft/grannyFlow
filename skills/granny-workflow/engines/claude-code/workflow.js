@@ -531,12 +531,12 @@ function reviewPlan(rv, c, host, base, stem, prompt = "") {
     fallback: rv.engine === "auto" && mode === "review"
   });
 }
-function planReviewScript(rv, c, host, stem, prompt) {
+function planReviewScript(rv, c, host, base, stem, prompt) {
   if (rv.engine === "agent" || rv.engine === "command" && !rv.command?.includes("{prompt}"))
     return;
   const m = resolveModel(rv.model, host);
   const model = m ? ` -m ${shellQuote(m)}` : "";
-  const cli = rv.engine === "command" ? cliCommand(rv, host, c.base, `${stem}.md`, prompt) : `codex exec --sandbox read-only${model} -o ${shellQuote(`${stem}.md`)} ${shellQuote(prompt)} </dev/null`;
+  const cli = rv.engine === "command" ? cliCommand(rv, host, base, `${stem}.md`, prompt) : `codex exec --sandbox read-only${model} -o ${shellQuote(`${stem}.md`)} ${shellQuote(prompt)} </dev/null`;
   return script(rv, c, host, stem, {
     cli,
     cliLabel: "codex CLI (codex exec, read-only)",
@@ -787,7 +787,7 @@ ${r.note}` : ""}` : "the worktree runner returned nothing";
       return { ran: true, findings: Array.isArray(r.findings) ? r.findings : [] };
     }
     const stem = reviewStem(config, slug(name), round, rv);
-    const plan = subject.kind === "plan" ? planReviewScript(rv, config, host.name, stem, planReviewPrompt(p, subject.files)) : reviewPlan(rv, config, host.name, subject.base, stem, commandReviewPrompt(p, name, subject.base));
+    const plan = subject.kind === "plan" ? planReviewScript(rv, config, host.name, base, stem, planReviewPrompt(p, subject.files)) : reviewPlan(rv, config, host.name, subject.base, stem, commandReviewPrompt(p, name, subject.base));
     if (!plan)
       return { ran: false, findings: [], note: "this reviewer has no command for a plan review" };
     let ran;

@@ -64,6 +64,21 @@ describe('the plan input', () => {
     }
     expect(f.commands[0]).toContain(`Plan files - read them first: ${PLAN}, /plans/it'\\''s wo-2.md`)
   })
+
+  it("fills {base} of a command plan reviewer with the run's base, not the configured one", async () => {
+    const f = fakeHost()
+    await runGranny(
+      f.host,
+      input({
+        base: 'develop',
+        plan: PLAN,
+        config: { worktree: false, reviewers: [{ name: 'glm', engine: 'command', command: 'glm-review --base {base} {prompt}' }] },
+      }),
+    )
+    const planCommand = f.commands.find(c => c.includes('review-plan-review-r1'))!
+    expect(planCommand).toContain('glm-review --base develop ')
+    expect(planCommand).not.toContain('--base main')
+  })
 })
 
 describe('the plan review', () => {
@@ -292,7 +307,7 @@ describe('the plan-review command of each reviewer engine', () => {
     ['auto on opencode', { engine: 'auto' }, 'opencode'],
   ] as const) {
     it(`runs codex exec read-only with the prompt for ${label} on ${host}`, () => {
-      const s = planReviewScript(rv(entry, host), config, host, stem, prompt)!
+      const s = planReviewScript(rv(entry, host), config, host, 'main', stem, prompt)!
       expect(s.backend).toBe('codex CLI (codex exec, read-only)')
       expect(s.script).toContain(
         `codex exec --sandbox read-only -o .granny/review-plan-review-r1-codex.md ${quoted} </dev/null > .granny/review-plan-review-r1-codex.log 2>&1`,
@@ -303,7 +318,7 @@ describe('the plan-review command of each reviewer engine', () => {
   }
 
   it('passes the reviewer model to codex exec', () => {
-    const s = planReviewScript(rv({ engine: 'codex', model: 'gpt-5.5' }), config, 'opencode', stem, prompt)!
+    const s = planReviewScript(rv({ engine: 'codex', model: 'gpt-5.5' }), config, 'opencode', 'main', stem, prompt)!
     expect(s.script).toContain(`codex exec --sandbox read-only -m gpt-5.5 -o .granny/review-plan-review-r1-codex.md ${quoted}`)
   })
 
@@ -314,7 +329,7 @@ describe('the plan-review command of each reviewer engine', () => {
     ['auto in adversarial-review mode', { engine: 'auto', mode: 'adversarial-review', model: 'gpt-5.5' }, 'claude-code'],
   ] as const) {
     it(`runs the companion's read-only, foreground task command for ${label} on ${host}`, () => {
-      const s = planReviewScript(rv(entry, host), config, host, stem, prompt)!
+      const s = planReviewScript(rv(entry, host), config, host, 'main', stem, prompt)!
       expect(s.backend).toBeUndefined()
       expect(s.script).toContain(`node "$companion" task -m gpt-5.5 ${quoted} </dev/null > .granny/review-plan-review-r1-codex.md 2> .granny/review-plan-review-r1-codex.log`)
       expect(s.script).not.toContain('--write')
@@ -325,7 +340,7 @@ describe('the plan-review command of each reviewer engine', () => {
   }
 
   it('fills {prompt} of a command reviewer with the plan-review prompt', () => {
-    const s = planReviewScript(rv({ engine: 'command', command: 'llm -m {model} {prompt}', model: 'm' }), config, 'opencode', stem, prompt)!
+    const s = planReviewScript(rv({ engine: 'command', command: 'llm -m {model} {prompt}', model: 'm' }), config, 'opencode', 'main', stem, prompt)!
     expect(s).toEqual({
       script: `mkdir -p .granny && rm -f .granny/review-plan-review-r1-codex.md .granny/review-plan-review-r1-codex.log && llm -m m ${quoted} > .granny/review-plan-review-r1-codex.log 2>&1; code=$?; if [ -s .granny/review-plan-review-r1-codex.md ]; then cat .granny/review-plan-review-r1-codex.md; else cat .granny/review-plan-review-r1-codex.log; fi; exit $code`,
       backend: 'custom command',
@@ -333,7 +348,7 @@ describe('the plan-review command of each reviewer engine', () => {
   })
 
   it('has no command for a command reviewer without {prompt}', () => {
-    expect(planReviewScript(rv({ engine: 'command', command: 'my-review --base {base} --out {out}' }), config, 'opencode', stem, prompt)).toBeUndefined()
+    expect(planReviewScript(rv({ engine: 'command', command: 'my-review --base {base} --out {out}' }), config, 'opencode', 'main', stem, prompt)).toBeUndefined()
   })
 })
 
@@ -395,7 +410,7 @@ describe('the plan-review command in a real shell', () => {
   const companionCalls = () => readFileSync(join(home, 'companion.jsonl'), 'utf8').trim().split('\n').map(l => JSON.parse(l))
 
   it('hands codex exec the prompt as one argument and closes its stdin, so it does not wait for more', async () => {
-    const s = planReviewScript(rv({ engine: 'codex' }), config, 'opencode', stem, prompt)!
+    const s = planReviewScript(rv({ engine: 'codex' }), config, 'opencode', 'main', stem, prompt)!
     const r = await sh(s.script, repo, env())
     expect(r).toEqual({ code: 0, output: '- [P1] Plan reviewed by codex exec — /plans/v1.md:3\n  detail\n' })
     expect(readFileSync(join(home, 'codex-argv'), 'utf8')).toBe(`exec\n--sandbox\nread-only\n-o\n${stem}.md\n${prompt}\n`)
@@ -404,7 +419,7 @@ describe('the plan-review command in a real shell', () => {
 
   it('runs the companion task with the prompt on Claude Code with engine auto, and says so', async () => {
     const companion = installCompanion()
-    const s = planReviewScript(rv({ engine: 'auto' }, 'claude-code'), config, 'claude-code', stem, prompt)!
+    const s = planReviewScript(rv({ engine: 'auto' }, 'claude-code'), config, 'claude-code', 'main', stem, prompt)!
     const r = await sh(s.script, repo, env())
     expect(r.code).toBe(0)
     expect(r.output).toContain(`[granny] reviewer: codex-plugin task (${companion})`)
@@ -414,7 +429,7 @@ describe('the plan-review command in a real shell', () => {
   }, 5000)
 
   it('falls back to codex exec on Claude Code with engine auto when no companion is installed', async () => {
-    const s = planReviewScript(rv({ engine: 'auto' }, 'claude-code'), config, 'claude-code', stem, prompt)!
+    const s = planReviewScript(rv({ engine: 'auto' }, 'claude-code'), config, 'claude-code', 'main', stem, prompt)!
     const r = await sh(s.script, repo, env())
     expect(r.code).toBe(0)
     expect(r.output).toContain('[granny] reviewer: codex CLI (codex exec, read-only) - no Codex plugin companion at')
@@ -422,7 +437,7 @@ describe('the plan-review command in a real shell', () => {
   }, 5000)
 
   it('fails with engine codex-plugin when no companion is installed, without running codex exec', async () => {
-    const s = planReviewScript(rv({ engine: 'codex-plugin' }, 'claude-code'), config, 'claude-code', stem, prompt)!
+    const s = planReviewScript(rv({ engine: 'codex-plugin' }, 'claude-code'), config, 'claude-code', 'main', stem, prompt)!
     const r = await sh(s.script, repo, env())
     expect(r.code).not.toBe(0)
     expect(r.output).toContain("codex-plugin task unavailable - no Codex plugin companion at")
@@ -431,7 +446,7 @@ describe('the plan-review command in a real shell', () => {
 
   it("reads the companion's empty task render as a failed review", async () => {
     installCompanion()
-    const s = planReviewScript(rv({ engine: 'codex-plugin' }, 'claude-code'), config, 'claude-code', stem, prompt)!
+    const s = planReviewScript(rv({ engine: 'codex-plugin' }, 'claude-code'), config, 'claude-code', 'main', stem, prompt)!
     const r = await sh(s.script, repo, env({ GRANNY_TASK_OUTPUT: 'Codex did not return a final message.\n' }))
     expect(r.code).toBe(0)
     expect(reviewFailure(r.output)).toBe('Codex did not return a final message.')

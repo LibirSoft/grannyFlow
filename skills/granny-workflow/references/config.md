@@ -77,7 +77,7 @@ The loop is a stage's review loop on the plan files instead of a diff: every rev
 | `codex`, and `auto` on opencode | `codex exec --sandbox read-only [-m <model>] -o <out> <prompt> </dev/null` - stdin is closed because `codex exec` appends a piped stdin to the prompt |
 | `codex-plugin`, and `auto` on Claude Code with the plugin | the companion's `task` command, read-only (no `--write`) and in the foreground (no `--background`): `node <companion> task [-m <model>] <prompt>`, with the same lookup, `node` check, own `CLAUDE_PLUGIN_DATA` and broker shutdown as the diff review. `auto` without the companion or `node` falls back to `codex exec` above; `codex-plugin` fails. `mode` and `focus` do not apply to a plan |
 | `agent` | the "Plan reviewer - agent engine" prompt in a read-only subagent |
-| `command` | the template with `{prompt}` filled with the plan-review prompt (`{base}` is `base`). A template without `{prompt}` cannot review a plan: it is skipped for the plan review with the log line `plan review: reviewer <name> skipped - its command has no {prompt}, so it cannot review a plan`. When that leaves no reviewer, the plan review fails |
+| `command` | the template with `{prompt}` filled with the plan-review prompt (`{base}` is the run's base: the `base` input when given, else the config's `base`). A template without `{prompt}` cannot review a plan: it is skipped for the plan review with the log line `plan review: reviewer <name> skipped - its command has no {prompt}, so it cannot review a plan`. When that leaves no reviewer, the plan review fails |
 
 The companion's `Codex did not return a final message.` (an empty `task` answer, exit 0) means the reviewer did not run, like the diff review's no-result renders.
 
@@ -194,7 +194,7 @@ Engine `command` runs the entry's `command` from the worktree (`repo` with `work
 
 | placeholder | filled with |
 |---|---|
-| `{base}` | the stage start sha |
+| `{base}` | the stage start sha; in the plan review, the run's base |
 | `{out}` | the file the review should be written to |
 | `{model}` | the entry's `model` for this host; empty without one |
 | `{prompt}` | a review prompt the engine writes for the stage - one line, asking for the finding format below ("Reviewer - command engine" in [prompts.md](prompts.md)) |

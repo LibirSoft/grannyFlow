@@ -171,7 +171,7 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
     const stem = reviewStem(config, slug(name), round, rv)
     const plan =
       subject.kind === 'plan'
-        ? planReviewScript(rv, config, host.name, stem, planReviewPrompt(p, subject.files))
+        ? planReviewScript(rv, config, host.name, base, stem,planReviewPrompt(p, subject.files))
         : reviewPlan(rv, config, host.name, subject.base, stem, commandReviewPrompt(p, name, subject.base))
     if (!plan) return { ran: false, findings: [], note: 'this reviewer has no command for a plan review' }
     let ran: boolean
