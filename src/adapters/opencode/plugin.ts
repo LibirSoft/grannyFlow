@@ -15,6 +15,7 @@ interface RunState {
   dir: string
   status: Status
   cancelled: boolean
+  abort: AbortController
   session?: string
   child?: ChildProcess
 }
@@ -153,7 +154,53 @@ const RUN_INPUT_SCHEMA = {
   required: ['repo', 'branch', 'stages'],
 }
 
-export default {
+export interface ProviderError {
+  type: string
+  message: string
+  status?: number
+}
+
+export function providerError(messages: unknown): ProviderError | undefined {
+  const list: any[] = Array.isArray(messages) ? messages : Array.isArray((messages as any)?.data) ? (messages as any).data : []
+  for (let i = list.length - 1; i >= 0; i--) {
+    const m = list[i]
+    if (m?.type === 'user') return undefined
+    if (m?.type !== 'assistant') continue
+    if (m.finish !== 'error' && !m.error) return undefined
+    const e = m.error ?? {}
+    return { type: String(e.type ?? 'unknown'), message: String(e.message ?? ''), ...(typeof e.status === 'number' ? { status: e.status } : {}) }
+  }
+  return undefined
+}
+
+const TRANSIENT_TYPES = new Set(['provider.quota', 'provider.rate-limit', 'provider.timeout', 'provider.transport'])
+const TRANSIENT_STATUS = new Set([429, 502, 503, 504, 529])
+
+export function isTransient(error: ProviderError): boolean {
+  return TRANSIENT_TYPES.has(error.type) || TRANSIENT_STATUS.has(error.status ?? 0) || /overloaded/i.test(error.message)
+}
+
+export function pause(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise(resolve => {
+    if (signal.aborted) return resolve()
+    const done = () => {
+      clearTimeout(timer)
+      signal.removeEventListener('abort', done)
+      resolve()
+    }
+    const timer = setTimeout(done, ms)
+    signal.addEventListener('abort', done, { once: true })
+  })
+}
+
+export interface RetryPolicy {
+  delays: number[]
+  sleep: (ms: number, signal: AbortSignal) => Promise<void>
+}
+
+const DEFAULT_DELAYS = [30_000, 120_000, 300_000, 600_000]
+
+export const createGrannyPlugin = ({ delays = DEFAULT_DELAYS, sleep = pause }: Partial<RetryPolicy> = {}) => ({
   id: 'granny-workflow',
   async setup(ctx: any) {
     const startRun = async (input: RunInput, parentSession: string): Promise<string> => {
@@ -168,7 +215,7 @@ export default {
       const id = runId()
       const dir = join(input.repo, config.workDir, 'runs', id)
       mkdirSync(dir, { recursive: true })
-      const run: RunState = { id, repo: input.repo, dir, status: 'running', cancelled: false }
+      const run: RunState = { id, repo: input.repo, dir, status: 'running', cancelled: false, abort: new AbortController() }
       runs.set(id, run)
       const journal = (type: string, data: Record<string, unknown>) =>
         appendFileSync(join(dir, 'journal.jsonl'), JSON.stringify({ t: stamp(), type, ...data }) + '\n')
@@ -181,6 +228,15 @@ export default {
       try {
         parentModel = (await ctx.session.get({ sessionID: parentSession }))?.model
       } catch {}
+
+      const readProviderError = async (sessionID: string, label: string) => {
+        try {
+          return providerError(await ctx.session.context({ sessionID }))
+        } catch (e) {
+          journal('context-failed', { label, session: sessionID, error: String((e as Error)?.message ?? e) })
+          return undefined
+        }
+      }
 
       const host: Host = {
         name: 'opencode',
@@ -199,7 +255,9 @@ export default {
           run.session = session.id
           journal('agent', { label: req.label, role: req.role, session: session.id, model: model ?? null })
           let text = `${req.prompt}\n\nWhen you are done, call the \`${tool}\` tool exactly once with your result. That call is your final answer: its arguments are everything the caller receives.`
-          for (let attempt = 1; attempt <= 3; attempt++) {
+          let misses = 0
+          let backoffs = 0
+          while (misses < 3) {
             submissions.delete(session.id)
             await ctx.session.prompt({ sessionID: session.id, text })
             await ctx.session.wait({ sessionID: session.id })
@@ -210,9 +268,24 @@ export default {
               if (!errors.length) return got
               text = `Your ${tool} call was invalid: ${errors.join('; ')}. Call ${tool} again with the corrected, complete result.`
             } else {
+              const error = await readProviderError(session.id, req.label)
+              if (error) {
+                const transient = isTransient(error)
+                const backoffMs = transient ? delays[backoffs] : undefined
+                journal('provider-error', { label: req.label, session: session.id, error, transient, ...(backoffMs !== undefined ? { backoffMs } : {}) })
+                if (backoffMs === undefined) {
+                  journal('agent-failed', { label: req.label, session: session.id, error })
+                  return null
+                }
+                backoffs++
+                await sleep(backoffMs, run.abort.signal)
+                if (run.cancelled) throw new Error('cancelled')
+                text = `Your previous turn ended on a provider error (${error.type}${error.message ? `: ${error.message.slice(0, 300)}` : ''}). Continue the task where it stopped; when you are done, call \`${tool}\` exactly once with your result.`
+                continue
+              }
               text = `You stopped without calling ${tool}. Call it now with your result.`
             }
-            journal('retry', { label: req.label, attempt, reason: text.slice(0, 200) })
+            journal('retry', { label: req.label, attempt: ++misses, reason: text.slice(0, 200) })
           }
           journal('agent-failed', { label: req.label, session: session.id })
           return null
@@ -332,6 +405,7 @@ You will receive a message when it finishes. Use granny_status { runId: "${id}" 
           const run = runs.get(value.runId)
           if (!run || run.status !== 'running') return { content: `No running granny run "${value.runId}".` }
           run.cancelled = true
+          run.abort.abort()
           run.child?.kill('SIGTERM')
           if (run.session) await ctx.session.interrupt({ sessionID: run.session, resume: false }).catch(() => {})
           return { content: `Cancelling ${value.runId}; the current step is interrupted and nothing further starts.` }
@@ -339,4 +413,6 @@ You will receive a message when it finishes. Use granny_status { runId: "${id}" 
       })
     })
   },
-}
+})
+
+export default createGrannyPlugin()

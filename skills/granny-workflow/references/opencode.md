@@ -46,6 +46,10 @@ Every child session runs the `build` agent with these session rules: everything 
 
 The review command runs in the opencode server's environment: `codex` must be on that PATH and logged in.
 
+## Provider errors
+
+When a child session's turn ends without a submit call, the plugin reads the session's messages. A turn that ended on a provider error is journaled as `provider-error` (type, message, status). Transient errors - quota, rate limit, timeout, dropped connection, overload (HTTP 429/502/503/504/529) - are retried after 30 s, 2 min, 5 min and 10 min, and the model is asked to continue where it stopped. Any other provider error, or a fifth transient one, ends the role with nothing (`agent-failed`): an implementer that returns nothing fails the run; a judge that returns nothing sends every finding to the implementer unscored, and the journal says so.
+
 ## Resume
 
 There is no result cache. Restart with the same arguments and `fromStage` set to the first stage that did not finish; earlier stages are recorded as `skipped`.

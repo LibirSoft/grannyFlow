@@ -3,7 +3,7 @@ import { spawnSync } from 'node:child_process'
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import plugin, { modelRef, permissions, preflight } from '../src/adapters/opencode/plugin'
+import plugin, { createGrannyPlugin, isTransient, modelRef, pause, permissions, preflight, providerError } from '../src/adapters/opencode/plugin'
 
 const git = (cwd: string, ...args: string[]) => {
   const r = spawnSync('git', args, { cwd, encoding: 'utf8' })
@@ -30,11 +30,21 @@ const CANNED: Record<string, unknown> = {
   granny_submit_findings: { findings: [] },
 }
 
-function fakeContext(behaviour: { skipSubmitOnce?: boolean } = {}) {
+type FakeError = { type: string; message: string; status?: number }
+
+interface Behaviour {
+  skipSubmitOnce?: boolean
+  contextThrows?: boolean
+  providerError?: (title: string, attempt: number) => FakeError | undefined
+}
+
+function fakeContext(behaviour: Behaviour = {}) {
   const tools = new Map<string, any>()
   const created: any[] = []
   const prompts: Array<{ sessionID: string; text: string }> = []
   const pending = new Map<string, string>()
+  const messages = new Map<string, any[]>()
+  const attempts = new Map<string, number>()
   let n = 0
   let skipped = false
   const ctx = {
@@ -49,14 +59,26 @@ function fakeContext(behaviour: { skipSubmitOnce?: boolean } = {}) {
       create: async (input: any) => {
         const s = { id: `ses_${++n}`, ...input }
         created.push(s)
+        messages.set(s.id, [])
         return s
       },
       prompt: async (input: { sessionID: string; text: string }) => {
         prompts.push(input)
         pending.set(input.sessionID, input.text)
+        messages.get(input.sessionID)?.push({ type: 'user', text: input.text })
         return {}
       },
       wait: async ({ sessionID }: { sessionID: string }) => {
+        const log = messages.get(sessionID) ?? []
+        const attempt = (attempts.get(sessionID) ?? 0) + 1
+        attempts.set(sessionID, attempt)
+        const title = created.find(s => s.id === sessionID)?.title ?? ''
+        const error = behaviour.providerError?.(title, attempt)
+        if (error) {
+          log.push({ type: 'assistant', finish: 'error', error, content: [] }, { type: 'idle', outcome: 'failed' })
+          return
+        }
+        log.push({ type: 'assistant', finish: 'stop', content: [] }, { type: 'idle', outcome: 'succeeded' })
         const text = pending.get(sessionID) ?? ''
         const name = /(granny_submit_\w+)/.exec(text)?.[1]
         if (!name) return
@@ -66,10 +88,41 @@ function fakeContext(behaviour: { skipSubmitOnce?: boolean } = {}) {
         }
         await tools.get(name).execute(CANNED[name], { sessionID })
       },
+      context: async ({ sessionID }: { sessionID: string }) => {
+        if (behaviour.contextThrows) throw new Error('context unavailable')
+        return [...(messages.get(sessionID) ?? [])]
+      },
       interrupt: async () => ({ interrupted: true }),
     },
   }
   return { ctx, tools, created, prompts }
+}
+
+const REVIEW_ONCE = `test -n {base} && if [ -e .granny/reviewed ]; then echo "No issues." > {out}; else touch .granny/reviewed; printf '%s\\n' '- [P2] Real issue — a.txt:1' '  detail' > {out}; fi`
+
+async function startRun(repo: string, f: ReturnType<typeof fakeContext>, extra: Record<string, unknown> = {}) {
+  writeFileSync(join(repo, 'granny.config.json'), JSON.stringify({ roles: { reviewer: { command: REVIEW_ONCE } }, ...extra }))
+  git(repo, 'add', 'granny.config.json')
+  git(repo, 'commit', '-qm', 'cfg')
+  const started = await f.tools.get('granny_run').execute({ repo, branch: 'feat/x', stages: [{ name: 'one', task: 'Do it.' }] }, { sessionID: 'parent' })
+  const id = /granny run (\S+) started/.exec(started.content)?.[1]
+  expect(id).toBeDefined()
+  return { id: id!, dir: join(repo, '.granny/runs', id!) }
+}
+
+const readRun = (dir: string, file: string) => (existsSync(join(dir, file)) ? readFileSync(join(dir, file), 'utf8') : '')
+const journalOf = (dir: string) => readRun(dir, 'journal.jsonl').trim().split('\n').filter(Boolean).map(l => JSON.parse(l))
+
+async function finished(dir: string) {
+  await waitFor(() => existsSync(join(dir, 'result.json'))).catch(e => {
+    throw new Error(`${e.message}\nstatus: ${readRun(dir, 'status.json')}\njournal:\n${readRun(dir, 'journal.jsonl')}`)
+  })
+  return JSON.parse(readRun(dir, 'result.json'))
+}
+
+const promptsTo = (f: ReturnType<typeof fakeContext>, title: string) => {
+  const ids = f.created.filter(s => s.title === title).map(s => s.id)
+  return f.prompts.filter(p => ids.includes(p.sessionID)).map(p => p.text)
 }
 
 async function waitFor(check: () => boolean, ms = 4000) {
@@ -97,6 +150,47 @@ describe('opencode plugin helpers', () => {
     expect(write).not.toContainEqual({ action: 'edit', resource: '*', effect: 'deny' })
     expect(ro).toContainEqual({ action: 'edit', resource: '*', effect: 'deny' })
     expect(ro).toContainEqual({ action: 'shell', resource: 'git commit *', effect: 'deny' })
+  })
+
+  it('reads the provider error of the latest turn only', () => {
+    const quota = { type: 'provider.quota', message: 'Quota exceeded', status: 429 }
+    const failed = [{ type: 'user', text: 'go' }, { type: 'assistant', finish: 'error', error: quota, content: [] }, { type: 'idle', outcome: 'failed' }]
+    const succeeded = [{ type: 'user', text: 'go on' }, { type: 'assistant', finish: 'stop', content: [] }, { type: 'idle', outcome: 'succeeded' }]
+    expect(providerError(failed)).toEqual(quota)
+    expect(providerError({ data: failed })).toEqual(quota)
+    expect(providerError([...failed, ...succeeded])).toBeUndefined()
+    expect(providerError([...succeeded, ...failed])).toEqual(quota)
+    expect(providerError([failed[0], failed[1], { type: 'assistant', finish: 'tool-calls', content: [] }, { type: 'idle', outcome: 'succeeded' }])).toBeUndefined()
+    expect(providerError([{ type: 'user', text: 'go' }, { type: 'assistant', finish: 'error', content: [] }])).toEqual({ type: 'unknown', message: '' })
+    expect(providerError(succeeded)).toBeUndefined()
+    expect(providerError(undefined)).toBeUndefined()
+  })
+
+  it('treats quota, rate limits, timeouts, dropped connections and overload as transient', () => {
+    for (const type of ['provider.quota', 'provider.rate-limit', 'provider.timeout', 'provider.transport']) {
+      expect(isTransient({ type, message: '' })).toBe(true)
+    }
+    expect(isTransient({ type: 'provider.internal', message: 'Overloaded', status: 529 })).toBe(true)
+    expect(isTransient({ type: 'provider.internal', message: 'overloaded_error: Overloaded' })).toBe(true)
+    expect(isTransient({ type: 'provider.internal', message: 'Service Unavailable', status: 503 })).toBe(true)
+    expect(isTransient({ type: 'provider.internal', message: 'boom', status: 500 })).toBe(false)
+    for (const type of ['provider.auth', 'provider.content-filter', 'provider.invalid-request', 'provider.no-route', 'unknown']) {
+      expect(isTransient({ type, message: 'nope' })).toBe(false)
+    }
+  })
+
+  it('pauses until the time is up or the run is cancelled', async () => {
+    const t0 = performance.now()
+    await pause(20, new AbortController().signal)
+    expect(performance.now() - t0).toBeGreaterThanOrEqual(15)
+
+    const ctl = new AbortController()
+    const t1 = performance.now()
+    const waiting = pause(60_000, ctl.signal)
+    ctl.abort()
+    await waiting
+    await pause(60_000, ctl.signal)
+    expect(performance.now() - t1).toBeLessThan(1000)
   })
 })
 
@@ -194,5 +288,93 @@ describe('opencode plugin', () => {
     expect(status.content).toContain('"status": "done"')
     expect(status.content).toContain('"outcome": "clean"')
     expect(git(repo, 'status', '--porcelain')).toBe('')
+  })
+
+  it('backs off on a transient provider error and asks the model to continue instead of calling the tool', async () => {
+    const quota = { type: 'provider.quota', message: 'Quota exceeded', status: 429 }
+    const slept: number[] = []
+    const f = fakeContext({ providerError: (title, attempt) => (title === 'granny · judge one r1' && attempt === 1 ? quota : undefined) })
+    await createGrannyPlugin({ sleep: async ms => void slept.push(ms) }).setup(f.ctx)
+    const { dir } = await startRun(repo, f)
+    const result = await finished(dir)
+
+    expect(slept).toEqual([30_000])
+    const judge = promptsTo(f, 'granny · judge one r1')
+    expect(judge).toHaveLength(2)
+    expect(judge[1]).toContain('provider.quota')
+    expect(judge[1]).toContain('granny_submit_score')
+    expect(f.prompts.some(p => p.text.startsWith('You stopped without calling'))).toBe(false)
+    expect(journalOf(dir)).toContainEqual(
+      expect.objectContaining({ type: 'provider-error', label: 'judge one r1', error: quota, transient: true, backoffMs: 30_000 }),
+    )
+    expect(result.stages[0].history[0].findings[0].score).toBe(95)
+  })
+
+  it('gives up on the role after the backoff budget, and the engine reports the unscored findings', async () => {
+    const slept: number[] = []
+    const f = fakeContext({
+      providerError: title => (title === 'granny · judge one r1' ? { type: 'provider.rate-limit', message: 'Too many requests', status: 429 } : undefined),
+    })
+    await createGrannyPlugin({ delays: [5, 10], sleep: async ms => void slept.push(ms) }).setup(f.ctx)
+    const { dir } = await startRun(repo, f)
+    const result = await finished(dir)
+
+    expect(slept).toEqual([5, 10])
+    expect(promptsTo(f, 'granny · judge one r1')).toHaveLength(3)
+    const journal = journalOf(dir)
+    expect(journal).toContainEqual(
+      expect.objectContaining({ type: 'agent-failed', label: 'judge one r1', error: expect.objectContaining({ type: 'provider.rate-limit' }) }),
+    )
+    expect(journal).toContainEqual(
+      expect.objectContaining({ type: 'log', message: 'one r1: judge returned nothing - all 1 finding(s) go to the implementer unscored' }),
+    )
+    expect(result.stages[0]).toMatchObject({ outcome: 'clean', rounds: 2 })
+    expect(result.stages[0].history[0].findings[0].score).toBeUndefined()
+  })
+
+  it('does not retry a provider error that waiting cannot fix', async () => {
+    const slept: number[] = []
+    const f = fakeContext({
+      providerError: title => (title === 'granny · judge one r1' ? { type: 'provider.auth', message: 'Invalid API key', status: 401 } : undefined),
+    })
+    await createGrannyPlugin({ sleep: async ms => void slept.push(ms) }).setup(f.ctx)
+    const { dir } = await startRun(repo, f)
+    await finished(dir)
+
+    expect(slept).toEqual([])
+    expect(promptsTo(f, 'granny · judge one r1')).toHaveLength(1)
+    const journal = journalOf(dir)
+    expect(journal).toContainEqual(expect.objectContaining({ type: 'provider-error', label: 'judge one r1', transient: false }))
+    expect(journal).toContainEqual(expect.objectContaining({ type: 'agent-failed', label: 'judge one r1' }))
+  })
+
+  it('falls back to re-prompting for the tool when the session context cannot be read', async () => {
+    const f = fakeContext({ skipSubmitOnce: true, contextThrows: true })
+    await plugin.setup(f.ctx)
+    const { dir } = await startRun(repo, f)
+    const result = await finished(dir)
+
+    expect(result.stages[0].outcome).toBe('clean')
+    expect(f.prompts.some(p => p.text.startsWith('You stopped without calling granny_submit_implementation'))).toBe(true)
+    expect(journalOf(dir)).toContainEqual(expect.objectContaining({ type: 'context-failed', label: 'implement one' }))
+  })
+
+  it('cancels a run while it waits out a provider error', async () => {
+    let sleeping = false
+    const f = fakeContext({
+      providerError: title => (title === 'granny · implement one' ? { type: 'provider.timeout', message: 'timed out' } : undefined),
+    })
+    const sleep = (_ms: number, signal: AbortSignal) =>
+      new Promise<void>(resolve => {
+        sleeping = true
+        signal.addEventListener('abort', () => resolve(), { once: true })
+      })
+    await createGrannyPlugin({ sleep }).setup(f.ctx)
+    const { id, dir } = await startRun(repo, f)
+    await waitFor(() => sleeping)
+    await f.tools.get('granny_cancel').execute({ runId: id })
+    await waitFor(() => readRun(dir, 'status.json').includes('"status": "cancelled"'))
+    expect(promptsTo(f, 'granny · implement one')).toHaveLength(1)
+    expect(f.created).toHaveLength(1)
   })
 })

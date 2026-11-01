@@ -688,7 +688,41 @@ var RUN_INPUT_SCHEMA = {
   },
   required: ["repo", "branch", "stages"]
 };
-var plugin_default = {
+function providerError(messages) {
+  const list = Array.isArray(messages) ? messages : Array.isArray(messages?.data) ? messages.data : [];
+  for (let i = list.length - 1;i >= 0; i--) {
+    const m = list[i];
+    if (m?.type === "user")
+      return;
+    if (m?.type !== "assistant")
+      continue;
+    if (m.finish !== "error" && !m.error)
+      return;
+    const e = m.error ?? {};
+    return { type: String(e.type ?? "unknown"), message: String(e.message ?? ""), ...typeof e.status === "number" ? { status: e.status } : {} };
+  }
+  return;
+}
+var TRANSIENT_TYPES = new Set(["provider.quota", "provider.rate-limit", "provider.timeout", "provider.transport"]);
+var TRANSIENT_STATUS = new Set([429, 502, 503, 504, 529]);
+function isTransient(error) {
+  return TRANSIENT_TYPES.has(error.type) || TRANSIENT_STATUS.has(error.status ?? 0) || /overloaded/i.test(error.message);
+}
+function pause(ms, signal) {
+  return new Promise((resolve) => {
+    if (signal.aborted)
+      return resolve();
+    const done = () => {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", done);
+      resolve();
+    };
+    const timer = setTimeout(done, ms);
+    signal.addEventListener("abort", done, { once: true });
+  });
+}
+var DEFAULT_DELAYS = [30000, 120000, 300000, 600000];
+var createGrannyPlugin = ({ delays = DEFAULT_DELAYS, sleep = pause } = {}) => ({
   id: "granny-workflow",
   async setup(ctx) {
     const startRun = async (input, parentSession) => {
@@ -707,7 +741,7 @@ var plugin_default = {
       const id = runId();
       const dir = join(input.repo, config.workDir, "runs", id);
       mkdirSync(dir, { recursive: true });
-      const run = { id, repo: input.repo, dir, status: "running", cancelled: false };
+      const run = { id, repo: input.repo, dir, status: "running", cancelled: false, abort: new AbortController };
       runs.set(id, run);
       const journal = (type, data) => appendFileSync(join(dir, "journal.jsonl"), JSON.stringify({ t: stamp(), type, ...data }) + `
 `);
@@ -718,6 +752,14 @@ var plugin_default = {
       try {
         parentModel = (await ctx.session.get({ sessionID: parentSession }))?.model;
       } catch {}
+      const readProviderError = async (sessionID, label) => {
+        try {
+          return providerError(await ctx.session.context({ sessionID }));
+        } catch (e) {
+          journal("context-failed", { label, session: sessionID, error: String(e?.message ?? e) });
+          return;
+        }
+      };
       const host = {
         name: "opencode",
         async agent(req) {
@@ -739,7 +781,9 @@ var plugin_default = {
           let text = `${req.prompt}
 
 When you are done, call the \`${tool}\` tool exactly once with your result. That call is your final answer: its arguments are everything the caller receives.`;
-          for (let attempt = 1;attempt <= 3; attempt++) {
+          let misses = 0;
+          let backoffs = 0;
+          while (misses < 3) {
             submissions.delete(session.id);
             await ctx.session.prompt({ sessionID: session.id, text });
             await ctx.session.wait({ sessionID: session.id });
@@ -752,9 +796,25 @@ When you are done, call the \`${tool}\` tool exactly once with your result. That
                 return got;
               text = `Your ${tool} call was invalid: ${errors.join("; ")}. Call ${tool} again with the corrected, complete result.`;
             } else {
+              const error = await readProviderError(session.id, req.label);
+              if (error) {
+                const transient = isTransient(error);
+                const backoffMs = transient ? delays[backoffs] : undefined;
+                journal("provider-error", { label: req.label, session: session.id, error, transient, ...backoffMs !== undefined ? { backoffMs } : {} });
+                if (backoffMs === undefined) {
+                  journal("agent-failed", { label: req.label, session: session.id, error });
+                  return null;
+                }
+                backoffs++;
+                await sleep(backoffMs, run.abort.signal);
+                if (run.cancelled)
+                  throw new Error("cancelled");
+                text = `Your previous turn ended on a provider error (${error.type}${error.message ? `: ${error.message.slice(0, 300)}` : ""}). Continue the task where it stopped; when you are done, call \`${tool}\` exactly once with your result.`;
+                continue;
+              }
               text = `You stopped without calling ${tool}. Call it now with your result.`;
             }
-            journal("retry", { label: req.label, attempt, reason: text.slice(0, 200) });
+            journal("retry", { label: req.label, attempt: ++misses, reason: text.slice(0, 200) });
           }
           journal("agent-failed", { label: req.label, session: session.id });
           return null;
@@ -883,6 +943,7 @@ ${result.length > 30000 ? result.slice(0, 30000) + `
           if (!run || run.status !== "running")
             return { content: `No running granny run "${value.runId}".` };
           run.cancelled = true;
+          run.abort.abort();
           run.child?.kill("SIGTERM");
           if (run.session)
             await ctx.session.interrupt({ sessionID: run.session, resume: false }).catch(() => {});
@@ -891,11 +952,16 @@ ${result.length > 30000 ? result.slice(0, 30000) + `
       });
     });
   }
-};
+});
+var plugin_default = createGrannyPlugin();
 export {
+  createGrannyPlugin,
   plugin_default as default,
   globalConfigPath,
+  isTransient,
   modelRef,
+  pause,
   permissions,
-  preflight
+  preflight,
+  providerError
 };
