@@ -1,7 +1,17 @@
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { resolveConfig } from '../src/core/config'
-import { agentReviewPrompt, commandReviewPrompt, extractPrompt, finalPrompt, fixPrompt, implementPrompt, judgePrompt } from '../src/core/prompts'
+import {
+  agentReviewPrompt,
+  commandReviewPrompt,
+  extractPrompt,
+  finalPrompt,
+  fixPrompt,
+  implementPrompt,
+  judgePrompt,
+  worktreeCommandPrompt,
+} from '../src/core/prompts'
+import { worktreeScript } from '../src/core/worktree'
 
 const root = join(import.meta.dir, '..')
 const skill = join(root, 'skills/granny-workflow')
@@ -47,7 +57,9 @@ export function renderPrompts(): string {
     context: '<context: plan / work-order files and override notes>',
     config: resolveConfig([]),
   }
+  const setup = `cd '<repo>' && ${worktreeScript(p.config, '<branch>', '<base>', '<worktreeDir>/<branch-slug>')}`
   const sections: Array<[string, string]> = [
+    ['Granny - worktree setup, the helper agent on Claude Code (on Cursor, run the command yourself)', worktreeCommandPrompt('<repo>', '<branch>', setup)],
     ['Implementer - stage', implementPrompt(p, { task: '<stage task>' }, 1, 2, '<stage name>')],
     ['Implementer - fix', fixPrompt(p, '<stage name>', 1, []).replace(/\[\]$/, '<accepted findings as JSON>')],
     ['Reviewer - agent engine', agentReviewPrompt(p, '<stage name>', '<stage start sha>')],

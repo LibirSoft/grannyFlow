@@ -3,6 +3,7 @@ export const meta = {
   description: 'Implement a plan stage by stage; after each stage loop review -> judge -> fix until clean; end PR-ready without pushing',
   whenToUse: 'Launched by the granny-workflow skill with args {repo, branch, base, context, stages, config}',
   phases: [
+    { title: 'Worktree' },
     { title: 'Implement' },
     { title: 'Review' },
     { title: 'PR ready' },
@@ -265,6 +266,15 @@ function reviewCommandPrompt(p, name, reviewer, script) {
 Stage "${name}" of repo ${p.repo}, branch \`${p.branch}\`, reviewer "${reviewer}".
 
 Run exactly this (it can take longer than 10 minutes - use your shell tool's background mode and wait for it to finish; never cut it short):
+${script}
+
+Set ran=true only if it exited 0, exitCode to its exit code, and output to everything it printed, verbatim and complete. If it failed, set ran=false and explain in note. Never invent output.`;
+}
+function worktreeCommandPrompt(repo, branch, script) {
+  return `You run one shell command that sets up the git worktree of branch \`${branch}\` for a granny run, and return its output. Run nothing else, and do not edit, stage or commit anything yourself.
+Repo ${repo}.
+
+Run exactly this:
 ${script}
 
 Set ran=true only if it exited 0, exitCode to its exit code, and output to everything it printed, verbatim and complete. If it failed, set ran=false and explain in note. Never invent output.`;
@@ -547,6 +557,42 @@ var SCHEMAS = {
   }
 };
 
+var SAID2 = "[granny] worktree: ";
+var REPORTED = /^\[granny\] worktree: (\/.*?)\r?$/m;
+function normalize(path) {
+  const parts = [];
+  for (const part of path.split("/")) {
+    if (!part || part === ".")
+      continue;
+    if (part === "..")
+      parts.pop();
+    else
+      parts.push(part);
+  }
+  return `/${parts.join("/")}`;
+}
+var branchSlug = (branch) => branch.replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") || "branch";
+function worktreePath(repo, branch, worktreeDir) {
+  const top = normalize(repo);
+  const cut = top.lastIndexOf("/");
+  const parent = top.slice(0, cut) || "/";
+  const dir = worktreeDir === undefined ? `${parent}/${top.slice(cut + 1)}-worktrees` : worktreeDir.startsWith("/") ? worktreeDir : `${parent}/${worktreeDir}`;
+  return normalize(`${dir}/${branchSlug(branch)}`);
+}
+function worktreeScript(c, branch, base, path) {
+  const entry = shellQuote(`/${c.workDir}/`);
+  const b = shellQuote(branch);
+  const exclude = `ex="$(git rev-parse --git-common-dir)/info/exclude" && mkdir -p "\${ex%/*}" && { grep -qxF -e ${entry} "$ex" 2>/dev/null || { if [ -s "$ex" ] && [ -n "$(tail -c 1 "$ex")" ]; then echo >> "$ex"; fi; printf '%s\\n' ${entry} >> "$ex"; }; }`;
+  const find = `wt=$(git worktree list --porcelain | while IFS= read -r l; do case "$l" in "worktree "*) p=\${l#worktree };; "branch refs/heads/"*) if [ "\${l#branch refs/heads/}" = ${b} ]; then printf '%s\\n' "$p"; break; fi;; esac; done)`;
+  const reuse = `changes=$(git -C "$wt" status --porcelain) || exit 1; if [ -n "$changes" ]; then printf '[granny] worktree failed: %s has %s checked out with uncommitted changes - commit or discard them, then run again:\\n' "$wt" ${b}; git -C "$wt" status --short; exit 1; fi`;
+  const add = `wt=${shellQuote(path)}; git worktree add "$wt" ${b} || exit 1`;
+  const create = `wt=${shellQuote(path)}; git worktree add -b ${b} "$wt" ${shellQuote(base)} || exit 1`;
+  return `${exclude} && ${find} && if [ -n "$wt" ]; then ${reuse}; elif git show-ref --verify --quiet ${shellQuote(`refs/heads/${branch}`)}; then ${add}; else ${create}; fi && printf '%s%s\\n' ${shellQuote(SAID2)} "$wt"`;
+}
+function reportedWorktree(output) {
+  return REPORTED.exec(output)?.[1];
+}
+
 var slug = (s) => s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "stage";
 function checkInput(input) {
   const errors = [];
@@ -581,8 +627,8 @@ async function runGranny(host, input) {
   const layers = Array.isArray(input.config) ? input.config : [input.config];
   const config = resolveConfig(layers, host.name);
   const base = input.base ?? config.base;
-  const p = { repo: input.repo, branch: input.branch, base, context: input.context, config };
   const fromStage = input.fromStage ?? 1;
+  let repo = input.repo;
   const call = async (role, kind, label, phase, prompt, access, rc) => host.agent({
     role,
     kind,
@@ -592,8 +638,38 @@ async function runGranny(host, input) {
     schema: SCHEMAS[kind],
     model: resolveModel(rc.model, host.name),
     effort: rc.effort,
-    access
+    access,
+    cwd: repo
   });
+  const setUpWorktree = async () => {
+    const script = worktreeScript(config, input.branch, base, worktreePath(input.repo, input.branch, config.worktreeDir));
+    let ran;
+    let code;
+    let output;
+    if (host.run) {
+      const r = await host.run(script, input.repo);
+      ran = r.code === 0;
+      code = r.code;
+      output = r.output;
+    } else {
+      const prompt = worktreeCommandPrompt(input.repo, input.branch, `cd ${shellQuote(input.repo)} && ${script}`);
+      const r = await call("granny", "command", "worktree", "Worktree", prompt, "write", config.roles.granny);
+      ran = Boolean(r?.ran);
+      code = r?.exitCode ?? (ran ? 0 : "?");
+      output = r ? `${String(r.output ?? "")}${r.note ? `
+${r.note}` : ""}` : "the worktree runner returned nothing";
+    }
+    const path = ran ? reportedWorktree(output) : undefined;
+    if (!path)
+      throw new Error(`worktree setup failed (exit ${code}): ${output.slice(-2000)}`);
+    host.log(`worktree: ${path}`);
+    return path;
+  };
+  if (config.worktree) {
+    host.phase("Worktree");
+    repo = await setUpWorktree();
+  }
+  const p = { repo, branch: input.branch, base, context: input.context, config };
   const implement = async (label, prompt) => {
     const r = await call("implementer", "implementation", label, "Implement", prompt, "write", config.roles.implementer);
     if (!r)
@@ -615,13 +691,13 @@ async function runGranny(host, input) {
     let output;
     let note;
     if (host.run) {
-      const r = await host.run(plan.script, input.repo);
+      const r = await host.run(plan.script, repo);
       ran = r.code === 0;
       output = r.output;
       if (!ran)
         note = `review command exited ${r.code}: ${r.output.slice(-2000)}`;
     } else {
-      const script = `cd ${shellQuote(input.repo)} && ${plan.script}`;
+      const script = `cd ${shellQuote(repo)} && ${plan.script}`;
       const r = await call("granny", "command", `review ${tag}`, "Review", reviewCommandPrompt(p, name, rv.name, script), "read-only", config.roles.granny);
       ran = Boolean(r?.ran);
       output = String(r?.output ?? "");
@@ -634,7 +710,7 @@ async function runGranny(host, input) {
     const failure = reviewFailure(output);
     if (failure)
       return { ran: false, findings: [], note: `reviewer returned no usable result (${failure}): ${output.slice(-2000)}` };
-    const parsed = parseCodexReview(output, input.repo);
+    const parsed = parseCodexReview(output, repo);
     if (parsed.markers <= parsed.findings.length)
       return { ran, findings: parsed.findings };
     host.log(`${tag}: parser read ${parsed.findings.length}/${parsed.markers} findings - asking an agent to extract them`);
@@ -758,7 +834,7 @@ async function runGranny(host, input) {
   const final = await call("granny", "final", "pr-ready check", "PR ready", finalPrompt(p), "write", config.roles.granny);
   if (!final)
     host.log("final check returned nothing");
-  return { repo: input.repo, branch: input.branch, base, stages, final };
+  return { repo: input.repo, branch: input.branch, base, worktree: repo, stages, final };
 }
 
 function main(api) {

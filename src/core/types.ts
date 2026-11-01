@@ -21,6 +21,7 @@ export interface AgentRequest {
   model?: string
   effort?: string
   access: 'write' | 'read-only'
+  cwd: string
 }
 
 export interface CommandResult {
@@ -97,6 +98,7 @@ export interface RunResult {
   repo: string
   branch: string
   base: string
+  worktree: string
   stages: StageResult[]
   final: FinalReport | null
 }

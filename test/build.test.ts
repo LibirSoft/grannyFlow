@@ -35,6 +35,7 @@ describe('claude-code workflow.js', () => {
     const agent = async (prompt: string, opts: any) => {
       calls.push({ prompt, opts })
       const kind = Object.keys(opts.schema.properties).join(',')
+      if (opts.label === 'worktree') return { ran: true, exitCode: 0, output: "Preparing worktree (new branch 'feat/x')\n[granny] worktree: /r-worktrees/feat-x\n" }
       if (kind.startsWith('startSha')) return { startSha: 's1', headSha: 'h1', gatesGreen: true, gates: 'ok', commits: ['c'], untested: '' }
       if (kind.startsWith('ran')) {
         reviews++
@@ -53,10 +54,18 @@ describe('claude-code workflow.js', () => {
     })
     expect(result.stages[0]).toMatchObject({ stage: 'one', outcome: 'clean', rounds: 2 })
     expect(result.base).toBe('main')
-    expect(phases).toEqual(['Implement', 'Review', 'PR ready'])
-    const impl = calls[0]!
+    expect(result.worktree).toBe('/r-worktrees/feat-x')
+    expect(phases).toEqual(['Worktree', 'Implement', 'Review', 'PR ready'])
+    const setup = calls[0]!
+    expect(setup.opts).toMatchObject({ label: 'worktree', phase: 'Worktree' })
+    expect(setup.prompt.startsWith('READ-ONLY ROLE')).toBe(false)
+    expect(setup.prompt).toContain('\ncd /r && ex="$(git rev-parse --git-common-dir)/info/exclude"')
+    expect(setup.prompt).toContain('wt=/r-worktrees/feat-x;')
+    const impl = calls[1]!
     expect(impl.opts).toMatchObject({ label: 'implement one', phase: 'Implement', model: 'opus', effort: 'high' })
+    expect(impl.prompt).toContain('Working repo: /r-worktrees/feat-x, branch `feat/x`')
     const runner = calls.find(c => c.opts.label === 'review one r1 codex')!
+    expect(runner.prompt).toContain('\ncd /r-worktrees/feat-x && mkdir -p .granny')
     expect(runner.prompt.startsWith('READ-ONLY ROLE')).toBe(true)
     expect(runner.opts.model).toBeUndefined()
     const judge = calls.find(c => c.opts.label === 'judge one r1')!

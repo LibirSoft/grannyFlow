@@ -11,12 +11,26 @@ export interface FakeOptions {
   scores?: Array<Record<string, number | { score: number; duplicateOf?: string }> | null>
   override?: (req: AgentRequest) => unknown
   shell?: { env?: Record<string, string> }
+  worktree?: string | CommandResult | 'git'
+}
+
+export interface Setup {
+  command: string
+  cwd: string
+  request?: AgentRequest
 }
 
 const CLEAN: CommandResult = { code: 0, output: 'No issues found.' }
 const asResult = (r: Review): CommandResult => (typeof r === 'string' ? { code: 0, output: r } : r)
 
 export const reviewerOf = (command: string) => /review-.+?-r\d+-([a-z0-9-]+)\.md/.exec(command)?.[1]
+
+const isWorktreeSetup = (command: string) => command.includes('git worktree list --porcelain')
+
+const cdTarget = (line: string) => {
+  const quoted = /^cd ((?:'[^']*'(?:\\''[^']*')*)|\S+) && /.exec(line)?.[1] ?? ''
+  return quoted.startsWith("'") ? quoted.slice(1, -1).replaceAll(`'\\''`, "'") : quoted
+}
 
 function bash(command: string, cwd: string, env: Record<string, string> = {}): Promise<CommandResult> {
   return new Promise(resolve => {
@@ -36,9 +50,17 @@ export function fakeHost(opts: FakeOptions = {}) {
   const scores = [...(opts.scores ?? [])]
   const calls: AgentRequest[] = []
   const commands: string[] = []
+  const cwds: string[] = []
+  const setups: Setup[] = []
   const logs: string[] = []
   const phases: string[] = []
   let impl = 0
+  const setUp = async (command: string, cwd: string, repo: string): Promise<CommandResult> => {
+    const w = opts.worktree
+    if (w === 'git') return bash(command, cwd, opts.shell?.env)
+    if (typeof w === 'object') return w
+    return { code: 0, output: `[granny] worktree: ${w ?? repo}\n` }
+  }
   const nextReview = async (command: string, cwd: string): Promise<CommandResult> => {
     if (opts.shell) return bash(command, cwd, opts.shell.env)
     if (typeof source === 'function') return asResult(await source(command))
@@ -50,6 +72,12 @@ export function fakeHost(opts: FakeOptions = {}) {
   const host: Host = {
     name: opts.name ?? 'opencode',
     async agent(req) {
+      if (req.label === 'worktree') {
+        const line = /Run exactly this:\n(.+)\n/.exec(req.prompt)?.[1] ?? ''
+        setups.push({ command: line, cwd: '/', request: req })
+        const r = await setUp(line, '/', cdTarget(line))
+        return { ran: r.code === 0, exitCode: r.code, output: r.output }
+      }
       calls.push(req)
       const custom = await opts.override?.(req)
       if (custom !== undefined) return custom
@@ -83,11 +111,16 @@ export function fakeHost(opts: FakeOptions = {}) {
   }
   if (opts.direct !== false) {
     host.run = async (command: string, cwd: string) => {
+      if (isWorktreeSetup(command)) {
+        setups.push({ command, cwd })
+        return setUp(command, cwd, cwd)
+      }
       commands.push(command)
+      cwds.push(cwd)
       return nextReview(command, cwd)
     }
   }
-  return { host, calls, commands, logs, phases }
+  return { host, calls, commands, cwds, setups, logs, phases }
 }
 
 export const finding = (severity: string, title: string, file = 'src/a.ts', line = 3) =>

@@ -8,12 +8,14 @@ import {
   implementPrompt,
   judgePrompt,
   reviewCommandPrompt,
+  worktreeCommandPrompt,
   type PromptContext,
 } from './prompts'
 import { isBlocker, mergeDuplicates, parseCodexReview, reviewFailure, triage } from './review'
 import { reportedBackend, reviewPlan, reviewStem } from './reviewer'
 import { SCHEMAS } from './schemas'
 import { shellQuote } from './shell'
+import { reportedWorktree, worktreePath, worktreeScript } from './worktree'
 import type {
   AgentRequest,
   FinalReport,
@@ -71,8 +73,8 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
   const layers = Array.isArray(input.config) ? input.config : [input.config]
   const config = resolveConfig(layers, host.name)
   const base = input.base ?? config.base
-  const p: PromptContext = { repo: input.repo, branch: input.branch, base, context: input.context, config }
   const fromStage = input.fromStage ?? 1
+  let repo = input.repo
 
   const call = async (role: Role, kind: ResultKind, label: string, phase: string, prompt: string, access: AgentRequest['access'], rc: RoleConfig) =>
     host.agent({
@@ -85,7 +87,37 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
       model: resolveModel(rc.model, host.name),
       effort: rc.effort,
       access,
+      cwd: repo,
     })
+
+  const setUpWorktree = async (): Promise<string> => {
+    const script = worktreeScript(config, input.branch, base, worktreePath(input.repo, input.branch, config.worktreeDir))
+    let ran: boolean
+    let code: number | string
+    let output: string
+    if (host.run) {
+      const r = await host.run(script, input.repo)
+      ran = r.code === 0
+      code = r.code
+      output = r.output
+    } else {
+      const prompt = worktreeCommandPrompt(input.repo, input.branch, `cd ${shellQuote(input.repo)} && ${script}`)
+      const r = await call('granny', 'command', 'worktree', 'Worktree', prompt, 'write', config.roles.granny)
+      ran = Boolean(r?.ran)
+      code = r?.exitCode ?? (ran ? 0 : '?')
+      output = r ? `${String(r.output ?? '')}${r.note ? `\n${r.note}` : ''}` : 'the worktree runner returned nothing'
+    }
+    const path = ran ? reportedWorktree(output) : undefined
+    if (!path) throw new Error(`worktree setup failed (exit ${code}): ${output.slice(-2000)}`)
+    host.log(`worktree: ${path}`)
+    return path
+  }
+
+  if (config.worktree) {
+    host.phase('Worktree')
+    repo = await setUpWorktree()
+  }
+  const p: PromptContext = { repo, branch: input.branch, base, context: input.context, config }
 
   const implement = async (label: string, prompt: string): Promise<Implementation> => {
     const r = (await call('implementer', 'implementation', label, 'Implement', prompt, 'write', config.roles.implementer)) as Implementation | null
@@ -110,12 +142,12 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
     let output: string
     let note: string | undefined
     if (host.run) {
-      const r = await host.run(plan.script, input.repo)
+      const r = await host.run(plan.script, repo)
       ran = r.code === 0
       output = r.output
       if (!ran) note = `review command exited ${r.code}: ${r.output.slice(-2000)}`
     } else {
-      const script = `cd ${shellQuote(input.repo)} && ${plan.script}`
+      const script = `cd ${shellQuote(repo)} && ${plan.script}`
       const r = await call('granny', 'command', `review ${tag}`, 'Review', reviewCommandPrompt(p, name, rv.name, script), 'read-only', config.roles.granny)
       ran = Boolean(r?.ran)
       output = String(r?.output ?? '')
@@ -126,7 +158,7 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
     const failure = reviewFailure(output)
     if (failure) return { ran: false, findings: [], note: `reviewer returned no usable result (${failure}): ${output.slice(-2000)}` }
 
-    const parsed = parseCodexReview(output, input.repo)
+    const parsed = parseCodexReview(output, repo)
     if (parsed.markers <= parsed.findings.length) return { ran, findings: parsed.findings }
 
     host.log(`${tag}: parser read ${parsed.findings.length}/${parsed.markers} findings - asking an agent to extract them`)
@@ -262,7 +294,7 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
   const final = (await call('granny', 'final', 'pr-ready check', 'PR ready', finalPrompt(p), 'write', config.roles.granny)) as FinalReport | null
   if (!final) host.log('final check returned nothing')
 
-  return { repo: input.repo, branch: input.branch, base, stages, final }
+  return { repo: input.repo, branch: input.branch, base, worktree: repo, stages, final }
 }
 
 export type { GrannyConfig }

@@ -27,7 +27,7 @@ describe('runGranny', () => {
     expect(f.calls.map(c => c.kind)).toEqual(['implementation', 'final'])
     expect(f.commands).toHaveLength(1)
     expect(f.commands[0]).toContain('codex exec review --base start1 -o .granny/review-core-r1-codex.md')
-    expect(f.phases).toEqual(['Implement', 'Review', 'PR ready'])
+    expect(f.phases).toEqual(['Worktree', 'Implement', 'Review', 'PR ready'])
     expect(r.final?.gatesGreen).toBe(true)
   })
 
@@ -136,7 +136,7 @@ describe('runGranny', () => {
     expect(r.stages[0]!.implementation).toBeUndefined()
     expect(f.calls.map(c => c.label)).toEqual(['judge audit r1', 'fix audit r1', 'pr-ready check'])
     expect(f.commands[0]).toContain('codex exec review --base main -o')
-    expect(f.phases).toEqual(['Review', 'PR ready'])
+    expect(f.phases).toEqual(['Worktree', 'Review', 'PR ready'])
   })
 
   it('rejects a stage with nothing to do, and a working stage without a task', async () => {
@@ -395,6 +395,130 @@ describe('runGranny', () => {
     await expect(runGranny(f.host, input({ config: { treshold: 1 } }))).rejects.toThrow('unknown key "treshold"')
     await expect(runGranny(f.host, input({ config: { roles: { reviewer: { engine: 'agent' } } } }))).rejects.toThrow('roles.reviewer was replaced by "reviewers"')
     expect(f.calls).toHaveLength(0)
+    expect(f.setups).toHaveLength(0)
+  })
+})
+
+describe('the worktree', () => {
+  const WT = '/work/repo-worktrees/feat-x'
+  const opus = { name: 'opus', engine: 'agent', model: 'opus' }
+
+  it('sets up the worktree before the first stage, then works only in it', async () => {
+    const f = fakeHost({
+      worktree: WT,
+      reviews: [review(finding('P2', 'Absolute path', `${WT}/src/b.ts`)), 'No issues.'],
+      scores: [{ 'codex-F1': 90 }],
+      override: req => (req.role === 'reviewer' ? { findings: [] } : undefined),
+    })
+    const r = await runGranny(f.host, input({ config: { reviewers: [{ name: 'codex' }, opus] } }))
+    expect(f.setups.map(s => s.cwd)).toEqual(['/work/repo'])
+    expect(f.logs[0]).toBe(`worktree: ${WT}`)
+    expect(r).toMatchObject({ repo: '/work/repo', worktree: WT })
+    expect(r.stages[0]).toMatchObject({ outcome: 'clean', rounds: 2 })
+    expect(r.stages[0]!.history[0]!.findings[0]).toMatchObject({ file: 'src/b.ts', title: 'Absolute path' })
+
+    expect(f.cwds).toEqual([WT, WT])
+    expect(f.calls.map(c => c.cwd)).toEqual(f.calls.map(() => WT))
+    expect(f.calls.map(c => c.label)).toEqual(['implement core', 'review core r1 opus', 'judge core r1', 'fix core r1', 'review core r2 opus', 'pr-ready check'])
+    for (const c of f.calls) {
+      expect(c.prompt).not.toContain('/work/repo ')
+      expect(c.prompt).not.toContain('/work/repo,')
+    }
+    for (const label of ['implement core', 'fix core r1', 'pr-ready check']) {
+      const prompt = f.calls.find(c => c.label === label)!.prompt
+      expect(prompt).toContain(`Working repo: ${WT}, branch \`feat/x\``)
+      expect(prompt).toContain(`Prefix EVERY shell command with \`cd ${WT} &&\``)
+    }
+    expect(f.calls.find(c => c.label === 'review core r1 opus')!.prompt).toContain(`\`cd ${WT} && git diff start1...HEAD\``)
+    expect(f.calls.find(c => c.label === 'judge core r1')!.prompt).toContain(`Repo ${WT}, branch feat/x`)
+  })
+
+  it('hands command reviewers a {prompt} that names the worktree', async () => {
+    const f = fakeHost({ worktree: WT })
+    await runGranny(f.host, input({ config: { reviewers: [GLM] } }))
+    expect(f.commands[0]).toContain(`Repo ${WT}, branch`)
+    expect(f.commands[0]).toContain(`cd ${WT} && git diff start1...HEAD`)
+    expect(f.commands[0]).not.toContain('/work/repo ')
+  })
+
+  it('runs the review command from the worktree on Claude Code, through the review runner', async () => {
+    const f = fakeHost({ name: 'claude-code', direct: false, worktree: WT })
+    await runGranny(f.host, input())
+    const runner = f.calls.find(c => c.label === 'review core r1 codex')!
+    expect(runner.prompt).toContain(`\ncd ${WT} && mkdir -p .granny && rm -f .granny/review-core-r1-codex.md`)
+    expect(runner.prompt).toContain(`Stage "core" of repo ${WT}, branch`)
+  })
+
+  it('runs the setup script on Claude Code through a granny helper agent that may write', async () => {
+    const f = fakeHost({ name: 'claude-code', direct: false, worktree: WT })
+    const r = await runGranny(f.host, input({ config: { roles: { granny: { model: 'haiku' } } } }))
+    expect(r.worktree).toBe(WT)
+    expect(f.setups).toHaveLength(1)
+    expect(f.setups[0]!.request).toMatchObject({ role: 'granny', kind: 'command', label: 'worktree', phase: 'Worktree', access: 'write', model: 'haiku', cwd: '/work/repo' })
+    expect(f.setups[0]!.request!.prompt).toContain('branch `feat/x`')
+    expect(f.setups[0]!.command.startsWith('cd /work/repo && ')).toBe(true)
+    expect(f.phases[0]).toBe('Worktree')
+  })
+
+  it('builds a setup script that reuses the branch worktree, or adds one for the branch or from the base', async () => {
+    const f = fakeHost()
+    await runGranny(f.host, input({ base: 'develop' }))
+    const script = f.setups[0]!.command
+    expect(script).toContain('git worktree list --porcelain')
+    expect(script).toContain(`if [ "\${l#branch refs/heads/}" = feat/x ]`)
+    expect(script).toContain('git show-ref --verify --quiet refs/heads/feat/x')
+    expect(script).toContain(`git worktree add "$wt" feat/x`)
+    expect(script).toContain(`git worktree add -b feat/x "$wt" develop`)
+    expect(script).toContain(`wt=${WT};`)
+    expect(script).toContain(`printf '%s\\n' /.granny/ >> "$ex"`)
+    expect(script).not.toContain('\n')
+  })
+
+  it('places the worktree under worktreeDir and quotes every path in the setup script', async () => {
+    const f = fakeHost()
+    await runGranny(f.host, input({ repo: "/work/my repo's", branch: "fix/it's", config: { worktreeDir: 'trees here', workDir: '.granny dir' } }))
+    const script = f.setups[0]!.command
+    expect(script).toContain(`wt='/work/trees here/fix-it-s';`)
+    expect(script).toContain(`= 'fix/it'\\''s' ]`)
+    expect(script).toContain(`printf '%s\\n' '/.granny dir/' >> "$ex"`)
+  })
+
+  it('fails before any agent runs when the setup fails, with what it printed', async () => {
+    const f = fakeHost({ worktree: { code: 1, output: '[granny] worktree failed: /w has feat/x checked out with uncommitted changes\n?? dirty.txt\n' } })
+    await expect(runGranny(f.host, input())).rejects.toThrow(/worktree setup failed \(exit 1\)[\s\S]*uncommitted changes[\s\S]*dirty\.txt/)
+    expect(f.calls).toHaveLength(0)
+    expect(f.commands).toHaveLength(0)
+
+    const cc = fakeHost({ name: 'claude-code', direct: false, worktree: { code: 1, output: 'fatal: not a git repository' } })
+    await expect(runGranny(cc.host, input())).rejects.toThrow(/worktree setup failed \(exit 1\)[\s\S]*not a git repository/)
+    expect(cc.calls).toHaveLength(0)
+  })
+
+  it('fails when the setup exits 0 without naming an absolute worktree path', async () => {
+    for (const output of ['Preparing worktree\n', '[granny] worktree: relative/path\n']) {
+      const f = fakeHost({ worktree: { code: 0, output } })
+      await expect(runGranny(f.host, input())).rejects.toThrow('worktree setup failed (exit 0)')
+      expect(f.calls).toHaveLength(0)
+    }
+  })
+
+  it('sets the worktree up again on fromStage, so a resumed run reuses it', async () => {
+    const f = fakeHost({ worktree: WT })
+    const r = await runGranny(f.host, input({ stages: [{ name: 'a', task: 'A' }, { name: 'b', task: 'B' }], fromStage: 2 }))
+    expect(f.setups).toHaveLength(1)
+    expect(r.worktree).toBe(WT)
+    expect(f.calls.find(c => c.kind === 'implementation')!.prompt).toContain(`Working repo: ${WT}`)
+  })
+
+  it('works in the repo itself with worktree off', async () => {
+    const f = fakeHost({ worktree: WT })
+    const r = await runGranny(f.host, input({ config: { worktree: false } }))
+    expect(f.setups).toHaveLength(0)
+    expect(r).toMatchObject({ repo: '/work/repo', worktree: '/work/repo' })
+    expect(f.cwds).toEqual(['/work/repo'])
+    expect(f.calls.every(c => c.cwd === '/work/repo')).toBe(true)
+    expect(f.calls[0]!.prompt).toContain('Working repo: /work/repo, branch')
+    expect(f.phases).toEqual(['Implement', 'Review', 'PR ready'])
   })
 })
 

@@ -3,6 +3,18 @@
 
 The exact prompts the engines send, rendered with the default config. Fill the `<placeholders>`; replace the gates, language, attribution and rules lines when the user's config differs. For stage 1 drop the "Earlier stages are done" line. A placeholder in single quotes is a shell argument: write each `'` in its value as `'\''`.
 
+## Granny - worktree setup, the helper agent on Claude Code (on Cursor, run the command yourself)
+
+```text
+You run one shell command that sets up the git worktree of branch `<branch>` for a granny run, and return its output. Run nothing else, and do not edit, stage or commit anything yourself.
+Repo <repo>.
+
+Run exactly this:
+cd '<repo>' && ex="$(git rev-parse --git-common-dir)/info/exclude" && mkdir -p "${ex%/*}" && { grep -qxF -e /.granny/ "$ex" 2>/dev/null || { if [ -s "$ex" ] && [ -n "$(tail -c 1 "$ex")" ]; then echo >> "$ex"; fi; printf '%s\n' /.granny/ >> "$ex"; }; } && wt=$(git worktree list --porcelain | while IFS= read -r l; do case "$l" in "worktree "*) p=${l#worktree };; "branch refs/heads/"*) if [ "${l#branch refs/heads/}" = '<branch>' ]; then printf '%s\n' "$p"; break; fi;; esac; done) && if [ -n "$wt" ]; then changes=$(git -C "$wt" status --porcelain) || exit 1; if [ -n "$changes" ]; then printf '[granny] worktree failed: %s has %s checked out with uncommitted changes - commit or discard them, then run again:\n' "$wt" '<branch>'; git -C "$wt" status --short; exit 1; fi; elif git show-ref --verify --quiet 'refs/heads/<branch>'; then wt='<worktreeDir>/<branch-slug>'; git worktree add "$wt" '<branch>' || exit 1; else wt='<worktreeDir>/<branch-slug>'; git worktree add -b '<branch>' "$wt" '<base>' || exit 1; fi && printf '%s%s\n' '[granny] worktree: ' "$wt"
+
+Set ran=true only if it exited 0, exitCode to its exit code, and output to everything it printed, verbatim and complete. If it failed, set ran=false and explain in note. Never invent output.
+```
+
 ## Implementer - stage
 
 ```text

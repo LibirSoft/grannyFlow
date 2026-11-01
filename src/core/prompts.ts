@@ -69,6 +69,16 @@ ${script}
 Set ran=true only if it exited 0, exitCode to its exit code, and output to everything it printed, verbatim and complete. If it failed, set ran=false and explain in note. Never invent output.`
 }
 
+export function worktreeCommandPrompt(repo: string, branch: string, script: string): string {
+  return `You run one shell command that sets up the git worktree of branch \`${branch}\` for a granny run, and return its output. Run nothing else, and do not edit, stage or commit anything yourself.
+Repo ${repo}.
+
+Run exactly this:
+${script}
+
+Set ran=true only if it exited 0, exitCode to its exit code, and output to everything it printed, verbatim and complete. If it failed, set ran=false and explain in note. Never invent output.`
+}
+
 export function agentReviewPrompt(p: PromptContext, name: string, reviewBase: string): string {
   return `${common(p)}
 
