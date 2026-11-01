@@ -5,12 +5,12 @@ The engine is `engines/claude-code/workflow.js`, a Workflow script: the loop is 
 ## Launch
 
 1. Collect the config layers. Read `~/.config/granny/config.json` and `<repo>/granny.config.json` if they exist; do not merge them yourself - the engine does that and rejects bad keys.
-2. Read `engines/claude-code/workflow.js` (relative to the skill directory). The skill directory is usually outside the session's working directories, where `scriptPath` is refused, so pass the full text unchanged as `script`.
+2. Read `engines/claude-code/workflow.js` (relative to the skill directory) and pass the full text unchanged as `script`. Alternative: copy the file into the session's scratchpad directory (the one your session names, not `/tmp`) and pass that copy's path as `scriptPath` instead of `script`. Never point `scriptPath` into the skill directory: when the skill lives outside the session's working directories, Workflow refuses that path; the scratchpad path works.
 3. Call:
 
 ```
 Workflow({
-  script: <contents of workflow.js>,
+  script: <contents of workflow.js>,              // or scriptPath: <scratchpad copy of workflow.js>
   args: {
     repo, branch, base, context, stages,          // fromStage when resuming by stage
     config: [<user config>, <project config>, <run overrides>]   // omit missing layers
@@ -32,7 +32,7 @@ With the default engine `auto`, the review script looks for OpenAI's Codex plugi
 
 ## Resume
 
-Same script, same args: `Workflow({ scriptPath: <path the first launch returned>, args, resumeFromRunId })`. Unchanged agent calls return cached results instantly, so the run continues where it stopped. To restart from a stage instead, add `fromStage` to args.
+Same script, same args: `Workflow({ scriptPath, args, resumeFromRunId })`, where `scriptPath` is the path the first launch returned when you passed `script`, or the same scratchpad copy you launched with (leave it in place until the run is done). Unchanged agent calls return cached results instantly, so the run continues where it stopped. To restart from a stage instead, add `fromStage` to args.
 
 ## When it ends
 
