@@ -6,7 +6,7 @@ Cursor has subagents but no workflow engine, so you run the loop yourself, step 
 
 Copy `engines/cursor/agents/*.md` to `~/.cursor/agents/` (all projects) or `<project>/.cursor/agents/`, and set `model:` in each file (`inherit` uses the chat's model). Cursor sometimes ignores a subagent's `model:`; check which model actually ran when it matters.
 
-Config: read `~/.config/granny/config.json` and `<repo>/granny.config.json` yourself and apply the layering in [config.md](config.md); only `threshold`, `maxRounds`, `base`, `gates`, `workDir`, `worktree`, `worktreeDir`, `language`, `aiAttribution`, `rules` and `reviewers` apply here - of a reviewer, its `name`, `engine`, `mode`, `focus`, `command`, and `model` where the engine passes it on. An `agent` reviewer runs `granny-reviewer` on whatever model that subagent has.
+Config: read `~/.config/granny/config.json` and `<repo>/granny.config.json` yourself and apply the layering in [config.md](config.md); only `threshold`, `maxRounds`, `planReview`, `base`, `gates`, `workDir`, `worktree`, `worktreeDir`, `language`, `aiAttribution`, `rules` and `reviewers` apply here - of a reviewer, its `name`, `engine`, `mode`, `focus`, `command`, and `model` where the engine passes it on. An `agent` reviewer runs `granny-reviewer` on whatever model that subagent has.
 
 ## The worktree
 
@@ -18,6 +18,19 @@ With `worktree` on (the default), set it up by hand before the first stage - als
 4. Otherwise: `git -C <repo> worktree add -b <branch> <worktreeDir>/<branch-slug> <base>`.
 
 `<worktreeDir>` defaults to `<parent of repo>/<repo name>-worktrees`; `<branch-slug>` is the branch with every character other than letters, digits, `.`, `_` and `-` as `-` (`feat/login` → `feat-login`). The "Granny - worktree setup" command in [prompts.md](prompts.md) does all four steps in one go and prints `[granny] worktree: <path>`. From then on the worktree is `<repo>` in every prompt and every terminal command; name it in the report and never remove it. With `worktree: false`, work in `repo` on the branch checked out there.
+
+## The plan review
+
+With plan files and `planReview` on (the default), review the plan after the worktree and before stage 1; skip it when you resume with `fromStage` above 1 ([config.md](config.md#plan-review)). It is the review loop below, steps 2-5, on the plan instead of a diff, with these differences:
+
+- Reviewers, round N, output `<workDir>/review-plan-review-rN-<name>.md` / `.log`, run from the worktree:
+  - engine `codex`, or `auto`: `codex exec --sandbox read-only -o <workDir>/review-plan-review-rN-<name>.md '<prompt>' </dev/null > <workDir>/review-plan-review-rN-<name>.log 2>&1`, with the "Plan reviewer - codex exec, the Codex plugin task and the {prompt} of a command engine" prompt from [prompts.md](prompts.md) as `<prompt>` (shell-quoted, one line).
+  - engine `codex-plugin`: `node <companion> task '<prompt>' </dev/null > ….md 2> ….log`, with `CLAUDE_PLUGIN_DATA=<workDir>/codex-plugin-<name>` exported - no `--write`, no `--background`. `Codex did not return a final message.` means it did not run.
+  - engine `agent`: `granny-reviewer` with the "Plan reviewer - agent engine" prompt.
+  - engine `command`: only a template with `{prompt}`, filled with the same one-line prompt; a reviewer without `{prompt}` sits the plan review out - say so in the journal. No reviewer left → the plan review fails.
+- Judge: `granny-judge` with the "Judge - plan review" prompt.
+- Fix: `granny-implementer` with the "Implementer - plan fix" prompt. It edits the plan files in place at their absolute paths, adds (round 1) or extends (later rounds) a `## rN deltas (<date>)` section at the top with the date from `date +%F`, and never stages or commits them. Check with `git status --short` that it committed nothing.
+- `clean` or `residual-only` → go on to stage 1. `round-cap` or `review-failed` → stop: implement nothing, report the plan findings left unresolved, and wait.
 
 ## The loop
 

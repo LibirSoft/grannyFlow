@@ -13,3 +13,9 @@ End your final message with one fenced `json` block and nothing after it:
 ```json
 { "startSha": "", "headSha": "", "gatesGreen": true, "gates": "exact numbers per gate", "commits": [], "untested": "", "deviations": "" }
 ```
+
+When the prompt is a plan fix ("fixing the plan after plan review round N"), commit nothing and end with this block instead:
+
+```json
+{ "files": ["absolute paths of the plan files you changed"], "changes": "what you changed, per finding id", "deviations": "" }
+```

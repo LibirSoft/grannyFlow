@@ -9,6 +9,11 @@ You are **Granny**: you prepare the run, launch the engine, and report the resul
 
 ```
 before the first stage: reuse the branch's worktree or create one (config worktree, default on); everything below runs there
+given a plan (config planReview, default on; not with fromStage > 1):
+  plan review ─► every reviewer reviews the plan files against the repo, same routing, judge and maxRounds cap;
+     the implementer fixes accepted findings in the plan files in place, uncommitted, and the plan is reviewed again
+     ├─ clean or residual-only ─► stage 1
+     └─ round-cap or review-failed ─► STOP before implementing ─► report
 for each stage:
   implementer builds the stage ─► every reviewer reviews it, in parallel (base = stage start sha)
      ├─ a reviewer fails, then fails its one retry ─► stage review-failed
@@ -23,7 +28,7 @@ after the last stage: granny's final check (gates, clean tree, no AI trailers, P
 | role | does | default model |
 |---|---|---|
 | granny | you; plus the engine's helper steps: worktree setup and review-command runner (Claude Code), extraction fallback, final PR-ready check | session model |
-| implementer | builds each stage, fixes accepted findings, commits | session model |
+| implementer | builds each stage, fixes accepted findings, commits; in the plan review, fixes the plan files in place without committing them | session model |
 | reviewers | config `reviewers`, a list; every reviewer reviews every stage, all at the same time. Engines: `auto` (default) runs OpenAI's Codex plugin when it is installed on Claude Code and `node` is on `PATH`, otherwise the Codex CLI (`codex exec review`); `codex-plugin` forces the plugin (and allows `mode: "adversarial-review"`), `codex` the CLI, `agent` a host model, `command` any CLI | one reviewer, `codex`, on Codex's default model |
 | judge | scores each finding that is not P0/P1 and merges duplicates; the overall review score is informational only | `sonnet` on Claude Code, session model on opencode |
 
@@ -43,7 +48,8 @@ All paths in this skill are relative to the directory containing this `SKILL.md`
 | `repo` | absolute path of the git repo (its main checkout) |
 | `branch` | feature branch. With `worktree` on (the default) the engine reuses the worktree that has it checked out, or creates one - with the branch, from `base`, when it does not exist yet; with `worktree: false` you create and check it out in preflight |
 | `base` | branch never to touch (default from config, `main`; check whether the repo uses `master`) |
-| `context` | files every agent reads first (plan, preamble, work orders), plus a one-line "these override older text" note when there are revisions. With the worktree on, the agents work in the worktree, where files that exist only in the main checkout (untracked, or in the git-excluded work dir such as `.granny/plans/`) are missing: name those by absolute path |
+| `plan` | absolute path of the plan file, or a list of them; relative paths are rejected. Every agent reads them first, and with config `planReview` on (the default) the run reviews them before stage 1 ([references/config.md](references/config.md#plan-review)). The fixes are written into these files where they are and never committed, so keep them where the implementer may write - a plan in the main checkout's git-excluded `.granny/plans/` works |
+| `context` | other files every agent reads first (preamble, work orders), plus a one-line "these override older text" note when there are revisions. With the worktree on, the agents work in the worktree, where files that exist only in the main checkout (untracked, or in the git-excluded work dir such as `.granny/plans/`) are missing: name those by absolute path |
 | `stages` | `[{ name, task, implement?, review? }]` - one entry per stop-and-review point; `task` names exactly which work orders or sections to do; `review: false` skips the loop for that stage; `implement: false` makes a review-only stage (no task needed) that reviews `base...HEAD` and fixes what the judge accepts - use it to run granny on work that is already written |
 | `fromStage` | 1-based stage to resume from (earlier stages are skipped) |
 | `config` | per-run overrides, same shape as the config file |
@@ -72,7 +78,7 @@ Three layers, later wins: `~/.config/granny/config.json` (user), `<repo>/granny.
 
 ## 3. Preflight - inline, before launching
 
-1. The plan is current: if dependency versions or upstream behaviour moved since it was written, update the plan first (a dated "rN deltas" section at the top) and tell the user what changed.
+1. The plan is current. With `plan` given and `planReview` on, the run's plan review checks it against the repo and fixes it (a dated "rN deltas" section at the top) before stage 1; tell the user that a plan review that ends `round-cap` or `review-failed` stops the run before anything is implemented. Without a plan review (no `plan`, `planReview: false`, or a resume with `fromStage`): if dependency versions or upstream behaviour moved since it was written, update the plan yourself first, the same way, and tell the user what changed.
 2. Branch and worktree - never work on `base`:
    - `worktree` on (the default): do not create or check out `branch` yourself; the engine's setup step does it before the first stage ([references/config.md](references/config.md#worktree)). Find out what it will do: when `git -C <repo> worktree list --porcelain` shows `branch refs/heads/<branch>` under some `worktree <path>` (the main checkout included), that path is reused and `git -C <path> status --short` must be clean, or the run fails before any agent starts; otherwise a worktree is created at `<worktreeDir>/<branch-slug>` (default `<parent of repo>/<repo name>-worktrees/<branch-slug>`, with `feat/login` as `feat-login`). Tell the user the path.
    - `worktree: false`: `git -C <repo> status --short` is clean; create and check out `branch`.
@@ -82,7 +88,7 @@ Three layers, later wins: `~/.config/granny/config.json` (user), `<repo>/granny.
    - Codex plugin (engine `codex-plugin`, or `auto` on Claude Code when it is installed and `command -v node` finds `node`): `node --version` works; `ls "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/cache/openai-codex/codex/*/scripts/codex-companion.mjs` finds the companion (for `codex-plugin` on opencode: with the opencode server's `HOME` and `CLAUDE_CONFIG_DIR`); `codex --version` works and Codex is logged in - the companion drives the CLI.
    - Engine `agent`: the model exists on this host - on Claude Code only Claude models; for any other provider there, the reviewer needs engine `command`.
    - Engine `command`: the CLI in the template is on `PATH` where the review runs (on opencode: the server's) and logged in to its provider.
-   Tell the user which reviewers will run and what `auto` will pick. A reviewer that fails twice in a round ends the stage `review-failed`.
+   Tell the user which reviewers will run and what `auto` will pick. A reviewer that fails twice in a round ends the stage `review-failed`. For the plan review the Codex engines run `codex exec` or the plugin's `task` instead of a diff review; a `command` reviewer without `{prompt}` sits the plan review out, and when no reviewer can review a plan, the plan review fails and the run stops.
 5. No other session already runs the same job (other agents, `git reflog`).
 
 ## 4. Launch
@@ -91,7 +97,7 @@ Follow your host reference. Then tell the user, in their language: the run id, t
 
 ## 5. When it completes
 
-Read the result. Name the worktree first (`worktree` in the result; `repo` itself with `worktree: false`): the branch is checked out there, the user reviews and pushes from there, and granny never removes it - `git worktree remove <path>` is the user's call. Report per stage: commits, gate numbers, review rounds, outcome (`clean`, `residual-only`, `round-cap`, `review-failed` with the reviewers its note names, `review-skipped`, `skipped`), residual and unresolved findings with the reviewer each came from (ids are `<reviewer>-F<n>`); then the final check, the PR body path (inside the worktree), and deviations and untested items from the implementers. Before repeating a load-bearing claim from an agent, verify it yourself (open the file, rerun the gate - in the worktree).
+Read the result. Name the worktree first (`worktree` in the result; `repo` itself with `worktree: false`): the branch is checked out there, the user reviews and pushes from there, and granny never removes it - `git worktree remove <path>` is the user's call. Then the plan review, when the result has `plan`: its outcome (`clean`, `residual-only`, `round-cap`, `review-failed`, `skipped` on a resume, `review-skipped` with `planReview: false`), its rounds, the residual and unresolved plan findings, and that the plan files now carry uncommitted fixes. After `round-cap` or `review-failed` the run stopped there: `stages` is empty and there is no final check - say that nothing was implemented, list the unresolved findings (and the note), and wait for the user. Otherwise report per stage: commits, gate numbers, review rounds, outcome (`clean`, `residual-only`, `round-cap`, `review-failed` with the reviewers its note names, `review-skipped`, `skipped`), residual and unresolved findings with the reviewer each came from (ids are `<reviewer>-F<n>`); then the final check, the PR body path (inside the worktree), and deviations and untested items from the implementers. Before repeating a load-bearing claim from an agent, verify it yourself (open the file, rerun the gate - in the worktree).
 
 Then STOP and wait. No push, no `git remote add`, no PR, no tag - the user decides.
 

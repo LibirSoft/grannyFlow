@@ -28,8 +28,10 @@ Run granny from the TUI, the desktop app or `opencode run` against the backgroun
 ## Launch
 
 ```
-granny_run({ repo, branch, base, context, stages, fromStage?, config? })
+granny_run({ repo, branch, base, context, plan?, stages, fromStage?, config? })
 ```
+
+`plan` is a list of absolute plan file paths; with it and config `planReview` on, the run reviews the plan before stage 1 ([Plan review](#plan-review)).
 
 The plugin reads `~/.config/granny/config.json` and `<repo>/granny.config.json` itself; `config` holds run overrides only. Before it starts it adds the work dir to the common git dir's `info/exclude` and checks `repo`:
 
@@ -44,6 +46,10 @@ It returns a run id at once and works in the background; child sessions appear a
 Run files: `<repo>/.granny/runs/<id>/` - `input.json`, `status.json`, `journal.jsonl`, `result.json` - in the main checkout you passed as `repo`, also when the run works in another worktree, so `granny_status({ repo })` and `granny_cancel` find runs as before. The PR body and the review outputs are in the worktree's `.granny/`.
 
 Reloading opencode's configuration or the plugin while a run is in progress (`opencode reload`, a changed plugin file) does not interrupt the run: the role sessions' results still reach it, and `granny_status` / `granny_cancel` still find it. Only stopping the server ends it.
+
+## Plan review
+
+The plan review runs after the worktree step and before stage 1 ([config.md](config.md#plan-review)): the review commands run in the server (`codex exec --sandbox read-only ...` for `codex` and `auto`, the companion's `task` for `codex-plugin`), agent reviewers and the judge in read-only child sessions, and the fix in a write session, `granny · fix plan review r<n>`, that answers through `granny_submit_plan_fix`. That session works in the worktree and edits the plan files at their absolute paths without committing them; a plan inside the worktree, or in the main checkout's git-excluded `.granny/` when the worktree is the main checkout, is a path it can write. When the plan review ends `round-cap` or `review-failed`, the run ends `done` without implementing anything: the completion message starts with `- plan review: <outcome>, ... - stopped before stage 1, nothing was implemented`, and `result.json` has `plan`, an empty `stages` and `final: null`. Otherwise the message starts with the plan review line and goes on with the stages.
 
 ## Models and permissions
 
@@ -75,4 +81,4 @@ A session API request that fails (creating, prompting or waiting on a child sess
 
 ## Resume
 
-There is no result cache. Restart with the same arguments and `fromStage` set to the first stage that did not finish; earlier stages are recorded as `skipped`. The restart reuses the worktree of the first run; when the interrupted step left uncommitted changes there, the run fails at the worktree step until you commit or discard them.
+There is no result cache. Restart with the same arguments and `fromStage` set to the first stage that did not finish; earlier stages are recorded as `skipped`, and so is the plan review when `fromStage` is above 1. A run that stopped in the plan review restarts without `fromStage` (or with `fromStage: 1`), which reviews the plan again. The restart reuses the worktree of the first run; when the interrupted step left uncommitted changes there, the run fails at the worktree step until you commit or discard them.

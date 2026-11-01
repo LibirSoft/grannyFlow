@@ -12,7 +12,7 @@ The engine is `engines/claude-code/workflow.js`, a Workflow script: the loop is 
 Workflow({
   script: <contents of workflow.js>,              // or scriptPath: <scratchpad copy of workflow.js>
   args: {
-    repo, branch, base, context, stages,          // fromStage when resuming by stage
+    repo, branch, base, context, plan, stages,    // plan: absolute path or list; fromStage when resuming by stage
     config: [<user config>, <project config>, <run overrides>]   // omit missing layers
   }
 })
@@ -29,6 +29,10 @@ Workflow({
 ## Worktree
 
 With `worktree` on (the default) the run starts with phase "Worktree": a granny helper agent (label `worktree`, write access, `roles.granny`'s model) runs the setup script from `repo` and returns what it printed; the engine reads the `[granny] worktree: <path>` line from it and stops the run when the script fails - a dirty reused worktree, for example - before any other agent starts. Pass the main checkout as `repo` and leave `branch` alone: the script reuses the worktree that has it checked out or creates one ([config.md](config.md#worktree)). `agent()` has no working-directory option, so every later prompt carries the worktree instead: `Working repo: <worktree>` and `cd <worktree> &&` before each command; the review runner `cd`s there too. The result's `worktree` is the path. On resume the cached setup call returns the same path; a relaunch with `fromStage` runs the setup again and reuses the worktree.
+
+## Plan review
+
+With `plan` in args and `planReview` on, phase "Plan review" runs after "Worktree" and before the first "Implement" ([config.md](config.md#plan-review)). The reviewers run as in a stage, each Codex engine through its granny helper agent with the plan-review script (`codex exec --sandbox read-only ...` or the plugin's `node <companion> task ...`); the judge and the fix (`fix plan review r<n>`, the implementer with write access, result `{ files, changes, deviations }`) are `agent()` calls in that phase. The fix agent writes the plan files at their absolute paths - a plan in the main checkout works, since the session works there too - and dates its `rN deltas` section with its shell's `date`, because the Workflow script has no clock. A plan review that ends `round-cap` or `review-failed` ends the Workflow there, with `stages: []` and `final: null`.
 
 ## Reviewers
 
@@ -47,4 +51,4 @@ Same script, same args: `Workflow({ scriptPath, args, resumeFromRunId })`, where
 
 ## When it ends
 
-The result is `{ repo, branch, base, worktree, stages: [...], final }`. If anything looks empty, read `<transcriptDir>/journal.jsonl`, which records every agent's return value, before drawing conclusions. Then report per SKILL.md section 5 and wait.
+The result is `{ repo, branch, base, worktree, plan?, stages: [...], final }`; `plan` is there when args had a `plan`. If anything looks empty, read `<transcriptDir>/journal.jsonl`, which records every agent's return value, before drawing conclusions. Then report per SKILL.md section 5 and wait.

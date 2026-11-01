@@ -57,6 +57,20 @@ describe('skill docs', () => {
     expect(read('references/cursor.md')).toContain('`git -C <repo> worktree list --porcelain`')
   })
 
+  it('documents the plan review in the config keys, SKILL.md, the host references and the Cursor protocol', () => {
+    const config = read('references/config.md')
+    expect(config).toMatch(/^\| `planReview` \| `true` \|/m)
+    expect(config).toContain('## Plan review')
+    expect(config).toContain('"planReview": true')
+    const skill = read('SKILL.md')
+    expect(skill).toMatch(/^\| `plan` \| absolute path/m)
+    expect(skill).toContain('plan review ─►')
+    expect(read('references/claude-code.md')).toContain('repo, branch, base, context, plan, stages')
+    expect(read('references/opencode.md')).toContain('granny_run({ repo, branch, base, context, plan?, stages')
+    expect(read('references/cursor.md')).toContain('## The plan review')
+    expect(readRoot('README.md')).toMatch(/^\| `planReview` \| `true` \|/m)
+  })
+
   it('points every repo reference at LibirSoft/grannyFlow', () => {
     expect(readRoot('README.md')).toContain('npx skills add LibirSoft/grannyFlow')
     const docs: Record<string, string> = {

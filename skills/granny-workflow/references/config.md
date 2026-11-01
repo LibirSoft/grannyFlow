@@ -14,11 +14,12 @@ Layers, later wins:
 | key | default | meaning |
 |---|---|---|
 | `roles.granny` | `{}` | model/effort for granny's helper steps: the worktree setup and the review-command runner (Claude Code), the extraction fallback, the final PR-ready check |
-| `roles.implementer` | `{}` | builds each stage and fixes accepted findings |
+| `roles.implementer` | `{}` | builds each stage and fixes accepted findings; fixes the plan in the plan review |
 | `roles.judge` | `{ "model": { "claude-code": "sonnet" } }` | scores each finding that is not P0/P1 0-100 and marks duplicates |
 | `reviewers` | `[{ "name": "codex", "engine": "auto" }]` | the reviewers; every one of them reviews every round, all at the same time - see [Reviewers](#reviewers) |
 | `threshold` | `70` | a finding is sent back to the implementer when it is P0/P1 (also `critical`/`high`; these skip the judge), when the judge gave it no score, or when its score is **strictly above** this. The overall review score gates nothing |
-| `maxRounds` | `4` | review rounds per stage; the stage ends `round-cap` after the last one |
+| `maxRounds` | `4` | review rounds per stage, and for the plan review; the stage ends `round-cap` after the last one |
+| `planReview` | `true` | with a `plan` in the run's input, review the plan files before stage 1 - see [Plan review](#plan-review). No effect without `plan` |
 | `base` | `"main"` | branch never to touch; the run's `base` argument overrides it |
 | `gates` | `"auto"` | `"auto"`: agents discover the project's test/lint/build/typecheck commands. Or a list, e.g. `["bun test", "bun run check", "bun run build"]` |
 | `workDir` | `".granny"` | repo-relative, git-excluded: PR body, review outputs, run journals |
@@ -59,11 +60,33 @@ Before it looks at the worktree, the step adds `/<workDir>/` to the common git d
 
 From then on everything happens in that worktree: every agent prompt (`Working repo: <worktree>`, `cd <worktree> &&`), every review command, the gates, the review outputs and the PR body in `<worktree>/<workDir>/`, and the final check. The run's result names it as `worktree`. Granny never removes it: the user reviews and pushes from there.
 
-- Files that exist only in the main checkout - untracked, or in its git-excluded work dir - are not in a new worktree. Give plan files in `context` as absolute paths.
+- Files that exist only in the main checkout - untracked, or in its git-excluded work dir - are not in a new worktree. Give plan files as `plan`, and other such files in `context`, by absolute path.
 - The project config is still read from `<repo>/granny.config.json`, the main checkout as it is.
 - On opencode the run files stay in `<repo>/<workDir>/runs/<id>/`, so `granny_status` finds runs by `repo`.
 
 With `worktree: false` the run works in `repo` itself, on the branch you checked out there.
+
+## Plan review
+
+The run's `plan` input is one absolute path or a list of them (a relative path is rejected before anything runs). Every agent prompt, the judge's and a command reviewer's `{prompt}` name them: `Plan files - read them first: <paths>`. With `planReview` on (the default) the run reviews them in phase "Plan review", after the worktree setup and before stage 1. It is skipped - and the result's `plan` says `skipped` - when the run resumes with `fromStage` > 1; with `planReview: false` it says `review-skipped`. A run without `plan` has no `plan` in its result.
+
+The loop is a stage's review loop on the plan files instead of a diff: every reviewer in parallel, the one retry, P0/P1 straight to the implementer, the judge for the rest (with a plan-review judge prompt) and its duplicates, `threshold`, and the `maxRounds` cap. Labels and log lines read `plan review r<n> <name>`, the outputs are `<workDir>/review-plan-review-r<n>-<name>.md` and `.log`, and finding ids are `<name>-F<n>` as in a stage. Each reviewer gets a plan-review prompt asking, against the actual repo, for wrong assumptions about the code or its dependencies, missing steps, risky ordering, acceptance criteria that cannot be tested, and version drift, in the form `- [P1] Title — <absolute plan path>:<line>` ([prompts.md](prompts.md) shows it). Findings keep that absolute path.
+
+| `engine` | plan review runs |
+|---|---|
+| `codex`, and `auto` on opencode | `codex exec --sandbox read-only [-m <model>] -o <out> <prompt> </dev/null` - stdin is closed because `codex exec` appends a piped stdin to the prompt |
+| `codex-plugin`, and `auto` on Claude Code with the plugin | the companion's `task` command, read-only (no `--write`) and in the foreground (no `--background`): `node <companion> task [-m <model>] <prompt>`, with the same lookup, `node` check, own `CLAUDE_PLUGIN_DATA` and broker shutdown as the diff review. `auto` without the companion or `node` falls back to `codex exec` above; `codex-plugin` fails. `mode` and `focus` do not apply to a plan |
+| `agent` | the "Plan reviewer - agent engine" prompt in a read-only subagent |
+| `command` | the template with `{prompt}` filled with the plan-review prompt (`{base}` is `base`). A template without `{prompt}` cannot review a plan: it is skipped for the plan review with the log line `plan review: reviewer <name> skipped - its command has no {prompt}, so it cannot review a plan`. When that leaves no reviewer, the plan review fails |
+
+The companion's `Codex did not return a final message.` (an empty `task` answer, exit 0) means the reviewer did not run, like the diff review's no-result renders.
+
+The fix step is the implementer with write access (label `fix plan review r<n>`). It edits the plan files in place at their absolute paths and never stages or commits them: in a worktree, a plan that is untracked in the main checkout does not exist, so the absolute path is the only copy. In round 1 it adds a section `## rN deltas (<date>)` at the top of each plan file it changes (N one higher than the highest one already there, r1 when there is none), in later rounds it extends that section; the date comes from `date +%F` in its shell. It returns the files it changed, what it changed per finding id, and the findings it did not apply in `deviations`. The implementer must be able to write the plan's path: on opencode its session works in the worktree, so keep the plan inside the worktree or the main checkout's git-excluded `<workDir>/` and check that your permissions let a session edit it.
+
+| plan review outcome | then |
+|---|---|
+| `clean`, `residual-only` | stage 1 starts; the residual plan findings are in the result for the user |
+| `round-cap`, `review-failed` | **fail closed**: the run stops before implementing. The result has `plan` with `{ outcome, rounds, residual, unresolved, history, note? }`, an empty `stages` and `final: null`; the log ends `plan review ended <outcome> - stopping before stage 1; nothing was implemented` |
 
 ## Reviewers
 
@@ -207,7 +230,7 @@ Findings are read from lines shaped like Codex's output - the built-in reviewer'
   Recommendation: what to change.
 ```
 
-The word severities map to `critical` → P0, `high` → P1, `medium` → P2, `low` → P3; for them the location is the last parenthesised part of the line (an ` — ` location is accepted too). Other bracketed words (`[note]`) are not findings. A marker bullet indented under a finding belongs to that finding's detail; it is neither a finding nor a marker. If the output has more markers than parseable findings, a granny helper agent extracts them instead. If it recovers fewer findings than markers, it is asked once more with the expected count; still short, the reviewer did not run (above), and when the retry ends short too, the stage ends `review-failed` with the marker, parser and extraction counts and the raw review output in its note - findings are never dropped silently and the stage is never reported clean. Output in which the Codex plugin says it got no usable result (`Codex did not return valid structured JSON.`, `Codex returned JSON with an unexpected review shape.`, `Codex review completed without any stdout output.`) also means the reviewer did not run, even when the command exited 0. Output with no marker at all reads as a clean review, and `codex exec review` can produce that when it could not review: with its sandbox unable to run commands (for example `bubblewrap` missing from `PATH`) it exits 0 with a sentence like `Review could not be completed: ... No code was inspected`. Check the reviewer's `.md` when a stage ends clean suspiciously fast.
+The word severities map to `critical` → P0, `high` → P1, `medium` → P2, `low` → P3; for them the location is the last parenthesised part of the line (an ` — ` location is accepted too). Other bracketed words (`[note]`) are not findings. A marker bullet indented under a finding belongs to that finding's detail; it is neither a finding nor a marker. If the output has more markers than parseable findings, a granny helper agent extracts them instead. If it recovers fewer findings than markers, it is asked once more with the expected count; still short, the reviewer did not run (above), and when the retry ends short too, the stage ends `review-failed` with the marker, parser and extraction counts and the raw review output in its note - findings are never dropped silently and the stage is never reported clean. Output in which the Codex plugin says it got no usable result (`Codex did not return valid structured JSON.`, `Codex returned JSON with an unexpected review shape.`, `Codex review completed without any stdout output.`, and for the plan review's `task`, `Codex did not return a final message.`) also means the reviewer did not run, even when the command exited 0. Output with no marker at all reads as a clean review, and `codex exec review` can produce that when it could not review: with its sandbox unable to run commands (for example `bubblewrap` missing from `PATH`) it exits 0 with a sentence like `Review could not be completed: ... No code was inspected`. Check the reviewer's `.md` when a stage ends clean suspiciously fast.
 
 ## Example: everything set
 
@@ -225,6 +248,7 @@ The word severities map to `critical` → P0, `high` → P1, `medium` → P2, `l
   ],
   "threshold": 70,
   "maxRounds": 4,
+  "planReview": true,
   "base": "main",
   "gates": ["bun test", "bun run check", "bun run build"],
   "workDir": ".granny",
