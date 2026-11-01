@@ -992,7 +992,7 @@ var createGrannyPlugin = ({ delays = DEFAULT_DELAYS, sleep = pause, killGraceMs 
       const id = runId();
       const dir = join(input.repo, config.workDir, "runs", id);
       mkdirSync(dir, { recursive: true });
-      const run = { id, repo: input.repo, dir, status: "running", cancelled: false, abort: new AbortController };
+      const run = { id, repo: input.repo, dir, status: "running", cancelled: false, abort: new AbortController, sessions: new Set };
       runs.set(id, run);
       const journal = (type, data) => appendFileSync(join(dir, "journal.jsonl"), JSON.stringify({ t: stamp(), type, ...data }) + `
 `);
@@ -1011,6 +1011,48 @@ var createGrannyPlugin = ({ delays = DEFAULT_DELAYS, sleep = pause, killGraceMs 
           return;
         }
       };
+      const converse = async (req, tool, session) => {
+        let text = `${req.prompt}
+
+When you are done, call the \`${tool}\` tool exactly once with your result. That call is your final answer: its arguments are everything the caller receives.`;
+        let misses = 0;
+        let backoffs = 0;
+        while (misses < 3) {
+          submissions.delete(session);
+          await ctx.session.prompt({ sessionID: session, text });
+          await ctx.session.wait({ sessionID: session });
+          if (run.cancelled)
+            throw new Error("cancelled");
+          const got = submissions.get(session);
+          if (got !== undefined) {
+            const errors = checkShape(req.schema, got);
+            if (!errors.length)
+              return got;
+            text = `Your ${tool} call was invalid: ${errors.join("; ")}. Call ${tool} again with the corrected, complete result.`;
+          } else {
+            const error = await readProviderError(session, req.label);
+            if (error) {
+              const transient = isTransient(error);
+              const backoffMs = transient ? delays[backoffs] : undefined;
+              journal("provider-error", { label: req.label, session, error, transient, ...backoffMs !== undefined ? { backoffMs } : {} });
+              if (backoffMs === undefined) {
+                journal("agent-failed", { label: req.label, session, error });
+                return null;
+              }
+              backoffs++;
+              await sleep(backoffMs, run.abort.signal);
+              if (run.cancelled)
+                throw new Error("cancelled");
+              text = `Your previous turn ended on a provider error (${error.type}${error.message ? `: ${error.message.slice(0, 300)}` : ""}). Continue the task where it stopped; when you are done, call \`${tool}\` exactly once with your result.`;
+              continue;
+            }
+            text = `You stopped without calling ${tool}. Call it now with your result.`;
+          }
+          journal("retry", { label: req.label, attempt: ++misses, reason: text.slice(0, 200) });
+        }
+        journal("agent-failed", { label: req.label, session });
+        return null;
+      };
       const host = {
         name: "opencode",
         async agent(req) {
@@ -1027,48 +1069,15 @@ var createGrannyPlugin = ({ delays = DEFAULT_DELAYS, sleep = pause, killGraceMs 
             location: { directory: input.repo },
             permissions: permissions(req.access)
           });
-          run.session = session.id;
+          run.sessions.add(session.id);
           journal("agent", { label: req.label, role: req.role, session: session.id, model: model ?? null });
-          let text = `${req.prompt}
-
-When you are done, call the \`${tool}\` tool exactly once with your result. That call is your final answer: its arguments are everything the caller receives.`;
-          let misses = 0;
-          let backoffs = 0;
-          while (misses < 3) {
-            submissions.delete(session.id);
-            await ctx.session.prompt({ sessionID: session.id, text });
-            await ctx.session.wait({ sessionID: session.id });
+          try {
             if (run.cancelled)
               throw new Error("cancelled");
-            const got = submissions.get(session.id);
-            if (got !== undefined) {
-              const errors = checkShape(req.schema, got);
-              if (!errors.length)
-                return got;
-              text = `Your ${tool} call was invalid: ${errors.join("; ")}. Call ${tool} again with the corrected, complete result.`;
-            } else {
-              const error = await readProviderError(session.id, req.label);
-              if (error) {
-                const transient = isTransient(error);
-                const backoffMs = transient ? delays[backoffs] : undefined;
-                journal("provider-error", { label: req.label, session: session.id, error, transient, ...backoffMs !== undefined ? { backoffMs } : {} });
-                if (backoffMs === undefined) {
-                  journal("agent-failed", { label: req.label, session: session.id, error });
-                  return null;
-                }
-                backoffs++;
-                await sleep(backoffMs, run.abort.signal);
-                if (run.cancelled)
-                  throw new Error("cancelled");
-                text = `Your previous turn ended on a provider error (${error.type}${error.message ? `: ${error.message.slice(0, 300)}` : ""}). Continue the task where it stopped; when you are done, call \`${tool}\` exactly once with your result.`;
-                continue;
-              }
-              text = `You stopped without calling ${tool}. Call it now with your result.`;
-            }
-            journal("retry", { label: req.label, attempt: ++misses, reason: text.slice(0, 200) });
+            return await converse(req, tool, session.id);
+          } finally {
+            run.sessions.delete(session.id);
           }
-          journal("agent-failed", { label: req.label, session: session.id });
-          return null;
         },
         async run(command, cwd) {
           if (run.cancelled)
@@ -1184,9 +1193,8 @@ ${result.length > 30000 ? result.slice(0, 30000) + `
             return { content: `No running granny run "${value.runId}".` };
           run.cancelled = true;
           run.abort.abort();
-          if (run.session)
-            await ctx.session.interrupt({ sessionID: run.session, resume: false }).catch(() => {});
-          return { content: `Cancelling ${value.runId}; the current step is interrupted and nothing further starts.` };
+          await Promise.all([...run.sessions].map((sessionID) => ctx.session.interrupt({ sessionID, resume: false }).catch(() => {})));
+          return { content: `Cancelling ${value.runId}; every running step is interrupted and nothing further starts.` };
         }
       });
     });

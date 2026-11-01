@@ -37,6 +37,7 @@ interface Behaviour {
   skipSubmitOnce?: boolean
   contextThrows?: boolean
   providerError?: (title: string, attempt: number) => FakeError | undefined
+  hangUntilInterrupted?: (title: string) => boolean
 }
 
 function fakeContext(behaviour: Behaviour = {}) {
@@ -46,6 +47,8 @@ function fakeContext(behaviour: Behaviour = {}) {
   const pending = new Map<string, string>()
   const messages = new Map<string, any[]>()
   const attempts = new Map<string, number>()
+  const interrupted: string[] = []
+  const wake = new Map<string, () => void>()
   let n = 0
   let skipped = false
   const ctx = {
@@ -74,6 +77,10 @@ function fakeContext(behaviour: Behaviour = {}) {
         const attempt = (attempts.get(sessionID) ?? 0) + 1
         attempts.set(sessionID, attempt)
         const title = created.find(s => s.id === sessionID)?.title ?? ''
+        if (behaviour.hangUntilInterrupted?.(title)) {
+          await new Promise<void>(resolve => wake.set(sessionID, resolve))
+          return
+        }
         const error = behaviour.providerError?.(title, attempt)
         if (error) {
           log.push({ type: 'assistant', finish: 'error', error, content: [] }, { type: 'idle', outcome: 'failed' })
@@ -93,10 +100,14 @@ function fakeContext(behaviour: Behaviour = {}) {
         if (behaviour.contextThrows) throw new Error('context unavailable')
         return [...(messages.get(sessionID) ?? [])]
       },
-      interrupt: async () => ({ interrupted: true }),
+      interrupt: async ({ sessionID }: { sessionID: string }) => {
+        interrupted.push(sessionID)
+        wake.get(sessionID)?.()
+        return { interrupted: true }
+      },
     },
   }
-  return { ctx, tools, created, prompts }
+  return { ctx, tools, created, prompts, interrupted }
 }
 
 const REVIEW_ONCE = `test -n {base} && if [ -e .granny/reviewed ]; then echo "No issues." > {out}; else touch .granny/reviewed; printf '%s\\n' '- [P2] Real issue — a.txt:1' '  detail' > {out}; fi`
@@ -484,6 +495,42 @@ describe('opencode plugin', () => {
         expect(journalOf(dir)).toContainEqual(expect.objectContaining({ type: 'log', message: expect.stringContaining('review command exited 130') }))
       })
     }
+
+    it('stops the review commands of every reviewer running at once and leaves no process behind', async () => {
+      const pidFiles = ['a', 'b'].map(name => join(pids, `${name}.pid`))
+      const command = (pidFile: string) => `test -n {base} && bash -c 'trap "" TERM; sleep 300 & echo $! > ${pidFile}; wait'`
+      const f = fakeContext()
+      await createGrannyPlugin({ killGraceMs: 100 }).setup(f.ctx)
+      const reviewers = pidFiles.map((pidFile, i) => ({ name: ['a', 'b'][i], engine: 'command', command: command(pidFile) }))
+      const { id, dir } = await startRun(repo, f, { reviewers })
+      await waitFor(() => pidFiles.every(p => existsSync(p) && readFileSync(p, 'utf8').trim() !== ''))
+      const sleepers = pidFiles.map(p => Number(readFileSync(p, 'utf8')))
+      leftovers.push(...sleepers)
+      expect(sleepers.every(alive)).toBe(true)
+
+      await f.tools.get('granny_cancel').execute({ runId: id })
+      await waitFor(() => readRun(dir, 'status.json').includes('"status": "cancelled"'), 2000)
+      await waitFor(() => !sleepers.some(alive), 2000)
+      const logs = journalOf(dir).filter(e => e.type === 'log').map(e => e.message)
+      for (const name of ['a', 'b']) expect(logs).toContainEqual(expect.stringContaining(`one r1 ${name}: did not run - retrying once. review command exited 130`))
+    })
+
+    it('interrupts every child session that is running, not only the last one started', async () => {
+      const reviewing = (title: string) => title.startsWith('granny · review one r1 ')
+      const f = fakeContext({ hangUntilInterrupted: reviewing })
+      await createGrannyPlugin({ killGraceMs: 100 }).setup(f.ctx)
+      const { id, dir } = await startRun(repo, f, { reviewers: ['a', 'b', 'c'].map(name => ({ name, engine: 'agent' })) })
+      await waitFor(() => f.created.filter(s => reviewing(s.title)).length === 3)
+
+      await f.tools.get('granny_cancel').execute({ runId: id })
+      await waitFor(() => readRun(dir, 'status.json').includes('"status": "cancelled"'), 2000)
+      expect([...f.interrupted].sort()).toEqual(f.created.filter(s => reviewing(s.title)).map(s => s.id).sort())
+      expect(f.created.filter(s => reviewing(s.title)).map(s => s.title).sort()).toEqual([
+        'granny · review one r1 a',
+        'granny · review one r1 b',
+        'granny · review one r1 c',
+      ])
+    })
 
     describe('with the Codex plugin', () => {
       const saved = { CLAUDE_CONFIG_DIR: process.env.CLAUDE_CONFIG_DIR, CLAUDE_PLUGIN_DATA: process.env.CLAUDE_PLUGIN_DATA }
