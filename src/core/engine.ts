@@ -11,6 +11,7 @@ import {
 } from './prompts'
 import { parseCodexReview, triage } from './review'
 import { SCHEMAS } from './schemas'
+import { shellQuote } from './shell'
 import type {
   AgentRequest,
   FinalReport,
@@ -95,7 +96,9 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
     }
 
     const stem = `${config.workDir}/review-${slug(name)}-r${round}`
-    const script = `mkdir -p ${config.workDir} && rm -f ${stem}.md ${stem}.log && ${codexCommand(config, reviewBase, `${stem}.md`)} > ${stem}.log 2>&1; code=$?; if [ -s ${stem}.md ]; then cat ${stem}.md; else cat ${stem}.log; fi; exit $code`
+    const md = shellQuote(`${stem}.md`)
+    const log = shellQuote(`${stem}.log`)
+    const script = `mkdir -p ${shellQuote(config.workDir)} && rm -f ${md} ${log} && ${codexCommand(config, reviewBase, `${stem}.md`)} > ${log} 2>&1; code=$?; if [ -s ${md} ]; then cat ${md}; else cat ${log}; fi; exit $code`
     let ran: boolean
     let output: string
     let note: string | undefined
@@ -105,7 +108,7 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
       output = r.output
       if (!ran) note = `review command exited ${r.code}: ${r.output.slice(-2000)}`
     } else {
-      const r = await call('granny', 'command', label, 'Review', reviewCommandPrompt(p, name, `cd ${input.repo} && ${script}`), 'read-only')
+      const r = await call('granny', 'command', label, 'Review', reviewCommandPrompt(p, name, `cd ${shellQuote(input.repo)} && ${script}`), 'read-only')
       ran = Boolean(r?.ran)
       output = String(r?.output ?? '')
       if (!ran) note = r?.note ?? 'review runner returned nothing'

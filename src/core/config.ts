@@ -1,3 +1,4 @@
+import { shellQuote } from './shell'
 import type { HostName, Role } from './types'
 
 export type ModelSpec = string | Partial<Record<HostName, string>>
@@ -162,8 +163,6 @@ export function codexCommand(c: GrannyConfig, base: string, out: string): string
   const model = c.roles.reviewer.model
   const codexModel = typeof model === 'string' ? model : undefined
   const template = c.roles.reviewer.command ?? `codex exec review --base {base}${codexModel ? ' -m {model}' : ''} -o {out}`
-  return template
-    .replaceAll('{base}', base)
-    .replaceAll('{out}', out)
-    .replaceAll('{model}', codexModel ?? '')
+  const values: Record<string, string> = { base: shellQuote(base), out: shellQuote(out), model: codexModel ? shellQuote(codexModel) : '' }
+  return template.replace(/\{(base|out|model)\}/g, (_, key: string) => values[key]!)
 }

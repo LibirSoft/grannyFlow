@@ -77,4 +77,12 @@ describe('codexCommand', () => {
     const c = resolveConfig([{ roles: { reviewer: { command: 'my-review --since {base} --out {out}' } } }])
     expect(codexCommand(c, 'abc', 'o.md')).toBe('my-review --since abc --out o.md')
   })
+
+  it('shell-quotes every substituted value, once, and keeps replacement patterns literal', () => {
+    const c = resolveConfig([{ roles: { reviewer: { model: 'my model', command: 'r --base {base} --out {out} -m {model} {out}' } } }])
+    expect(codexCommand(c, 'b{out}', "dir's $& $'/r.md")).toBe(
+      `r --base 'b{out}' --out 'dir'\\''s $& $'\\''/r.md' -m 'my model' 'dir'\\''s $& $'\\''/r.md'`,
+    )
+    expect(codexCommand(resolveConfig([]), 'abc', 'my dir/r.md')).toBe(`codex exec review --base abc -o 'my dir/r.md'`)
+  })
 })

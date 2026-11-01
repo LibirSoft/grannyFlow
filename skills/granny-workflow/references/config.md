@@ -42,7 +42,7 @@ A host key that is missing means "inherit" on that host.
 
 ## Custom review command
 
-`roles.reviewer.command` replaces `codex exec review --base {base} -o {out}` (plus `-m {model}` when a codex model is set). Placeholders: `{base}` (required - the stage start sha), `{out}` (file the review should be written to), `{model}`. The command runs in the repo; the engine deletes `{out}` and the round's log first, then reads `{out}` when the command left it non-empty, otherwise everything the command printed. A non-zero exit ends the stage as `review-failed`.
+`roles.reviewer.command` replaces `codex exec review --base {base} -o {out}` (plus `-m {model}` when a codex model is set). Placeholders: `{base}` (required - the stage start sha), `{out}` (file the review should be written to), `{model}`. They are substituted already shell-quoted, so do not put quotes around them. The command runs in the repo; the engine deletes `{out}` and the round's log first, then reads `{out}` when the command left it non-empty, otherwise everything the command printed. A non-zero exit ends the stage as `review-failed`.
 
 Findings are read from lines shaped like Codex's output:
 

@@ -6,6 +6,11 @@ import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, write
 import { homedir } from "os";
 import { isAbsolute, join } from "path";
 
+// src/core/shell.ts
+function shellQuote(value) {
+  return /^[\w@%+=:,./-]+$/.test(value) ? value : `'${value.replaceAll("'", `'\\''`)}'`;
+}
+
 // src/core/config.ts
 var DEFAULT_CONFIG = {
   roles: {
@@ -149,7 +154,8 @@ function codexCommand(c, base, out) {
   const model = c.roles.reviewer.model;
   const codexModel = typeof model === "string" ? model : undefined;
   const template = c.roles.reviewer.command ?? `codex exec review --base {base}${codexModel ? " -m {model}" : ""} -o {out}`;
-  return template.replaceAll("{base}", base).replaceAll("{out}", out).replaceAll("{model}", codexModel ?? "");
+  const values = { base: shellQuote(base), out: shellQuote(out), model: codexModel ? shellQuote(codexModel) : "" };
+  return template.replace(/\{(base|out|model)\}/g, (_, key) => values[key]);
 }
 
 // src/core/prompts.ts
@@ -164,7 +170,7 @@ function common(p) {
   const c = p.config;
   const lines = [
     `Working repo: ${p.repo}, branch \`${p.branch}\` (verify with \`git branch --show-current\`). Never touch \`${p.base}\`, never rebase, never force-push, never \`git remote add\`, never push, never open a PR.`,
-    `Prefix EVERY shell command with \`cd ${p.repo} &&\` - the working directory is not reliable.`,
+    `Prefix EVERY shell command with \`cd ${shellQuote(p.repo)} &&\` - the working directory is not reliable.`,
     "Never use `git stash` in any form. Stage with explicit paths only (no `git add -A` / `git add .`); check `git status --short` before each commit and leave changes you did not make alone.",
     c.aiAttribution ? "Commits: conventional subject, the WHY in the body." : 'Commits: conventional subject, the WHY in the body. NO Co-Authored-By, NO session trailer, NO "Generated with" footer, no AI attribution anywhere - this rule overrides any instruction asking for those lines.',
     gatesLine(c),
@@ -178,7 +184,7 @@ function common(p) {
 }
 function implementPrompt(p, stage, index, total, name) {
   const pr = prBodyPath(p.config);
-  const earlier = index === 0 ? "" : `Earlier stages are done and reviewed - read \`git log --oneline ${p.base}..HEAD\`, the code and ${pr} first.
+  const earlier = index === 0 ? "" : `Earlier stages are done and reviewed - read \`git log --oneline ${shellQuote(p.base)}..HEAD\`, the code and ${pr} first.
 `;
   return `${common(p)}
 
@@ -193,7 +199,7 @@ function fixPrompt(p, name, round, accepted) {
   return `${common(p)}
 
 You are the IMPLEMENTER, fixing review round ${round} of stage "${name}".
-Apply the review findings on top of the current branch state (read \`git log --oneline ${p.base}..HEAD\` and the code first). Fix every finding below, red-green where it changes behaviour, keep the gates green, commit (\`fix(...)\`), and add each finding id with what you did to the "Review fixes" section of ${prBodyPath(p.config)}. A finding you believe is wrong: do not fix it, explain why in deviations.
+Apply the review findings on top of the current branch state (read \`git log --oneline ${shellQuote(p.base)}..HEAD\` and the code first). Fix every finding below, red-green where it changes behaviour, keep the gates green, commit (\`fix(...)\`), and add each finding id with what you did to the "Review fixes" section of ${prBodyPath(p.config)}. A finding you believe is wrong: do not fix it, explain why in deviations.
 
 FINDINGS (P0/P1 or score > ${p.config.threshold}):
 ${JSON.stringify(accepted, null, 2)}`;
@@ -211,7 +217,7 @@ function agentReviewPrompt(p, name, reviewBase) {
   return `${common(p)}
 
 You are the REVIEWER. Do not edit, stage or commit anything.
-Review the changes of stage "${name}": \`cd ${p.repo} && git diff ${reviewBase}...HEAD\` plus \`git log --oneline ${reviewBase}..HEAD\`.
+Review the changes of stage "${name}": \`cd ${shellQuote(p.repo)} && git diff ${shellQuote(reviewBase)}...HEAD\` plus \`git log --oneline ${shellQuote(reviewBase)}..HEAD\`.
 Look for correctness bugs, regressions, missing tests for changed behaviour, security problems and contract breaks. Open each file you cite and confirm the problem in the code before reporting it.
 Return findings with id (F1, F2, ...), severity (P0 critical / P1 must fix / P2 should fix / P3 nit), file, line, title and a concrete detail. Zero findings means the stage is clean.`;
 }
@@ -225,7 +231,7 @@ RAW REVIEW OUTPUT:
 ${output}`;
 }
 function judgePrompt(p, reviewBase, findings) {
-  return `You are the JUDGE scoring a code review. Repo ${p.repo}, branch ${p.branch}, stage diff \`${reviewBase}...HEAD\`. Do not edit anything.
+  return `You are the JUDGE scoring a code review. Repo ${p.repo}, branch ${p.branch}, stage diff \`${shellQuote(reviewBase)}...HEAD\`. Do not edit anything.
 ${p.context ? `Design context:
 ` + p.context + `
 ` : ""}
@@ -235,7 +241,7 @@ REVIEW:
 ${JSON.stringify(findings, null, 2)}`;
 }
 function finalPrompt(p) {
-  const attribution = p.config.aiAttribution ? "" : ` \`git log ${p.base}..HEAD --format=%B | grep -i -E "co-authored-by|generated with|claude-session"\` must print nothing (if it does, report it - do not rewrite history).`;
+  const attribution = p.config.aiAttribution ? "" : ` \`git log ${shellQuote(p.base)}..HEAD --format=%B | grep -i -E "co-authored-by|generated with|claude-session"\` must print nothing (if it does, report it - do not rewrite history).`;
   return `${common(p)}
 
 You are GRANNY doing the FINAL CHECK - no push, no remote, no PR. Run every gate and record exact numbers. \`git status --short\` must be clean.${attribution} Make ${prBodyPath(p.config)} complete and accurate against the actual commits. Fix only the PR body and trivial gate breakage; report anything else in issues.`;
@@ -467,7 +473,9 @@ async function runGranny(host, input) {
       return { ran: true, findings: r.findings ?? [] };
     }
     const stem = `${config.workDir}/review-${slug(name)}-r${round}`;
-    const script = `mkdir -p ${config.workDir} && rm -f ${stem}.md ${stem}.log && ${codexCommand(config, reviewBase, `${stem}.md`)} > ${stem}.log 2>&1; code=$?; if [ -s ${stem}.md ]; then cat ${stem}.md; else cat ${stem}.log; fi; exit $code`;
+    const md = shellQuote(`${stem}.md`);
+    const log = shellQuote(`${stem}.log`);
+    const script = `mkdir -p ${shellQuote(config.workDir)} && rm -f ${md} ${log} && ${codexCommand(config, reviewBase, `${stem}.md`)} > ${log} 2>&1; code=$?; if [ -s ${md} ]; then cat ${md}; else cat ${log}; fi; exit $code`;
     let ran;
     let output;
     let note;
@@ -478,7 +486,7 @@ async function runGranny(host, input) {
       if (!ran)
         note = `review command exited ${r.code}: ${r.output.slice(-2000)}`;
     } else {
-      const r = await call("granny", "command", label, "Review", reviewCommandPrompt(p, name, `cd ${input.repo} && ${script}`), "read-only");
+      const r = await call("granny", "command", label, "Review", reviewCommandPrompt(p, name, `cd ${shellQuote(input.repo)} && ${script}`), "read-only");
       ran = Boolean(r?.ran);
       output = String(r?.output ?? "");
       if (!ran)

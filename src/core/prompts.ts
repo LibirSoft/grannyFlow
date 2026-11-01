@@ -1,4 +1,5 @@
 import type { GrannyConfig } from './config'
+import { shellQuote } from './shell'
 import type { Finding, StageSpec } from './types'
 
 export interface PromptContext {
@@ -22,7 +23,7 @@ export function common(p: PromptContext): string {
   const c = p.config
   const lines = [
     `Working repo: ${p.repo}, branch \`${p.branch}\` (verify with \`git branch --show-current\`). Never touch \`${p.base}\`, never rebase, never force-push, never \`git remote add\`, never push, never open a PR.`,
-    `Prefix EVERY shell command with \`cd ${p.repo} &&\` - the working directory is not reliable.`,
+    `Prefix EVERY shell command with \`cd ${shellQuote(p.repo)} &&\` - the working directory is not reliable.`,
     'Never use `git stash` in any form. Stage with explicit paths only (no `git add -A` / `git add .`); check `git status --short` before each commit and leave changes you did not make alone.',
     c.aiAttribution
       ? 'Commits: conventional subject, the WHY in the body.'
@@ -37,7 +38,7 @@ export function common(p: PromptContext): string {
 
 export function implementPrompt(p: PromptContext, stage: StageSpec, index: number, total: number, name: string): string {
   const pr = prBodyPath(p.config)
-  const earlier = index === 0 ? '' : `Earlier stages are done and reviewed - read \`git log --oneline ${p.base}..HEAD\`, the code and ${pr} first.\n`
+  const earlier = index === 0 ? '' : `Earlier stages are done and reviewed - read \`git log --oneline ${shellQuote(p.base)}..HEAD\`, the code and ${pr} first.\n`
   return `${common(p)}
 
 You are the IMPLEMENTER.
@@ -52,7 +53,7 @@ export function fixPrompt(p: PromptContext, name: string, round: number, accepte
   return `${common(p)}
 
 You are the IMPLEMENTER, fixing review round ${round} of stage "${name}".
-Apply the review findings on top of the current branch state (read \`git log --oneline ${p.base}..HEAD\` and the code first). Fix every finding below, red-green where it changes behaviour, keep the gates green, commit (\`fix(...)\`), and add each finding id with what you did to the "Review fixes" section of ${prBodyPath(p.config)}. A finding you believe is wrong: do not fix it, explain why in deviations.
+Apply the review findings on top of the current branch state (read \`git log --oneline ${shellQuote(p.base)}..HEAD\` and the code first). Fix every finding below, red-green where it changes behaviour, keep the gates green, commit (\`fix(...)\`), and add each finding id with what you did to the "Review fixes" section of ${prBodyPath(p.config)}. A finding you believe is wrong: do not fix it, explain why in deviations.
 
 FINDINGS (P0/P1 or score > ${p.config.threshold}):
 ${JSON.stringify(accepted, null, 2)}`
@@ -72,7 +73,7 @@ export function agentReviewPrompt(p: PromptContext, name: string, reviewBase: st
   return `${common(p)}
 
 You are the REVIEWER. Do not edit, stage or commit anything.
-Review the changes of stage "${name}": \`cd ${p.repo} && git diff ${reviewBase}...HEAD\` plus \`git log --oneline ${reviewBase}..HEAD\`.
+Review the changes of stage "${name}": \`cd ${shellQuote(p.repo)} && git diff ${shellQuote(reviewBase)}...HEAD\` plus \`git log --oneline ${shellQuote(reviewBase)}..HEAD\`.
 Look for correctness bugs, regressions, missing tests for changed behaviour, security problems and contract breaks. Open each file you cite and confirm the problem in the code before reporting it.
 Return findings with id (F1, F2, ...), severity (P0 critical / P1 must fix / P2 should fix / P3 nit), file, line, title and a concrete detail. Zero findings means the stage is clean.`
 }
@@ -89,7 +90,7 @@ ${output}`
 }
 
 export function judgePrompt(p: PromptContext, reviewBase: string, findings: Finding[]): string {
-  return `You are the JUDGE scoring a code review. Repo ${p.repo}, branch ${p.branch}, stage diff \`${reviewBase}...HEAD\`. Do not edit anything.
+  return `You are the JUDGE scoring a code review. Repo ${p.repo}, branch ${p.branch}, stage diff \`${shellQuote(reviewBase)}...HEAD\`. Do not edit anything.
 ${p.context ? 'Design context:\n' + p.context + '\n' : ''}
 For each finding below, open the cited code and judge whether it is real, correctly described and worth fixing; score it 0-100 (findings the code refutes score low). Then score the whole review 0-100 (correctness + actionability; mostly wrong or trivial findings = low).
 
@@ -100,7 +101,7 @@ ${JSON.stringify(findings, null, 2)}`
 export function finalPrompt(p: PromptContext): string {
   const attribution = p.config.aiAttribution
     ? ''
-    : ` \`git log ${p.base}..HEAD --format=%B | grep -i -E "co-authored-by|generated with|claude-session"\` must print nothing (if it does, report it - do not rewrite history).`
+    : ` \`git log ${shellQuote(p.base)}..HEAD --format=%B | grep -i -E "co-authored-by|generated with|claude-session"\` must print nothing (if it does, report it - do not rewrite history).`
   return `${common(p)}
 
 You are GRANNY doing the FINAL CHECK - no push, no remote, no PR. Run every gate and record exact numbers. \`git status --short\` must be clean.${attribution} Make ${prBodyPath(p.config)} complete and accurate against the actual commits. Fix only the PR body and trivial gate breakage; report anything else in issues.`

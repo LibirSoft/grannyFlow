@@ -244,6 +244,29 @@ describe('runGranny', () => {
     )
   })
 
+  it('shell-quotes the repo, the work dir and the base in every generated command', async () => {
+    const repo = "/work/my repo's"
+    const config = { workDir: ".granny dir's" }
+    const r = `'/work/my repo'\\''s'`
+    const wd = (file = '') => `'.granny dir'\\''s${file}'`
+
+    const direct = fakeHost({ reviews: ['No issues.'] })
+    await runGranny(direct.host, input({ repo, config, base: 'feat;main' }))
+    expect(direct.calls[0]!.prompt).toContain(`Prefix EVERY shell command with \`cd ${r} &&\``)
+    expect(direct.calls.find(c => c.kind === 'final')!.prompt).toContain(`git log 'feat;main'..HEAD`)
+    expect(direct.commands[0]).toBe(
+      `mkdir -p ${wd()} && rm -f ${wd('/review-core-r1.md')} ${wd('/review-core-r1.log')} && codex exec review --base start1 -o ${wd('/review-core-r1.md')} > ${wd('/review-core-r1.log')} 2>&1; code=$?; if [ -s ${wd('/review-core-r1.md')} ]; then cat ${wd('/review-core-r1.md')}; else cat ${wd('/review-core-r1.log')}; fi; exit $code`,
+    )
+
+    const runner = fakeHost({ name: 'claude-code', direct: false, reviews: ['No issues.'] })
+    await runGranny(runner.host, input({ repo, config }))
+    expect(runner.calls.find(c => c.kind === 'command')!.prompt).toContain(`\n${`cd ${r} && mkdir -p ${wd()} && rm -f`}`)
+
+    const agent = fakeHost({ override: req => (req.kind === 'findings' ? { findings: [] } : undefined) })
+    await runGranny(agent.host, input({ repo, config: { ...config, roles: { reviewer: { engine: 'agent' } } }, stages: [{ name: 'audit', implement: false }], base: "it's" }))
+    expect(agent.calls.find(c => c.role === 'reviewer')!.prompt).toContain(`\`cd ${r} && git diff 'it'\\''s'...HEAD\``)
+  })
+
   it('resolves role models per host and applies effort', async () => {
     const config = {
       roles: {
@@ -307,13 +330,55 @@ describe('runGranny', () => {
   })
 })
 
+const FAKE_CODEX = `#!/usr/bin/env bash
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -o) out=$2; shift 2 ;;
+    --base) base=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+echo 'codex progress' >&2
+printf '%s\\n' "- [P1] Reviewed $base — a.ts:1" '  detail' > "$out"
+`
+
 describe('the review script in a real shell', () => {
   let repo: string
+  let bin: string
+  const workDir = "review dir's $& $HOME"
   beforeEach(() => {
-    repo = mkdtempSync(join(tmpdir(), 'granny-shell-'))
+    repo = mkdtempSync(join(tmpdir(), "granny repo's "))
+    bin = mkdtempSync(join(tmpdir(), 'granny-bin-'))
+    writeFileSync(join(bin, 'codex'), FAKE_CODEX, { mode: 0o755 })
   })
   afterEach(() => {
     rmSync(repo, { recursive: true, force: true })
+    rmSync(bin, { recursive: true, force: true })
+  })
+  const shell = () => ({ env: { PATH: `${bin}:${process.env.PATH}` } })
+
+  it('runs the default codex command in a repo and work dir with spaces and a quote', async () => {
+    const f = fakeHost({ shell: shell(), scores: [{ F1: 90 }] })
+    const r = await runGranny(f.host, input({ repo, config: { maxRounds: 1, workDir } }))
+    expect(r.stages[0]!.history[0]!.findings.map(x => x.title)).toEqual(['Reviewed start1'])
+    expect(readFileSync(join(repo, workDir, 'review-core-r1.md'), 'utf8')).toContain('Reviewed start1')
+    expect(readFileSync(join(repo, workDir, 'review-core-r1.log'), 'utf8')).toBe('codex progress\n')
+  })
+
+  it('runs the cd-prefixed command a granny agent is given from outside the repo', async () => {
+    const f = fakeHost({ name: 'claude-code', direct: false, shell: shell(), scores: [{ F1: 90 }] })
+    const r = await runGranny(f.host, input({ repo, config: { maxRounds: 1, workDir } }))
+    expect(f.commands[0]!.startsWith('cd ')).toBe(true)
+    expect(r.stages[0]!.history[0]!.findings.map(x => x.title)).toEqual(['Reviewed start1'])
+    expect(existsSync(join(repo, workDir, 'review-core-r1.md'))).toBe(true)
+  })
+
+  it('substitutes a quoted {out} into a custom command', async () => {
+    const command = `{ test -n {base} && printf '%s\\n' '- [P2] Custom — b.ts:2' '  d' > {out}; }`
+    const f = fakeHost({ shell: {}, scores: [{ F1: 90 }] })
+    const r = await runGranny(f.host, input({ repo, config: { maxRounds: 1, workDir, roles: { reviewer: { command } } } }))
+    expect(r.stages[0]!.history[0]!.findings.map(x => x.title)).toEqual(['Custom'])
+    expect(readFileSync(join(repo, workDir, 'review-core-r1.md'), 'utf8')).toContain('Custom')
   })
 
   it('reads what a custom reviewer printed, not a review file an earlier run left behind', async () => {
