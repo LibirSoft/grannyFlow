@@ -390,6 +390,50 @@ describe('opencode plugin', () => {
     expect(f.created).toHaveLength(1)
   })
 
+  describe('when opencode reloads the plugin while a run is in progress', () => {
+    const freshModule = (tag: string) => import(`../src/adapters/opencode/plugin.ts?${tag}`)
+    const startWith = async (runTool: any, reviewer: Record<string, unknown>, stage: Record<string, unknown> = { name: 'one', task: 'Do it.' }) => {
+      writeFileSync(join(repo, 'granny.config.json'), JSON.stringify({ roles: { reviewer } }))
+      git(repo, 'add', 'granny.config.json')
+      git(repo, 'commit', '-qm', 'cfg')
+      const started = await runTool.execute({ repo, branch: 'feat/x', stages: [stage] }, { sessionID: 'parent' })
+      const id = /granny run (\S+) started/.exec(started.content)![1]!
+      return { id, dir: join(repo, '.granny/runs', id) }
+    }
+
+    it('still receives the results the role sessions submit through the reloaded tools', async () => {
+      const f = fakeContext()
+      await (await freshModule('before-reload-1')).default.setup(f.ctx)
+      const runTool = f.tools.get('granny_run')
+      await (await freshModule('after-reload-1')).default.setup(f.ctx)
+      const { dir } = await startWith(runTool, { command: REVIEW_ONCE })
+      const result = await finished(dir)
+      expect(result.stages[0]).toMatchObject({ outcome: 'clean', rounds: 2, implementation: { headSha: 'bbb' } })
+      expect(result.final).toMatchObject({ gatesGreen: true })
+      expect(journalOf(dir).filter(e => e.type === 'retry' || e.type === 'agent-failed')).toEqual([])
+    })
+
+    it('lets the reloaded plugin report and cancel a run the previous one started', async () => {
+      const f = fakeContext()
+      const before = await freshModule('before-reload-2')
+      await before.createGrannyPlugin({ killGraceMs: 100 }).setup(f.ctx)
+      const runTool = f.tools.get('granny_run')
+      const cancelBefore = f.tools.get('granny_cancel')
+      const after = await freshModule('after-reload-2')
+      await after.createGrannyPlugin({ killGraceMs: 100 }).setup(f.ctx)
+      const { id, dir } = await startWith(runTool, { command: 'test -n {base} && sleep 30' }, { name: 'one', implement: false })
+      try {
+        await waitFor(() => journalOf(dir).some(e => e.type === 'command'))
+        expect((await f.tools.get('granny_status').execute({ runId: id })).content).toContain(`"id": "${id}"`)
+        expect((await f.tools.get('granny_cancel').execute({ runId: id })).content).toContain(`Cancelling ${id}`)
+        await waitFor(() => readRun(dir, 'status.json').includes('"status": "cancelled"'), 2000)
+      } finally {
+        await cancelBefore.execute({ runId: id })
+        await waitFor(() => !readRun(dir, 'status.json').includes('"status": "running"'), 2000).catch(() => {})
+      }
+    })
+  })
+
   describe('cancelling a running review command', () => {
     let pids: string
     const leftovers: number[] = []

@@ -38,6 +38,8 @@ The plugin reads `~/.config/granny/config.json` and `<repo>/granny.config.json` 
 
 Run files: `<repo>/.granny/runs/<id>/` - `input.json`, `status.json`, `journal.jsonl`, `result.json`.
 
+Reloading opencode's configuration or the plugin while a run is in progress (`opencode reload`, a changed plugin file) does not interrupt the run: the role sessions' results still reach it, and `granny_status` / `granny_cancel` still find it. Only stopping the server ends it.
+
 ## Models and permissions
 
 Models are `provider/model[#variant]` (`opencode models`). A role without a model uses the model of the session that called `granny_run`. `effort` is ignored here; use the `#variant` suffix.

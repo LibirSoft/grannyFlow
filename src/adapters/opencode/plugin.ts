@@ -28,8 +28,13 @@ const SUBMIT: Partial<Record<ResultKind, string>> = {
   final: 'granny_submit_final',
 }
 
-const runs = new Map<string, RunState>()
-const submissions = new Map<string, unknown>()
+// opencode re-imports the plugin as a new module on reload while earlier runs keep going.
+const SHARED = Symbol.for('granny-workflow.state')
+const shared: { runs: Map<string, RunState>; submissions: Map<string, unknown> } = ((globalThis as any)[SHARED] ??= {
+  runs: new Map(),
+  submissions: new Map(),
+})
+const { runs, submissions } = shared
 
 export function modelRef(spec: string | undefined): ModelRef | undefined {
   if (!spec) return undefined

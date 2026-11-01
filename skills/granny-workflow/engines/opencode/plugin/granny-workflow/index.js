@@ -663,8 +663,12 @@ var SUBMIT = {
   score: "granny_submit_score",
   final: "granny_submit_final"
 };
-var runs = new Map;
-var submissions = new Map;
+var SHARED = Symbol.for("granny-workflow.state");
+var shared = globalThis[SHARED] ??= {
+  runs: new Map,
+  submissions: new Map
+};
+var { runs, submissions } = shared;
 function modelRef(spec) {
   if (!spec)
     return;
