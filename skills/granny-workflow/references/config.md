@@ -44,14 +44,18 @@ A host key that is missing means "inherit" on that host.
 
 `roles.reviewer.command` replaces `codex exec review --base {base} -o {out}` (plus `-m {model}` when a codex model is set). Placeholders: `{base}` (required - the stage start sha), `{out}` (file the review should be written to), `{model}`. They are substituted already shell-quoted, so do not put quotes around them. The command runs in the repo; the engine deletes `{out}` and the round's log first, then reads `{out}` when the command left it non-empty, otherwise everything the command printed. A non-zero exit ends the stage as `review-failed`.
 
-Findings are read from lines shaped like Codex's output:
+Findings are read from lines shaped like Codex's output - the built-in reviewer's form, and the Codex plugin's `adversarial-review` form:
 
 ```
 - [P1] Title — path/to/file.ts:12-14
   Detail, indented, any number of lines.
+
+- [high] Title (path/to/file.ts:12-14)
+  Detail, indented.
+  Recommendation: what to change.
 ```
 
-A `- [Px]` bullet indented under a finding belongs to that finding's detail; it is neither a finding nor a marker. If the output has more `[P0-3]` markers than parseable findings, a granny helper agent extracts them instead. If it recovers fewer findings than markers, it is asked once more with the expected count; still short, the stage ends `review-failed` with the marker, parser and extraction counts and the raw review output in its note - findings are never dropped silently and the stage is never reported clean.
+The word severities map to `critical` → P0, `high` → P1, `medium` → P2, `low` → P3; for them the location is the last parenthesised part of the line (an ` — ` location is accepted too). Other bracketed words (`[note]`) are not findings. A marker bullet indented under a finding belongs to that finding's detail; it is neither a finding nor a marker. If the output has more markers than parseable findings, a granny helper agent extracts them instead. If it recovers fewer findings than markers, it is asked once more with the expected count; still short, the stage ends `review-failed` with the marker, parser and extraction counts and the raw review output in its note - findings are never dropped silently and the stage is never reported clean. Output in which the Codex plugin says it got no usable result (`Codex did not return valid structured JSON.`, `Codex returned JSON with an unexpected review shape.`) also ends the stage `review-failed`, even when the command exited 0.
 
 ## Example: everything set
 

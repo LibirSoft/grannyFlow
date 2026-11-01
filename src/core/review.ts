@@ -1,7 +1,10 @@
 import type { Finding } from './types'
 
-const MARKER = /^\s*[-*]\s*\[(P[0-3])\](.*)$/
+const MARKER = /^\s*[-*]\s*\[(P[0-3]|[A-Za-z]+)\](.*)$/
+const WORD_SEVERITY = new Map([['critical', 'P0'], ['high', 'P1'], ['medium', 'P2'], ['low', 'P3']])
 const LOCATION = /^(.+?)(?::(\d+)(?:-\d+)?)?$/
+const PAREN_LOCATION = /^(.*\S)\s+\(([^()]+)\)$/
+const FAILED_RENDER = /^Codex (?:did not return valid structured JSON|returned JSON with an unexpected review shape)\.$/m
 
 export interface ParsedReview {
   findings: Finding[]
@@ -22,23 +25,31 @@ export function parseCodexReview(text: string, repo?: string): ParsedReview {
       continue
     }
     const marker = MARKER.exec(line)
-    if (!marker) {
+    const word = marker ? WORD_SEVERITY.get(marker[1]!.toLowerCase()) : undefined
+    if (!marker || (!word && !/^P[0-3]$/.test(marker[1]!))) {
       item = null
       continue
     }
     markers++
-    const finding = toFinding(marker[1]!, marker[2]!.trim(), findings.length + 1, repo)
+    const finding = toFinding(word ?? marker[1]!, word !== undefined, marker[2]!.trim(), findings.length + 1, repo)
     if (finding) findings.push(finding)
     item = { indent, finding }
   }
   return { findings, markers }
 }
 
-function toFinding(severity: string, rest: string, n: number, repo?: string): Finding | null {
+function split(rest: string, paren: boolean): [string, string] | null {
+  const inParens = paren ? PAREN_LOCATION.exec(rest) : null
+  if (inParens) return [inParens[1]!, inParens[2]!]
   const sep = rest.lastIndexOf(' — ')
-  if (sep < 0) return null
-  const title = rest.slice(0, sep).trim()
-  const loc = LOCATION.exec(rest.slice(sep + 3).trim())
+  return sep < 0 ? null : [rest.slice(0, sep), rest.slice(sep + 3)]
+}
+
+function toFinding(severity: string, paren: boolean, rest: string, n: number, repo?: string): Finding | null {
+  const parts = split(rest, paren)
+  if (!parts) return null
+  const title = parts[0].trim()
+  const loc = LOCATION.exec(parts[1].trim())
   if (!title || !loc) return null
   let file = loc[1]!.trim()
   if (repo && file.startsWith(repo.replace(/\/$/, '') + '/')) file = file.slice(repo.replace(/\/$/, '').length + 1)
@@ -47,7 +58,11 @@ function toFinding(severity: string, rest: string, n: number, repo?: string): Fi
   return finding
 }
 
-export const isBlocker = (f: Pick<Finding, 'severity'>): boolean =>
+export function reviewFailure(text: string): string | undefined {
+  return FAILED_RENDER.exec(text)?.[0]
+}
+
+export const isBlocker =(f: Pick<Finding, 'severity'>): boolean =>
   /^\s*(p0|p1|critical|high)\b/i.test(String(f.severity ?? ''))
 
 export function triage(findings: Finding[], threshold: number): { accepted: Finding[]; residual: Finding[] } {

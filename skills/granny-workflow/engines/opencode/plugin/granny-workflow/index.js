@@ -248,8 +248,11 @@ You are GRANNY doing the FINAL CHECK - no push, no remote, no PR. Run every gate
 }
 
 // src/core/review.ts
-var MARKER = /^\s*[-*]\s*\[(P[0-3])\](.*)$/;
+var MARKER = /^\s*[-*]\s*\[(P[0-3]|[A-Za-z]+)\](.*)$/;
+var WORD_SEVERITY = new Map([["critical", "P0"], ["high", "P1"], ["medium", "P2"], ["low", "P3"]]);
 var LOCATION = /^(.+?)(?::(\d+)(?:-\d+)?)?$/;
+var PAREN_LOCATION = /^(.*\S)\s+\(([^()]+)\)$/;
+var FAILED_RENDER = /^Codex (?:did not return valid structured JSON|returned JSON with an unexpected review shape)\.$/m;
 function parseCodexReview(text, repo) {
   const findings = [];
   let markers = 0;
@@ -267,24 +270,32 @@ ${line.trim()}` : line.trim();
       continue;
     }
     const marker = MARKER.exec(line);
-    if (!marker) {
+    const word = marker ? WORD_SEVERITY.get(marker[1].toLowerCase()) : undefined;
+    if (!marker || !word && !/^P[0-3]$/.test(marker[1])) {
       item = null;
       continue;
     }
     markers++;
-    const finding = toFinding(marker[1], marker[2].trim(), findings.length + 1, repo);
+    const finding = toFinding(word ?? marker[1], word !== undefined, marker[2].trim(), findings.length + 1, repo);
     if (finding)
       findings.push(finding);
     item = { indent, finding };
   }
   return { findings, markers };
 }
-function toFinding(severity, rest, n, repo) {
+function split(rest, paren) {
+  const inParens = paren ? PAREN_LOCATION.exec(rest) : null;
+  if (inParens)
+    return [inParens[1], inParens[2]];
   const sep = rest.lastIndexOf(" \u2014 ");
-  if (sep < 0)
+  return sep < 0 ? null : [rest.slice(0, sep), rest.slice(sep + 3)];
+}
+function toFinding(severity, paren, rest, n, repo) {
+  const parts = split(rest, paren);
+  if (!parts)
     return null;
-  const title = rest.slice(0, sep).trim();
-  const loc = LOCATION.exec(rest.slice(sep + 3).trim());
+  const title = parts[0].trim();
+  const loc = LOCATION.exec(parts[1].trim());
   if (!title || !loc)
     return null;
   let file = loc[1].trim();
@@ -294,6 +305,9 @@ function toFinding(severity, rest, n, repo) {
   if (loc[2])
     finding.line = Number(loc[2]);
   return finding;
+}
+function reviewFailure(text) {
+  return FAILED_RENDER.exec(text)?.[0];
 }
 var isBlocker = (f) => /^\s*(p0|p1|critical|high)\b/i.test(String(f.severity ?? ""));
 function triage(findings, threshold) {
@@ -494,6 +508,9 @@ async function runGranny(host, input) {
     }
     if (!ran)
       return { ran, findings: [], note };
+    const failure = reviewFailure(output);
+    if (failure)
+      return { ran: false, findings: [], note: `reviewer returned no usable result (${failure}): ${output.slice(-2000)}` };
     const parsed = parseCodexReview(output, input.repo);
     if (parsed.markers <= parsed.findings.length)
       return { ran, findings: parsed.findings };

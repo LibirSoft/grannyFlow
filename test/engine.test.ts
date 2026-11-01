@@ -74,6 +74,15 @@ describe('runGranny', () => {
     expect(f.calls.some(c => c.kind === 'score')).toBe(false)
   })
 
+  it('fails the review instead of reporting clean when Codex returned no structured result', async () => {
+    const f = fakeHost({ reviews: ['# Codex Adversarial Review\n\nCodex did not return valid structured JSON.\n\n- Parse error: Unexpected end of JSON input\n'] })
+    const r = await runGranny(f.host, input())
+    expect(r.stages[0]).toMatchObject({ outcome: 'review-failed', rounds: 1 })
+    expect(r.stages[0]!.note).toContain('Codex did not return valid structured JSON.')
+    expect(r.stages[0]!.note).toContain('Unexpected end of JSON input')
+    expect(f.calls.some(c => c.kind === 'score' || c.kind === 'findings')).toBe(false)
+  })
+
   it('sends every finding when the judge returns nothing, and says so', async () => {
     const f = fakeHost({ reviews: [review(finding('P3', 'Nit'), finding('P3', 'Other nit')), 'No issues.'], scores: [null] })
     await runGranny(f.host, input())

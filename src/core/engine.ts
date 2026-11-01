@@ -9,7 +9,7 @@ import {
   reviewCommandPrompt,
   type PromptContext,
 } from './prompts'
-import { parseCodexReview, triage } from './review'
+import { parseCodexReview, reviewFailure, triage } from './review'
 import { SCHEMAS } from './schemas'
 import { shellQuote } from './shell'
 import type {
@@ -114,6 +114,8 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
       if (!ran) note = r?.note ?? 'review runner returned nothing'
     }
     if (!ran) return { ran, findings: [], note }
+    const failure = reviewFailure(output)
+    if (failure) return { ran: false, findings: [], note: `reviewer returned no usable result (${failure}): ${output.slice(-2000)}` }
 
     const parsed = parseCodexReview(output, input.repo)
     if (parsed.markers <= parsed.findings.length) return { ran, findings: parsed.findings }

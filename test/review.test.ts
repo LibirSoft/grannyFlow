@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'bun:test'
-import { isBlocker, parseCodexReview, triage } from '../src/core/review'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
+import { isBlocker, parseCodexReview, reviewFailure, triage } from '../src/core/review'
 import type { Finding } from '../src/core/types'
+
+const fixture = (name: string) => readFileSync(join(import.meta.dir, 'fixtures', name), 'utf8')
 
 const REAL = `The patch changes the existing add function to perform subtraction, introducing an arithmetic regression.
 
@@ -88,6 +92,93 @@ Some closing words.`
       ['A', 'detail a'],
       ['B', 'detail b'],
     ])
+  })
+})
+
+describe('parseCodexReview on Codex plugin output', () => {
+  it('reads a real `codex-companion review` output', () => {
+    const { findings, markers } = parseCodexReview(fixture('codex-plugin-review.md'), '/tmp/granny-fixture')
+    expect(markers).toBe(2)
+    expect(findings.map(f => [f.id, f.severity, f.file, f.line, f.title])).toEqual([
+      ['F1', 'P1', 'cart.js', 3, 'Include the first item in the cart total'],
+      ['F2', 'P2', 'cart.js', 8, 'Restore discount percentage bounds validation'],
+    ])
+    expect(findings[0]!.detail).toStartWith('Starting the loop at index 1 skips the first item')
+  })
+
+  it('reads a real `codex-companion adversarial-review` output, recommendation included, next steps left out', () => {
+    const { findings, markers } = parseCodexReview(fixture('codex-plugin-adversarial-review.md'))
+    expect(markers).toBe(2)
+    expect(findings.map(f => [f.id, f.severity, f.file, f.line, f.title])).toEqual([
+      ['F1', 'P1', 'cart.js', 3, 'Cart totals exclude the first item'],
+      ['F2', 'P1', 'cart.js', 7, 'Out-of-range discounts now produce invalid totals'],
+    ])
+    expect(findings[0]!.detail).toBe(
+      'Starting the loop at index 1 skips items[0] in every cart. A single item priced at 25 with quantity 2 returns 0 instead of 50; adding a second line worth 30 returns 30 instead of 80. Any downstream use of this total receives an understated amount.\nRecommendation: Start iteration at index 0 and add regression coverage for single-item and multiple-item totals.',
+    )
+    expect(findings.every(isBlocker)).toBe(true)
+  })
+
+  it('maps critical/high/medium/low to P0-P3 and reads the location from the last parentheses', () => {
+    const text = `Findings:
+- [critical] Token leaks — src/auth.ts:9
+  Body.
+- [High] Retry loop (re-entrant) ignores cancel (src/run.ts:4-6)
+  Body.
+  Recommendation: Check the signal.
+- [medium] Cache never expires — split — here (cache.ts)
+  Body.
+- [LOW] Missing file in render (unknown)
+  No details provided.
+
+Next steps:
+- Fix the leak first.
+
+Reasoning:
+- The [high] severity was chosen because tokens leak.`
+    const { findings, markers } = parseCodexReview(text)
+    expect(markers).toBe(4)
+    expect(findings.map(f => [f.severity, f.file, f.line, f.title])).toEqual([
+      ['P0', 'src/auth.ts', 9, 'Token leaks'],
+      ['P1', 'src/run.ts', 4, 'Retry loop (re-entrant) ignores cancel'],
+      ['P2', 'cache.ts', undefined, 'Cache never expires — split — here'],
+      ['P3', 'unknown', undefined, 'Missing file in render'],
+    ])
+    expect(findings[1]!.detail).toBe('Body.\nRecommendation: Check the signal.')
+  })
+
+  it('keeps [Px] findings on the em-dash form and other bracketed words out of the count', () => {
+    const { findings, markers } = parseCodexReview(
+      '- [P1] Fix total() (cart.js:3)\n  d\n- [note] Not a finding (a.ts:1)\n- [Polish] Not one — a.ts:2\n- [constructor] Nor this — a.ts:3\n- [P2] Fix total() — cart.js:4',
+    )
+    expect(markers).toBe(2)
+    expect(findings.map(f => [f.title, f.file, f.line])).toEqual([['Fix total()', 'cart.js', 4]])
+  })
+})
+
+describe('reviewFailure', () => {
+  it('recognises the companion render for a review without a structured result', () => {
+    const noJson = `# Codex Adversarial Review
+
+Codex did not return valid structured JSON.
+
+- Parse error: Unexpected end of JSON input
+
+Raw final message:
+
+\`\`\`text
+{"verdict": "needs-attention", "findings": [
+\`\`\`
+`
+    const badShape = '# Codex Adversarial Review\n\nTarget: branch diff against abc\nCodex returned JSON with an unexpected review shape.\n\n- Validation error: Missing array `findings`.\n'
+    expect(reviewFailure(noJson)).toBe('Codex did not return valid structured JSON.')
+    expect(reviewFailure(badShape)).toBe('Codex returned JSON with an unexpected review shape.')
+  })
+
+  it('ignores clean reviews and finding text that quotes the render', () => {
+    expect(reviewFailure(fixture('codex-plugin-adversarial-review.md'))).toBeUndefined()
+    expect(reviewFailure('No material findings.')).toBeUndefined()
+    expect(reviewFailure('- [high] Parser — a.ts:1\n  Codex did not return valid structured JSON.')).toBeUndefined()
   })
 })
 
