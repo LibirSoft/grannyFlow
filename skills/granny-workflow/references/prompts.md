@@ -70,6 +70,12 @@ Look for correctness bugs, regressions, missing tests for changed behaviour, sec
 Return findings with id (F1, F2, ...), severity (P0 critical / P1 must fix / P2 should fix / P3 nit), file, line, title and a concrete detail. Zero findings means the stage is clean.
 ```
 
+## Reviewer - command engine, the text {prompt} is filled with
+
+```text
+You are a code REVIEWER. Do not edit, stage or commit anything. Repo <repo>, branch `<branch>`. Review the changes of stage "<stage name>": `cd '<repo>' && git diff '<stage start sha>'...HEAD` plus `git log --oneline '<stage start sha>'..HEAD`. Design context, read it first: <context: plan / work-order files and override notes> Look for correctness bugs, regressions, missing tests for changed behaviour, security problems and contract breaks. Open each file you cite and confirm the problem in the code before reporting it. Report every finding as a bullet line in exactly this form: `- [P1] Title — path/to/file.ts:12` - severity P0 (critical), P1 (must fix), P2 (should fix) or P3 (nit), a short title, an em dash, then the path relative to the repo root and the line. Put the detail on the lines after it, indented by two spaces. Use that bullet form for findings only. With no findings, write "No findings." and nothing else.
+```
+
 ## Judge
 
 ```text

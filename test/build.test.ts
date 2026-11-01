@@ -38,9 +38,9 @@ describe('claude-code workflow.js', () => {
       if (kind.startsWith('startSha')) return { startSha: 's1', headSha: 'h1', gatesGreen: true, gates: 'ok', commits: ['c'], untested: '' }
       if (kind.startsWith('ran')) {
         reviews++
-        return { ran: true, exitCode: 0, output: reviews === 1 ? review(finding('P1', 'Off by one')) : 'No issues.' }
+        return { ran: true, exitCode: 0, output: reviews === 1 ? review(finding('P2', 'Off by one')) : 'No issues.' }
       }
-      if (kind.startsWith('score')) return { score: 80, perFinding: [{ id: 'F1', score: 85, reason: 'real' }], rationale: 'ok' }
+      if (kind.startsWith('score')) return { score: 80, perFinding: [{ id: 'codex-F1', score: 85, reason: 'real' }], rationale: 'ok' }
       if (kind.startsWith('gatesGreen')) return { gatesGreen: true, gates: 'ok', commits: ['c'], prBodyPath: '.granny/PR-BODY.md', issues: '' }
       throw new Error(`unexpected schema ${kind}`)
     }
@@ -56,7 +56,7 @@ describe('claude-code workflow.js', () => {
     expect(phases).toEqual(['Implement', 'Review', 'PR ready'])
     const impl = calls[0]!
     expect(impl.opts).toMatchObject({ label: 'implement one', phase: 'Implement', model: 'opus', effort: 'high' })
-    const runner = calls.find(c => c.opts.label === 'review one r1')!
+    const runner = calls.find(c => c.opts.label === 'review one r1 codex')!
     expect(runner.prompt.startsWith('READ-ONLY ROLE')).toBe(true)
     expect(runner.opts.model).toBeUndefined()
     const judge = calls.find(c => c.opts.label === 'judge one r1')!

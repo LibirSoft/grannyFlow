@@ -65,9 +65,12 @@ Three layers, later wins: `~/.config/granny/config.json`, `<repo>/granny.config.
   "roles": {
     "granny":      { "model": { "claude-code": "opus", "opencode": "anthropic/claude-opus-5-5" } },
     "implementer": { "model": "opus", "effort": "high" },
-    "reviewer":    { "engine": "auto" },
     "judge":       { "model": { "claude-code": "sonnet", "opencode": "anthropic/claude-sonnet-5-5" } }
   },
+  "reviewers": [
+    { "name": "codex", "engine": "auto" },
+    { "name": "opus",  "engine": "agent", "model": { "claude-code": "opus", "opencode": "anthropic/claude-opus-5-5" } }
+  ],
   "threshold": 70,
   "maxRounds": 4,
   "gates": ["bun test", "bun run check", "bun run build"]

@@ -2,9 +2,11 @@ import { afterEach, beforeEach, describe, expect, it } from 'bun:test'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { resolveConfig } from '../src/core/config'
 import { runGranny, type RunInput } from '../src/core/engine'
+import { commandReviewPrompt } from '../src/core/prompts'
 import { alive, brokerCompanion, records, sessionEndHook, until } from './fake-companion'
-import { fakeHost, finding, review } from './fake-host'
+import { fakeHost, finding, review, reviewerOf } from './fake-host'
 
 const input = (extra: Partial<RunInput> = {}): RunInput => ({
   repo: '/work/repo',
@@ -14,6 +16,8 @@ const input = (extra: Partial<RunInput> = {}): RunInput => ({
   ...extra,
 })
 
+const GLM = { name: 'glm', engine: 'command', command: 'glm-review {prompt}' }
+
 describe('runGranny', () => {
   it('ends a stage clean when the first review has no findings', async () => {
     const f = fakeHost({ reviews: ['I did not find any issues.'] })
@@ -22,7 +26,7 @@ describe('runGranny', () => {
     expect(r.stages[0]).toMatchObject({ stage: 'core', outcome: 'clean', rounds: 1 })
     expect(f.calls.map(c => c.kind)).toEqual(['implementation', 'final'])
     expect(f.commands).toHaveLength(1)
-    expect(f.commands[0]).toContain('codex exec review --base start1 -o .granny/review-core-r1.md')
+    expect(f.commands[0]).toContain('codex exec review --base start1 -o .granny/review-core-r1-codex.md')
     expect(f.phases).toEqual(['Implement', 'Review', 'PR ready'])
     expect(r.final?.gatesGreen).toBe(true)
   })
@@ -30,7 +34,7 @@ describe('runGranny', () => {
   it('sends P0/P1 at any score and others above the threshold, keeps the rest as residual', async () => {
     const f = fakeHost({
       reviews: [review(finding('P1', 'Blocker bug'), finding('P2', 'Borderline'), finding('P2', 'Real issue')), 'No issues.'],
-      scores: [{ F1: 10, F2: 70, F3: 71 }],
+      scores: [{ 'codex-F1': 10, 'codex-F2': 70, 'codex-F3': 71 }],
     })
     const r = await runGranny(f.host, input())
     expect(r.stages[0]).toMatchObject({ outcome: 'clean', rounds: 2 })
@@ -38,12 +42,12 @@ describe('runGranny', () => {
     expect(fix.prompt).toContain('Blocker bug')
     expect(fix.prompt).toContain('Real issue')
     expect(fix.prompt).not.toContain('Borderline')
-    expect(f.logs.some(l => l.includes('not sent: F2(70)'))).toBe(true)
+    expect(f.logs.some(l => l.includes('not sent: codex-F2(70)'))).toBe(true)
     expect(r.stages[0]!.history[0]!.findings.map(x => x.score)).toEqual([10, 70, 71])
   })
 
   it('stops with residual-only when nothing is above the threshold', async () => {
-    const f = fakeHost({ reviews: [review(finding('P2', 'Meh'), finding('P3', 'Nit'))], scores: [{ F1: 40, F2: 70 }] })
+    const f = fakeHost({ reviews: [review(finding('P2', 'Meh'), finding('P3', 'Nit'))], scores: [{ 'codex-F1': 40, 'codex-F2': 70 }] })
     const r = await runGranny(f.host, input())
     expect(r.stages[0]).toMatchObject({ outcome: 'residual-only', rounds: 1 })
     expect(r.stages[0]!.residual.map(x => x.title)).toEqual(['Meh', 'Nit'])
@@ -51,7 +55,7 @@ describe('runGranny', () => {
   })
 
   it('honours a configured threshold', async () => {
-    const f = fakeHost({ reviews: [review(finding('P2', 'Meh')), 'No issues.'], scores: [{ F1: 40 }] })
+    const f = fakeHost({ reviews: [review(finding('P2', 'Meh')), 'No issues.'], scores: [{ 'codex-F1': 40 }] })
     const r = await runGranny(f.host, input({ config: { threshold: 30 } }))
     expect(r.stages[0]!.outcome).toBe('clean')
     expect(f.calls.some(c => c.label === 'fix core r1')).toBe(true)
@@ -59,7 +63,7 @@ describe('runGranny', () => {
 
   it('hits the round cap and reports the last findings as unresolved', async () => {
     const bad = review(finding('P1', 'Still broken'))
-    const f = fakeHost({ reviews: [bad, bad], scores: [{ F1: 90 }, { F1: 90 }] })
+    const f = fakeHost({ reviews: [bad, bad], scores: [{ 'codex-F1': 90 }, { 'codex-F1': 90 }] })
     const r = await runGranny(f.host, input({ config: { maxRounds: 2 } }))
     expect(r.stages[0]).toMatchObject({ outcome: 'round-cap', rounds: 2 })
     expect(r.stages[0]!.unresolved.map(x => x.title)).toEqual(['Still broken'])
@@ -71,6 +75,7 @@ describe('runGranny', () => {
     const f = fakeHost({ reviews: [{ code: 1, output: 'codex: not logged in' }] })
     const r = await runGranny(f.host, input())
     expect(r.stages[0]).toMatchObject({ outcome: 'review-failed', rounds: 1 })
+    expect(r.stages[0]!.note).toContain('codex: review command exited 1')
     expect(r.stages[0]!.note).toContain('not logged in')
     expect(f.calls.some(c => c.kind === 'score')).toBe(false)
   })
@@ -100,7 +105,7 @@ describe('runGranny', () => {
   })
 
   it('does not report an unscored send when the judge answers', async () => {
-    const f = fakeHost({ reviews: [review(finding('P3', 'Nit')), 'No issues.'], scores: [{ F1: 90 }] })
+    const f = fakeHost({ reviews: [review(finding('P3', 'Nit')), 'No issues.'], scores: [{ 'codex-F1': 90 }] })
     await runGranny(f.host, input())
     expect(f.logs.some(l => l.includes('judge returned nothing'))).toBe(false)
   })
@@ -122,7 +127,7 @@ describe('runGranny', () => {
   })
 
   it('reviews an existing branch against the base in a review-only stage, then fixes', async () => {
-    const f = fakeHost({ reviews: [review(finding('P1', 'Existing bug')), 'No issues.'], scores: [{ F1: 90 }] })
+    const f = fakeHost({ reviews: [review(finding('P2', 'Existing bug')), 'No issues.'], scores: [{ 'codex-F1': 90 }] })
     const r = await runGranny(f.host, input({ stages: [{ name: 'audit', implement: false }] }))
     expect(r.stages[0]).toMatchObject({ stage: 'audit', outcome: 'clean', rounds: 2 })
     expect(r.stages[0]!.implementation).toBeUndefined()
@@ -139,7 +144,7 @@ describe('runGranny', () => {
   })
 
   it('does not ask for an extraction when a finding detail quotes a [Px] bullet', async () => {
-    const f = fakeHost({ reviews: [review(`${finding('P2', 'Real one')}\n  - [P1] quoted from an earlier round`), 'No issues.'], scores: [{ F1: 90 }] })
+    const f = fakeHost({ reviews: [review(`${finding('P2', 'Real one')}\n  - [P1] quoted from an earlier round`), 'No issues.'], scores: [{ 'codex-F1': 90 }] })
     const r = await runGranny(f.host, input())
     expect(f.calls.some(c => c.kind === 'findings')).toBe(false)
     expect(r.stages[0]).toMatchObject({ outcome: 'clean', rounds: 2 })
@@ -148,7 +153,7 @@ describe('runGranny', () => {
 
   it('reads findings from CRLF review output instead of reporting the stage clean', async () => {
     const crlf = review(finding('P2', 'Native form'), '- [high] Adversarial form (src/b.ts:12-14)\n  Body.\n  Recommendation: Fix it.').replace(/\n/g, '\r\n')
-    const f = fakeHost({ reviews: [crlf, 'No issues.'], scores: [{ F1: 90, F2: 90 }] })
+    const f = fakeHost({ reviews: [crlf, 'No issues.'], scores: [{ 'codex-F1': 90, 'codex-F2': 90 }] })
     const r = await runGranny(f.host, input())
     expect(r.stages[0]).toMatchObject({ outcome: 'clean', rounds: 2 })
     expect(r.stages[0]!.history[0]!.findings.map(x => [x.severity, x.title, x.file, x.line, x.detail])).toEqual([
@@ -162,7 +167,7 @@ describe('runGranny', () => {
   it('falls back to an extraction agent when the parser misses findings', async () => {
     const f = fakeHost({
       reviews: ['- [P1] no location here\n  detail', 'No issues.'],
-      scores: [{ F1: 90 }],
+      scores: [{ 'codex-F1': 90 }],
       override: req =>
         req.kind === 'findings' ? { findings: [{ id: 'F1', severity: 'P1', file: 'x.ts', title: 'Extracted', detail: 'd' }] } : undefined,
     })
@@ -170,7 +175,8 @@ describe('runGranny', () => {
     const extract = f.calls.find(c => c.kind === 'findings')!
     expect(extract.role).toBe('granny')
     expect(extract.access).toBe('read-only')
-    expect(r.stages[0]!.history[0]!.findings[0]!.title).toBe('Extracted')
+    expect(extract.label).toBe('extract core r1 codex')
+    expect(r.stages[0]!.history[0]!.findings[0]).toMatchObject({ id: 'codex-F1', reviewer: 'codex', title: 'Extracted' })
   })
 
   for (const [label, extracted] of [['an empty list', { findings: [] }], ['nothing', null]] as const) {
@@ -204,15 +210,15 @@ describe('runGranny', () => {
     const answers = [extracted('Only one'), extracted('One', 'Two')]
     const f = fakeHost({
       reviews: [twoUnparseable, 'No issues.'],
-      scores: [{ F1: 90, F2: 90 }],
+      scores: [{ 'codex-F1': 90, 'codex-F2': 90 }],
       override: req => (req.kind === 'findings' ? answers.shift() : undefined),
     })
     const r = await runGranny(f.host, input())
     const extracts = f.calls.filter(c => c.kind === 'findings')
-    expect(extracts.map(c => c.label)).toEqual(['extract core r1', 'extract core r1 retry'])
+    expect(extracts.map(c => c.label)).toEqual(['extract core r1 codex', 'extract core r1 codex retry'])
     expect(extracts[1]!.prompt).toContain('2 finding marker(s)')
     expect(extracts[1]!.prompt).toContain('returned 1')
-    expect(f.logs).toContain('core r1: extraction recovered 1/2 findings - asking once more with the expected count')
+    expect(f.logs).toContain('core r1 codex: extraction recovered 1/2 findings - asking once more with the expected count')
     expect(r.stages[0]).toMatchObject({ outcome: 'clean', rounds: 2 })
     expect(r.stages[0]!.history[0]!.findings.map(x => x.title)).toEqual(['One', 'Two'])
   })
@@ -242,7 +248,7 @@ describe('runGranny', () => {
   it('accepts an extraction that recovers more findings than markers', async () => {
     const f = fakeHost({
       reviews: ['- [P1] no location here\n  detail', 'No issues.'],
-      scores: [{ F1: 90, F2: 90 }],
+      scores: [{ 'codex-F1': 90, 'codex-F2': 90 }],
       override: req => (req.kind === 'findings' ? extracted('A', 'B') : undefined),
     })
     const r = await runGranny(f.host, input())
@@ -254,14 +260,11 @@ describe('runGranny', () => {
     const f = fakeHost({
       override: req => (req.kind === 'findings' ? { findings: [] } : undefined),
     })
-    const r = await runGranny(
-      f.host,
-      input({ config: { roles: { reviewer: { engine: 'agent', model: { opencode: 'zai/glm-5' } } } } }),
-    )
+    const r = await runGranny(f.host, input({ config: { reviewers: [{ name: 'glm', engine: 'agent', model: { opencode: 'zai/glm-5' } }] } }))
     expect(r.stages[0]!.outcome).toBe('clean')
     expect(f.commands).toHaveLength(0)
     const rev = f.calls.find(c => c.role === 'reviewer')!
-    expect(rev).toMatchObject({ kind: 'findings', access: 'read-only', model: 'zai/glm-5' })
+    expect(rev).toMatchObject({ kind: 'findings', access: 'read-only', model: 'zai/glm-5', label: 'review core r1 glm' })
     expect(rev.prompt).toContain('git diff start1...HEAD')
   })
 
@@ -270,12 +273,13 @@ describe('runGranny', () => {
     await runGranny(f.host, input())
     const runner = f.calls.find(c => c.kind === 'command')!
     expect(runner.role).toBe('granny')
+    expect(runner.label).toBe('review core r1 codex')
     expect(runner.prompt).toContain(
-      'cd /work/repo && mkdir -p .granny && rm -f .granny/review-core-r1.md .granny/review-core-r1.log && codex_plugins="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/plugins/cache/openai-codex/codex"; companion_version=$(',
+      'cd /work/repo && mkdir -p .granny && rm -f .granny/review-core-r1-codex.md .granny/review-core-r1-codex.log && codex_plugins="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/plugins/cache/openai-codex/codex"; companion_version=$(',
     )
     expect(runner.prompt).not.toContain('sort -V')
-    expect(runner.prompt).toContain('node "$companion" review --wait --base start1 --scope branch > .granny/review-core-r1.md 2> .granny/review-core-r1.log;')
-    expect(runner.prompt).toContain('codex exec review --base start1 -o .granny/review-core-r1.md > .granny/review-core-r1.log 2>&1;')
+    expect(runner.prompt).toContain('node "$companion" review --wait --base start1 --scope branch > .granny/review-core-r1-codex.md 2> .granny/review-core-r1-codex.log;')
+    expect(runner.prompt).toContain('codex exec review --base start1 -o .granny/review-core-r1-codex.md > .granny/review-core-r1-codex.log 2>&1;')
     expect(runner.prompt).toContain(`never cut it short):\n${f.commands[0]}\n\nSet ran=true`)
   })
 
@@ -283,11 +287,11 @@ describe('runGranny', () => {
     const f = fakeHost({ reviews: ['No issues.'] })
     await runGranny(f.host, input())
     expect(f.commands[0]).not.toContain('companion')
-    expect(f.logs).toContain('core r1: reviewer: codex CLI (codex exec review)')
+    expect(f.logs).toContain('core r1 codex: reviewer: codex CLI (codex exec review)')
   })
 
   it('refuses adversarial-review on engine auto on opencode before starting, where auto means the Codex CLI', async () => {
-    const config = { roles: { reviewer: { mode: 'adversarial-review' } } }
+    const config = { reviewers: [{ mode: 'adversarial-review' }] }
     const oc = fakeHost()
     await expect(runGranny(oc.host, input({ config }))).rejects.toThrow('on opencode engine "auto" means the Codex CLI')
     expect(oc.calls).toHaveLength(0)
@@ -307,7 +311,7 @@ describe('runGranny', () => {
     expect(direct.calls[0]!.prompt).toContain(`Prefix EVERY shell command with \`cd ${r} &&\``)
     expect(direct.calls.find(c => c.kind === 'final')!.prompt).toContain(`git log 'feat;main'..HEAD`)
     expect(direct.commands[0]).toBe(
-      `mkdir -p ${wd()} && rm -f ${wd('/review-core-r1.md')} ${wd('/review-core-r1.log')} && codex exec review --base start1 -o ${wd('/review-core-r1.md')} > ${wd('/review-core-r1.log')} 2>&1; code=$?; if [ -s ${wd('/review-core-r1.md')} ]; then cat ${wd('/review-core-r1.md')}; else cat ${wd('/review-core-r1.log')}; fi; exit $code`,
+      `mkdir -p ${wd()} && rm -f ${wd('/review-core-r1-codex.md')} ${wd('/review-core-r1-codex.log')} && codex exec review --base start1 -o ${wd('/review-core-r1-codex.md')} > ${wd('/review-core-r1-codex.log')} 2>&1; code=$?; if [ -s ${wd('/review-core-r1-codex.md')} ]; then cat ${wd('/review-core-r1-codex.md')}; else cat ${wd('/review-core-r1-codex.log')}; fi; exit $code`,
     )
 
     const runner = fakeHost({ name: 'claude-code', direct: false, reviews: ['No issues.'] })
@@ -315,7 +319,7 @@ describe('runGranny', () => {
     expect(runner.calls.find(c => c.kind === 'command')!.prompt).toContain(`\n${`cd ${r} && mkdir -p ${wd()} && rm -f`}`)
 
     const agent = fakeHost({ override: req => (req.kind === 'findings' ? { findings: [] } : undefined) })
-    await runGranny(agent.host, input({ repo, config: { ...config, roles: { reviewer: { engine: 'agent' } } }, stages: [{ name: 'audit', implement: false }], base: "it's" }))
+    await runGranny(agent.host, input({ repo, config: { ...config, reviewers: [{ engine: 'agent' }] }, stages: [{ name: 'audit', implement: false }], base: "it's" }))
     expect(agent.calls.find(c => c.role === 'reviewer')!.prompt).toContain(`\`cd ${r} && git diff 'it'\\''s'...HEAD\``)
   })
 
@@ -331,7 +335,7 @@ describe('runGranny', () => {
     expect(cc.calls.find(c => c.role === 'implementer')).toMatchObject({ model: 'opus', effort: 'high' })
     expect(cc.calls.find(c => c.kind === 'final')).toMatchObject({ role: 'granny', model: 'haiku', access: 'write' })
 
-    const oc = fakeHost({ reviews: [review(finding('P1', 'x')), 'No issues.'], scores: [{ F1: 99 }] })
+    const oc = fakeHost({ reviews: [review(finding('P2', 'x')), 'No issues.'], scores: [{ 'codex-F1': 99 }] })
     await runGranny(oc.host, input({ config }))
     expect(oc.calls.find(c => c.role === 'implementer')!.model).toBe('anthropic/claude-opus-5-5')
     expect(oc.calls.find(c => c.role === 'judge')!.model).toBeUndefined()
@@ -339,7 +343,7 @@ describe('runGranny', () => {
   })
 
   it('defaults the judge to sonnet on claude-code', async () => {
-    const f = fakeHost({ name: 'claude-code', direct: false, reviews: [review(finding('P1', 'x')), 'No issues.'], scores: [{ F1: 99 }] })
+    const f = fakeHost({ name: 'claude-code', direct: false, reviews: [review(finding('P2', 'x')), 'No issues.'], scores: [{ 'codex-F1': 99 }] })
     await runGranny(f.host, input())
     expect(f.calls.find(c => c.role === 'judge')).toMatchObject({ model: 'sonnet', access: 'read-only' })
   })
@@ -378,7 +382,164 @@ describe('runGranny', () => {
     const f = fakeHost()
     await expect(runGranny(f.host, { repo: 'rel', branch: '', stages: [] } as RunInput)).rejects.toThrow(/repo must be an absolute path[\s\S]*branch is required[\s\S]*stages must be/)
     await expect(runGranny(f.host, input({ config: { treshold: 1 } }))).rejects.toThrow('unknown key "treshold"')
+    await expect(runGranny(f.host, input({ config: { roles: { reviewer: { engine: 'agent' } } } }))).rejects.toThrow('roles.reviewer was replaced by "reviewers"')
     expect(f.calls).toHaveLength(0)
+  })
+})
+
+describe('several reviewers', () => {
+  const three = [{ name: 'codex' }, { name: 'opus', engine: 'agent', model: 'opus' }, GLM]
+
+  it('runs every reviewer of a round at the same time', async () => {
+    let started = 0
+    let release!: () => void
+    const everyone = new Promise<void>(resolve => (release = resolve))
+    const seen: Array<[string, number]> = []
+    const arrive = async (who: string) => {
+      if (++started === 3) release()
+      await Promise.race([everyone, Bun.sleep(500)])
+      seen.push([who, started])
+    }
+    const f = fakeHost({
+      reviews: async command => {
+        await arrive(reviewerOf(command)!)
+        return 'No issues.'
+      },
+      override: async req => {
+        if (req.role !== 'reviewer') return undefined
+        await arrive('opus')
+        return { findings: [] }
+      },
+    })
+    const r = await runGranny(f.host, input({ config: { reviewers: three } }))
+    expect(r.stages[0]).toMatchObject({ outcome: 'clean', rounds: 1 })
+    expect(seen.map(([, n]) => n)).toEqual([3, 3, 3])
+    expect(seen.map(([who]) => who).sort()).toEqual(['codex', 'glm', 'opus'])
+  })
+
+  it('gives every reviewer its own output files and logs its backend under its name', async () => {
+    const f = fakeHost()
+    await runGranny(f.host, input({ config: { reviewers: [{ name: 'codex' }, { name: 'cli-2', engine: 'codex', model: 'gpt-5.5' }, GLM] } }))
+    expect(f.commands).toHaveLength(3)
+    expect(f.commands[0]).toContain('rm -f .granny/review-core-r1-codex.md .granny/review-core-r1-codex.log && codex exec review --base start1 -o .granny/review-core-r1-codex.md > .granny/review-core-r1-codex.log 2>&1;')
+    expect(f.commands[1]).toContain('codex exec review --base start1 -m gpt-5.5 -o .granny/review-core-r1-cli-2.md > .granny/review-core-r1-cli-2.log 2>&1;')
+    expect(f.commands[2]).toContain('rm -f .granny/review-core-r1-glm.md .granny/review-core-r1-glm.log && glm-review ')
+    expect(f.logs).toContain('core r1 codex: reviewer: codex CLI (codex exec review)')
+    expect(f.logs).toContain('core r1 cli-2: reviewer: codex CLI (codex exec review)')
+    expect(f.logs).toContain('core r1 glm: reviewer: custom command')
+  })
+
+  it('fills {prompt} with a one-line review prompt that demands the finding format', async () => {
+    const f = fakeHost({ name: 'claude-code', direct: false })
+    await runGranny(f.host, input({ context: 'Read plans/x.md first.\nThen plans/y.md.', config: { reviewers: [GLM] } }))
+    const prompt = commandReviewPrompt(
+      { repo: '/work/repo', branch: 'feat/x', base: 'main', context: 'Read plans/x.md first.\nThen plans/y.md.', config: resolveConfig([{ reviewers: [GLM] }]) },
+      'core',
+      'start1',
+    )
+    expect(prompt).not.toContain('\n')
+    expect(prompt).toContain('git diff start1...HEAD')
+    expect(prompt).toContain('- [P1] Title — path/to/file.ts:12')
+    expect(prompt).toContain('Read plans/x.md first. Then plans/y.md.')
+    expect(f.calls.find(c => c.kind === 'command')!.label).toBe('review core r1 glm')
+    expect(f.commands[0]).toContain(`glm-review '${prompt.replaceAll("'", `'\\''`)}' > .granny/review-core-r1-glm.log 2>&1;`)
+  })
+
+  it('prefixes finding ids with the reviewer and keeps the attribution through the judge, the fix and the residual', async () => {
+    const f = fakeHost({
+      reviews: { codex: [review(finding('P2', 'From codex'), finding('P3', 'Second from codex')), 'No issues.'], glm: [review(finding('P2', 'From glm')), 'No issues.'] },
+      scores: [{ 'codex-F1': 90, 'codex-F2': 10, 'glm-F1': 95 }],
+    })
+    const r = await runGranny(f.host, input({ config: { reviewers: [{ name: 'codex' }, GLM] } }))
+    expect(r.stages[0]).toMatchObject({ outcome: 'clean', rounds: 2 })
+    expect(r.stages[0]!.history[0]!.findings.map(x => [x.id, x.reviewer, x.title, x.score])).toEqual([
+      ['codex-F1', 'codex', 'From codex', 90],
+      ['codex-F2', 'codex', 'Second from codex', 10],
+      ['glm-F1', 'glm', 'From glm', 95],
+    ])
+    const judge = f.calls.find(c => c.role === 'judge')!.prompt
+    expect(judge).toContain('"id": "glm-F1"')
+    expect(judge).toContain('"reviewer": "glm"')
+    const fix = f.calls.find(c => c.label === 'fix core r1')!.prompt
+    expect(fix).toContain('"id": "codex-F1"')
+    expect(fix).toContain('"id": "glm-F1"')
+    expect(fix).toContain('"reviewer": "glm"')
+    expect(fix).not.toContain('codex-F2')
+    expect(f.logs.some(l => l.includes('not sent: codex-F2(10)'))).toBe(true)
+  })
+
+  it('numbers an agent reviewer\'s findings under its own name, whatever ids it chose', async () => {
+    const f = fakeHost({
+      override: req =>
+        req.role === 'reviewer'
+          ? { findings: [{ id: 'F1', severity: 'P2', file: 'a.ts', title: 'One', detail: 'd' }, { id: 'F1', severity: 'P3', file: 'b.ts', title: 'Two', detail: 'd' }] }
+          : undefined,
+      scores: [{ 'opus-F1': 10, 'opus-F2': 10 }],
+    })
+    const r = await runGranny(f.host, input({ config: { maxRounds: 1, reviewers: [{ name: 'opus', engine: 'agent' }] } }))
+    expect(r.stages[0]!.residual.map(x => [x.id, x.reviewer, x.title])).toEqual([
+      ['opus-F1', 'opus', 'One'],
+      ['opus-F2', 'opus', 'Two'],
+    ])
+  })
+
+  it("runs agent reviewers with the reviewer entry's own model and effort", async () => {
+    const f = fakeHost({ name: 'claude-code', direct: false, override: req => (req.role === 'reviewer' ? { findings: [] } : undefined) })
+    await runGranny(
+      f.host,
+      input({
+        config: {
+          roles: { judge: { model: 'haiku', effort: 'low' }, granny: { model: 'haiku', effort: 'low' } },
+          reviewers: [
+            { name: 'opus', engine: 'agent', model: { 'claude-code': 'opus', opencode: 'anthropic/claude-opus-5-5' }, effort: 'high' },
+            { name: 'sonnet', engine: 'agent', model: 'sonnet' },
+          ],
+        },
+      }),
+    )
+    expect(f.calls.filter(c => c.role === 'reviewer').map(c => [c.label, c.model, c.effort])).toEqual([
+      ['review core r1 opus', 'opus', 'high'],
+      ['review core r1 sonnet', 'sonnet', undefined],
+    ])
+  })
+
+  it('is clean only when every reviewer ran and none reported findings', async () => {
+    const f = fakeHost({ reviews: { codex: ['No issues.'], glm: [{ code: 2, output: 'glm: provider error' }] } })
+    const r = await runGranny(f.host, input({ config: { reviewers: [{ name: 'codex' }, GLM] } }))
+    expect(r.stages[0]).toMatchObject({ outcome: 'review-failed', rounds: 1, unresolved: [] })
+    expect(r.stages[0]!.note).toContain('reviewer(s) that did not run: glm')
+    expect(r.stages[0]!.note).toContain('glm: review command exited 2')
+    expect(r.stages[0]!.note).not.toContain('codex:')
+  })
+
+  it('ends review-failed when a reviewer does not run, keeping the findings of the reviewers that did', async () => {
+    const f = fakeHost({
+      reviews: { codex: [{ code: 1, output: 'codex: not logged in' }], glm: [review(finding('P2', 'Kept'))] },
+      override: req => (req.role === 'reviewer' ? null : undefined),
+    })
+    const r = await runGranny(f.host, input({ config: { reviewers: [{ name: 'codex' }, { name: 'opus', engine: 'agent' }, GLM] } }))
+    expect(r.stages[0]).toMatchObject({ outcome: 'review-failed', rounds: 1 })
+    expect(r.stages[0]!.unresolved.map(x => [x.id, x.reviewer, x.title])).toEqual([['glm-F1', 'glm', 'Kept']])
+    expect(r.stages[0]!.note).toContain('reviewer(s) that did not run: codex, opus')
+    expect(r.stages[0]!.note).toContain('codex: review command exited 1')
+    expect(r.stages[0]!.note).toContain('opus: reviewer agent returned nothing')
+    expect(f.calls.some(c => c.role === 'judge' || c.label.startsWith('fix'))).toBe(false)
+  })
+
+  it('keeps the last round findings of a reviewer that stops running in a later round', async () => {
+    const f = fakeHost({
+      reviews: {
+        codex: [review(finding('P2', 'Codex round one')), { code: 1, output: 'codex: crashed' }],
+        glm: [review(finding('P2', 'Glm round one')), review(finding('P2', 'Glm round two'))],
+      },
+      scores: [{ 'codex-F1': 90, 'glm-F1': 90 }],
+    })
+    const r = await runGranny(f.host, input({ config: { reviewers: [{ name: 'codex' }, GLM] } }))
+    expect(r.stages[0]).toMatchObject({ outcome: 'review-failed', rounds: 2 })
+    expect(r.stages[0]!.unresolved.map(x => [x.id, x.title])).toEqual([
+      ['glm-F1', 'Glm round two'],
+      ['codex-F1', 'Codex round one'],
+    ])
   })
 })
 
@@ -392,6 +553,18 @@ while [ $# -gt 0 ]; do
 done
 echo 'codex progress' >&2
 printf '%s\\n' "- [P1] Reviewed $base — a.ts:1" '  detail' > "$out"
+`
+
+const FAKE_LLM = `#!/usr/bin/env bash
+model=
+while [ $# -gt 1 ]; do
+  case "$1" in
+    -m) model=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+printf '%s' "$1" > "$GRANNY_PROMPT_RECORD"
+printf '%s\\n' "- [P2] Reviewed with $model — a.ts:1" '  detail'
 `
 
 const FIXTURES = join(import.meta.dir, 'fixtures')
@@ -443,38 +616,38 @@ describe('the review script in a real shell', () => {
 
   it('runs the newest Codex plugin companion on Claude Code with engine auto, and says so', async () => {
     installCompanions()
-    const f = fakeHost({ name: 'claude-code', direct: false, shell: shell(), scores: [{ F1: 90, F2: 90 }] })
+    const f = fakeHost({ name: 'claude-code', direct: false, shell: shell(), scores: [{ 'codex-F1': 90, 'codex-F2': 90 }] })
     const r = await runGranny(f.host, input({ repo, config: { maxRounds: 1, workDir } }))
     expect(titles(r)).toEqual([
       ['P1', 'Include the first item in the cart total'],
       ['P2', 'Restore discount percentage bounds validation'],
     ])
     expect(companionCalls()).toEqual([{ version: '1.0.10', argv: ['review', '--wait', '--base', 'start1', '--scope', 'branch'], cwd: realpathSync(repo) }])
-    expect(f.logs).toContain(`core r1: reviewer: codex-plugin review (${companionDir('1.0.10')}/codex-companion.mjs)`)
-    expect(readFileSync(join(repo, workDir, 'review-core-r1.md'), 'utf8')).toBe(readFileSync(join(FIXTURES, 'codex-plugin-review.md'), 'utf8'))
-    expect(readFileSync(join(repo, workDir, 'review-core-r1.log'), 'utf8')).toBe('[codex] progress\n')
+    expect(f.logs).toContain(`core r1 codex: reviewer: codex-plugin review (${companionDir('1.0.10')}/codex-companion.mjs)`)
+    expect(readFileSync(join(repo, workDir, 'review-core-r1-codex.md'), 'utf8')).toBe(readFileSync(join(FIXTURES, 'codex-plugin-review.md'), 'utf8'))
+    expect(readFileSync(join(repo, workDir, 'review-core-r1-codex.log'), 'utf8')).toBe('[codex] progress\n')
   })
 
   it('looks for the companion under CLAUDE_CONFIG_DIR instead of ~/.claude when it is set', async () => {
     installCompanions()
     const config = join(home, 'relocated claude config')
     installCompanion('1.0.3', undefined, config)
-    const f = fakeHost({ name: 'claude-code', direct: false, shell: shell({ CLAUDE_CONFIG_DIR: config }), scores: [{ F1: 90, F2: 90 }] })
+    const f = fakeHost({ name: 'claude-code', direct: false, shell: shell({ CLAUDE_CONFIG_DIR: config }), scores: [{ 'codex-F1': 90, 'codex-F2': 90 }] })
     await runGranny(f.host, input({ repo, config: { maxRounds: 1, workDir } }))
     expect(companionCalls().map(c => c.version)).toEqual(['1.0.3'])
-    expect(f.logs).toContain(`core r1: reviewer: codex-plugin review (${companionDir('1.0.3', config)}/codex-companion.mjs)`)
+    expect(f.logs).toContain(`core r1 codex: reviewer: codex-plugin review (${companionDir('1.0.3', config)}/codex-companion.mjs)`)
   })
 
   it('names the CLAUDE_CONFIG_DIR it searched when it falls back to the Codex CLI', async () => {
     installCompanions()
     const config = join(home, 'empty claude config')
     mkdirSync(config)
-    const f = fakeHost({ name: 'claude-code', direct: false, shell: shell({ CLAUDE_CONFIG_DIR: config }), scores: [{ F1: 90 }] })
+    const f = fakeHost({ name: 'claude-code', direct: false, shell: shell({ CLAUDE_CONFIG_DIR: config }), scores: [{ 'codex-F1': 90 }] })
     const r = await runGranny(f.host, input({ repo, config: { maxRounds: 1, workDir } }))
     expect(titles(r)).toEqual([['P1', 'Reviewed start1']])
     expect(companionCalls()).toEqual([])
     expect(f.logs).toContain(
-      `core r1: reviewer: codex CLI (codex exec review) - no Codex plugin companion at ${config}/plugins/cache/openai-codex/codex/<version>/scripts/codex-companion.mjs`,
+      `core r1 codex: reviewer: codex CLI (codex exec review) - no Codex plugin companion at ${config}/plugins/cache/openai-codex/codex/<version>/scripts/codex-companion.mjs`,
     )
   })
 
@@ -486,7 +659,7 @@ describe('the review script in a real shell', () => {
     )
     for (const version of ['0.99.99', '1.0.9', '1.9.3', '1.0.10']) installCompanion(version, '- [P0] Older companion ran — old.js:1\n')
     installCompanion('1.10.0')
-    const f = fakeHost({ name: 'claude-code', direct: false, shell: shell(), scores: [{ F1: 90, F2: 90 }] })
+    const f = fakeHost({ name: 'claude-code', direct: false, shell: shell(), scores: [{ 'codex-F1': 90, 'codex-F2': 90 }] })
     const r = await runGranny(f.host, input({ repo, config: { maxRounds: 1, workDir } }))
     expect(companionCalls().map(c => c.version)).toEqual(['1.10.0'])
     expect(titles(r).map(([, title]) => title)).toEqual(['Include the first item in the cart total', 'Restore discount percentage bounds validation'])
@@ -502,19 +675,19 @@ describe('the review script in a real shell', () => {
   })
 
   it('falls back to the Codex CLI on Claude Code with engine auto when no companion is installed, and says why', async () => {
-    const f = fakeHost({ name: 'claude-code', direct: false, shell: shell(), scores: [{ F1: 90 }] })
+    const f = fakeHost({ name: 'claude-code', direct: false, shell: shell(), scores: [{ 'codex-F1': 90 }] })
     const r = await runGranny(f.host, input({ repo, config: { maxRounds: 1, workDir } }))
     expect(titles(r)).toEqual([['P1', 'Reviewed start1']])
-    expect(f.logs).toContain(`core r1: reviewer: codex CLI (codex exec review) - ${missing()}`)
+    expect(f.logs).toContain(`core r1 codex: reviewer: codex CLI (codex exec review) - ${missing()}`)
   })
 
   it('falls back to the Codex CLI on Claude Code with engine auto when a companion is installed but node is not on PATH', async () => {
     installCompanions()
-    const f = fakeHost({ name: 'claude-code', direct: false, shell: withoutNode(), scores: [{ F1: 90 }] })
+    const f = fakeHost({ name: 'claude-code', direct: false, shell: withoutNode(), scores: [{ 'codex-F1': 90 }] })
     const r = await runGranny(f.host, input({ repo, config: { maxRounds: 1, workDir } }))
     expect(titles(r)).toEqual([['P1', 'Reviewed start1']])
     expect(companionCalls()).toEqual([])
-    expect(f.logs).toContain(`core r1: reviewer: codex CLI (codex exec review) - ${noNode()}`)
+    expect(f.logs).toContain(`core r1 codex: reviewer: codex CLI (codex exec review) - ${noNode()}`)
   })
 
   for (const [label, host, reviewer] of [
@@ -526,13 +699,13 @@ describe('the review script in a real shell', () => {
       installCompanions()
       const mode = 'mode' in reviewer ? reviewer.mode : 'review'
       const f = fakeHost({ name: host, direct: host === 'opencode', shell: withoutNode() })
-      const r = await runGranny(f.host, input({ repo, config: { maxRounds: 1, workDir, roles: { reviewer } } }))
+      const r = await runGranny(f.host, input({ repo, config: { maxRounds: 1, workDir, reviewers: [{ name: 'codex', ...reviewer }] } }))
       expect(r.stages[0]).toMatchObject({ outcome: 'review-failed', rounds: 1 })
       expect(r.stages[0]!.note).toContain(`codex-plugin ${mode} unavailable - ${noNode()}; install Node.js`)
       expect(r.stages[0]!.note).not.toContain('Reviewed')
       expect(r.stages[0]!.note).not.toContain('command not found')
       expect(companionCalls()).toEqual([])
-      expect(f.logs.some(l => l.startsWith(`core r1: reviewer: codex-plugin ${mode} unavailable - node is not on PATH`))).toBe(true)
+      expect(f.logs.some(l => l.startsWith(`core r1 codex: reviewer: codex-plugin ${mode} unavailable - node is not on PATH`))).toBe(true)
     })
   }
 
@@ -545,18 +718,21 @@ describe('the review script in a real shell', () => {
         } catch {}
       }
     })
+    const installBroker = (record: string, exit = 0) => {
+      mkdirSync(companionDir('1.0.10'), { recursive: true })
+      writeFileSync(join(companionDir('1.0.10'), 'codex-companion.mjs'), brokerCompanion(record, { exit }))
+      writeFileSync(join(companionDir('1.0.10'), 'session-lifecycle-hook.mjs'), sessionEndHook(record))
+    }
     for (const [label, exit] of [['the review ends', 0], ['the companion fails', 1]] as const) {
       it(`is stopped when ${label}, and is kept out of the session's plugin data`, async () => {
         const userData = join(home, 'user plugin data')
         const record = join(home, 'broker.jsonl')
-        mkdirSync(companionDir('1.0.10'), { recursive: true })
-        writeFileSync(join(companionDir('1.0.10'), 'codex-companion.mjs'), brokerCompanion(record, { exit }))
-        writeFileSync(join(companionDir('1.0.10'), 'session-lifecycle-hook.mjs'), sessionEndHook(record))
-        const f = fakeHost({ name: 'claude-code', direct: false, shell: shell({ CLAUDE_PLUGIN_DATA: userData }), scores: [{ F1: 90 }] })
+        installBroker(record, exit)
+        const f = fakeHost({ name: 'claude-code', direct: false, shell: shell({ CLAUDE_PLUGIN_DATA: userData }), scores: [{ 'codex-F1': 90 }] })
         const r = await runGranny(f.host, input({ repo, config: { maxRounds: 1, workDir } }))
         const [companion, ...after] = records(record)
         brokers.push(companion.broker)
-        const data = join(realpathSync(repo), workDir, 'codex-plugin')
+        const data = join(realpathSync(repo), workDir, 'codex-plugin-codex')
         expect(realpathSync(companion.data)).toBe(data)
         expect(after.map(h => ({ ...h, data: realpathSync(h.data) }))).toEqual([{ event: 'hook', argv: ['SessionEnd'], cwd: realpathSync(repo), data }])
         expect(await until(() => !alive(companion.broker))).toBe(true)
@@ -566,11 +742,30 @@ describe('the review script in a real shell', () => {
       })
     }
 
+    it('gives each Codex plugin reviewer its own broker, stopped by its own SessionEnd, while they run side by side', async () => {
+      const record = join(home, 'broker.jsonl')
+      installBroker(record)
+      const f = fakeHost({ name: 'claude-code', direct: false, shell: shell(), scores: [{ 'one-F1': 90, 'two-F1': 90 }] })
+      const r = await runGranny(f.host, input({ repo, config: { maxRounds: 1, workDir, reviewers: [{ name: 'one', engine: 'codex-plugin' }, { name: 'two', engine: 'codex-plugin' }] } }))
+      const all = records(record).map(e => ({ ...e, data: realpathSync(e.data) }))
+      const companions = all.filter(e => e.event === 'companion')
+      brokers.push(...companions.map(c => c.broker))
+      const dir = (name: string) => join(realpathSync(repo), workDir, `codex-plugin-${name}`)
+      expect(companions.map(c => c.data).sort()).toEqual([dir('one'), dir('two')])
+      expect(all.filter(e => e.event === 'hook').map(h => h.data).sort()).toEqual([dir('one'), dir('two')])
+      for (const c of companions) expect(await until(() => !alive(c.broker))).toBe(true)
+      expect(r.stages[0]!.history[0]!.findings.map(x => [x.id, x.title])).toEqual([
+        ['one-F1', 'Reviewed by the plugin'],
+        ['two-F1', 'Reviewed by the plugin'],
+      ])
+      for (const name of ['one', 'two']) expect(f.logs).toContain(`core r1 ${name}: reviewer: codex-plugin review (${companionDir('1.0.10')}/codex-companion.mjs)`)
+    })
+
     it('is not touched when engine auto runs the Codex CLI', async () => {
       const record = join(home, 'broker.jsonl')
       mkdirSync(companionDir('1.0.10'), { recursive: true })
       writeFileSync(join(companionDir('1.0.10'), 'session-lifecycle-hook.mjs'), sessionEndHook(record))
-      const f = fakeHost({ name: 'claude-code', direct: false, shell: shell(), scores: [{ F1: 90 }] })
+      const f = fakeHost({ name: 'claude-code', direct: false, shell: shell(), scores: [{ 'codex-F1': 90 }] })
       const r = await runGranny(f.host, input({ repo, config: { maxRounds: 1, workDir } }))
       expect(titles(r)).toEqual([['P1', 'Reviewed start1']])
       expect(records(record)).toEqual([])
@@ -579,17 +774,17 @@ describe('the review script in a real shell', () => {
 
   it('runs the Codex CLI on opencode with engine auto even when a companion is installed', async () => {
     installCompanions()
-    const f = fakeHost({ shell: shell(), scores: [{ F1: 90 }] })
+    const f = fakeHost({ shell: shell(), scores: [{ 'codex-F1': 90 }] })
     const r = await runGranny(f.host, input({ repo, config: { maxRounds: 1, workDir } }))
     expect(titles(r)).toEqual([['P1', 'Reviewed start1']])
     expect(companionCalls()).toEqual([])
-    expect(f.logs).toContain('core r1: reviewer: codex CLI (codex exec review)')
+    expect(f.logs).toContain('core r1 codex: reviewer: codex CLI (codex exec review)')
   })
 
   it('runs the companion on opencode with engine codex-plugin, passing the reviewer model', async () => {
     installCompanions()
-    const f = fakeHost({ shell: shell(), scores: [{ F1: 90, F2: 90 }] })
-    const r = await runGranny(f.host, input({ repo, config: { maxRounds: 1, workDir, roles: { reviewer: { engine: 'codex-plugin', model: 'gpt-5.5' } } } }))
+    const f = fakeHost({ shell: shell(), scores: [{ 'codex-F1': 90, 'codex-F2': 90 }] })
+    const r = await runGranny(f.host, input({ repo, config: { maxRounds: 1, workDir, reviewers: [{ name: 'codex', engine: 'codex-plugin', model: 'gpt-5.5' }] } }))
     expect(titles(r).map(([, title]) => title)).toEqual(['Include the first item in the cart total', 'Restore discount percentage bounds validation'])
     expect(companionCalls().map(c => [c.version, c.argv])).toEqual([['1.0.10', ['review', '--wait', '--base', 'start1', '--scope', 'branch', '-m', 'gpt-5.5']]])
   })
@@ -597,80 +792,96 @@ describe('the review script in a real shell', () => {
   for (const [label, host] of [['Claude Code', 'claude-code'], ['opencode', 'opencode']] as const) {
     it(`fails the review with a clear note when engine codex-plugin finds no companion on ${label} - no CLI fallback`, async () => {
       const f = fakeHost({ name: host, direct: host === 'opencode', shell: shell() })
-      const r = await runGranny(f.host, input({ repo, config: { maxRounds: 1, workDir, roles: { reviewer: { engine: 'codex-plugin' } } } }))
+      const r = await runGranny(f.host, input({ repo, config: { maxRounds: 1, workDir, reviewers: [{ name: 'codex', engine: 'codex-plugin' }] } }))
       expect(r.stages[0]).toMatchObject({ outcome: 'review-failed', rounds: 1 })
       expect(r.stages[0]!.note).toContain(`codex-plugin review unavailable - ${missing()}; install OpenAI's Codex plugin for Claude Code`)
       expect(r.stages[0]!.note).not.toContain('Reviewed')
       expect(r.stages[0]!.note).not.toContain('No such file')
-      expect(existsSync(join(repo, workDir, 'review-core-r1.md'))).toBe(false)
-      expect(f.logs.some(l => l.startsWith('core r1: reviewer: codex-plugin review unavailable'))).toBe(true)
+      expect(existsSync(join(repo, workDir, 'review-core-r1-codex.md'))).toBe(false)
+      expect(f.logs.some(l => l.startsWith('core r1 codex: reviewer: codex-plugin review unavailable'))).toBe(true)
     })
   }
 
   it('runs adversarial-review with the focus text after --, and reads its high findings as P1', async () => {
     installCompanions()
     const focus = "don't skip $HOME; -x `id`"
-    const f = fakeHost({ name: 'claude-code', direct: false, shell: shell(), scores: [{ F1: 90, F2: 90 }] })
-    const r = await runGranny(f.host, input({ repo, config: { maxRounds: 1, workDir, roles: { reviewer: { mode: 'adversarial-review', focus, model: 'gpt-5.5' } } } }))
+    const f = fakeHost({ name: 'claude-code', direct: false, shell: shell(), scores: [{ 'codex-F1': 90, 'codex-F2': 90 }] })
+    const r = await runGranny(f.host, input({ repo, config: { maxRounds: 1, workDir, reviewers: [{ name: 'codex', mode: 'adversarial-review', focus, model: 'gpt-5.5' }] } }))
     expect(companionCalls().map(c => c.argv)).toEqual([['adversarial-review', '--wait', '--base', 'start1', '--scope', 'branch', '-m', 'gpt-5.5', '--', focus]])
     expect(titles(r)).toEqual([
       ['P1', 'Cart totals exclude the first item'],
       ['P1', 'Out-of-range discounts now produce invalid totals'],
     ])
-    expect(f.logs).toContain(`core r1: reviewer: codex-plugin adversarial-review (${companionDir('1.0.10')}/codex-companion.mjs)`)
+    expect(f.logs).toContain(`core r1 codex: reviewer: codex-plugin adversarial-review (${companionDir('1.0.10')}/codex-companion.mjs)`)
   })
 
   it('fails adversarial-review on engine auto when no companion is installed instead of running a plain CLI review', async () => {
     const f = fakeHost({ name: 'claude-code', direct: false, shell: shell() })
-    const r = await runGranny(f.host, input({ repo, config: { maxRounds: 1, workDir, roles: { reviewer: { mode: 'adversarial-review' } } } }))
+    const r = await runGranny(f.host, input({ repo, config: { maxRounds: 1, workDir, reviewers: [{ name: 'codex', mode: 'adversarial-review' }] } }))
     expect(r.stages[0]).toMatchObject({ outcome: 'review-failed', rounds: 1 })
     expect(r.stages[0]!.note).toContain(`codex-plugin adversarial-review unavailable - ${missing()}`)
     expect(r.stages[0]!.note).not.toContain('Reviewed')
   })
 
-  it('runs a custom command on engine auto without looking for the plugin', async () => {
+  it('runs a command reviewer on Claude Code without looking for the plugin', async () => {
     installCompanions()
     const command = `test -n {base} && printf '%s\\n' '- [P2] Custom — b.ts:2' '  d' > {out}`
-    const f = fakeHost({ name: 'claude-code', direct: false, shell: shell(), scores: [{ F1: 90 }] })
-    const r = await runGranny(f.host, input({ repo, config: { maxRounds: 1, workDir, roles: { reviewer: { command } } } }))
+    const f = fakeHost({ name: 'claude-code', direct: false, shell: shell(), scores: [{ 'mine-F1': 90 }] })
+    const r = await runGranny(f.host, input({ repo, config: { maxRounds: 1, workDir, reviewers: [{ name: 'mine', engine: 'command', command }] } }))
     expect(titles(r)).toEqual([['P2', 'Custom']])
     expect(companionCalls()).toEqual([])
-    expect(f.logs).toContain('core r1: reviewer: custom command (roles.reviewer.command)')
+    expect(f.logs).toContain('core r1 mine: reviewer: custom command')
   })
 
+  for (const [label, host] of [['opencode', 'opencode'], ['Claude Code', 'claude-code']] as const) {
+    it(`runs a command reviewer that takes {prompt}, handing the CLI the whole prompt as one argument, on ${label}`, async () => {
+      writeFileSync(join(bin, 'fake-llm'), FAKE_LLM, { mode: 0o755 })
+      const promptFile = join(home, 'prompt.txt')
+      const context = "Read plans/x.md first.\nIt's `important`: $HOME and $(id)."
+      const glm = { name: 'glm', engine: 'command', command: 'fake-llm -m {model} {prompt}', model: 'opencode/glm-5.3-flash-free' }
+      const f = fakeHost({ name: host, direct: host === 'opencode', shell: shell({ GRANNY_PROMPT_RECORD: promptFile }), scores: [{ 'glm-F1': 90 }] })
+      const r = await runGranny(f.host, input({ repo, context, config: { maxRounds: 1, workDir, reviewers: [glm] } }))
+      const expected = commandReviewPrompt({ repo, branch: 'feat/x', base: 'main', context, config: resolveConfig([{ reviewers: [glm] }]) }, 'core', 'start1')
+      expect(readFileSync(promptFile, 'utf8')).toBe(expected)
+      expect(expected).toContain("It's `important`: $HOME and $(id).")
+      expect(r.stages[0]!.history[0]!.findings.map(x => [x.id, x.reviewer, x.title])).toEqual([['glm-F1', 'glm', 'Reviewed with opencode/glm-5.3-flash-free']])
+      expect(f.logs).toContain('core r1 glm: reviewer: custom command')
+    })
+  }
+
   it('runs the default codex command in a repo and work dir with spaces and a quote', async () => {
-    const f = fakeHost({ shell: shell(), scores: [{ F1: 90 }] })
+    const f = fakeHost({ shell: shell(), scores: [{ 'codex-F1': 90 }] })
     const r = await runGranny(f.host, input({ repo, config: { maxRounds: 1, workDir } }))
     expect(r.stages[0]!.history[0]!.findings.map(x => x.title)).toEqual(['Reviewed start1'])
-    expect(readFileSync(join(repo, workDir, 'review-core-r1.md'), 'utf8')).toContain('Reviewed start1')
-    expect(readFileSync(join(repo, workDir, 'review-core-r1.log'), 'utf8')).toBe('codex progress\n')
+    expect(readFileSync(join(repo, workDir, 'review-core-r1-codex.md'), 'utf8')).toContain('Reviewed start1')
+    expect(readFileSync(join(repo, workDir, 'review-core-r1-codex.log'), 'utf8')).toBe('codex progress\n')
   })
 
   it('runs the cd-prefixed command a granny agent is given from outside the repo', async () => {
-    const f = fakeHost({ name: 'claude-code', direct: false, shell: shell(), scores: [{ F1: 90 }] })
+    const f = fakeHost({ name: 'claude-code', direct: false, shell: shell(), scores: [{ 'codex-F1': 90 }] })
     const r = await runGranny(f.host, input({ repo, config: { maxRounds: 1, workDir } }))
     expect(f.commands[0]!.startsWith('cd ')).toBe(true)
     expect(r.stages[0]!.history[0]!.findings.map(x => x.title)).toEqual(['Reviewed start1'])
-    expect(existsSync(join(repo, workDir, 'review-core-r1.md'))).toBe(true)
+    expect(existsSync(join(repo, workDir, 'review-core-r1-codex.md'))).toBe(true)
   })
 
-  it('substitutes a quoted {out} into a custom command', async () => {
+  it('substitutes a quoted {out} into a command template', async () => {
     const command = `{ test -n {base} && printf '%s\\n' '- [P2] Custom — b.ts:2' '  d' > {out}; }`
-    const f = fakeHost({ shell: {}, scores: [{ F1: 90 }] })
-    const r = await runGranny(f.host, input({ repo, config: { maxRounds: 1, workDir, roles: { reviewer: { command } } } }))
+    const f = fakeHost({ shell: {}, scores: [{ 'mine-F1': 90 }] })
+    const r = await runGranny(f.host, input({ repo, config: { maxRounds: 1, workDir, reviewers: [{ name: 'mine', engine: 'command', command }] } }))
     expect(r.stages[0]!.history[0]!.findings.map(x => x.title)).toEqual(['Custom'])
-    expect(readFileSync(join(repo, workDir, 'review-core-r1.md'), 'utf8')).toContain('Custom')
+    expect(readFileSync(join(repo, workDir, 'review-core-r1-mine.md'), 'utf8')).toContain('Custom')
   })
 
-  it('reads what a custom reviewer printed, not a review file an earlier run left behind', async () => {
+  it('reads what a command reviewer printed, not a review file an earlier run left behind', async () => {
     mkdirSync(join(repo, '.granny'))
-    writeFileSync(join(repo, '.granny/review-core-r1.md'), review(finding('P2', 'Stale from an earlier run')))
-    writeFileSync(join(repo, '.granny/review-core-r1.log'), 'stale log\n')
+    writeFileSync(join(repo, '.granny/review-core-r1-mine.md'), review(finding('P2', 'Stale from an earlier run')))
+    writeFileSync(join(repo, '.granny/review-core-r1-mine.log'), 'stale log\n')
     const command = `test -n {base} && printf '%s\\n' '- [P1] Fresh — a.ts:1' '  printed to stdout'`
-    const f = fakeHost({ shell: {}, scores: [{ F1: 90 }] })
-    const r = await runGranny(f.host, input({ repo, config: { maxRounds: 1, roles: { reviewer: { command } } } }))
+    const f = fakeHost({ shell: {}, scores: [{ 'mine-F1': 90 }] })
+    const r = await runGranny(f.host, input({ repo, config: { maxRounds: 1, reviewers: [{ name: 'mine', engine: 'command', command }] } }))
     expect(r.stages[0]!.history[0]!.findings.map(x => x.title)).toEqual(['Fresh'])
-    expect(existsSync(join(repo, '.granny/review-core-r1.md'))).toBe(false)
-    expect(readFileSync(join(repo, '.granny/review-core-r1.log'), 'utf8')).not.toContain('stale log')
+    expect(existsSync(join(repo, '.granny/review-core-r1-mine.md'))).toBe(false)
+    expect(readFileSync(join(repo, '.granny/review-core-r1-mine.log'), 'utf8')).not.toContain('stale log')
   })
 })

@@ -1,5 +1,4 @@
-import { shellQuote } from './shell'
-import type { HostName, Role } from './types'
+import type { HostName } from './types'
 
 export type ModelSpec = string | Partial<Record<HostName, string>>
 
@@ -8,23 +7,21 @@ export interface RoleConfig {
   effort?: string
 }
 
-export type ReviewerEngine = 'auto' | 'codex-plugin' | 'codex' | 'agent'
+export type ConfigRole = 'granny' | 'implementer' | 'judge'
+export type ReviewerEngine = 'auto' | 'codex' | 'codex-plugin' | 'agent' | 'command'
 export type ReviewMode = 'review' | 'adversarial-review'
 
 export interface ReviewerConfig extends RoleConfig {
-  engine?: ReviewerEngine
+  name: string
+  engine: ReviewerEngine
   mode?: ReviewMode
   focus?: string
   command?: string
 }
 
 export interface GrannyConfig {
-  roles: {
-    granny: RoleConfig
-    implementer: RoleConfig
-    reviewer: ReviewerConfig
-    judge: RoleConfig
-  }
+  roles: Record<ConfigRole, RoleConfig>
+  reviewers: ReviewerConfig[]
   threshold: number
   maxRounds: number
   base: string
@@ -39,9 +36,9 @@ export const DEFAULT_CONFIG: GrannyConfig = {
   roles: {
     granny: {},
     implementer: {},
-    reviewer: { engine: 'auto' },
     judge: { model: { 'claude-code': 'sonnet' } },
   },
+  reviewers: [{ name: 'codex', engine: 'auto' }],
   threshold: 70,
   maxRounds: 4,
   base: 'main',
@@ -55,13 +52,15 @@ export const DEFAULT_CONFIG: GrannyConfig = {
   ],
 }
 
-const ROLES: Role[] = ['granny', 'implementer', 'reviewer', 'judge']
+const ROLES: ConfigRole[] = ['granny', 'implementer', 'judge']
 const TOP_KEYS = new Set(['$schema', 'roles', ...Object.keys(DEFAULT_CONFIG).filter(k => k !== 'roles')])
 const ROLE_KEYS = new Set(['model', 'effort'])
-const REVIEWER_KEYS = new Set(['model', 'effort', 'engine', 'mode', 'focus', 'command'])
+const REVIEWER_KEYS = new Set(['name', 'engine', 'model', 'effort', 'mode', 'focus', 'command'])
 const EFFORTS = new Set(['low', 'medium', 'high', 'xhigh', 'max'])
-const ENGINES: ReviewerEngine[] = ['auto', 'codex-plugin', 'codex', 'agent']
+const ENGINES: ReviewerEngine[] = ['auto', 'codex', 'codex-plugin', 'agent', 'command']
+const PLUGIN_ENGINES: ReviewerEngine[] = ['auto', 'codex-plugin']
 const MODES: ReviewMode[] = ['review', 'adversarial-review']
+const NAME = /^[a-z0-9-]+$/
 
 const isObject = (v: unknown): v is Record<string, any> => typeof v === 'object' && v !== null && !Array.isArray(v)
 
@@ -83,7 +82,13 @@ export function resolveConfig(layers: unknown[], host?: HostName): GrannyConfig 
       if (!isObject(layer.roles)) errors.push(`${where}: roles must be an object`)
       else {
         for (const [role, value] of Object.entries(layer.roles)) {
-          if (!ROLES.includes(role as Role)) {
+          if (role === 'reviewer') {
+            errors.push(
+              `${where}: roles.reviewer was replaced by "reviewers": [{ "name": "codex", ...the same keys }] - a list of reviewers that run in parallel; a custom command needs "engine": "command"`,
+            )
+            continue
+          }
+          if (!ROLES.includes(role as ConfigRole)) {
             errors.push(`${where}: unknown role "${role}" (expected ${ROLES.join(', ')})`)
             continue
           }
@@ -91,11 +96,10 @@ export function resolveConfig(layers: unknown[], host?: HostName): GrannyConfig 
             errors.push(`${where}: roles.${role} must be an object`)
             continue
           }
-          const allowed = role === 'reviewer' ? REVIEWER_KEYS : ROLE_KEYS
           for (const k of Object.keys(value)) {
-            if (!allowed.has(k)) errors.push(`${where}: unknown key "roles.${role}.${k}"`)
+            if (!ROLE_KEYS.has(k)) errors.push(`${where}: unknown key "roles.${role}.${k}"`)
           }
-          const target = config.roles[role as Role] as Record<string, unknown>
+          const target = config.roles[role as ConfigRole] as Record<string, unknown>
           for (const [k, v] of Object.entries(value)) {
             if (v === null) delete target[k]
             else target[k] = v
@@ -109,12 +113,75 @@ export function resolveConfig(layers: unknown[], host?: HostName): GrannyConfig 
     }
   })
 
-  errors.push(...validate(config, host))
+  config.reviewers = reviewers(config.reviewers, errors, host)
+  errors.push(...validate(config))
   if (errors.length) throw new Error(`Invalid granny config:\n- ${errors.join('\n- ')}`)
   return config
 }
 
-function validate(c: GrannyConfig, host?: HostName): string[] {
+function modelErrors(path: string, spec: unknown): string[] {
+  if (spec === undefined) return []
+  if (typeof spec !== 'string' && !isObject(spec)) return [`${path} must be a string or an object keyed by host`]
+  if (typeof spec === 'string') return []
+  const errors: string[] = []
+  for (const [host, m] of Object.entries(spec)) {
+    if (host !== 'claude-code' && host !== 'opencode') errors.push(`${path}: unknown host "${host}"`)
+    if (typeof m !== 'string' || !m) errors.push(`${path}.${host} must be a non-empty string`)
+  }
+  return errors
+}
+
+const effortErrors = (path: string, effort: unknown): string[] =>
+  effort !== undefined && !EFFORTS.has(effort as string) ? [`${path} must be one of ${[...EFFORTS].join(', ')}`] : []
+
+function reviewers(list: unknown, errors: string[], host?: HostName): ReviewerConfig[] {
+  if (!Array.isArray(list) || !list.length) {
+    errors.push('reviewers must be a non-empty array of reviewer objects')
+    return []
+  }
+  const named = new Map<string, number>()
+  return list.map((entry, i): ReviewerConfig => {
+    const at = `reviewers[${i}]`
+    if (!isObject(entry)) {
+      errors.push(`${at} must be an object`)
+      return { name: `reviewer-${i + 1}`, engine: 'auto' }
+    }
+    for (const k of Object.keys(entry)) {
+      if (!REVIEWER_KEYS.has(k)) errors.push(`unknown key "${at}.${k}"`)
+    }
+    const engine: ReviewerEngine = entry.engine ?? 'auto'
+    if (!ENGINES.includes(engine)) errors.push(`${at}.engine must be one of ${ENGINES.map(e => `"${e}"`).join(', ')}`)
+    const name: string = entry.name ?? `${engine}-${i + 1}`
+    if (typeof name !== 'string' || !NAME.test(name)) errors.push(`${at}.name must be a non-empty string of a-z, 0-9 and -`)
+    else if (named.has(name)) errors.push(`${at}.name "${name}" is already used by reviewers[${named.get(name)}]`)
+    else named.set(name, i)
+
+    errors.push(...modelErrors(`${at}.model`, entry.model), ...effortErrors(`${at}.effort`, entry.effort))
+    const adversarial = entry.mode === 'adversarial-review'
+    if (entry.mode !== undefined && !MODES.includes(entry.mode)) errors.push(`${at}.mode must be "review" or "adversarial-review"`)
+    else if (entry.mode !== undefined && !PLUGIN_ENGINES.includes(engine)) {
+      errors.push(`${at}.mode needs the Codex plugin; engine "${engine}" cannot run it - use "codex-plugin" or "auto"`)
+    }
+    if (entry.focus !== undefined && (typeof entry.focus !== 'string' || !entry.focus.trim())) errors.push(`${at}.focus must be a non-empty string`)
+    else if (entry.focus !== undefined && !adversarial) {
+      errors.push(`${at}.focus only works with mode "adversarial-review"; the plain review takes no focus text`)
+    }
+    if (engine === 'command') {
+      if (entry.command === undefined) errors.push(`${at}.command is required for engine "command"`)
+      else if (typeof entry.command !== 'string' || !/\{(base|prompt)\}/.test(entry.command)) {
+        errors.push(`${at}.command must be a string containing {base} or {prompt}`)
+      }
+    } else if (entry.command !== undefined) {
+      errors.push(`${at}.command needs "engine": "command"; engine "${engine}" runs its own reviewer`)
+    }
+    if (host === 'opencode' && adversarial && engine === 'auto') {
+      errors.push(`${at}.mode "adversarial-review" needs the Codex plugin, and on opencode engine "auto" means the Codex CLI - set ${at}.engine to "codex-plugin"`)
+    }
+    return { ...entry, name, engine }
+  })
+}
+
+function validate(c: GrannyConfig): string[] {
   const errors: string[] = []
   if (typeof c.threshold !== 'number' || !(c.threshold >= 0 && c.threshold <= 100)) {
     errors.push('threshold must be a number between 0 and 100')
@@ -132,43 +199,7 @@ function validate(c: GrannyConfig, host?: HostName): string[] {
   if (!Array.isArray(c.rules) || !c.rules.every(r => typeof r === 'string')) errors.push('rules must be an array of strings')
 
   for (const role of ROLES) {
-    const r = c.roles[role]
-    if (r.model !== undefined && typeof r.model !== 'string' && !isObject(r.model)) {
-      errors.push(`roles.${role}.model must be a string or an object keyed by host`)
-    }
-    if (isObject(r.model)) {
-      for (const [host, m] of Object.entries(r.model)) {
-        if (host !== 'claude-code' && host !== 'opencode') errors.push(`roles.${role}.model: unknown host "${host}"`)
-        if (typeof m !== 'string' || !m) errors.push(`roles.${role}.model.${host} must be a non-empty string`)
-      }
-    }
-    if (r.effort !== undefined && !EFFORTS.has(r.effort)) {
-      errors.push(`roles.${role}.effort must be one of ${[...EFFORTS].join(', ')}`)
-    }
-  }
-  const rv = c.roles.reviewer
-  const engine = rv.engine ?? 'auto'
-  const adversarial = rv.mode === 'adversarial-review'
-  if (!ENGINES.includes(engine)) errors.push(`roles.reviewer.engine must be one of ${ENGINES.map(e => `"${e}"`).join(', ')}`)
-  if (rv.mode !== undefined && !MODES.includes(rv.mode)) errors.push('roles.reviewer.mode must be "review" or "adversarial-review"')
-  if (rv.focus !== undefined && (typeof rv.focus !== 'string' || !rv.focus.trim())) errors.push('roles.reviewer.focus must be a non-empty string')
-  if (rv.command !== undefined && (typeof rv.command !== 'string' || !rv.command.includes('{base}'))) {
-    errors.push('roles.reviewer.command must be a string containing {base}')
-  }
-  if (adversarial && (engine === 'codex' || engine === 'agent')) {
-    errors.push(`roles.reviewer.mode "adversarial-review" needs the Codex plugin; engine "${engine}" cannot run it - use "codex-plugin" or "auto"`)
-  }
-  if (rv.focus !== undefined && !adversarial) {
-    errors.push('roles.reviewer.focus only works with mode "adversarial-review"; the plain review takes no focus text')
-  }
-  if (rv.command !== undefined && engine === 'codex-plugin') {
-    errors.push('roles.reviewer.command cannot be combined with engine "codex-plugin"; it replaces the Codex CLI command')
-  }
-  if (rv.command !== undefined && adversarial && engine === 'auto') {
-    errors.push('roles.reviewer.mode "adversarial-review" needs the Codex plugin, but a custom roles.reviewer.command runs instead of the plugin')
-  }
-  if (host === 'opencode' && adversarial && engine === 'auto' && rv.command === undefined) {
-    errors.push('roles.reviewer.mode "adversarial-review" needs the Codex plugin, and on opencode engine "auto" means the Codex CLI - set roles.reviewer.engine to "codex-plugin"')
+    errors.push(...modelErrors(`roles.${role}.model`, c.roles[role].model), ...effortErrors(`roles.${role}.effort`, c.roles[role].effort))
   }
   return errors
 }
@@ -177,16 +208,4 @@ export function resolveModel(spec: ModelSpec | undefined, host: HostName): strin
   if (spec === undefined) return undefined
   if (typeof spec === 'string') return spec
   return spec[host]
-}
-
-export function reviewerEngine(c: GrannyConfig): ReviewerEngine {
-  return c.roles.reviewer.engine ?? 'auto'
-}
-
-export function codexCommand(c: GrannyConfig, base: string, out: string): string {
-  const model = c.roles.reviewer.model
-  const codexModel = typeof model === 'string' ? model : undefined
-  const template = c.roles.reviewer.command ?? `codex exec review --base {base}${codexModel ? ' -m {model}' : ''} -o {out}`
-  const values: Record<string, string> = { base: shellQuote(base), out: shellQuote(out), model: codexModel ? shellQuote(codexModel) : '' }
-  return template.replace(/\{(base|out|model)\}/g, (_, key: string) => values[key]!)
 }

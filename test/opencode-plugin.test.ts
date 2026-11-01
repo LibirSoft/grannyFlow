@@ -26,7 +26,7 @@ function makeRepo(): string {
 
 const CANNED: Record<string, unknown> = {
   granny_submit_implementation: { startSha: 'aaa', headSha: 'bbb', gatesGreen: true, gates: 'ok', commits: ['c1'], untested: '' },
-  granny_submit_score: { score: 90, perFinding: [{ id: 'F1', score: 95, reason: 'real' }], rationale: 'ok' },
+  granny_submit_score: { score: 90, perFinding: [{ id: 'codex-F1', score: 95, reason: 'real' }], rationale: 'ok' },
   granny_submit_final: { gatesGreen: true, gates: 'ok', commits: ['c1'], prBodyPath: '.granny/PR-BODY.md', issues: '' },
   granny_submit_findings: { findings: [] },
 }
@@ -102,7 +102,7 @@ function fakeContext(behaviour: Behaviour = {}) {
 const REVIEW_ONCE = `test -n {base} && if [ -e .granny/reviewed ]; then echo "No issues." > {out}; else touch .granny/reviewed; printf '%s\\n' '- [P2] Real issue — a.txt:1' '  detail' > {out}; fi`
 
 async function startRun(repo: string, f: ReturnType<typeof fakeContext>, extra: Record<string, unknown> = {}) {
-  writeFileSync(join(repo, 'granny.config.json'), JSON.stringify({ roles: { reviewer: { command: REVIEW_ONCE } }, ...extra }))
+  writeFileSync(join(repo, 'granny.config.json'), JSON.stringify({ reviewers: [{ name: 'codex', engine: 'command', command: REVIEW_ONCE }], ...extra }))
   git(repo, 'add', 'granny.config.json')
   git(repo, 'commit', '-qm', 'cfg')
   const started = await f.tools.get('granny_run').execute({ repo, branch: 'feat/x', stages: [{ name: 'one', task: 'Do it.' }] }, { sessionID: 'parent' })
@@ -250,7 +250,7 @@ describe('opencode plugin', () => {
     await plugin.setup(f.ctx)
     const started = await f.tools
       .get('granny_run')
-      .execute({ repo, branch: 'feat/x', stages: [{ task: 't' }], config: { roles: { reviewer: { mode: 'adversarial-review' } } } }, { sessionID: 'parent' })
+      .execute({ repo, branch: 'feat/x', stages: [{ task: 't' }], config: { reviewers: [{ mode: 'adversarial-review' }] } }, { sessionID: 'parent' })
     expect(started.content).toContain('on opencode engine "auto" means the Codex CLI')
     expect(existsSync(join(repo, '.granny/runs'))).toBe(false)
     expect(f.created).toHaveLength(0)
@@ -260,12 +260,14 @@ describe('opencode plugin', () => {
     writeFileSync(
       join(repo, 'granny.config.json'),
       JSON.stringify({
-        roles: {
-          judge: { model: { opencode: 'opencode/judge-model' } },
-          reviewer: {
+        roles: { judge: { model: { opencode: 'opencode/judge-model' } } },
+        reviewers: [
+          {
+            name: 'codex',
+            engine: 'command',
             command: `test -n {base} && if [ -e .granny/reviewed ]; then echo "No issues." > {out}; else touch .granny/reviewed; printf '%s\\n' '- [P2] Real issue — a.txt:1' '  detail' > {out}; fi`,
           },
-        },
+        ],
       }),
     )
     git(repo, 'add', 'granny.config.json')
@@ -283,7 +285,7 @@ describe('opencode plugin', () => {
     })
     const result = JSON.parse(readFileSync(join(dir, 'result.json'), 'utf8'))
     expect(result.stages[0]).toMatchObject({ stage: 'one', outcome: 'clean', rounds: 2 })
-    expect(result.stages[0].history[0].findings[0]).toMatchObject({ id: 'F1', severity: 'P2', file: 'a.txt', line: 1, score: 95 })
+    expect(result.stages[0].history[0].findings[0]).toMatchObject({ id: 'codex-F1', reviewer: 'codex', severity: 'P2', file: 'a.txt', line: 1, score: 95 })
 
     expect(f.created.map(s => s.title)).toEqual(['granny · implement one', 'granny · judge one r1', 'granny · fix one r1', 'granny · pr-ready check'])
     expect(f.created[0]).toMatchObject({ agent: 'build', model: { providerID: 'opencode', id: 'parent-model' }, location: { directory: repo } })
@@ -393,7 +395,7 @@ describe('opencode plugin', () => {
   describe('when opencode reloads the plugin while a run is in progress', () => {
     const freshModule = (tag: string) => import(`../src/adapters/opencode/plugin.ts?${tag}`)
     const startWith = async (runTool: any, reviewer: Record<string, unknown>, stage: Record<string, unknown> = { name: 'one', task: 'Do it.' }) => {
-      writeFileSync(join(repo, 'granny.config.json'), JSON.stringify({ roles: { reviewer } }))
+      writeFileSync(join(repo, 'granny.config.json'), JSON.stringify({ reviewers: [{ name: 'codex', engine: 'command', ...reviewer }] }))
       git(repo, 'add', 'granny.config.json')
       git(repo, 'commit', '-qm', 'cfg')
       const started = await runTool.execute({ repo, branch: 'feat/x', stages: [stage] }, { sessionID: 'parent' })
@@ -470,7 +472,7 @@ describe('opencode plugin', () => {
         const pidFile = join(pids, 'grandchild.pid')
         const f = fakeContext()
         await createGrannyPlugin({ killGraceMs: 100 }).setup(f.ctx)
-        const { id, dir } = await startRun(repo, f, { roles: { reviewer: { command: command(pidFile) } } })
+        const { id, dir } = await startRun(repo, f, { reviewers: [{ name: 'codex', engine: 'command', command: command(pidFile) }] })
         await waitFor(() => existsSync(pidFile) && readFileSync(pidFile, 'utf8').trim() !== '')
         const pid = Number(readFileSync(pidFile, 'utf8'))
         leftovers.push(pid)
@@ -502,7 +504,7 @@ describe('opencode plugin', () => {
         process.env.CLAUDE_PLUGIN_DATA = join(pids, 'user plugin data')
         const f = fakeContext()
         await createGrannyPlugin({ killGraceMs: 3000 }).setup(f.ctx)
-        const { id, dir } = await startRun(repo, f, { roles: { reviewer: { engine: 'codex-plugin' } } })
+        const { id, dir } = await startRun(repo, f, { reviewers: [{ name: 'codex', engine: 'codex-plugin' }] })
         await waitFor(() => records(record).length > 0)
         const broker = records(record)[0].broker
         leftovers.push(broker)

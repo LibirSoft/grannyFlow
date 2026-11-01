@@ -9,7 +9,7 @@ const skill = join(root, 'skills/granny-workflow')
 const read = (p: string) => readFileSync(join(skill, p), 'utf8')
 const readRoot = (p: string) => readFileSync(join(root, p), 'utf8')
 const configBlocks = (md: string) =>
-  [...md.matchAll(/```json\n([\s\S]*?)```/g)].map(m => m[1]!).filter(b => /^\{\s*"roles"/.test(b.trim()))
+  [...md.matchAll(/```json\n([\s\S]*?)```/g)].map(m => m[1]!).filter(b => /^\{\s*"(roles|reviewers)"/.test(b.trim()))
 
 describe('skill docs', () => {
   it('ships prompts.md in sync with the engine prompts', () => {
@@ -17,8 +17,8 @@ describe('skill docs', () => {
   })
 
   it('has config examples that the engine accepts', () => {
-    const blocks = [...configBlocks(read('SKILL.md')), ...configBlocks(read('references/config.md'))]
-    expect(blocks.length).toBeGreaterThanOrEqual(2)
+    const blocks = [...configBlocks(readRoot('README.md')), ...configBlocks(read('SKILL.md')), ...configBlocks(read('references/config.md'))]
+    expect(blocks.length).toBeGreaterThanOrEqual(4)
     for (const block of blocks) expect(() => resolveConfig([JSON.parse(block)])).not.toThrow()
   })
 

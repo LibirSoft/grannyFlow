@@ -1,7 +1,7 @@
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { resolveConfig } from '../src/core/config'
-import { agentReviewPrompt, extractPrompt, finalPrompt, fixPrompt, implementPrompt, judgePrompt } from '../src/core/prompts'
+import { agentReviewPrompt, commandReviewPrompt, extractPrompt, finalPrompt, fixPrompt, implementPrompt, judgePrompt } from '../src/core/prompts'
 
 const root = join(import.meta.dir, '..')
 const skill = join(root, 'skills/granny-workflow')
@@ -51,6 +51,7 @@ export function renderPrompts(): string {
     ['Implementer - stage', implementPrompt(p, { task: '<stage task>' }, 1, 2, '<stage name>')],
     ['Implementer - fix', fixPrompt(p, '<stage name>', 1, []).replace(/\[\]$/, '<accepted findings as JSON>')],
     ['Reviewer - agent engine', agentReviewPrompt(p, '<stage name>', '<stage start sha>')],
+    ['Reviewer - command engine, the text {prompt} is filled with', commandReviewPrompt(p, '<stage name>', '<stage start sha>')],
     ['Judge', judgePrompt(p, '<stage start sha>', []).replace(/\[\]$/, '<findings as JSON>')],
     ['Extraction fallback', extractPrompt('<stage name>', '<raw review output>')],
     ['Granny - final check', finalPrompt(p)],

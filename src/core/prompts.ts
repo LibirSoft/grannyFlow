@@ -59,9 +59,9 @@ FINDINGS (P0/P1 or score > ${p.config.threshold}):
 ${JSON.stringify(accepted, null, 2)}`
 }
 
-export function reviewCommandPrompt(p: PromptContext, name: string, script: string): string {
+export function reviewCommandPrompt(p: PromptContext, name: string, reviewer: string, script: string): string {
   return `You run one shell command for a code review and return its output. Do not edit, stage or commit anything, and do not review the code yourself.
-Stage "${name}" of repo ${p.repo}, branch \`${p.branch}\`.
+Stage "${name}" of repo ${p.repo}, branch \`${p.branch}\`, reviewer "${reviewer}".
 
 Run exactly this (it can take longer than 10 minutes - use your shell tool's background mode and wait for it to finish; never cut it short):
 ${script}
@@ -76,6 +76,20 @@ You are the REVIEWER. Do not edit, stage or commit anything.
 Review the changes of stage "${name}": \`cd ${shellQuote(p.repo)} && git diff ${shellQuote(reviewBase)}...HEAD\` plus \`git log --oneline ${shellQuote(reviewBase)}..HEAD\`.
 Look for correctness bugs, regressions, missing tests for changed behaviour, security problems and contract breaks. Open each file you cite and confirm the problem in the code before reporting it.
 Return findings with id (F1, F2, ...), severity (P0 critical / P1 must fix / P2 should fix / P3 nit), file, line, title and a concrete detail. Zero findings means the stage is clean.`
+}
+
+export function commandReviewPrompt(p: PromptContext, name: string, reviewBase: string): string {
+  return [
+    'You are a code REVIEWER. Do not edit, stage or commit anything.',
+    `Repo ${p.repo}, branch \`${p.branch}\`. Review the changes of stage "${name}": \`cd ${shellQuote(p.repo)} && git diff ${shellQuote(reviewBase)}...HEAD\` plus \`git log --oneline ${shellQuote(reviewBase)}..HEAD\`.`,
+    p.context ? `Design context, read it first: ${p.context}` : '',
+    'Look for correctness bugs, regressions, missing tests for changed behaviour, security problems and contract breaks. Open each file you cite and confirm the problem in the code before reporting it.',
+    'Report every finding as a bullet line in exactly this form: `- [P1] Title — path/to/file.ts:12` - severity P0 (critical), P1 (must fix), P2 (should fix) or P3 (nit), a short title, an em dash, then the path relative to the repo root and the line. Put the detail on the lines after it, indented by two spaces.',
+    'Use that bullet form for findings only. With no findings, write "No findings." and nothing else.',
+  ]
+    .filter(Boolean)
+    .join(' ')
+    .replace(/\s*\n\s*/g, ' ')
 }
 
 export function extractPrompt(name: string, output: string, short?: { markers: number; got: number }): string {

@@ -38,6 +38,7 @@ export interface Host {
 
 export interface Finding {
   id: string
+  reviewer?: string
   severity: string
   file: string
   line?: number

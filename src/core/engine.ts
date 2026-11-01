@@ -1,6 +1,7 @@
-import { resolveConfig, resolveModel, reviewerEngine, type GrannyConfig } from './config'
+import { resolveConfig, resolveModel, type GrannyConfig, type ReviewerConfig, type RoleConfig } from './config'
 import {
   agentReviewPrompt,
+  commandReviewPrompt,
   extractPrompt,
   finalPrompt,
   fixPrompt,
@@ -10,7 +11,7 @@ import {
   type PromptContext,
 } from './prompts'
 import { parseCodexReview, reviewFailure, triage } from './review'
-import { reportedBackend, reviewPlan } from './reviewer'
+import { reportedBackend, reviewPlan, reviewStem } from './reviewer'
 import { SCHEMAS } from './schemas'
 import { shellQuote } from './shell'
 import type {
@@ -35,6 +36,13 @@ export interface RunInput {
   stages: StageSpec[]
   fromStage?: number
   config?: unknown | unknown[]
+}
+
+interface ReviewerRound {
+  reviewer: ReviewerConfig
+  ran: boolean
+  findings: Finding[]
+  note?: string
 }
 
 const slug = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'stage'
@@ -66,9 +74,8 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
   const p: PromptContext = { repo: input.repo, branch: input.branch, base, context: input.context, config }
   const fromStage = input.fromStage ?? 1
 
-  const call = async (role: Role, kind: ResultKind, label: string, phase: string, prompt: string, access: AgentRequest['access']) => {
-    const rc = config.roles[role]
-    return host.agent({
+  const call = async (role: Role, kind: ResultKind, label: string, phase: string, prompt: string, access: AgentRequest['access'], rc: RoleConfig) =>
+    host.agent({
       role,
       kind,
       label,
@@ -79,24 +86,26 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
       effort: rc.effort,
       access,
     })
-  }
 
   const implement = async (label: string, prompt: string): Promise<Implementation> => {
-    const r = (await call('implementer', 'implementation', label, 'Implement', prompt, 'write')) as Implementation | null
+    const r = (await call('implementer', 'implementation', label, 'Implement', prompt, 'write', config.roles.implementer)) as Implementation | null
     if (!r) throw new Error(`${label}: implementer returned nothing`)
     host.log(`${label}: ${r.startSha.slice(0, 8)}..${r.headSha.slice(0, 8)}, gates ${r.gatesGreen ? 'green' : 'RED'} - ${r.gates}`)
     return r
   }
 
-  const review = async (name: string, reviewBase: string, round: number): Promise<{ ran: boolean; findings: Finding[]; note?: string }> => {
-    const label = `review ${name} r${round}`
-    if (reviewerEngine(config) === 'agent') {
-      const r = await call('reviewer', 'findings', label, 'Review', agentReviewPrompt(p, name, reviewBase), 'read-only')
+  const attribute = (rv: ReviewerConfig, findings: Finding[]): Finding[] =>
+    findings.map((f, i) => ({ ...f, id: `${rv.name}-F${i + 1}`, reviewer: rv.name }))
+
+  const review = async (rv: ReviewerConfig, name: string, reviewBase: string, round: number): Promise<Omit<ReviewerRound, 'reviewer'>> => {
+    const tag = `${name} r${round} ${rv.name}`
+    if (rv.engine === 'agent') {
+      const r = await call('reviewer', 'findings', `review ${tag}`, 'Review', agentReviewPrompt(p, name, reviewBase), 'read-only', rv)
       if (!r) return { ran: false, findings: [], note: 'reviewer agent returned nothing' }
-      return { ran: true, findings: r.findings ?? [] }
+      return { ran: true, findings: Array.isArray(r.findings) ? r.findings : [] }
     }
 
-    const plan = reviewPlan(config, host.name, reviewBase, `${config.workDir}/review-${slug(name)}-r${round}`)
+    const plan = reviewPlan(rv, config, host.name, reviewBase, reviewStem(config, slug(name), round, rv), commandReviewPrompt(p, name, reviewBase))
     let ran: boolean
     let output: string
     let note: string | undefined
@@ -106,12 +115,13 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
       output = r.output
       if (!ran) note = `review command exited ${r.code}: ${r.output.slice(-2000)}`
     } else {
-      const r = await call('granny', 'command', label, 'Review', reviewCommandPrompt(p, name, `cd ${shellQuote(input.repo)} && ${plan.script}`), 'read-only')
+      const script = `cd ${shellQuote(input.repo)} && ${plan.script}`
+      const r = await call('granny', 'command', `review ${tag}`, 'Review', reviewCommandPrompt(p, name, rv.name, script), 'read-only', config.roles.granny)
       ran = Boolean(r?.ran)
       output = String(r?.output ?? '')
       if (!ran) note = r ? `review command exited ${r.exitCode ?? '?'}${r.note ? ` (${r.note})` : ''}: ${output.slice(-2000)}` : 'review runner returned nothing'
     }
-    host.log(`${name} r${round}: reviewer: ${plan.backend ?? reportedBackend(output) ?? 'not reported'}`)
+    host.log(`${tag}: reviewer: ${plan.backend ?? reportedBackend(output) ?? 'not reported'}`)
     if (!ran) return { ran, findings: [], note }
     const failure = reviewFailure(output)
     if (failure) return { ran: false, findings: [], note: `reviewer returned no usable result (${failure}): ${output.slice(-2000)}` }
@@ -119,16 +129,16 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
     const parsed = parseCodexReview(output, input.repo)
     if (parsed.markers <= parsed.findings.length) return { ran, findings: parsed.findings }
 
-    host.log(`${name} r${round}: parser read ${parsed.findings.length}/${parsed.markers} findings - asking an agent to extract them`)
+    host.log(`${tag}: parser read ${parsed.findings.length}/${parsed.markers} findings - asking an agent to extract them`)
     const extract = async (label: string, prompt: string): Promise<Finding[]> => {
-      const r = await call('granny', 'findings', label, 'Review', prompt, 'read-only')
+      const r = await call('granny', 'findings', label, 'Review', prompt, 'read-only', config.roles.granny)
       return Array.isArray(r?.findings) ? r.findings : []
     }
-    const first = await extract(`extract ${name} r${round}`, extractPrompt(name, output))
+    const first = await extract(`extract ${tag}`, extractPrompt(name, output))
     if (first.length >= parsed.markers) return { ran, findings: first }
 
-    host.log(`${name} r${round}: extraction recovered ${first.length}/${parsed.markers} findings - asking once more with the expected count`)
-    const second = await extract(`extract ${name} r${round} retry`, extractPrompt(name, output, { markers: parsed.markers, got: first.length }))
+    host.log(`${tag}: extraction recovered ${first.length}/${parsed.markers} findings - asking once more with the expected count`)
+    const second = await extract(`extract ${tag} retry`, extractPrompt(name, output, { markers: parsed.markers, got: first.length }))
     if (second.length >= parsed.markers) return { ran, findings: second }
     return {
       ran: false,
@@ -137,23 +147,36 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
     }
   }
 
+  const reviewAll = (name: string, reviewBase: string, round: number): Promise<ReviewerRound[]> =>
+    Promise.all(
+      config.reviewers.map(async reviewer => {
+        const r = await review(reviewer, name, reviewBase, round)
+        return { reviewer, ...r, findings: attribute(reviewer, r.findings) }
+      }),
+    )
+
   const reviewLoop = async (name: string, reviewBase: string): Promise<Omit<StageResult, 'stage' | 'implementation'>> => {
     const history: RoundRecord[] = []
     for (let round = 1; round <= config.maxRounds; round++) {
-      const r = await review(name, reviewBase, round)
-      if (!r.ran) {
-        host.log(`${name} r${round}: review failed - stopping this stage's loop. ${r.note ?? ''}`)
-        return { outcome: 'review-failed', rounds: round, residual: [], unresolved: history.at(-1)?.findings ?? [], history, note: r.note }
+      const results = await reviewAll(name, reviewBase, round)
+      const failed = results.filter(r => !r.ran)
+      const found = results.filter(r => r.ran).flatMap(r => r.findings)
+      if (failed.length) {
+        const names = new Set(failed.map(r => r.reviewer.name))
+        const earlier = (history.at(-1)?.findings ?? []).filter(f => f.reviewer !== undefined && names.has(f.reviewer))
+        const note = [`reviewer(s) that did not run: ${[...names].join(', ')}`, ...failed.map(r => `${r.reviewer.name}: ${r.note ?? 'no output'}`)].join('\n')
+        host.log(`${name} r${round}: review failed - stopping this stage's loop. ${note}`)
+        return { outcome: 'review-failed', rounds: round, residual: [], unresolved: [...found, ...earlier], history, note }
       }
-      if (!r.findings.length) {
+      if (!found.length) {
         host.log(`${name} r${round}: clean`)
         return { outcome: 'clean', rounds: round, residual: [], unresolved: [], history }
       }
 
-      const scored = await call('judge', 'score', `judge ${name} r${round}`, 'Review', judgePrompt(p, reviewBase, r.findings), 'read-only')
-      if (!scored) host.log(`${name} r${round}: judge returned nothing - all ${r.findings.length} finding(s) go to the implementer unscored`)
+      const scored = await call('judge', 'score', `judge ${name} r${round}`, 'Review', judgePrompt(p, reviewBase, found), 'read-only', config.roles.judge)
+      if (!scored) host.log(`${name} r${round}: judge returned nothing - all ${found.length} finding(s) go to the implementer unscored`)
       const per: Array<{ id: string; score: number; reason: string }> = scored?.perFinding ?? []
-      const findings: Finding[] = r.findings.map(f => {
+      const findings: Finding[] = found.map(f => {
         const s = per.find(x => x.id === f.id)
         return s ? { ...f, score: s.score, reason: s.reason } : { ...f }
       })
@@ -202,7 +225,7 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
   }
 
   host.phase('PR ready')
-  const final = (await call('granny', 'final', 'pr-ready check', 'PR ready', finalPrompt(p), 'write')) as FinalReport | null
+  const final = (await call('granny', 'final', 'pr-ready check', 'PR ready', finalPrompt(p), 'write', config.roles.granny)) as FinalReport | null
   if (!final) host.log('final check returned nothing')
 
   return { repo: input.repo, branch: input.branch, base, stages, final }

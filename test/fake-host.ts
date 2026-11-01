@@ -1,35 +1,57 @@
-import { spawnSync } from 'node:child_process'
+import { spawn } from 'node:child_process'
 import type { AgentRequest, CommandResult, Host, HostName } from '../src/core/types'
+
+export type Review = CommandResult | string
+export type Reviews = Review[] | Record<string, Review[]> | ((command: string) => Review | Promise<Review>)
 
 export interface FakeOptions {
   name?: HostName
   direct?: boolean
-  reviews?: Array<CommandResult | string>
-  scores?: Array<Record<string, number> | null>
+  reviews?: Reviews
+  scores?: Array<Record<string, number | { score: number; duplicateOf?: string }> | null>
   override?: (req: AgentRequest) => unknown
   shell?: { env?: Record<string, string> }
 }
 
+const CLEAN: CommandResult = { code: 0, output: 'No issues found.' }
+const asResult = (r: Review): CommandResult => (typeof r === 'string' ? { code: 0, output: r } : r)
+
+export const reviewerOf = (command: string) => /review-.+?-r\d+-([a-z0-9-]+)\.md/.exec(command)?.[1]
+
+function bash(command: string, cwd: string, env: Record<string, string> = {}): Promise<CommandResult> {
+  return new Promise(resolve => {
+    const child = spawn('bash', ['-c', command], { cwd, env: { ...process.env, ...env } })
+    let output = ''
+    child.stdout.on('data', d => (output += d))
+    child.stderr.on('data', d => (output += d))
+    child.on('error', e => resolve({ code: 127, output: String(e) }))
+    child.on('close', code => resolve({ code: code ?? 1, output }))
+  })
+}
+
 export function fakeHost(opts: FakeOptions = {}) {
-  const reviews = [...(opts.reviews ?? [])].map(r => (typeof r === 'string' ? { code: 0, output: r } : r))
+  const source = opts.reviews ?? []
+  const queue = Array.isArray(source) ? [...source] : []
+  const perReviewer = !Array.isArray(source) && typeof source === 'object' ? Object.fromEntries(Object.entries(source).map(([k, v]) => [k, [...v]])) : {}
   const scores = [...(opts.scores ?? [])]
   const calls: AgentRequest[] = []
   const commands: string[] = []
   const logs: string[] = []
   const phases: string[] = []
   let impl = 0
-  const bash = (command: string, cwd: string): CommandResult => {
-    const r = spawnSync('bash', ['-c', command], { cwd, encoding: 'utf8', env: { ...process.env, ...opts.shell?.env } })
-    return { code: r.status ?? 1, output: `${r.stdout}${r.stderr}` }
+  const nextReview = async (command: string, cwd: string): Promise<CommandResult> => {
+    if (opts.shell) return bash(command, cwd, opts.shell.env)
+    if (typeof source === 'function') return asResult(await source(command))
+    const list = Array.isArray(source) ? queue : perReviewer[reviewerOf(command) ?? ''] ?? []
+    const next = list.shift()
+    return next === undefined ? CLEAN : asResult(next)
   }
-  const nextReview = (command: string, cwd: string) =>
-    opts.shell ? bash(command, cwd) : reviews.shift() ?? { code: 0, output: 'No issues found.' }
 
   const host: Host = {
     name: opts.name ?? 'opencode',
     async agent(req) {
       calls.push(req)
-      const custom = opts.override?.(req)
+      const custom = await opts.override?.(req)
       if (custom !== undefined) return custom
       switch (req.kind) {
         case 'implementation':
@@ -38,12 +60,16 @@ export function fakeHost(opts: FakeOptions = {}) {
         case 'score': {
           const s = scores.length ? scores.shift() : {}
           if (s === null) return null
-          return { score: 50, perFinding: Object.entries(s ?? {}).map(([id, score]) => ({ id, score, reason: `reason ${id}` })), rationale: 'r' }
+          const perFinding = Object.entries(s ?? {}).map(([id, v]) => {
+            const { score, duplicateOf } = typeof v === 'number' ? { score: v, duplicateOf: undefined } : v
+            return { id, score, reason: `reason ${id}`, ...(duplicateOf ? { duplicateOf } : {}) }
+          })
+          return { score: 50, perFinding, rationale: 'r' }
         }
         case 'command': {
           const script = /never cut it short\):\n(.+)\n/.exec(req.prompt)?.[1] ?? ''
           commands.push(script)
-          const r = nextReview(script, '/')
+          const r = await nextReview(script, '/')
           return { ran: r.code === 0, exitCode: r.code, output: r.output }
         }
         case 'findings':

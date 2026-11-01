@@ -77,7 +77,7 @@ Rejected before any agent starts: `adversarial-review` with engine `codex` or `a
 An adversarial review on both hosts:
 
 ```json
-{ "roles": { "reviewer": { "engine": "codex-plugin", "mode": "adversarial-review", "focus": "data loss, retries and auth" } } }
+{ "reviewers": [{ "name": "codex", "engine": "codex-plugin", "mode": "adversarial-review", "focus": "data loss, retries and auth" }] }
 ```
 
 ## Custom review command
@@ -104,9 +104,13 @@ The word severities map to `critical` → P0, `high` → P1, `medium` → P2, `l
   "roles": {
     "granny": { "model": "sonnet", "effort": "medium" },
     "implementer": { "model": { "claude-code": "opus", "opencode": "anthropic/claude-opus-5-5#high" }, "effort": "high" },
-    "reviewer": { "engine": "auto", "mode": "review" },
     "judge": { "model": { "claude-code": "sonnet", "opencode": "anthropic/claude-sonnet-5-5" } }
   },
+  "reviewers": [
+    { "name": "codex", "engine": "auto", "mode": "review" },
+    { "name": "opus", "engine": "agent", "model": { "claude-code": "opus", "opencode": "anthropic/claude-opus-5-5" }, "effort": "high" },
+    { "name": "glm", "engine": "command", "command": "opencode run -m opencode/glm-5.3-flash-free {prompt}" }
+  ],
   "threshold": 70,
   "maxRounds": 4,
   "base": "main",
