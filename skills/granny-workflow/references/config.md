@@ -65,6 +65,8 @@ Its stdout goes to the round's `.md` file and its progress to the `.log`, the sa
 <stage> r<n>: reviewer: codex-plugin review unavailable - node is not on PATH for the Codex plugin companion at <companion path>; install Node.js
 ```
 
+The companion talks to Codex through an app-server broker it starts in the background (`app-server-broker.mjs` with a `codex app-server` child) and leaves running when it exits. Granny gives the companion its own plugin data directory, `<workDir>/codex-plugin` (as `CLAUDE_PLUGIN_DATA`), so a review never shares or stops the broker of a Claude Code session working in the same repo, and stops its own broker with the plugin's `scripts/session-lifecycle-hook.mjs SessionEnd` when the review script exits - after the review, after a failure, and on SIGTERM, SIGINT or SIGHUP (so `granny_cancel` on opencode stops it too). A SIGKILL skips that step and leaves the broker running.
+
 | key | values | |
 |---|---|---|
 | `mode` | `review` (default), `adversarial-review` | `review` is Codex's built-in reviewer; `adversarial-review` is the plugin's skeptical, ship/no-ship review with `critical`/`high`/`medium`/`low` findings. It needs the plugin: engine `codex-plugin`, or `auto` on Claude Code, where a missing companion or a missing `node` fails the review instead of running a plain CLI review |

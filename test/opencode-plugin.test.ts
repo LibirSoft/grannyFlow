@@ -1,9 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test'
 import { spawnSync } from 'node:child_process'
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import plugin, { createGrannyPlugin, isTransient, modelRef, pause, permissions, preflight, providerError } from '../src/adapters/opencode/plugin'
+import { brokerCompanion, records, sessionEndHook } from './fake-companion'
 
 const git = (cwd: string, ...args: string[]) => {
   const r = spawnSync('git', args, { cwd, encoding: 'utf8' })
@@ -437,5 +438,38 @@ describe('opencode plugin', () => {
         expect(journalOf(dir)).toContainEqual(expect.objectContaining({ type: 'log', message: expect.stringContaining('review command exited 130') }))
       })
     }
+
+    describe('with the Codex plugin', () => {
+      const saved = { CLAUDE_CONFIG_DIR: process.env.CLAUDE_CONFIG_DIR, CLAUDE_PLUGIN_DATA: process.env.CLAUDE_PLUGIN_DATA }
+      afterEach(() => {
+        for (const [key, value] of Object.entries(saved)) {
+          if (value === undefined) delete process.env[key]
+          else process.env[key] = value
+        }
+      })
+
+      it('also stops the app-server broker the companion started outside the process group', async () => {
+        const scripts = join(pids, 'claude config/plugins/cache/openai-codex/codex/1.0.6/scripts')
+        const record = join(pids, 'calls.jsonl')
+        mkdirSync(scripts, { recursive: true })
+        writeFileSync(join(scripts, 'codex-companion.mjs'), brokerCompanion(record, { hang: true }))
+        writeFileSync(join(scripts, 'session-lifecycle-hook.mjs'), sessionEndHook(record))
+        process.env.CLAUDE_CONFIG_DIR = join(pids, 'claude config')
+        process.env.CLAUDE_PLUGIN_DATA = join(pids, 'user plugin data')
+        const f = fakeContext()
+        await createGrannyPlugin({ killGraceMs: 3000 }).setup(f.ctx)
+        const { id, dir } = await startRun(repo, f, { roles: { reviewer: { engine: 'codex-plugin' } } })
+        await waitFor(() => records(record).length > 0)
+        const broker = records(record)[0].broker
+        leftovers.push(broker)
+        expect(alive(broker)).toBe(true)
+
+        await f.tools.get('granny_cancel').execute({ runId: id })
+        await waitFor(() => readRun(dir, 'status.json').includes('"status": "cancelled"'), 4000)
+        await waitFor(() => !alive(broker), 2000)
+        expect(records(record).map(r => r.event)).toEqual(['companion', 'hook'])
+        expect(existsSync(join(pids, 'user plugin data'))).toBe(false)
+      })
+    })
   })
 })

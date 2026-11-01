@@ -34,7 +34,7 @@ granny_run({ repo, branch, base, context, stages, fromStage?, config? })
 The plugin reads `~/.config/granny/config.json` and `<repo>/granny.config.json` itself; `config` holds run overrides only. It refuses to start when the repo is not on `branch` or the tree is dirty, and it adds the work dir to `.git/info/exclude`. It returns a run id at once and works in the background; child sessions appear as `granny · <step>`. When the run ends the plugin posts a `[granny] Run … finished` message into your session - that is your cue to report.
 
 - `granny_status({ runId })` - status, journal tail, result. `granny_status({ repo })` finds the latest run in that repo.
-- `granny_cancel({ runId })` - interrupts the current step; nothing further starts. A running review command is stopped with everything it started: its process group gets SIGTERM, then SIGKILL 5 s later.
+- `granny_cancel({ runId })` - interrupts the current step; nothing further starts. A running review command is stopped with everything it started: its process group gets SIGTERM, then SIGKILL 5 s later. With engine `codex-plugin` the review script also stops the app-server broker the companion started outside that process group ([config.md](config.md#reviewer)).
 
 Run files: `<repo>/.granny/runs/<id>/` - `input.json`, `status.json`, `journal.jsonl`, `result.json`.
 

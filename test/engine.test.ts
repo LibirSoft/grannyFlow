@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync,
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { runGranny, type RunInput } from '../src/core/engine'
+import { alive, brokerCompanion, records, sessionEndHook, until } from './fake-companion'
 import { fakeHost, finding, review } from './fake-host'
 
 const input = (extra: Partial<RunInput> = {}): RunInput => ({
@@ -534,6 +535,47 @@ describe('the review script in a real shell', () => {
       expect(f.logs.some(l => l.startsWith(`core r1: reviewer: codex-plugin ${mode} unavailable - node is not on PATH`))).toBe(true)
     })
   }
+
+  describe("the Codex plugin's app-server broker", () => {
+    const brokers: number[] = []
+    afterEach(() => {
+      for (const pid of brokers.splice(0)) {
+        try {
+          process.kill(pid, 'SIGKILL')
+        } catch {}
+      }
+    })
+    for (const [label, exit] of [['the review ends', 0], ['the companion fails', 1]] as const) {
+      it(`is stopped when ${label}, and is kept out of the session's plugin data`, async () => {
+        const userData = join(home, 'user plugin data')
+        const record = join(home, 'broker.jsonl')
+        mkdirSync(companionDir('1.0.10'), { recursive: true })
+        writeFileSync(join(companionDir('1.0.10'), 'codex-companion.mjs'), brokerCompanion(record, { exit }))
+        writeFileSync(join(companionDir('1.0.10'), 'session-lifecycle-hook.mjs'), sessionEndHook(record))
+        const f = fakeHost({ name: 'claude-code', direct: false, shell: shell({ CLAUDE_PLUGIN_DATA: userData }), scores: [{ F1: 90 }] })
+        const r = await runGranny(f.host, input({ repo, config: { maxRounds: 1, workDir } }))
+        const [companion, ...after] = records(record)
+        brokers.push(companion.broker)
+        const data = join(realpathSync(repo), workDir, 'codex-plugin')
+        expect(realpathSync(companion.data)).toBe(data)
+        expect(after.map(h => ({ ...h, data: realpathSync(h.data) }))).toEqual([{ event: 'hook', argv: ['SessionEnd'], cwd: realpathSync(repo), data }])
+        expect(await until(() => !alive(companion.broker))).toBe(true)
+        expect(existsSync(userData)).toBe(false)
+        if (exit) expect(r.stages[0]).toMatchObject({ outcome: 'review-failed', rounds: 1 })
+        else expect(titles(r)).toEqual([['P2', 'Reviewed by the plugin']])
+      })
+    }
+
+    it('is not touched when engine auto runs the Codex CLI', async () => {
+      const record = join(home, 'broker.jsonl')
+      mkdirSync(companionDir('1.0.10'), { recursive: true })
+      writeFileSync(join(companionDir('1.0.10'), 'session-lifecycle-hook.mjs'), sessionEndHook(record))
+      const f = fakeHost({ name: 'claude-code', direct: false, shell: shell(), scores: [{ F1: 90 }] })
+      const r = await runGranny(f.host, input({ repo, config: { maxRounds: 1, workDir } }))
+      expect(titles(r)).toEqual([['P1', 'Reviewed start1']])
+      expect(records(record)).toEqual([])
+    })
+  })
 
   it('runs the Codex CLI on opencode with engine auto even when a companion is installed', async () => {
     installCompanions()

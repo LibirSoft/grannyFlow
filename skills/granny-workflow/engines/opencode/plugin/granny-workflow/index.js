@@ -371,7 +371,9 @@ function reviewPlan(c, host, base, stem) {
   const noNode = otherwise("node is not on PATH for the Codex plugin companion at $companion", "install Node.js");
   const versions = `for d in "$codex_plugins"/*/; do d=\${d%/}; d=\${d##*/}; [ -f "$codex_plugins/$d/${COMPANION}" ] && printf '%s\\n' "$d"; done`;
   const find = `${PLUGINS}; companion_version=$(${versions} | sort -t. -k1,1n -k2,2n -k3,3n | tail -n 1); companion="$codex_plugins/$companion_version/${COMPANION}"`;
-  const plugin = `echo "${SAID}codex-plugin ${mode} ($companion)" && ${companionCommand(c, base)} > ${md} 2> ${log}`;
+  const stopBroker = `node "\${companion%/*}/session-lifecycle-hook.mjs" SessionEnd </dev/null >/dev/null 2>&1`;
+  const ownBroker = `export CLAUDE_PLUGIN_DATA="$PWD"/${shellQuote(`${c.workDir}/codex-plugin`)} && trap '${stopBroker}' EXIT && trap 'exit 143' TERM && trap 'exit 130' INT && trap 'exit 129' HUP`;
+  const plugin = `echo "${SAID}codex-plugin ${mode} ($companion)" && ${ownBroker} && ${companionCommand(c, base)} > ${md} 2> ${log}`;
   return {
     script: wrap(`${find}; if [ -z "$companion_version" ]; then ${missing}; elif ! command -v node >/dev/null 2>&1; then ${noNode}; else ${plugin}; fi`)
   };
