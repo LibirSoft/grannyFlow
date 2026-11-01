@@ -15,7 +15,7 @@ describe('resolveConfig', () => {
     expect(c.threshold).toBe(75)
     expect(c.roles.implementer).toEqual({ model: 'opus', effort: 'max' })
     expect(c.roles.judge).toEqual({ model: 'haiku' })
-    expect(c.roles.reviewer).toEqual({ engine: 'codex' })
+    expect(c.roles.reviewer).toEqual({ engine: 'auto' })
     expect(c.gates).toEqual(['bun test'])
     expect(c.rules).toEqual([])
     expect(DEFAULT_CONFIG.threshold).toBe(70)
@@ -44,13 +44,58 @@ describe('resolveConfig', () => {
         'workDir must be',
         'roles.judge.effort',
         'unknown host "cursor"',
-        'roles.reviewer.engine',
+        'roles.reviewer.engine must be one of "auto", "codex-plugin", "codex", "agent"',
         'must be a string containing {base}',
       ]) {
         expect(message).toContain(part)
       }
     }
   })
+})
+
+describe('reviewer engine, mode and focus', () => {
+  const reviewer = (r: Record<string, unknown>, host?: 'claude-code' | 'opencode') => () => resolveConfig([{ roles: { reviewer: r } }], host)
+
+  it('defaults to engine auto and accepts every working combination', () => {
+    expect(DEFAULT_CONFIG.roles.reviewer).toEqual({ engine: 'auto' })
+    for (const r of [
+      { engine: 'codex-plugin' },
+      { engine: 'codex-plugin', mode: 'adversarial-review', focus: 'auth and retries' },
+      { engine: 'auto', mode: 'adversarial-review' },
+      { mode: 'review' },
+      { engine: 'codex', mode: 'review', command: 'my-review {base}' },
+      { engine: 'auto', command: 'my-review {base}' },
+      { engine: 'agent' },
+    ]) {
+      expect(reviewer(r)).not.toThrow()
+      expect(reviewer(r, 'claude-code')).not.toThrow()
+    }
+    expect(reviewer({ engine: 'codex-plugin', mode: 'adversarial-review' }, 'opencode')).not.toThrow()
+    expect(resolveConfig([{ roles: { reviewer: { engine: 'codex-plugin', mode: 'adversarial-review', focus: 'x' } } }]).roles.reviewer).toEqual({
+      engine: 'codex-plugin',
+      mode: 'adversarial-review',
+      focus: 'x',
+    })
+  })
+
+  const rejects: Array<[string, Record<string, unknown>, string, ('claude-code' | 'opencode')?]> = [
+    ['an unknown mode', { mode: 'strict' }, 'roles.reviewer.mode must be "review" or "adversarial-review"'],
+    ['an empty focus', { mode: 'adversarial-review', focus: ' ' }, 'roles.reviewer.focus must be a non-empty string'],
+    ['a focus that is not a string', { mode: 'adversarial-review', focus: 42 }, 'roles.reviewer.focus must be a non-empty string'],
+    ['adversarial-review on the Codex CLI', { engine: 'codex', mode: 'adversarial-review' }, 'mode "adversarial-review" needs the Codex plugin'],
+    ['adversarial-review on an agent reviewer', { engine: 'agent', mode: 'adversarial-review' }, 'mode "adversarial-review" needs the Codex plugin'],
+    ['a focus on a plain review', { engine: 'codex-plugin', focus: 'auth' }, 'roles.reviewer.focus only works with mode "adversarial-review"'],
+    ['a focus with the default mode', { focus: 'auth' }, 'roles.reviewer.focus only works with mode "adversarial-review"'],
+    ['a custom command with codex-plugin', { engine: 'codex-plugin', command: 'r {base}' }, 'roles.reviewer.command cannot be combined with engine "codex-plugin"'],
+    ['a custom command with adversarial-review', { mode: 'adversarial-review', command: 'r {base}' }, 'a custom roles.reviewer.command runs instead of the plugin'],
+    ['adversarial-review on auto on opencode', { mode: 'adversarial-review' }, 'on opencode engine "auto" means the Codex CLI', 'opencode'],
+    ['a misspelt reviewer key', { mode: 'adversarial-review', focs: 'x' }, 'unknown key "roles.reviewer.focs"'],
+  ]
+  for (const [label, r, message, host] of rejects) {
+    it(`rejects ${label}`, () => {
+      expect(reviewer(r, host)).toThrow(message)
+    })
+  }
 })
 
 describe('resolveModel', () => {

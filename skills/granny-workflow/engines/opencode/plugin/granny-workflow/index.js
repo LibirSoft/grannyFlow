@@ -16,7 +16,7 @@ var DEFAULT_CONFIG = {
   roles: {
     granny: {},
     implementer: {},
-    reviewer: { engine: "codex" },
+    reviewer: { engine: "auto" },
     judge: { model: { "claude-code": "sonnet" } }
   },
   threshold: 70,
@@ -34,10 +34,12 @@ var DEFAULT_CONFIG = {
 var ROLES = ["granny", "implementer", "reviewer", "judge"];
 var TOP_KEYS = new Set(["$schema", "roles", ...Object.keys(DEFAULT_CONFIG).filter((k) => k !== "roles")]);
 var ROLE_KEYS = new Set(["model", "effort"]);
-var REVIEWER_KEYS = new Set(["model", "effort", "engine", "command"]);
+var REVIEWER_KEYS = new Set(["model", "effort", "engine", "mode", "focus", "command"]);
 var EFFORTS = new Set(["low", "medium", "high", "xhigh", "max"]);
+var ENGINES = ["auto", "codex-plugin", "codex", "agent"];
+var MODES = ["review", "adversarial-review"];
 var isObject = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
-function resolveConfig(layers) {
+function resolveConfig(layers, host) {
   const config = JSON.parse(JSON.stringify(DEFAULT_CONFIG));
   const errors = [];
   layers.forEach((layer, index) => {
@@ -86,14 +88,14 @@ function resolveConfig(layers) {
       config[key] = value;
     }
   });
-  errors.push(...validate(config));
+  errors.push(...validate(config, host));
   if (errors.length)
     throw new Error(`Invalid granny config:
 - ${errors.join(`
 - `)}`);
   return config;
 }
-function validate(c) {
+function validate(c, host) {
   const errors = [];
   if (typeof c.threshold !== "number" || !(c.threshold >= 0 && c.threshold <= 100)) {
     errors.push("threshold must be a number between 0 and 100");
@@ -132,11 +134,31 @@ function validate(c) {
     }
   }
   const rv = c.roles.reviewer;
-  if (rv.engine !== undefined && rv.engine !== "codex" && rv.engine !== "agent") {
-    errors.push('roles.reviewer.engine must be "codex" or "agent"');
-  }
+  const engine = rv.engine ?? "auto";
+  const adversarial = rv.mode === "adversarial-review";
+  if (!ENGINES.includes(engine))
+    errors.push(`roles.reviewer.engine must be one of ${ENGINES.map((e) => `"${e}"`).join(", ")}`);
+  if (rv.mode !== undefined && !MODES.includes(rv.mode))
+    errors.push('roles.reviewer.mode must be "review" or "adversarial-review"');
+  if (rv.focus !== undefined && (typeof rv.focus !== "string" || !rv.focus.trim()))
+    errors.push("roles.reviewer.focus must be a non-empty string");
   if (rv.command !== undefined && (typeof rv.command !== "string" || !rv.command.includes("{base}"))) {
     errors.push("roles.reviewer.command must be a string containing {base}");
+  }
+  if (adversarial && (engine === "codex" || engine === "agent")) {
+    errors.push(`roles.reviewer.mode "adversarial-review" needs the Codex plugin; engine "${engine}" cannot run it - use "codex-plugin" or "auto"`);
+  }
+  if (rv.focus !== undefined && !adversarial) {
+    errors.push('roles.reviewer.focus only works with mode "adversarial-review"; the plain review takes no focus text');
+  }
+  if (rv.command !== undefined && engine === "codex-plugin") {
+    errors.push('roles.reviewer.command cannot be combined with engine "codex-plugin"; it replaces the Codex CLI command');
+  }
+  if (rv.command !== undefined && adversarial && engine === "auto") {
+    errors.push('roles.reviewer.mode "adversarial-review" needs the Codex plugin, but a custom roles.reviewer.command runs instead of the plugin');
+  }
+  if (host === "opencode" && adversarial && engine === "auto" && rv.command === undefined) {
+    errors.push('roles.reviewer.mode "adversarial-review" needs the Codex plugin, and on opencode engine "auto" means the Codex CLI - set roles.reviewer.engine to "codex-plugin"');
   }
   return errors;
 }
@@ -148,7 +170,7 @@ function resolveModel(spec, host) {
   return spec[host];
 }
 function reviewerEngine(c) {
-  return c.roles.reviewer.engine ?? "codex";
+  return c.roles.reviewer.engine ?? "auto";
 }
 function codexCommand(c, base, out) {
   const model = c.roles.reviewer.model;
@@ -322,6 +344,38 @@ function triage(findings, threshold) {
   return { accepted, residual };
 }
 
+// src/core/reviewer.ts
+var SAID = "[granny] reviewer: ";
+var BACKEND_LINE = /^\[granny\] reviewer: (.*)$/m;
+var COMPANION = ".claude/plugins/cache/openai-codex/codex/*/scripts/codex-companion.mjs";
+function companionCommand(c, base) {
+  const rv = c.roles.reviewer;
+  const model = typeof rv.model === "string" ? ` -m ${shellQuote(rv.model)}` : "";
+  const focus = rv.focus ? ` -- ${shellQuote(rv.focus)}` : "";
+  return `node "$companion" ${rv.mode ?? "review"} --wait --base ${shellQuote(base)} --scope branch${model}${focus}`;
+}
+function reviewPlan(c, host, base, stem) {
+  const md = shellQuote(`${stem}.md`);
+  const log = shellQuote(`${stem}.log`);
+  const wrap = (run) => `mkdir -p ${shellQuote(c.workDir)} && rm -f ${md} ${log} && ${run}; code=$?; if [ -s ${md} ]; then cat ${md}; else cat ${log}; fi; exit $code`;
+  const rv = c.roles.reviewer;
+  const engine = reviewerEngine(c);
+  const mode = rv.mode ?? "review";
+  const cli = `${codexCommand(c, base, `${stem}.md`)} > ${log} 2>&1`;
+  const cliLabel = rv.command ? "custom command (roles.reviewer.command)" : "codex CLI (codex exec review)";
+  if (engine !== "codex-plugin" && (engine !== "auto" || host !== "claude-code" || rv.command)) {
+    return { script: wrap(cli), backend: cliLabel };
+  }
+  const missing = `no Codex plugin companion at $HOME/${COMPANION.replace("*", "<version>")}`;
+  const fallback = engine === "auto" && mode === "review" ? `echo "${SAID}${cliLabel} - ${missing}" && ${cli}` : `{ echo "${SAID}codex-plugin ${mode} unavailable - ${missing}; install OpenAI's Codex plugin for Claude Code" > ${log}; false; }`;
+  const find = `companion=$(printf '%s\\n' "$HOME"/${COMPANION} | sort -V | tail -n 1)`;
+  const plugin = `echo "${SAID}codex-plugin ${mode} ($companion)" && ${companionCommand(c, base)} > ${md} 2> ${log}`;
+  return { script: wrap(`${find}; if [ -f "$companion" ]; then ${plugin}; else ${fallback}; fi`) };
+}
+function reportedBackend(output) {
+  return BACKEND_LINE.exec(output)?.[1]?.trim();
+}
+
 // src/core/schemas.ts
 var FINDING = {
   type: "object",
@@ -453,7 +507,7 @@ async function runGranny(host, input) {
 - ${inputErrors.join(`
 - `)}`);
   const layers = Array.isArray(input.config) ? input.config : [input.config];
-  const config = resolveConfig(layers);
+  const config = resolveConfig(layers, host.name);
   const base = input.base ?? config.base;
   const p = { repo: input.repo, branch: input.branch, base, context: input.context, config };
   const fromStage = input.fromStage ?? 1;
@@ -486,26 +540,24 @@ async function runGranny(host, input) {
         return { ran: false, findings: [], note: "reviewer agent returned nothing" };
       return { ran: true, findings: r.findings ?? [] };
     }
-    const stem = `${config.workDir}/review-${slug(name)}-r${round}`;
-    const md = shellQuote(`${stem}.md`);
-    const log = shellQuote(`${stem}.log`);
-    const script = `mkdir -p ${shellQuote(config.workDir)} && rm -f ${md} ${log} && ${codexCommand(config, reviewBase, `${stem}.md`)} > ${log} 2>&1; code=$?; if [ -s ${md} ]; then cat ${md}; else cat ${log}; fi; exit $code`;
+    const plan = reviewPlan(config, host.name, reviewBase, `${config.workDir}/review-${slug(name)}-r${round}`);
     let ran;
     let output;
     let note;
     if (host.run) {
-      const r = await host.run(script, input.repo);
+      const r = await host.run(plan.script, input.repo);
       ran = r.code === 0;
       output = r.output;
       if (!ran)
         note = `review command exited ${r.code}: ${r.output.slice(-2000)}`;
     } else {
-      const r = await call("granny", "command", label, "Review", reviewCommandPrompt(p, name, `cd ${shellQuote(input.repo)} && ${script}`), "read-only");
+      const r = await call("granny", "command", label, "Review", reviewCommandPrompt(p, name, `cd ${shellQuote(input.repo)} && ${plan.script}`), "read-only");
       ran = Boolean(r?.ran);
       output = String(r?.output ?? "");
       if (!ran)
-        note = r?.note ?? "review runner returned nothing";
+        note = r ? `review command exited ${r.exitCode ?? "?"}${r.note ? ` (${r.note})` : ""}: ${output.slice(-2000)}` : "review runner returned nothing";
     }
+    host.log(`${name} r${round}: reviewer: ${plan.backend ?? reportedBackend(output) ?? "not reported"}`);
     if (!ran)
       return { ran, findings: [], note };
     const failure = reviewFailure(output);
@@ -808,7 +860,7 @@ var createGrannyPlugin = ({ delays = DEFAULT_DELAYS, sleep = pause, killGraceMs 
 - ${problems.join(`
 - `)}`;
       const layers = [readJson(globalConfigPath()), readJson(join(input.repo, "granny.config.json")), input.config];
-      const config = resolveConfig(layers);
+      const config = resolveConfig(layers, "opencode");
       const blockers = preflight(input.repo, input.branch, config.workDir);
       if (blockers.length)
         return `granny_run refused:

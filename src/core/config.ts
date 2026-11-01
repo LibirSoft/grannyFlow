@@ -8,8 +8,13 @@ export interface RoleConfig {
   effort?: string
 }
 
+export type ReviewerEngine = 'auto' | 'codex-plugin' | 'codex' | 'agent'
+export type ReviewMode = 'review' | 'adversarial-review'
+
 export interface ReviewerConfig extends RoleConfig {
-  engine?: 'codex' | 'agent'
+  engine?: ReviewerEngine
+  mode?: ReviewMode
+  focus?: string
   command?: string
 }
 
@@ -34,7 +39,7 @@ export const DEFAULT_CONFIG: GrannyConfig = {
   roles: {
     granny: {},
     implementer: {},
-    reviewer: { engine: 'codex' },
+    reviewer: { engine: 'auto' },
     judge: { model: { 'claude-code': 'sonnet' } },
   },
   threshold: 70,
@@ -53,12 +58,14 @@ export const DEFAULT_CONFIG: GrannyConfig = {
 const ROLES: Role[] = ['granny', 'implementer', 'reviewer', 'judge']
 const TOP_KEYS = new Set(['$schema', 'roles', ...Object.keys(DEFAULT_CONFIG).filter(k => k !== 'roles')])
 const ROLE_KEYS = new Set(['model', 'effort'])
-const REVIEWER_KEYS = new Set(['model', 'effort', 'engine', 'command'])
+const REVIEWER_KEYS = new Set(['model', 'effort', 'engine', 'mode', 'focus', 'command'])
 const EFFORTS = new Set(['low', 'medium', 'high', 'xhigh', 'max'])
+const ENGINES: ReviewerEngine[] = ['auto', 'codex-plugin', 'codex', 'agent']
+const MODES: ReviewMode[] = ['review', 'adversarial-review']
 
 const isObject = (v: unknown): v is Record<string, any> => typeof v === 'object' && v !== null && !Array.isArray(v)
 
-export function resolveConfig(layers: unknown[]): GrannyConfig {
+export function resolveConfig(layers: unknown[], host?: HostName): GrannyConfig {
   const config: GrannyConfig = JSON.parse(JSON.stringify(DEFAULT_CONFIG))
   const errors: string[] = []
 
@@ -102,12 +109,12 @@ export function resolveConfig(layers: unknown[]): GrannyConfig {
     }
   })
 
-  errors.push(...validate(config))
+  errors.push(...validate(config, host))
   if (errors.length) throw new Error(`Invalid granny config:\n- ${errors.join('\n- ')}`)
   return config
 }
 
-function validate(c: GrannyConfig): string[] {
+function validate(c: GrannyConfig, host?: HostName): string[] {
   const errors: string[] = []
   if (typeof c.threshold !== 'number' || !(c.threshold >= 0 && c.threshold <= 100)) {
     errors.push('threshold must be a number between 0 and 100')
@@ -140,11 +147,28 @@ function validate(c: GrannyConfig): string[] {
     }
   }
   const rv = c.roles.reviewer
-  if (rv.engine !== undefined && rv.engine !== 'codex' && rv.engine !== 'agent') {
-    errors.push('roles.reviewer.engine must be "codex" or "agent"')
-  }
+  const engine = rv.engine ?? 'auto'
+  const adversarial = rv.mode === 'adversarial-review'
+  if (!ENGINES.includes(engine)) errors.push(`roles.reviewer.engine must be one of ${ENGINES.map(e => `"${e}"`).join(', ')}`)
+  if (rv.mode !== undefined && !MODES.includes(rv.mode)) errors.push('roles.reviewer.mode must be "review" or "adversarial-review"')
+  if (rv.focus !== undefined && (typeof rv.focus !== 'string' || !rv.focus.trim())) errors.push('roles.reviewer.focus must be a non-empty string')
   if (rv.command !== undefined && (typeof rv.command !== 'string' || !rv.command.includes('{base}'))) {
     errors.push('roles.reviewer.command must be a string containing {base}')
+  }
+  if (adversarial && (engine === 'codex' || engine === 'agent')) {
+    errors.push(`roles.reviewer.mode "adversarial-review" needs the Codex plugin; engine "${engine}" cannot run it - use "codex-plugin" or "auto"`)
+  }
+  if (rv.focus !== undefined && !adversarial) {
+    errors.push('roles.reviewer.focus only works with mode "adversarial-review"; the plain review takes no focus text')
+  }
+  if (rv.command !== undefined && engine === 'codex-plugin') {
+    errors.push('roles.reviewer.command cannot be combined with engine "codex-plugin"; it replaces the Codex CLI command')
+  }
+  if (rv.command !== undefined && adversarial && engine === 'auto') {
+    errors.push('roles.reviewer.mode "adversarial-review" needs the Codex plugin, but a custom roles.reviewer.command runs instead of the plugin')
+  }
+  if (host === 'opencode' && adversarial && engine === 'auto' && rv.command === undefined) {
+    errors.push('roles.reviewer.mode "adversarial-review" needs the Codex plugin, and on opencode engine "auto" means the Codex CLI - set roles.reviewer.engine to "codex-plugin"')
   }
   return errors
 }
@@ -155,8 +179,8 @@ export function resolveModel(spec: ModelSpec | undefined, host: HostName): strin
   return spec[host]
 }
 
-export function reviewerEngine(c: GrannyConfig): 'codex' | 'agent' {
-  return c.roles.reviewer.engine ?? 'codex'
+export function reviewerEngine(c: GrannyConfig): ReviewerEngine {
+  return c.roles.reviewer.engine ?? 'auto'
 }
 
 export function codexCommand(c: GrannyConfig, base: string, out: string): string {

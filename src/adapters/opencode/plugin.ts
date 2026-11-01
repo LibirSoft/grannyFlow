@@ -244,7 +244,7 @@ export const createGrannyPlugin = ({ delays = DEFAULT_DELAYS, sleep = pause, kil
       if (problems.length) return `granny_run refused:\n- ${problems.join('\n- ')}`
 
       const layers = [readJson(globalConfigPath()), readJson(join(input.repo, 'granny.config.json')), input.config]
-      const config = resolveConfig(layers)
+      const config = resolveConfig(layers, 'opencode')
       const blockers = preflight(input.repo, input.branch, config.workDir)
       if (blockers.length) return `granny_run refused:\n- ${blockers.join('\n- ')}`
 

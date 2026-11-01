@@ -1,4 +1,4 @@
-import { codexCommand, resolveConfig, resolveModel, reviewerEngine, type GrannyConfig } from './config'
+import { resolveConfig, resolveModel, reviewerEngine, type GrannyConfig } from './config'
 import {
   agentReviewPrompt,
   extractPrompt,
@@ -10,6 +10,7 @@ import {
   type PromptContext,
 } from './prompts'
 import { parseCodexReview, reviewFailure, triage } from './review'
+import { reportedBackend, reviewPlan } from './reviewer'
 import { SCHEMAS } from './schemas'
 import { shellQuote } from './shell'
 import type {
@@ -60,7 +61,7 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
   if (inputErrors.length) throw new Error(`Invalid granny input:\n- ${inputErrors.join('\n- ')}`)
 
   const layers = Array.isArray(input.config) ? input.config : [input.config]
-  const config = resolveConfig(layers)
+  const config = resolveConfig(layers, host.name)
   const base = input.base ?? config.base
   const p: PromptContext = { repo: input.repo, branch: input.branch, base, context: input.context, config }
   const fromStage = input.fromStage ?? 1
@@ -95,24 +96,22 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
       return { ran: true, findings: r.findings ?? [] }
     }
 
-    const stem = `${config.workDir}/review-${slug(name)}-r${round}`
-    const md = shellQuote(`${stem}.md`)
-    const log = shellQuote(`${stem}.log`)
-    const script = `mkdir -p ${shellQuote(config.workDir)} && rm -f ${md} ${log} && ${codexCommand(config, reviewBase, `${stem}.md`)} > ${log} 2>&1; code=$?; if [ -s ${md} ]; then cat ${md}; else cat ${log}; fi; exit $code`
+    const plan = reviewPlan(config, host.name, reviewBase, `${config.workDir}/review-${slug(name)}-r${round}`)
     let ran: boolean
     let output: string
     let note: string | undefined
     if (host.run) {
-      const r = await host.run(script, input.repo)
+      const r = await host.run(plan.script, input.repo)
       ran = r.code === 0
       output = r.output
       if (!ran) note = `review command exited ${r.code}: ${r.output.slice(-2000)}`
     } else {
-      const r = await call('granny', 'command', label, 'Review', reviewCommandPrompt(p, name, `cd ${shellQuote(input.repo)} && ${script}`), 'read-only')
+      const r = await call('granny', 'command', label, 'Review', reviewCommandPrompt(p, name, `cd ${shellQuote(input.repo)} && ${plan.script}`), 'read-only')
       ran = Boolean(r?.ran)
       output = String(r?.output ?? '')
-      if (!ran) note = r?.note ?? 'review runner returned nothing'
+      if (!ran) note = r ? `review command exited ${r.exitCode ?? '?'}${r.note ? ` (${r.note})` : ''}: ${output.slice(-2000)}` : 'review runner returned nothing'
     }
+    host.log(`${name} r${round}: reviewer: ${plan.backend ?? reportedBackend(output) ?? 'not reported'}`)
     if (!ran) return { ran, findings: [], note }
     const failure = reviewFailure(output)
     if (failure) return { ran: false, findings: [], note: `reviewer returned no usable result (${failure}): ${output.slice(-2000)}` }

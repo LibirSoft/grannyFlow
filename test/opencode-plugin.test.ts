@@ -244,6 +244,17 @@ describe('opencode plugin', () => {
     expect(f.created).toHaveLength(0)
   })
 
+  it('refuses adversarial-review on engine auto, which means the Codex CLI on opencode, without creating sessions', async () => {
+    const f = fakeContext()
+    await plugin.setup(f.ctx)
+    const started = await f.tools
+      .get('granny_run')
+      .execute({ repo, branch: 'feat/x', stages: [{ task: 't' }], config: { roles: { reviewer: { mode: 'adversarial-review' } } } }, { sessionID: 'parent' })
+    expect(started.content).toContain('on opencode engine "auto" means the Codex CLI')
+    expect(existsSync(join(repo, '.granny/runs'))).toBe(false)
+    expect(f.created).toHaveLength(0)
+  })
+
   it('runs the loop in the background with child sessions, a direct review command and a completion message', async () => {
     writeFileSync(
       join(repo, 'granny.config.json'),
