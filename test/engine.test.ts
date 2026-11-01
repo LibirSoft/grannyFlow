@@ -1,4 +1,7 @@
-import { describe, expect, it } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, it } from 'bun:test'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { runGranny, type RunInput } from '../src/core/engine'
 import { fakeHost, finding, review } from './fake-host'
 
@@ -236,7 +239,9 @@ describe('runGranny', () => {
     await runGranny(f.host, input())
     const runner = f.calls.find(c => c.kind === 'command')!
     expect(runner.role).toBe('granny')
-    expect(runner.prompt).toContain('cd /work/repo && mkdir -p .granny && codex exec review --base start1')
+    expect(runner.prompt).toContain(
+      'cd /work/repo && mkdir -p .granny && rm -f .granny/review-core-r1.md .granny/review-core-r1.log && codex exec review --base start1',
+    )
   })
 
   it('resolves role models per host and applies effort', async () => {
@@ -299,5 +304,27 @@ describe('runGranny', () => {
     await expect(runGranny(f.host, { repo: 'rel', branch: '', stages: [] } as RunInput)).rejects.toThrow(/repo must be an absolute path[\s\S]*branch is required[\s\S]*stages must be/)
     await expect(runGranny(f.host, input({ config: { treshold: 1 } }))).rejects.toThrow('unknown key "treshold"')
     expect(f.calls).toHaveLength(0)
+  })
+})
+
+describe('the review script in a real shell', () => {
+  let repo: string
+  beforeEach(() => {
+    repo = mkdtempSync(join(tmpdir(), 'granny-shell-'))
+  })
+  afterEach(() => {
+    rmSync(repo, { recursive: true, force: true })
+  })
+
+  it('reads what a custom reviewer printed, not a review file an earlier run left behind', async () => {
+    mkdirSync(join(repo, '.granny'))
+    writeFileSync(join(repo, '.granny/review-core-r1.md'), review(finding('P2', 'Stale from an earlier run')))
+    writeFileSync(join(repo, '.granny/review-core-r1.log'), 'stale log\n')
+    const command = `test -n {base} && printf '%s\\n' '- [P1] Fresh — a.ts:1' '  printed to stdout'`
+    const f = fakeHost({ shell: {}, scores: [{ F1: 90 }] })
+    const r = await runGranny(f.host, input({ repo, config: { maxRounds: 1, roles: { reviewer: { command } } } }))
+    expect(r.stages[0]!.history[0]!.findings.map(x => x.title)).toEqual(['Fresh'])
+    expect(existsSync(join(repo, '.granny/review-core-r1.md'))).toBe(false)
+    expect(readFileSync(join(repo, '.granny/review-core-r1.log'), 'utf8')).not.toContain('stale log')
   })
 })

@@ -1,3 +1,4 @@
+import { spawnSync } from 'node:child_process'
 import type { AgentRequest, CommandResult, Host, HostName } from '../src/core/types'
 
 export interface FakeOptions {
@@ -6,6 +7,7 @@ export interface FakeOptions {
   reviews?: Array<CommandResult | string>
   scores?: Array<Record<string, number> | null>
   override?: (req: AgentRequest) => unknown
+  shell?: { env?: Record<string, string> }
 }
 
 export function fakeHost(opts: FakeOptions = {}) {
@@ -16,7 +18,12 @@ export function fakeHost(opts: FakeOptions = {}) {
   const logs: string[] = []
   const phases: string[] = []
   let impl = 0
-  const nextReview = () => reviews.shift() ?? { code: 0, output: 'No issues found.' }
+  const bash = (command: string, cwd: string): CommandResult => {
+    const r = spawnSync('bash', ['-c', command], { cwd, encoding: 'utf8', env: { ...process.env, ...opts.shell?.env } })
+    return { code: r.status ?? 1, output: `${r.stdout}${r.stderr}` }
+  }
+  const nextReview = (command: string, cwd: string) =>
+    opts.shell ? bash(command, cwd) : reviews.shift() ?? { code: 0, output: 'No issues found.' }
 
   const host: Host = {
     name: opts.name ?? 'opencode',
@@ -34,7 +41,9 @@ export function fakeHost(opts: FakeOptions = {}) {
           return { score: 50, perFinding: Object.entries(s ?? {}).map(([id, score]) => ({ id, score, reason: `reason ${id}` })), rationale: 'r' }
         }
         case 'command': {
-          const r = nextReview()
+          const script = /never cut it short\):\n(.+)\n/.exec(req.prompt)?.[1] ?? ''
+          commands.push(script)
+          const r = nextReview(script, '/')
           return { ran: r.code === 0, exitCode: r.code, output: r.output }
         }
         case 'findings':
@@ -47,9 +56,9 @@ export function fakeHost(opts: FakeOptions = {}) {
     phase: t => phases.push(t),
   }
   if (opts.direct !== false) {
-    host.run = async (command: string) => {
+    host.run = async (command: string, cwd: string) => {
       commands.push(command)
-      return nextReview()
+      return nextReview(command, cwd)
     }
   }
   return { host, calls, commands, logs, phases }

@@ -467,7 +467,7 @@ async function runGranny(host, input) {
       return { ran: true, findings: r.findings ?? [] };
     }
     const stem = `${config.workDir}/review-${slug(name)}-r${round}`;
-    const script = `mkdir -p ${config.workDir} && ${codexCommand(config, reviewBase, `${stem}.md`)} > ${stem}.log 2>&1; code=$?; if [ -s ${stem}.md ]; then cat ${stem}.md; else cat ${stem}.log; fi; exit $code`;
+    const script = `mkdir -p ${config.workDir} && rm -f ${stem}.md ${stem}.log && ${codexCommand(config, reviewBase, `${stem}.md`)} > ${stem}.log 2>&1; code=$?; if [ -s ${stem}.md ]; then cat ${stem}.md; else cat ${stem}.log; fi; exit $code`;
     let ran;
     let output;
     let note;
