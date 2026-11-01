@@ -13,7 +13,7 @@ Layers, later wins:
 
 | key | default | meaning |
 |---|---|---|
-| `roles.granny` | `{}` | model/effort for granny's helper steps: the review-command runner (Claude Code), the extraction fallback, the final PR-ready check |
+| `roles.granny` | `{}` | model/effort for granny's helper steps: the worktree setup and the review-command runner (Claude Code), the extraction fallback, the final PR-ready check |
 | `roles.implementer` | `{}` | builds each stage and fixes accepted findings |
 | `roles.judge` | `{ "model": { "claude-code": "sonnet" } }` | scores each finding that is not P0/P1 0-100 and marks duplicates |
 | `reviewers` | `[{ "name": "codex", "engine": "auto" }]` | the reviewers; every one of them reviews every round, all at the same time - see [Reviewers](#reviewers) |

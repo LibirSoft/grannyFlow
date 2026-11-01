@@ -22,7 +22,7 @@ after the last stage: granny's final check (gates, clean tree, no AI trailers, P
 
 | role | does | default model |
 |---|---|---|
-| granny | you; plus the engine's helper steps: review-command runner (Claude Code), extraction fallback, final PR-ready check | session model |
+| granny | you; plus the engine's helper steps: worktree setup and review-command runner (Claude Code), extraction fallback, final PR-ready check | session model |
 | implementer | builds each stage, fixes accepted findings, commits | session model |
 | reviewers | config `reviewers`, a list; every reviewer reviews every stage, all at the same time. Engines: `auto` (default) runs OpenAI's Codex plugin when it is installed on Claude Code and `node` is on `PATH`, otherwise the Codex CLI (`codex exec review`); `codex-plugin` forces the plugin (and allows `mode: "adversarial-review"`), `codex` the CLI, `agent` a host model, `command` any CLI | one reviewer, `codex`, on Codex's default model |
 | judge | scores each finding that is not P0/P1 and merges duplicates; the overall review score is informational only | `sonnet` on Claude Code, session model on opencode |
