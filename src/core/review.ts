@@ -1,7 +1,6 @@
 import type { Finding } from './types'
 
-const ITEM = /^\s*[-*]\s*\[(P[0-3])\]\s+(.*)$/
-const MARKER = /^\s*[-*]\s*\[P[0-3]\]/gm
+const MARKER = /^\s*[-*]\s*\[(P[0-3])\](.*)$/
 const LOCATION = /^(.+?)(?::(\d+)(?:-\d+)?)?$/
 
 export interface ParsedReview {
@@ -10,20 +9,27 @@ export interface ParsedReview {
 }
 
 export function parseCodexReview(text: string, repo?: string): ParsedReview {
-  const markers = (text.match(MARKER) ?? []).length
   const findings: Finding[] = []
-  let current: Finding | null = null
+  let markers = 0
+  let item: { indent: number; finding: Finding | null } | null = null
 
   for (const line of text.split('\n')) {
-    const item = ITEM.exec(line)
-    if (item) {
-      current = toFinding(item[1]!, item[2]!, findings.length + 1, repo)
-      if (current) findings.push(current)
+    if (!line.trim()) continue
+    const indent = line.length - line.trimStart().length
+    if (item && indent > item.indent) {
+      const f = item.finding
+      if (f) f.detail = f.detail ? `${f.detail}\n${line.trim()}` : line.trim()
       continue
     }
-    if (!current) continue
-    if (/^\s+\S/.test(line)) current.detail = current.detail ? `${current.detail}\n${line.trim()}` : line.trim()
-    else if (line.trim()) current = null
+    const marker = MARKER.exec(line)
+    if (!marker) {
+      item = null
+      continue
+    }
+    markers++
+    const finding = toFinding(marker[1]!, marker[2]!.trim(), findings.length + 1, repo)
+    if (finding) findings.push(finding)
+    item = { indent, finding }
   }
   return { findings, markers }
 }

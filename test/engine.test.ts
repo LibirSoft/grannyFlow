@@ -117,6 +117,14 @@ describe('runGranny', () => {
     expect(f.calls).toHaveLength(0)
   })
 
+  it('does not ask for an extraction when a finding detail quotes a [Px] bullet', async () => {
+    const f = fakeHost({ reviews: [review(`${finding('P2', 'Real one')}\n  - [P1] quoted from an earlier round`), 'No issues.'], scores: [{ F1: 90 }] })
+    const r = await runGranny(f.host, input())
+    expect(f.calls.some(c => c.kind === 'findings')).toBe(false)
+    expect(r.stages[0]).toMatchObject({ outcome: 'clean', rounds: 2 })
+    expect(r.stages[0]!.history[0]!.findings.map(x => x.title)).toEqual(['Real one'])
+  })
+
   it('falls back to an extraction agent when the parser misses findings', async () => {
     const f = fakeHost({
       reviews: ['- [P1] no location here\n  detail', 'No issues.'],

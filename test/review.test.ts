@@ -53,6 +53,42 @@ Some closing words.`
     expect(markers).toBe(1)
     expect(findings).toEqual([])
   })
+
+  it('reads a [Px] bullet nested in a finding detail as detail, not as another finding', () => {
+    const text = `Review comments:
+
+- [P2] Guard the cache — src/a.ts:3-3
+  An earlier round reported:
+  - [P1] stale entry survives a reload
+  * [P0] Wrong file — src/b.ts:9
+  and this one is still open, unlike the [P1] above.
+- [P3] Typo — README.md
+  Fix it.`
+    const { findings, markers } = parseCodexReview(text)
+    expect(markers).toBe(2)
+    expect(findings.map(f => [f.id, f.severity, f.file, f.title])).toEqual([
+      ['F1', 'P2', 'src/a.ts', 'Guard the cache'],
+      ['F2', 'P3', 'README.md', 'Typo'],
+    ])
+    expect(findings[0]!.detail).toBe(
+      'An earlier round reported:\n- [P1] stale entry survives a reload\n* [P0] Wrong file — src/b.ts:9\nand this one is still open, unlike the [P1] above.',
+    )
+  })
+
+  it('keeps nested bullets inside an unparseable finding out of the marker count', () => {
+    const { findings, markers } = parseCodexReview('- [P1] title without a location\n  - [P2] quoted line\n- [P2] Real — a.ts:1\n  d')
+    expect(markers).toBe(2)
+    expect(findings.map(f => f.title)).toEqual(['Real'])
+  })
+
+  it('still counts an indented list of findings', () => {
+    const { findings, markers } = parseCodexReview('Review comments:\n  - [P1] A — a.ts:1\n    detail a\n  - [P2] B — b.ts:2\n    detail b')
+    expect(markers).toBe(2)
+    expect(findings.map(f => [f.title, f.detail])).toEqual([
+      ['A', 'detail a'],
+      ['B', 'detail b'],
+    ])
+  })
 })
 
 describe('triage', () => {

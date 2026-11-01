@@ -240,29 +240,34 @@ You are GRANNY doing the FINAL CHECK - no push, no remote, no PR. Run every gate
 }
 
 // src/core/review.ts
-var ITEM = /^\s*[-*]\s*\[(P[0-3])\]\s+(.*)$/;
-var MARKER = /^\s*[-*]\s*\[P[0-3]\]/gm;
+var MARKER = /^\s*[-*]\s*\[(P[0-3])\](.*)$/;
 var LOCATION = /^(.+?)(?::(\d+)(?:-\d+)?)?$/;
 function parseCodexReview(text, repo) {
-  const markers = (text.match(MARKER) ?? []).length;
   const findings = [];
-  let current = null;
+  let markers = 0;
+  let item = null;
   for (const line of text.split(`
 `)) {
-    const item = ITEM.exec(line);
-    if (item) {
-      current = toFinding(item[1], item[2], findings.length + 1, repo);
-      if (current)
-        findings.push(current);
+    if (!line.trim())
+      continue;
+    const indent = line.length - line.trimStart().length;
+    if (item && indent > item.indent) {
+      const f = item.finding;
+      if (f)
+        f.detail = f.detail ? `${f.detail}
+${line.trim()}` : line.trim();
       continue;
     }
-    if (!current)
+    const marker = MARKER.exec(line);
+    if (!marker) {
+      item = null;
       continue;
-    if (/^\s+\S/.test(line))
-      current.detail = current.detail ? `${current.detail}
-${line.trim()}` : line.trim();
-    else if (line.trim())
-      current = null;
+    }
+    markers++;
+    const finding = toFinding(marker[1], marker[2].trim(), findings.length + 1, repo);
+    if (finding)
+      findings.push(finding);
+    item = { indent, finding };
   }
   return { findings, markers };
 }
