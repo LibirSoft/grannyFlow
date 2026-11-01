@@ -46,6 +46,10 @@ Every child session runs the `build` agent with these session rules: everything 
 
 The review command runs in the opencode server's environment: `codex` must be on that PATH and logged in. It runs in its own process group, so stopping the opencode server does not stop a review that is in progress; use `granny_cancel` first.
 
+## Reviewer
+
+Here the default engine `auto` always means the Codex CLI (`codex exec review`); it does not look for OpenAI's Codex plugin for Claude Code. To use the plugin, set `roles.reviewer.engine` to `codex-plugin`: the review script then runs the newest `~/.claude/plugins/cache/openai-codex/codex/<version>/scripts/codex-companion.mjs` under the opencode server's home directory with `node`, and fails the review with a note when it is not there. `mode: "adversarial-review"` needs `codex-plugin` on opencode; with `auto`, `granny_run` refuses to start. The journal logs the backend every round (`<stage> r<n>: reviewer: ...`). Details: [config.md](config.md#reviewer).
+
 ## Provider errors
 
 When a child session's turn ends without a submit call, the plugin reads the session's messages. A turn that ended on a provider error is journaled as `provider-error` (type, message, status). Transient errors - quota, rate limit, timeout, dropped connection, overload (HTTP 429/502/503/504/529) - are retried after 30 s, 2 min, 5 min and 10 min, and the model is asked to continue where it stopped. Any other provider error, or a fifth transient one, ends the role with nothing (`agent-failed`): an implementer that returns nothing fails the run; a judge that returns nothing sends every finding to the implementer unscored, and the journal says so.

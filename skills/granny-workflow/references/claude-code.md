@@ -26,6 +26,10 @@ Workflow({
 
 `opus`, `sonnet`, `haiku`, or a model ID the session accepts. A role without a model inherits the session model; the judge defaults to `sonnet`. `effort` is passed through (`low` … `max`). The review command runs inside a granny helper agent, because Workflow scripts have no shell; a cheap `roles.granny.model` keeps that step inexpensive, but granny also runs the final check, so do not go below `sonnet` there.
 
+## Reviewer
+
+With the default engine `auto`, the review script looks for OpenAI's Codex plugin for Claude Code (the newest `~/.claude/plugins/cache/openai-codex/codex/<version>/scripts/codex-companion.mjs`) and runs `node <companion> review` when it finds one, otherwise `codex exec review`. The shell script makes the choice at run time, since the Workflow script cannot read the filesystem; it prints the choice and the engine logs it every round as `<stage> r<n>: reviewer: ...` - tell the user which one ran. `codex-plugin` makes the plugin mandatory: without it the review fails and the stage ends `review-failed` with a note naming the path it looked in. `mode: "adversarial-review"` (optionally with `focus`) runs the plugin's adversarial review; under `auto` it also needs the plugin and never falls back to a plain CLI review. Details: [config.md](config.md#reviewer).
+
 ## Resume
 
 Same script, same args: `Workflow({ scriptPath: <path the first launch returned>, args, resumeFromRunId })`. Unchanged agent calls return cached results instantly, so the run continues where it stopped. To restart from a stage instead, add `fromStage` to args.

@@ -15,7 +15,7 @@ Layers, later wins:
 |---|---|---|
 | `roles.granny` | `{}` | model/effort for granny's helper steps: the review-command runner (Claude Code), the extraction fallback, the final PR-ready check |
 | `roles.implementer` | `{}` | builds each stage and fixes accepted findings |
-| `roles.reviewer` | `{ "engine": "codex" }` | `engine`: `codex` runs a command, `agent` asks a model to review the diff. `model`: with `codex` a string passed as `codex -m`; with `agent` a host model. `command`: custom review command, see below |
+| `roles.reviewer` | `{ "engine": "auto" }` | `engine`: `auto`, `codex-plugin`, `codex` or `agent`; `mode` and `focus` for the Codex plugin - see [Reviewer](#reviewer). `model`: with the Codex engines a string passed as `-m`; with `agent` a host model. `command`: custom review command, see below |
 | `roles.judge` | `{ "model": { "claude-code": "sonnet" } }` | scores each finding 0-100 |
 | `threshold` | `70` | a finding is sent back to the implementer when it is P0/P1 (also `critical`/`high`), when the judge gave it no score, or when its score is **strictly above** this. The overall review score gates nothing |
 | `maxRounds` | `4` | review rounds per stage; the stage ends `round-cap` after the last one |
@@ -40,9 +40,40 @@ A role's `model` is either one string for every host, or an object keyed by host
 
 A host key that is missing means "inherit" on that host.
 
+## Reviewer
+
+| `engine` | runs |
+|---|---|
+| `auto` (default) | on Claude Code: the Codex plugin when its companion script is installed, otherwise the Codex CLI. On opencode: always the Codex CLI |
+| `codex-plugin` | OpenAI's Codex plugin for Claude Code, on either host. When the companion script is missing the review fails with a note saying so - it never falls back to the CLI |
+| `codex` | the Codex CLI: `codex exec review` |
+| `agent` | a model reviews the diff with the reviewer prompt; `model` is a host model |
+
+The plugin path runs the newest `~/.claude/plugins/cache/openai-codex/codex/<version>/scripts/codex-companion.mjs` (version-sorted) from the repo:
+
+```
+node <companion> review --wait --base <stage start sha> --scope branch [-m <model>]
+node <companion> adversarial-review --wait --base <stage start sha> --scope branch [-m <model>] [-- <focus>]
+```
+
+Its stdout goes to the round's `.md` file and its progress to the `.log`, the same files the CLI uses. The plugin needs `node`, and the Codex CLI installed and logged in (the companion drives it). The engine logs which backend ran each round (`<stage> r<n>: reviewer: codex-plugin review (<companion path>)`, `... reviewer: codex CLI (codex exec review) - no Codex plugin companion at ...`), so you can see what `auto` chose.
+
+| key | values | |
+|---|---|---|
+| `mode` | `review` (default), `adversarial-review` | `review` is Codex's built-in reviewer; `adversarial-review` is the plugin's skeptical, ship/no-ship review with `critical`/`high`/`medium`/`low` findings. It needs the plugin: engine `codex-plugin`, or `auto` on Claude Code, where a missing companion fails the review instead of running a plain CLI review |
+| `focus` | non-empty string | extra instructions for `adversarial-review` only (the plain review takes no focus text), passed shell-quoted after `--` |
+
+Rejected before any agent starts: `adversarial-review` with engine `codex` or `agent`, or with `auto` on opencode (where `auto` means the CLI); `focus` without `adversarial-review`; `command` with `codex-plugin`, or with `adversarial-review`.
+
+An adversarial review on both hosts:
+
+```json
+{ "roles": { "reviewer": { "engine": "codex-plugin", "mode": "adversarial-review", "focus": "data loss, retries and auth" } } }
+```
+
 ## Custom review command
 
-`roles.reviewer.command` replaces `codex exec review --base {base} -o {out}` (plus `-m {model}` when a codex model is set). Placeholders: `{base}` (required - the stage start sha), `{out}` (file the review should be written to), `{model}`. They are substituted already shell-quoted, so do not put quotes around them. The command runs in the repo; the engine deletes `{out}` and the round's log first, then reads `{out}` when the command left it non-empty, otherwise everything the command printed. A non-zero exit ends the stage as `review-failed`.
+`roles.reviewer.command` replaces `codex exec review --base {base} -o {out}` (plus `-m {model}` when a codex model is set) for engines `codex` and `auto` - with `auto` a custom command always runs and the plugin is not looked for. Placeholders: `{base}` (required - the stage start sha), `{out}` (file the review should be written to), `{model}`. They are substituted already shell-quoted, so do not put quotes around them. The command runs in the repo; the engine deletes `{out}` and the round's log first, then reads `{out}` when the command left it non-empty, otherwise everything the command printed. A non-zero exit ends the stage as `review-failed`.
 
 Findings are read from lines shaped like Codex's output - the built-in reviewer's form, and the Codex plugin's `adversarial-review` form:
 
@@ -64,7 +95,7 @@ The word severities map to `critical` → P0, `high` → P1, `medium` → P2, `l
   "roles": {
     "granny": { "model": "sonnet", "effort": "medium" },
     "implementer": { "model": { "claude-code": "opus", "opencode": "anthropic/claude-opus-5-5#high" }, "effort": "high" },
-    "reviewer": { "engine": "codex" },
+    "reviewer": { "engine": "auto", "mode": "review" },
     "judge": { "model": { "claude-code": "sonnet", "opencode": "anthropic/claude-sonnet-5-5" } }
   },
   "threshold": 70,

@@ -22,7 +22,7 @@ after the last stage: granny's final check (gates, clean tree, no AI trailers, P
 |---|---|---|
 | granny | you; plus the engine's helper steps: review-command runner (Claude Code), extraction fallback, final PR-ready check | session model |
 | implementer | builds each stage, fixes accepted findings, commits | session model |
-| reviewer | reviews each stage: `codex exec review` (engine `codex`) or a model (engine `agent`) | Codex's default |
+| reviewer | reviews each stage: engine `auto` (default) runs OpenAI's Codex plugin when it is installed on Claude Code, otherwise the Codex CLI (`codex exec review`); `codex-plugin` forces the plugin (and allows `mode: "adversarial-review"`), `codex` the CLI, `agent` a model | Codex's default |
 | judge | scores each finding; the overall review score is informational only | `sonnet` on Claude Code, session model on opencode |
 
 ## Pick your host path
@@ -57,7 +57,7 @@ Three layers, later wins: `~/.config/granny/config.json` (user), `<repo>/granny.
   "roles": {
     "granny":      { "model": { "claude-code": "opus", "opencode": "anthropic/claude-opus-5-5" } },
     "implementer": { "model": "opus", "effort": "high" },
-    "reviewer":    { "engine": "codex" },
+    "reviewer":    { "engine": "auto" },
     "judge":       { "model": { "claude-code": "sonnet", "opencode": "anthropic/claude-sonnet-5-5" } }
   },
   "threshold": 70,
@@ -70,7 +70,11 @@ Three layers, later wins: `~/.config/granny/config.json` (user), `<repo>/granny.
 1. The plan is current: if dependency versions or upstream behaviour moved since it was written, update the plan first (a dated "rN deltas" section at the top) and tell the user what changed.
 2. `git -C <repo> status --short` is clean; create and check out `branch`; never work on `base`.
 3. The work dir (default `.granny/`) is in `.git/info/exclude` - for a worktree, the common git dir's `info/exclude`. It holds the PR body, review outputs and run journals.
-4. Reviewer engine `codex`: `codex --version` works and Codex is logged in. Engine `agent`: nothing to check.
+4. Reviewer, by the engine that will run (see [references/config.md](references/config.md#reviewer)):
+   - Codex CLI (engine `codex`, or `auto` on opencode, or `auto` on Claude Code without the plugin): `codex --version` works and Codex is logged in (`codex login status`).
+   - Codex plugin (engine `codex-plugin`, or `auto` on Claude Code when it is installed): `node --version` works; `ls ~/.claude/plugins/cache/openai-codex/codex/*/scripts/codex-companion.mjs` finds the companion (for `codex-plugin` on opencode: in the home directory of the opencode server); `codex --version` works and Codex is logged in - the companion drives the CLI.
+   - Engine `agent`: nothing to check.
+   Tell the user which reviewer `auto` will pick.
 5. No other session already runs the same job (other agents, `git reflog`).
 
 ## 4. Launch
