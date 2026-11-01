@@ -124,6 +124,28 @@ describe('runGranny', () => {
     expect(r.stages[0]!.history[0]!.findings[0]!.title).toBe('Extracted')
   })
 
+  for (const [label, extracted] of [['an empty list', { findings: [] }], ['nothing', null]] as const) {
+    it(`fails the review instead of reporting clean when extraction returns ${label}`, async () => {
+      const f = fakeHost({
+        reviews: ['- [P1] no location here\n  detail'],
+        override: req => (req.kind === 'findings' ? extracted : undefined),
+      })
+      const r = await runGranny(f.host, input())
+      expect(r.stages[0]).toMatchObject({ outcome: 'review-failed', rounds: 1 })
+      expect(r.stages[0]!.note).toContain('1 finding marker(s), parser read 0')
+      expect(r.stages[0]!.note).toContain('no location here')
+      expect(f.calls.some(c => c.kind === 'score' || c.label.startsWith('fix'))).toBe(false)
+    })
+  }
+
+  it('fails the review rather than fixing only the parsed part when extraction returns nothing', async () => {
+    const f = fakeHost({ reviews: [review(finding('P2', 'Parsed one'), '- [P1] unparseable\n  d')] })
+    const r = await runGranny(f.host, input())
+    expect(r.stages[0]).toMatchObject({ outcome: 'review-failed', rounds: 1 })
+    expect(r.stages[0]!.note).toContain('2 finding marker(s), parser read 1')
+    expect(f.calls.some(c => c.kind === 'score' || c.label.startsWith('fix'))).toBe(false)
+  })
+
   it('uses an agent reviewer when configured, with no shell command', async () => {
     const f = fakeHost({
       override: req => (req.kind === 'findings' ? { findings: [] } : undefined),

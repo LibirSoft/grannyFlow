@@ -454,20 +454,24 @@ async function runGranny(host, input) {
     if (!ran)
       return { ran, findings: [], note };
     const parsed = parseCodexReview(output, input.repo);
-    if (parsed.markers > parsed.findings.length) {
-      host.log(`${name} r${round}: parser read ${parsed.findings.length}/${parsed.markers} findings - asking an agent to extract them`);
-      const r = await call("granny", "findings", `extract ${name} r${round}`, "Review", extractPrompt(name, output), "read-only");
-      if (r?.findings?.length)
-        return { ran, findings: r.findings };
-    }
-    return { ran, findings: parsed.findings };
+    if (parsed.markers <= parsed.findings.length)
+      return { ran, findings: parsed.findings };
+    host.log(`${name} r${round}: parser read ${parsed.findings.length}/${parsed.markers} findings - asking an agent to extract them`);
+    const r = await call("granny", "findings", `extract ${name} r${round}`, "Review", extractPrompt(name, output), "read-only");
+    if (r?.findings?.length)
+      return { ran, findings: r.findings };
+    return {
+      ran: false,
+      findings: [],
+      note: `review reported ${parsed.markers} finding marker(s), parser read ${parsed.findings.length} and the extraction agent returned none: ${output.slice(-2000)}`
+    };
   };
   const reviewLoop = async (name, reviewBase) => {
     const history = [];
     for (let round = 1;round <= config.maxRounds; round++) {
       const r = await review(name, reviewBase, round);
       if (!r.ran) {
-        host.log(`${name} r${round}: review did not run - stopping this stage's loop. ${r.note ?? ""}`);
+        host.log(`${name} r${round}: review failed - stopping this stage's loop. ${r.note ?? ""}`);
         return { outcome: "review-failed", rounds: round, residual: [], unresolved: history.at(-1)?.findings ?? [], history, note: r.note };
       }
       if (!r.findings.length) {
