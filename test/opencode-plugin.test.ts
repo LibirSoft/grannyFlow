@@ -262,6 +262,16 @@ describe('opencode plugin', () => {
     ])
   })
 
+  it('lets the model pass plan files to granny_run and refuses a relative one', async () => {
+    const f = fakeContext()
+    await plugin.setup(f.ctx)
+    const run = f.tools.get('granny_run')
+    expect(run.input.properties.plan).toMatchObject({ type: 'array', items: { type: 'string' } })
+    const refused = await run.execute({ repo, branch: 'feat/x', plan: ['plans/v1.md'], stages: [{ task: 't' }] }, { sessionID: 'parent' })
+    expect(refused.content).toContain('plan must be an absolute path')
+    expect(f.created).toHaveLength(0)
+  })
+
   it('refuses to start on a bad input or config without creating sessions', async () => {
     const f = fakeContext()
     await plugin.setup(f.ctx)

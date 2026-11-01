@@ -29,6 +29,7 @@ export interface GrannyConfig {
   workDir: string
   worktree: boolean
   worktreeDir?: string
+  planReview: boolean
   language: string
   aiAttribution: boolean
   rules: string[]
@@ -47,6 +48,7 @@ export const DEFAULT_CONFIG: GrannyConfig = {
   gates: 'auto',
   workDir: '.granny',
   worktree: true,
+  planReview: true,
   language: 'English',
   aiAttribution: false,
   rules: [
@@ -203,6 +205,7 @@ function validate(c: GrannyConfig): string[] {
     if (typeof c.worktreeDir !== 'string' || !c.worktreeDir.trim()) errors.push('worktreeDir must be a non-empty path')
     else if (c.worktreeDir.startsWith('~')) errors.push('worktreeDir is not expanded by a shell - write the absolute path instead of ~')
   }
+  if (typeof c.planReview !== 'boolean') errors.push('planReview must be a boolean')
   if (typeof c.aiAttribution !== 'boolean') errors.push('aiAttribution must be a boolean')
   if (!Array.isArray(c.rules) || !c.rules.every(r => typeof r === 'string')) errors.push('rules must be an array of strings')
 

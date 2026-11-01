@@ -188,6 +188,19 @@ describe('worktree', () => {
   }
 })
 
+describe('planReview', () => {
+  it('is on by default and takes a boolean from any layer', () => {
+    expect(DEFAULT_CONFIG.planReview).toBe(true)
+    expect(resolveConfig([]).planReview).toBe(true)
+    expect(resolveConfig([{ planReview: false }]).planReview).toBe(false)
+    expect(resolveConfig([{ planReview: false }, { planReview: true }]).planReview).toBe(true)
+  })
+
+  it('rejects a planReview that is not a boolean', () => {
+    expect(() => resolveConfig([{ planReview: 'yes' }])).toThrow('planReview must be a boolean')
+  })
+})
+
 describe('resolveModel', () => {
   it('uses a plain string on every host and picks the host key from an object', () => {
     expect(resolveModel('sonnet', 'claude-code')).toBe('sonnet')

@@ -35,6 +35,7 @@ export interface RunInput {
   branch: string
   base?: string
   context?: string
+  plan?: string | string[]
   stages: StageSpec[]
   fromStage?: number
   config?: unknown | unknown[]
@@ -63,8 +64,17 @@ export function checkInput(input: RunInput): string[] {
   if (input.fromStage !== undefined && (!Number.isInteger(input.fromStage) || input.fromStage < 1 || input.fromStage > (input.stages?.length ?? 0))) {
     errors.push('fromStage must be a 1-based stage index')
   }
+  if (input.plan !== undefined) {
+    const plans: unknown[] = Array.isArray(input.plan) ? input.plan : [input.plan]
+    const bad = plans.find(f => typeof f !== 'string' || !f.startsWith('/'))
+    if (!plans.length || bad !== undefined) {
+      errors.push(`plan must be an absolute path or a non-empty array of absolute paths${bad === undefined || bad === '' ? '' : ` (got ${JSON.stringify(bad)})`}`)
+    }
+  }
   return errors
 }
+
+const planFiles = (input: RunInput): string[] => (input.plan === undefined ? [] : Array.isArray(input.plan) ? input.plan : [input.plan])
 
 export async function runGranny(host: Host, input: RunInput): Promise<RunResult> {
   const inputErrors = checkInput(input)
@@ -117,7 +127,9 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
     host.phase('Worktree')
     repo = await setUpWorktree()
   }
-  const p: PromptContext = { repo, branch: input.branch, base, context: input.context, config }
+  const plans = planFiles(input)
+  const context = [plans.length ? `Plan files - read them first: ${plans.join(', ')}` : '', input.context ?? ''].filter(Boolean).join('\n') || undefined
+  const p: PromptContext = { repo, branch: input.branch, base, context, config }
 
   const implement = async (label: string, prompt: string): Promise<Implementation> => {
     const r = (await call('implementer', 'implementation', label, 'Implement', prompt, 'write', config.roles.implementer)) as Implementation | null

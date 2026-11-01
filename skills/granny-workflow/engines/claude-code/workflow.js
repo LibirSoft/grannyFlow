@@ -23,6 +23,7 @@ var DEFAULT_CONFIG = {
   gates: "auto",
   workDir: ".granny",
   worktree: true,
+  planReview: true,
   language: "English",
   aiAttribution: false,
   rules: [
@@ -195,6 +196,8 @@ function validate(c) {
     else if (c.worktreeDir.startsWith("~"))
       errors.push("worktreeDir is not expanded by a shell - write the absolute path instead of ~");
   }
+  if (typeof c.planReview !== "boolean")
+    errors.push("planReview must be a boolean");
   if (typeof c.aiAttribution !== "boolean")
     errors.push("aiAttribution must be a boolean");
   if (!Array.isArray(c.rules) || !c.rules.every((r) => typeof r === "string"))
@@ -616,8 +619,16 @@ function checkInput(input) {
   if (input.fromStage !== undefined && (!Number.isInteger(input.fromStage) || input.fromStage < 1 || input.fromStage > (input.stages?.length ?? 0))) {
     errors.push("fromStage must be a 1-based stage index");
   }
+  if (input.plan !== undefined) {
+    const plans = Array.isArray(input.plan) ? input.plan : [input.plan];
+    const bad = plans.find((f) => typeof f !== "string" || !f.startsWith("/"));
+    if (!plans.length || bad !== undefined) {
+      errors.push(`plan must be an absolute path or a non-empty array of absolute paths${bad === undefined || bad === "" ? "" : ` (got ${JSON.stringify(bad)})`}`);
+    }
+  }
   return errors;
 }
+var planFiles = (input) => input.plan === undefined ? [] : Array.isArray(input.plan) ? input.plan : [input.plan];
 async function runGranny(host, input) {
   const inputErrors = checkInput(input);
   if (inputErrors.length)
@@ -669,7 +680,10 @@ ${r.note}` : ""}` : "the worktree runner returned nothing";
     host.phase("Worktree");
     repo = await setUpWorktree();
   }
-  const p = { repo, branch: input.branch, base, context: input.context, config };
+  const plans = planFiles(input);
+  const context = [plans.length ? `Plan files - read them first: ${plans.join(", ")}` : "", input.context ?? ""].filter(Boolean).join(`
+`) || undefined;
+  const p = { repo, branch: input.branch, base, context, config };
   const implement = async (label, prompt) => {
     const r = await call("implementer", "implementation", label, "Implement", prompt, "write", config.roles.implementer);
     if (!r)

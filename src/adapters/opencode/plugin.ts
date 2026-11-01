@@ -144,7 +144,12 @@ const RUN_INPUT_SCHEMA = {
       description: 'Feature branch. With config worktree on (default) granny reuses its worktree or creates one - do not check it out yourself; with worktree off it must be checked out in repo',
     },
     base: { type: 'string', description: 'Branch never to touch; defaults to config.base' },
-    context: { type: 'string', description: 'Files every agent reads first (plan, work orders) and override notes' },
+    context: { type: 'string', description: 'Files every agent reads first (work orders, notes) and override notes' },
+    plan: {
+      type: 'array',
+      items: { type: 'string' },
+      description: 'Absolute paths of the plan files. Every agent reads them; with config planReview on (default) the reviewers review them before stage 1 and the implementer fixes them in place, uncommitted',
+    },
     stages: {
       type: 'array',
       description: 'One entry per stop-and-review point',
