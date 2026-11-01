@@ -331,7 +331,7 @@ var MARKER = /^\s*[-*]\s*\[(P[0-3]|[A-Za-z]+)\](.*)$/;
 var WORD_SEVERITY = new Map([["critical", "P0"], ["high", "P1"], ["medium", "P2"], ["low", "P3"]]);
 var LOCATION = /^(.+?)(?::(\d+)(?:-\d+)?)?$/;
 var PAREN_LOCATION = /^(.*\S)\s+\(([^()]+)\)$/;
-var FAILED_RENDER = /^Codex (?:did not return valid structured JSON|returned JSON with an unexpected review shape|review completed without any stdout output)\.$/m;
+var FAILED_RENDER = /^Codex (?:did not return valid structured JSON|returned JSON with an unexpected review shape|review completed without any stdout output|did not return a final message)\.$/m;
 function parseCodexReview(text, repo) {
   const findings = [];
   let markers = 0;
@@ -455,28 +455,36 @@ function companionCommand(rv, host, base) {
   return `node "$companion" ${rv.mode ?? "review"} --wait --base ${shellQuote(base)} --scope branch${model}${focus}`;
 }
 var reviewStem = (c, stage, round, rv) => `${c.workDir}/review-${stage}-r${round}-${rv.name}`;
-function reviewPlan(rv, c, host, base, stem, prompt = "") {
+function script(rv, c, host, stem, b) {
   const md = shellQuote(`${stem}.md`);
   const log = shellQuote(`${stem}.log`);
   const wrap = (run) => `mkdir -p ${shellQuote(c.workDir)} && rm -f ${md} ${log} && ${run}; code=$?; if [ -s ${md} ]; then cat ${md}; else cat ${log}; fi; exit $code`;
-  const mode = rv.mode ?? "review";
-  const cli = `${cliCommand(rv, host, base, `${stem}.md`, prompt)} > ${log} 2>&1`;
+  const cli = `${b.cli} > ${log} 2>&1`;
   if (rv.engine === "command")
     return { script: wrap(cli), backend: "custom command" };
-  const cliLabel = "codex CLI (codex exec review)";
   if (rv.engine === "codex" || rv.engine === "auto" && host !== "claude-code")
-    return { script: wrap(cli), backend: cliLabel };
-  const otherwise = (why, remedy) => rv.engine === "auto" && mode === "review" ? `echo "${SAID}${cliLabel} - ${why}" && ${cli}` : `{ echo "${SAID}codex-plugin ${mode} unavailable - ${why}; ${remedy}" > ${log}; false; }`;
+    return { script: wrap(cli), backend: b.cliLabel };
+  const otherwise = (why, remedy) => b.fallback ? `echo "${SAID}${b.cliLabel} - ${why}" && ${cli}` : `{ echo "${SAID}codex-plugin ${b.pluginLabel} unavailable - ${why}; ${remedy}" > ${log}; false; }`;
   const missing = otherwise(`no Codex plugin companion at $codex_plugins/<version>/${COMPANION}`, "install OpenAI's Codex plugin for Claude Code");
   const noNode = otherwise("node is not on PATH for the Codex plugin companion at $companion", "install Node.js");
   const versions = `for d in "$codex_plugins"/*/; do d=\${d%/}; d=\${d##*/}; [ -f "$codex_plugins/$d/${COMPANION}" ] && printf '%s\\n' "$d"; done`;
   const find = `${PLUGINS}; companion_version=$(${versions} | sort -t. -k1,1n -k2,2n -k3,3n | tail -n 1); companion="$codex_plugins/$companion_version/${COMPANION}"`;
   const stopBroker = `node "\${companion%/*}/session-lifecycle-hook.mjs" SessionEnd </dev/null >/dev/null 2>&1`;
   const ownBroker = `export CLAUDE_PLUGIN_DATA="$PWD"/${shellQuote(`${c.workDir}/codex-plugin-${rv.name}`)} && trap '${stopBroker}' EXIT && trap 'exit 143' TERM && trap 'exit 130' INT && trap 'exit 129' HUP`;
-  const plugin = `echo "${SAID}codex-plugin ${mode} ($companion)" && ${ownBroker} && ${companionCommand(rv, host, base)} > ${md} 2> ${log}`;
+  const plugin = `echo "${SAID}codex-plugin ${b.pluginLabel} ($companion)" && ${ownBroker} && ${b.plugin} > ${md} 2> ${log}`;
   return {
     script: wrap(`${find}; if [ -z "$companion_version" ]; then ${missing}; elif ! command -v node >/dev/null 2>&1; then ${noNode}; else ${plugin}; fi`)
   };
+}
+function reviewPlan(rv, c, host, base, stem, prompt = "") {
+  const mode = rv.mode ?? "review";
+  return script(rv, c, host, stem, {
+    cli: cliCommand(rv, host, base, `${stem}.md`, prompt),
+    cliLabel: "codex CLI (codex exec review)",
+    plugin: companionCommand(rv, host, base),
+    pluginLabel: mode,
+    fallback: rv.engine === "auto" && mode === "review"
+  });
 }
 function reportedBackend(output) {
   return BACKEND_LINE.exec(output)?.[1]?.trim();

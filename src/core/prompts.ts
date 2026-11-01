@@ -102,6 +102,33 @@ export function commandReviewPrompt(p: PromptContext, name: string, reviewBase: 
     .replace(/\s*\n\s*/g, ' ')
 }
 
+const planReviewAsks = (p: PromptContext, plans: string[]) => [
+  `Review the plan in ${plans.join(', ')} - a plan, not code changes - against the actual repo at ${p.repo} (branch \`${p.branch}\`): open the code, configs, lockfiles and docs the plan talks about before reporting anything.`,
+  'Look for: wrong assumptions about the code or its dependencies, missing steps, risky ordering, acceptance criteria that cannot be tested, and version drift (versions, APIs, flags or files the plan names that differ from what the repo or its dependencies actually have).',
+  'Report every finding as a bullet line in exactly this form: `- [P1] Title — /abs/path/of/plan.md:12` - severity P0 (critical), P1 (must fix before implementing), P2 (should fix) or P3 (nit), a short title, an em dash, then the absolute path of the plan file and the line in it the finding is about. Put the detail on the lines after it, indented by two spaces.',
+  'Use that bullet form for findings only. With no findings, write "No findings." and nothing else.',
+]
+
+export function planReviewPrompt(p: PromptContext, plans: string[]): string {
+  return [
+    'You are a plan REVIEWER. Do not edit, stage or commit anything.',
+    ...planReviewAsks(p, plans).slice(0, 1),
+    p.context ? `Design context, read it first: ${p.context}` : '',
+    ...planReviewAsks(p, plans).slice(1),
+  ]
+    .filter(Boolean)
+    .join(' ')
+    .replace(/\s*\n\s*/g, ' ')
+}
+
+export function agentPlanReviewPrompt(p: PromptContext, plans: string[]): string {
+  return `${common(p)}
+
+You are the plan REVIEWER. Do not edit, stage or commit anything.
+${planReviewAsks(p, plans).slice(0, 2).join('\n')}
+Return findings with id (F1, F2, ...), severity (P0 critical / P1 must fix before implementing / P2 should fix / P3 nit), file (the absolute path of the plan file), line (the line in the plan file), title and a concrete detail. Zero findings means the plan is clean.`
+}
+
 export function extractPrompt(name: string, output: string, short?: { markers: number; got: number }): string {
   const count = short
     ? `\nThe output has ${short.markers} finding marker(s) (\`- [P0]\` ... \`- [P3]\` bullets); an earlier extraction returned ${short.got}. Return all ${short.markers}.`
