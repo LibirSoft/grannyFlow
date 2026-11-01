@@ -2,7 +2,7 @@ export type HostName = 'claude-code' | 'opencode'
 
 export type Role = 'granny' | 'implementer' | 'reviewer' | 'judge'
 
-export type ResultKind = 'implementation' | 'findings' | 'score' | 'command' | 'final'
+export type ResultKind = 'implementation' | 'planFix' | 'findings' | 'score' | 'command' | 'final'
 
 export type JsonSchema = {
   type: 'object'
@@ -86,6 +86,14 @@ export interface StageResult {
   note?: string
 }
 
+export interface PlanFix {
+  files: string[]
+  changes: string
+  deviations?: string
+}
+
+export type PlanResult = Omit<StageResult, 'stage' | 'implementation'>
+
 export interface FinalReport {
   gatesGreen: boolean
   gates: string
@@ -99,6 +107,7 @@ export interface RunResult {
   branch: string
   base: string
   worktree: string
+  plan?: PlanResult
   stages: StageResult[]
   final: FinalReport | null
 }

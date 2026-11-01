@@ -299,6 +299,28 @@ function commandReviewPrompt(p, name, reviewBase) {
     'Use that bullet form for findings only. With no findings, write "No findings." and nothing else.'
   ].filter(Boolean).join(" ").replace(/\s*\n\s*/g, " ");
 }
+var planReviewAsks = (p, plans) => [
+  `Review the plan in ${plans.join(", ")} - a plan, not code changes - against the actual repo at ${p.repo} (branch \`${p.branch}\`): open the code, configs, lockfiles and docs the plan talks about before reporting anything.`,
+  "Look for: wrong assumptions about the code or its dependencies, missing steps, risky ordering, acceptance criteria that cannot be tested, and version drift (versions, APIs, flags or files the plan names that differ from what the repo or its dependencies actually have).",
+  "Report every finding as a bullet line in exactly this form: `- [P1] Title \u2014 /abs/path/of/plan.md:12` - severity P0 (critical), P1 (must fix before implementing), P2 (should fix) or P3 (nit), a short title, an em dash, then the absolute path of the plan file and the line in it the finding is about. Put the detail on the lines after it, indented by two spaces.",
+  'Use that bullet form for findings only. With no findings, write "No findings." and nothing else.'
+];
+function planReviewPrompt(p, plans) {
+  return [
+    "You are a plan REVIEWER. Do not edit, stage or commit anything.",
+    ...planReviewAsks(p, plans).slice(0, 1),
+    p.context ? `Design context, read it first: ${p.context}` : "",
+    ...planReviewAsks(p, plans).slice(1)
+  ].filter(Boolean).join(" ").replace(/\s*\n\s*/g, " ");
+}
+function agentPlanReviewPrompt(p, plans) {
+  return `${common(p)}
+
+You are the plan REVIEWER. Do not edit, stage or commit anything.
+${planReviewAsks(p, plans).slice(0, 2).join(`
+`)}
+Return findings with id (F1, F2, ...), severity (P0 critical / P1 must fix before implementing / P2 should fix / P3 nit), file (the absolute path of the plan file), line (the line in the plan file), title and a concrete detail. Zero findings means the plan is clean.`;
+}
 function extractPrompt(name, output, short) {
   const count = short ? `
 The output has ${short.markers} finding marker(s) (\`- [P0]\` ... \`- [P3]\` bullets); an earlier extraction returned ${short.got}. Return all ${short.markers}.` : "";
@@ -318,6 +340,28 @@ For each finding below, open the cited code and judge whether it is real, correc
 
 REVIEW:
 ${JSON.stringify(findings, null, 2)}`;
+}
+function planJudgePrompt(p, plans, findings) {
+  return `You are the JUDGE scoring a plan review. Repo ${p.repo}, branch ${p.branch}, plan ${plans.join(", ")}. Implementation has not started. Do not edit anything.
+${p.context ? `Design context:
+` + p.context + `
+` : ""}
+The findings come from one or more reviewers; each names its reviewer. P0/P1 findings are not in this list: they go to the implementer without a score.
+For each finding below, open the cited plan line and the code, config or dependency it talks about, and judge whether it is real, correctly described and worth fixing in the plan before implementation starts; score it 0-100 (findings the repo refutes score low). When a finding reports the same problem as another finding in this list, score it too and set its duplicateOf to the id of the finding to keep. Then score the whole review 0-100 (correctness + actionability; mostly wrong or trivial findings = low).
+
+REVIEW:
+${JSON.stringify(findings, null, 2)}`;
+}
+function planFixPrompt(p, plans, round, accepted) {
+  return `${common(p)}
+
+You are the IMPLEMENTER, fixing the plan after plan review round ${round}. Implementation has not started: change only the plan.
+Edit the plan files in place at their absolute paths: ${plans.join(", ")}. Change nothing else - no code, no other file. Never stage or commit the plan files, even when they sit inside the repo: they stay uncommitted.
+${round === 1 ? "At the top of each plan file you change, add a section `## rN deltas (<date>)` - N one higher than the highest rN deltas section already in that file, r1 when there is none - listing each finding id and what you changed for it." : "At the top of each plan file you change, extend the newest `## rN deltas (<date>)` section - an earlier round of this plan review added it - with each finding id and what you changed for it; add one (N one higher than the highest in that file, r1 when there is none) where it is missing."} Take the date from \`date +%F\` in your shell.
+Fix every finding below. A finding you believe is wrong: leave the plan as it is for it and explain why in deviations.
+
+FINDINGS (P0/P1 or score > ${p.config.threshold}):
+${JSON.stringify(accepted, null, 2)}`;
 }
 function finalPrompt(p) {
   const attribution = p.config.aiAttribution ? "" : ` \`git log ${shellQuote(p.base)}..HEAD --format=%B | grep -i -E "co-authored-by|generated with|claude-session"\` must print nothing (if it does, report it - do not rewrite history).`;
@@ -487,6 +531,20 @@ function reviewPlan(rv, c, host, base, stem, prompt = "") {
     fallback: rv.engine === "auto" && mode === "review"
   });
 }
+function planReviewScript(rv, c, host, stem, prompt) {
+  if (rv.engine === "agent" || rv.engine === "command" && !rv.command?.includes("{prompt}"))
+    return;
+  const m = resolveModel(rv.model, host);
+  const model = m ? ` -m ${shellQuote(m)}` : "";
+  const cli = rv.engine === "command" ? cliCommand(rv, host, c.base, `${stem}.md`, prompt) : `codex exec --sandbox read-only${model} -o ${shellQuote(`${stem}.md`)} ${shellQuote(prompt)} </dev/null`;
+  return script(rv, c, host, stem, {
+    cli,
+    cliLabel: "codex CLI (codex exec, read-only)",
+    plugin: `node "$companion" task${model} ${shellQuote(prompt)} </dev/null`,
+    pluginLabel: "task",
+    fallback: rv.engine === "auto"
+  });
+}
 function reportedBackend(output) {
   return BACKEND_LINE.exec(output)?.[1]?.trim();
 }
@@ -517,6 +575,15 @@ var SCHEMAS = {
       deviations: { type: "string" }
     },
     required: ["startSha", "headSha", "gatesGreen", "gates", "commits", "untested"]
+  },
+  planFix: {
+    type: "object",
+    properties: {
+      files: { type: "array", items: { type: "string" }, description: "absolute paths of the plan files you changed" },
+      changes: { type: "string", description: "what you changed in the plan, per finding id" },
+      deviations: { type: "string", description: "findings you did not apply, and why" }
+    },
+    required: ["files", "changes"]
   },
   findings: {
     type: "object",
@@ -632,6 +699,7 @@ function reportedWorktree(output) {
 }
 
 // src/core/engine.ts
+var PLAN_PHASE = "Plan review";
 var slug = (s) => s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "stage";
 function checkInput(input) {
   const errors = [];
@@ -728,15 +796,27 @@ ${r.note}` : ""}` : "the worktree runner returned nothing";
     return r;
   };
   const attribute = (rv, findings) => findings.map((f, i) => ({ ...f, id: `${rv.name}-F${i + 1}`, reviewer: rv.name }));
-  const review = async (rv, name, reviewBase, round, attempt) => {
+  const fixPlan = async (label, prompt) => {
+    const r = await call("implementer", "planFix", label, PLAN_PHASE, prompt, "write", config.roles.implementer);
+    if (!r)
+      throw new Error(`${label}: implementer returned nothing`);
+    host.log(`${label}: plan edited - ${Array.isArray(r.files) && r.files.length ? r.files.join(", ") : "no file reported"}`);
+    return r;
+  };
+  const review = async (rv, name, subject, round, attempt) => {
     const tag = `${name} r${round} ${rv.name}${attempt > 1 ? ` #${attempt}` : ""}`;
+    const phase = subject.kind === "plan" ? PLAN_PHASE : "Review";
     if (rv.engine === "agent") {
-      const r = await call("reviewer", "findings", `review ${tag}`, "Review", agentReviewPrompt(p, name, reviewBase), "read-only", rv);
+      const prompt = subject.kind === "plan" ? agentPlanReviewPrompt(p, subject.files) : agentReviewPrompt(p, name, subject.base);
+      const r = await call("reviewer", "findings", `review ${tag}`, phase, prompt, "read-only", rv);
       if (!r)
         return { ran: false, findings: [], note: "reviewer agent returned nothing" };
       return { ran: true, findings: Array.isArray(r.findings) ? r.findings : [] };
     }
-    const plan = reviewPlan(rv, config, host.name, reviewBase, reviewStem(config, slug(name), round, rv), commandReviewPrompt(p, name, reviewBase));
+    const stem = reviewStem(config, slug(name), round, rv);
+    const plan = subject.kind === "plan" ? planReviewScript(rv, config, host.name, stem, planReviewPrompt(p, subject.files)) : reviewPlan(rv, config, host.name, subject.base, stem, commandReviewPrompt(p, name, subject.base));
+    if (!plan)
+      return { ran: false, findings: [], note: "this reviewer has no command for a plan review" };
     let ran;
     let output;
     let note;
@@ -748,7 +828,7 @@ ${r.note}` : ""}` : "the worktree runner returned nothing";
         note = `review command exited ${r.code}: ${r.output.slice(-2000)}`;
     } else {
       const script = `cd ${shellQuote(repo)} && ${plan.script}`;
-      const r = await call("granny", "command", `review ${tag}`, "Review", reviewCommandPrompt(p, name, rv.name, script), "read-only", config.roles.granny);
+      const r = await call("granny", "command", `review ${tag}`, phase, reviewCommandPrompt(p, name, rv.name, script), "read-only", config.roles.granny);
       ran = Boolean(r?.ran);
       output = String(r?.output ?? "");
       if (!ran)
@@ -760,12 +840,12 @@ ${r.note}` : ""}` : "the worktree runner returned nothing";
     const failure = reviewFailure(output);
     if (failure)
       return { ran: false, findings: [], note: `reviewer returned no usable result (${failure}): ${output.slice(-2000)}` };
-    const parsed = parseCodexReview(output, repo);
+    const parsed = parseCodexReview(output, subject.kind === "plan" ? undefined : repo);
     if (parsed.markers <= parsed.findings.length)
       return { ran, findings: parsed.findings };
     host.log(`${tag}: parser read ${parsed.findings.length}/${parsed.markers} findings - asking an agent to extract them`);
     const extract = async (label, prompt) => {
-      const r = await call("granny", "findings", label, "Review", prompt, "read-only", config.roles.granny);
+      const r = await call("granny", "findings", label, phase, prompt, "read-only", config.roles.granny);
       return Array.isArray(r?.findings) ? r.findings : [];
     };
     const first = await extract(`extract ${tag}`, extractPrompt(name, output));
@@ -781,26 +861,27 @@ ${r.note}` : ""}` : "the worktree runner returned nothing";
       note: `review reported ${parsed.markers} finding marker(s), parser read ${parsed.findings.length}; extraction recovered ${first.length}, then ${second.length} on a retry that named the count: ${output.slice(-2000)}`
     };
   };
-  const attempt = async (rv, name, reviewBase, round, n) => {
+  const attempt = async (rv, name, subject, round, n) => {
     try {
-      return await review(rv, name, reviewBase, round, n);
+      return await review(rv, name, subject, round, n);
     } catch (e) {
       return { ran: false, findings: [], note: `reviewer call failed: ${String(e?.message ?? e)}` };
     }
   };
-  const reviewAll = (name, reviewBase, round) => Promise.all(config.reviewers.map(async (reviewer) => {
-    let r = await attempt(reviewer, name, reviewBase, round, 1);
+  const reviewAll = (reviewers, name, subject, round) => Promise.all(reviewers.map(async (reviewer) => {
+    let r = await attempt(reviewer, name, subject, round, 1);
     if (!r.ran) {
       host.log(`${name} r${round} ${reviewer.name}: did not run - retrying once. ${r.note ?? ""}`);
-      r = await attempt(reviewer, name, reviewBase, round, 2);
+      r = await attempt(reviewer, name, subject, round, 2);
     }
     return { reviewer, ...r, findings: attribute(reviewer, r.findings) };
   }));
-  const reviewLoop = async (name, reviewBase) => {
+  const reviewLoop = async (name, subject, reviewers = config.reviewers) => {
+    const phase = subject.kind === "plan" ? PLAN_PHASE : "Review";
     const history = [];
     let unmerged = [];
     for (let round = 1;round <= config.maxRounds; round++) {
-      const results = await reviewAll(name, reviewBase, round);
+      const results = await reviewAll(reviewers, name, subject, round);
       const failed = results.filter((r) => !r.ran);
       const found = results.filter((r) => r.ran).flatMap((r) => r.findings);
       if (failed.length) {
@@ -825,7 +906,8 @@ ${r.note}` : ""}` : "the worktree runner returned nothing";
       unmerged = found;
       let score = null;
       if (judged.length) {
-        const scored = await call("judge", "score", `judge ${name} r${round}`, "Review", judgePrompt(p, reviewBase, judged), "read-only", config.roles.judge);
+        const prompt = subject.kind === "plan" ? planJudgePrompt(p, subject.files, judged) : judgePrompt(p, subject.base, judged);
+        const scored = await call("judge", "score", `judge ${name} r${round}`, phase, prompt, "read-only", config.roles.judge);
         if (!scored)
           host.log(`${name} r${round}: judge returned nothing - all ${judged.length} finding(s) go to the implementer unscored`);
         const per = Array.isArray(scored?.perFinding) ? scored.perFinding : [];
@@ -852,6 +934,10 @@ ${r.note}` : ""}` : "the worktree runner returned nothing";
         host.log(`${name} r${round}: nothing actionable left - stage done with ${residual.length} residual finding(s) for the user`);
         return { outcome: "residual-only", rounds: round, residual, unresolved: [], history };
       }
+      if (subject.kind === "plan") {
+        await fixPlan(`fix ${name} r${round}`, planFixPrompt(p, subject.files, round, accepted));
+        continue;
+      }
       const fix = await implement(`fix ${name} r${round}`, fixPrompt(p, name, round, accepted));
       if (!fix.gatesGreen)
         host.log(`${name} r${round}: WARNING fixer left gates red - ${fix.gates}`);
@@ -859,6 +945,35 @@ ${r.note}` : ""}` : "the worktree runner returned nothing";
     host.log(`${name}: hit the ${config.maxRounds}-round cap without a clean review`);
     return { outcome: "round-cap", rounds: config.maxRounds, residual: [], unresolved: history.at(-1)?.findings ?? [], history };
   };
+  const reviewThePlan = async () => {
+    const skipped = (outcome, why) => {
+      host.log(why);
+      return { outcome, rounds: 0, residual: [], unresolved: [], history: [] };
+    };
+    if (!plans.length)
+      return;
+    if (!config.planReview)
+      return skipped("review-skipped", "plan review off (planReview: false)");
+    if (fromStage > 1)
+      return skipped("skipped", `plan review skipped - the run resumes from stage ${fromStage}`);
+    host.phase(PLAN_PHASE);
+    const name = "plan review";
+    const able = config.reviewers.filter((rv) => rv.engine !== "command" || rv.command?.includes("{prompt}"));
+    const unable = config.reviewers.filter((rv) => !able.includes(rv));
+    for (const rv of unable)
+      host.log(`${name}: reviewer ${rv.name} skipped - its command has no {prompt}, so it cannot review a plan`);
+    if (!able.length) {
+      const note = `no reviewer can review a plan: ${unable.map((rv) => rv.name).join(", ")} ${unable.length > 1 ? "have commands" : "has a command"} without {prompt} - add a reviewer that can, or set planReview to false`;
+      host.log(`${name}: ${note}`);
+      return { outcome: "review-failed", rounds: 0, residual: [], unresolved: [], history: [], note };
+    }
+    return reviewLoop(name, { kind: "plan", files: plans }, able);
+  };
+  const planResult = await reviewThePlan();
+  if (planResult && (planResult.outcome === "round-cap" || planResult.outcome === "review-failed")) {
+    host.log(`plan review ended ${planResult.outcome} - stopping before stage 1; nothing was implemented`);
+    return { repo: input.repo, branch: input.branch, base, worktree: repo, plan: planResult, stages: [], final: null };
+  }
   const stages = [];
   for (let i = 0;i < input.stages.length; i++) {
     const st = input.stages[i];
@@ -877,19 +992,20 @@ ${r.note}` : ""}` : "the worktree runner returned nothing";
       host.log(`${name}: review-only stage - reviewing ${base}...HEAD`);
     }
     host.phase("Review");
-    const loop = st.review === false ? { outcome: "review-skipped", rounds: 0, residual: [], unresolved: [], history: [] } : await reviewLoop(name, impl?.startSha || base);
+    const loop = st.review === false ? { outcome: "review-skipped", rounds: 0, residual: [], unresolved: [], history: [] } : await reviewLoop(name, { kind: "diff", base: impl?.startSha || base });
     stages.push({ stage: name, ...impl ? { implementation: impl } : {}, ...loop });
   }
   host.phase("PR ready");
   const final = await call("granny", "final", "pr-ready check", "PR ready", finalPrompt(p), "write", config.roles.granny);
   if (!final)
     host.log("final check returned nothing");
-  return { repo: input.repo, branch: input.branch, base, worktree: repo, stages, final };
+  return { repo: input.repo, branch: input.branch, base, worktree: repo, ...planResult ? { plan: planResult } : {}, stages, final };
 }
 
 // src/adapters/opencode/plugin.ts
 var SUBMIT = {
   implementation: "granny_submit_implementation",
+  planFix: "granny_submit_plan_fix",
   findings: "granny_submit_findings",
   score: "granny_submit_score",
   final: "granny_submit_final"
@@ -984,13 +1100,18 @@ function runId() {
   return `${new Date().toISOString().replace(/[-:]/g, "").replace("T", "-").slice(0, 15)}-${Math.random().toString(36).slice(2, 6)}`;
 }
 function summarize(result, worktree) {
-  const lines = result.stages.map((s) => {
+  const line = (s, name) => {
     const extra = [
       s.residual.length ? `${s.residual.length} residual` : "",
       s.unresolved.length ? `${s.unresolved.length} unresolved` : ""
     ].filter(Boolean).join(", ");
-    return `- ${s.stage}: ${s.outcome}, ${s.rounds} review round(s)${extra ? ` (${extra})` : ""}`;
-  });
+    return `- ${name}: ${s.outcome}, ${s.rounds} review round(s)${extra ? ` (${extra})` : ""}`;
+  };
+  const lines = result.stages.map((s) => line(s, s.stage));
+  if (result.plan) {
+    const stopped = result.plan.outcome === "round-cap" || result.plan.outcome === "review-failed";
+    lines.unshift(`${line(result.plan, "plan review")}${stopped ? " - stopped before stage 1, nothing was implemented" : ""}`);
+  }
   if (result.final)
     lines.push(`- final: gates ${result.final.gatesGreen ? "green" : "RED"}, PR body ${result.final.prBodyPath}${result.final.issues ? `, issues: ${result.final.issues}` : ""}`);
   if (worktree)

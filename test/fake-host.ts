@@ -85,6 +85,8 @@ export function fakeHost(opts: FakeOptions = {}) {
         case 'implementation':
           impl++
           return { startSha: `start${impl}`, headSha: `head${impl}`, gatesGreen: true, gates: 'all green', commits: [`commit ${impl}`], untested: '' }
+        case 'planFix':
+          return { files: ['/plans/v1.md'], changes: 'fixed' }
         case 'score': {
           const s = scores.length ? scores.shift() : {}
           if (s === null) return null

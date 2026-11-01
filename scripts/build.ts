@@ -2,6 +2,7 @@ import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { resolveConfig } from '../src/core/config'
 import {
+  agentPlanReviewPrompt,
   agentReviewPrompt,
   commandReviewPrompt,
   extractPrompt,
@@ -9,6 +10,9 @@ import {
   fixPrompt,
   implementPrompt,
   judgePrompt,
+  planFixPrompt,
+  planJudgePrompt,
+  planReviewPrompt,
   worktreeCommandPrompt,
 } from '../src/core/prompts'
 import { worktreeScript } from '../src/core/worktree'
@@ -54,12 +58,17 @@ export function renderPrompts(): string {
     repo: '<repo>',
     branch: '<branch>',
     base: '<base>',
-    context: '<context: plan / work-order files and override notes>',
+    context: 'Plan files - read them first: <plan files>\n<context: work-order files and override notes>',
     config: resolveConfig([]),
   }
+  const plans = ['<plan files>']
   const setup = `cd '<repo>' && ${worktreeScript(p.config, '<branch>', '<base>', '<worktreeDir>/<branch-slug>')}`
   const sections: Array<[string, string]> = [
     ['Granny - worktree setup, the helper agent on Claude Code (on Cursor, run the command yourself)', worktreeCommandPrompt('<repo>', '<branch>', setup)],
+    ['Plan reviewer - agent engine', agentPlanReviewPrompt(p, plans)],
+    ['Plan reviewer - codex exec, the Codex plugin task and the {prompt} of a command engine', planReviewPrompt(p, plans)],
+    ['Judge - plan review', planJudgePrompt(p, plans, []).replace(/\[\]$/, '<findings as JSON>')],
+    ['Implementer - plan fix (round 1; later rounds extend the newest rN deltas section)', planFixPrompt(p, plans, 1, []).replace(/\[\]$/, '<accepted findings as JSON>')],
     ['Implementer - stage', implementPrompt(p, { task: '<stage task>' }, 1, 2, '<stage name>')],
     ['Implementer - fix', fixPrompt(p, '<stage name>', 1, []).replace(/\[\]$/, '<accepted findings as JSON>')],
     ['Reviewer - agent engine', agentReviewPrompt(p, '<stage name>', '<stage start sha>')],

@@ -5,7 +5,7 @@ import { isAbsolute, join } from 'node:path'
 import { resolveConfig } from '../../core/config'
 import { checkInput, runGranny, type RunInput } from '../../core/engine'
 import { checkShape, SCHEMAS } from '../../core/schemas'
-import type { AgentRequest, CommandResult, Host, ResultKind, RunResult } from '../../core/types'
+import type { AgentRequest, CommandResult, Host, PlanResult, ResultKind, RunResult } from '../../core/types'
 
 type Status = 'running' | 'done' | 'failed' | 'cancelled'
 
@@ -23,6 +23,7 @@ type ModelRef = { providerID: string; id: string; variant?: string }
 
 const SUBMIT: Partial<Record<ResultKind, string>> = {
   implementation: 'granny_submit_implementation',
+  planFix: 'granny_submit_plan_fix',
   findings: 'granny_submit_findings',
   score: 'granny_submit_score',
   final: 'granny_submit_final',
@@ -123,13 +124,18 @@ function runId(): string {
 }
 
 function summarize(result: RunResult, worktree: boolean): string {
-  const lines = result.stages.map(s => {
+  const line = (s: PlanResult, name: string) => {
     const extra = [
       s.residual.length ? `${s.residual.length} residual` : '',
       s.unresolved.length ? `${s.unresolved.length} unresolved` : '',
     ].filter(Boolean).join(', ')
-    return `- ${s.stage}: ${s.outcome}, ${s.rounds} review round(s)${extra ? ` (${extra})` : ''}`
-  })
+    return `- ${name}: ${s.outcome}, ${s.rounds} review round(s)${extra ? ` (${extra})` : ''}`
+  }
+  const lines = result.stages.map(s => line(s, s.stage))
+  if (result.plan) {
+    const stopped = result.plan.outcome === 'round-cap' || result.plan.outcome === 'review-failed'
+    lines.unshift(`${line(result.plan, 'plan review')}${stopped ? ' - stopped before stage 1, nothing was implemented' : ''}`)
+  }
   if (result.final) lines.push(`- final: gates ${result.final.gatesGreen ? 'green' : 'RED'}, PR body ${result.final.prBodyPath}${result.final.issues ? `, issues: ${result.final.issues}` : ''}`)
   if (worktree) lines.push(`- worktree: ${result.worktree} - review and push from there; granny never removes it`)
   return lines.join('\n')

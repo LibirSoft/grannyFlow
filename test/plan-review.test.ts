@@ -66,6 +66,172 @@ describe('the plan input', () => {
   })
 })
 
+describe('the plan review', () => {
+  const WT = '/work/repo-worktrees/feat-x'
+  const planFinding = (severity: string, title: string, line = 3) => finding(severity, title, PLAN, line)
+  const planCommand = (c: string) => c.includes('review-plan-review-r')
+  const opus = { name: 'opus', engine: 'agent', model: 'opus' }
+
+  it('reviews the plan after the worktree setup and before stage 1, and goes on when it is clean', async () => {
+    const f = fakeHost({ worktree: WT })
+    const r = await runGranny(f.host, input({ plan: PLAN }))
+    expect(f.phases).toEqual(['Worktree', 'Plan review', 'Implement', 'Review', 'PR ready'])
+    expect(f.commands).toHaveLength(2)
+    expect(f.commands[0]).toContain('codex exec --sandbox read-only -o .granny/review-plan-review-r1-codex.md ')
+    expect(f.commands[0]).toContain(`Review the plan in ${PLAN} - a plan, not code changes - against the actual repo at ${WT}`)
+    expect(f.cwds[0]).toBe(WT)
+    expect(f.commands[1]).toContain('codex exec review --base start1')
+    expect(f.logs).toContain('plan review r1: clean')
+    expect(f.logs).toContain('plan review r1 codex: reviewer: codex CLI (codex exec, read-only)')
+    expect(r.plan).toEqual({ outcome: 'clean', rounds: 1, residual: [], unresolved: [], history: [] })
+    expect(r.stages[0]).toMatchObject({ stage: 'core', outcome: 'clean' })
+    expect(r.final).not.toBeNull()
+  })
+
+  it('has the implementer fix the plan in place, uncommitted, then reviews it again', async () => {
+    const f = fakeHost({ worktree: WT, reviews: [review(planFinding('P2', 'Step 2 uses a removed flag')), 'No findings.'], scores: [{ 'codex-F1': 90 }] })
+    const r = await runGranny(f.host, input({ plan: [PLAN, '/plans/wo-2.md'] }))
+    expect(r.plan).toMatchObject({ outcome: 'clean', rounds: 2 })
+    expect(r.plan!.history[0]!.findings[0]).toMatchObject({ id: 'codex-F1', file: PLAN, line: 3, score: 90, title: 'Step 2 uses a removed flag' })
+    expect(f.calls.map(c => c.label)).toEqual(['judge plan review r1', 'fix plan review r1', 'implement core', 'pr-ready check'])
+    const judge = f.calls[0]!
+    expect(judge).toMatchObject({ role: 'judge', kind: 'score', phase: 'Plan review', access: 'read-only' })
+    expect(judge.prompt).toContain(`You are the JUDGE scoring a plan review. Repo ${WT}, branch feat/x, plan ${PLAN}, /plans/wo-2.md.`)
+    expect(judge.prompt).not.toContain('stage diff')
+    const fix = f.calls[1]!
+    expect(fix).toMatchObject({ role: 'implementer', kind: 'planFix', phase: 'Plan review', access: 'write', cwd: WT })
+    expect(fix.prompt).toContain(`Edit the plan files in place at their absolute paths: ${PLAN}, /plans/wo-2.md.`)
+    expect(fix.prompt).toContain('Never stage or commit the plan files')
+    expect(fix.prompt).toContain('`## rN deltas (<date>)`')
+    expect(fix.prompt).toContain('`date +%F`')
+    expect(fix.prompt).toContain('Step 2 uses a removed flag')
+    expect(f.commands.filter(planCommand).map(c => /review-plan-review-r\d/.exec(c)![0])).toEqual(['review-plan-review-r1', 'review-plan-review-r2'])
+    expect(f.phases).toEqual(['Worktree', 'Plan review', 'Implement', 'Review', 'PR ready'])
+  })
+
+  it('stops before stage 1 when it hits the round cap, and reports the plan result', async () => {
+    const bad = review(planFinding('P2', 'Still missing a migration step'))
+    const f = fakeHost({ reviews: [bad, bad], scores: [{ 'codex-F1': 90 }, { 'codex-F1': 90 }] })
+    const r = await runGranny(f.host, input({ plan: PLAN, config: { maxRounds: 2 } }))
+    expect(r.plan).toMatchObject({ outcome: 'round-cap', rounds: 2 })
+    expect(r.plan!.unresolved.map(x => x.title)).toEqual(['Still missing a migration step'])
+    expect(r.plan!.history).toHaveLength(2)
+    expect(r.stages).toEqual([])
+    expect(r.final).toBeNull()
+    expect(f.calls.map(c => c.label)).toEqual(['judge plan review r1', 'fix plan review r1', 'judge plan review r2', 'fix plan review r2'])
+    expect(f.phases).toEqual(['Worktree', 'Plan review'])
+    expect(f.logs.at(-1)).toBe('plan review ended round-cap - stopping before stage 1; nothing was implemented')
+  })
+
+  it('stops before stage 1 when a reviewer fails twice', async () => {
+    const f = fakeHost({ reviews: [{ code: 1, output: 'codex: not logged in' }, { code: 1, output: 'codex: still not logged in' }] })
+    const r = await runGranny(f.host, input({ plan: PLAN }))
+    expect(r.plan).toMatchObject({ outcome: 'review-failed', rounds: 1 })
+    expect(r.plan!.note).toContain('still not logged in')
+    expect(r.stages).toEqual([])
+    expect(r.final).toBeNull()
+    expect(f.calls).toHaveLength(0)
+    expect(f.logs.at(-1)).toBe('plan review ended review-failed - stopping before stage 1; nothing was implemented')
+  })
+
+  it('goes on to stage 1 with the residual findings when nothing is above the threshold', async () => {
+    const f = fakeHost({ reviews: [review(planFinding('P3', 'Wording'))], scores: [{ 'codex-F1': 20 }] })
+    const r = await runGranny(f.host, input({ plan: PLAN }))
+    expect(r.plan).toMatchObject({ outcome: 'residual-only', rounds: 1 })
+    expect(r.plan!.residual.map(x => x.title)).toEqual(['Wording'])
+    expect(r.stages[0]).toMatchObject({ stage: 'core', outcome: 'clean' })
+  })
+
+  it('sends P0/P1 plan findings to the implementer without the judge', async () => {
+    const f = fakeHost({ reviews: [review(planFinding('P1', 'Wrong dependency version')), 'No findings.'] })
+    const r = await runGranny(f.host, input({ plan: PLAN }))
+    expect(r.plan).toMatchObject({ outcome: 'clean', rounds: 2 })
+    expect(f.calls.some(c => c.kind === 'score')).toBe(false)
+    expect(f.calls.find(c => c.label === 'fix plan review r1')!.prompt).toContain('Wrong dependency version')
+    expect(f.logs).toContain('plan review r1: 1 P0/P1 finding(s) go to the implementer without the judge: codex-F1')
+  })
+
+  it('is skipped when the run resumes from a later stage', async () => {
+    const f = fakeHost()
+    const r = await runGranny(f.host, input({ plan: PLAN, stages: [{ name: 'a', task: 'A' }, { name: 'b', task: 'B' }], fromStage: 2 }))
+    expect(r.plan).toEqual({ outcome: 'skipped', rounds: 0, residual: [], unresolved: [], history: [] })
+    expect(f.phases).toEqual(['Worktree', 'Implement', 'Review', 'PR ready'])
+    expect(f.commands.some(planCommand)).toBe(false)
+    expect(f.logs).toContain('plan review skipped - the run resumes from stage 2')
+    expect(f.calls.find(c => c.kind === 'implementation')!.prompt).toContain(`Plan files - read them first: ${PLAN}`)
+  })
+
+  it('is off with planReview false, and absent without a plan', async () => {
+    const off = fakeHost()
+    const r = await runGranny(off.host, input({ plan: PLAN, config: { planReview: false } }))
+    expect(r.plan).toEqual({ outcome: 'review-skipped', rounds: 0, residual: [], unresolved: [], history: [] })
+    expect(off.commands.some(planCommand)).toBe(false)
+    expect(off.logs).toContain('plan review off (planReview: false)')
+    const none = fakeHost()
+    expect((await runGranny(none.host, input())).plan).toBeUndefined()
+    expect(none.phases).toEqual(['Worktree', 'Implement', 'Review', 'PR ready'])
+  })
+
+  it('skips a command reviewer without {prompt}, with a log line, and reviews with the others', async () => {
+    const diffOnly = { name: 'diff-only', engine: 'command', command: 'my-review --base {base} --out {out}' }
+    const f = fakeHost({ override: req => (req.role === 'reviewer' ? { findings: [] } : undefined) })
+    const r = await runGranny(f.host, input({ plan: PLAN, config: { reviewers: [diffOnly, opus] } }))
+    expect(r.plan).toMatchObject({ outcome: 'clean', rounds: 1 })
+    expect(f.logs).toContain('plan review: reviewer diff-only skipped - its command has no {prompt}, so it cannot review a plan')
+    expect(f.commands.some(planCommand)).toBe(false)
+    expect(f.commands.some(c => c.includes('my-review --base start1'))).toBe(true)
+    const agent = f.calls.find(c => c.label === 'review plan review r1 opus')!
+    expect(agent).toMatchObject({ role: 'reviewer', kind: 'findings', phase: 'Plan review', access: 'read-only', model: 'opus' })
+    expect(agent.prompt).toContain(`Review the plan in ${PLAN}`)
+  })
+
+  it('fails closed when no reviewer can review a plan', async () => {
+    const diffOnly = { name: 'diff-only', engine: 'command', command: 'my-review --base {base} --out {out}' }
+    const f = fakeHost()
+    const r = await runGranny(f.host, input({ plan: PLAN, config: { reviewers: [diffOnly] } }))
+    expect(r.plan).toMatchObject({ outcome: 'review-failed', rounds: 0 })
+    expect(r.plan!.note).toBe('no reviewer can review a plan: diff-only has a command without {prompt} - add a reviewer that can, or set planReview to false')
+    expect(r.stages).toEqual([])
+    expect(f.calls).toHaveLength(0)
+  })
+
+  it('fills {prompt} of a command reviewer with the plan-review prompt', async () => {
+    const f = fakeHost({ worktree: WT })
+    await runGranny(f.host, input({ plan: PLAN, config: { reviewers: [{ name: 'glm', engine: 'command', command: 'glm-review {prompt}' }] } }))
+    expect(f.commands[0]).toContain(`glm-review 'You are a plan REVIEWER.`)
+    expect(f.commands[0]).toContain('.granny/review-plan-review-r1-glm.md')
+  })
+
+  it('retries a plan reviewer that failed once', async () => {
+    const f = fakeHost({ reviews: [{ code: 1, output: 'flaky' }, 'No findings.'] })
+    const r = await runGranny(f.host, input({ plan: PLAN }))
+    expect(r.plan).toMatchObject({ outcome: 'clean', rounds: 1 })
+    expect(f.commands.filter(planCommand)).toHaveLength(2)
+  })
+
+  it('keeps the absolute plan path of a finding even when the plan sits in the worktree', async () => {
+    const inside = `${WT}/.granny/plans/v1.md`
+    const f = fakeHost({ worktree: WT, reviews: [review(finding('P2', 'Gap', inside, 9)), 'No findings.'], scores: [{ 'codex-F1': 90 }] })
+    const r = await runGranny(f.host, input({ plan: inside }))
+    expect(r.plan!.history[0]!.findings[0]).toMatchObject({ file: inside, line: 9 })
+  })
+
+  it('runs the plan-review command on Claude Code through the review runner, in the Plan review phase', async () => {
+    const f = fakeHost({ name: 'claude-code', direct: false, worktree: WT })
+    const r = await runGranny(f.host, input({ plan: PLAN }))
+    expect(r.plan).toMatchObject({ outcome: 'clean' })
+    const runner = f.calls.find(c => c.label === 'review plan review r1 codex')!
+    expect(runner).toMatchObject({ role: 'granny', kind: 'command', phase: 'Plan review', access: 'read-only' })
+    expect(runner.prompt).toContain(`\ncd ${WT} && mkdir -p .granny && rm -f .granny/review-plan-review-r1-codex.md`)
+    expect(runner.prompt).toContain('node "$companion" task')
+  })
+
+  it('throws when the plan fixer returns nothing', async () => {
+    const f = fakeHost({ reviews: [review(planFinding('P1', 'Blocker'))], override: req => (req.kind === 'planFix' ? null : undefined) })
+    await expect(runGranny(f.host, input({ plan: PLAN }))).rejects.toThrow('fix plan review r1: implementer returned nothing')
+  })
+})
+
 const ctx = (extra: Partial<PromptContext> = {}): PromptContext => ({
   repo: '/work/repo-worktrees/feat-x',
   branch: 'feat/x',

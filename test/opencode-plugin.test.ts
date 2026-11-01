@@ -29,6 +29,7 @@ const CANNED: Record<string, unknown> = {
   granny_submit_score: { score: 90, perFinding: [{ id: 'codex-F1', score: 95, reason: 'real' }], rationale: 'ok' },
   granny_submit_final: { gatesGreen: true, gates: 'ok', commits: ['c1'], prBodyPath: '.granny/PR-BODY.md', issues: '' },
   granny_submit_findings: { findings: [] },
+  granny_submit_plan_fix: { files: ['/plan.md'], changes: 'fixed' },
 }
 
 type FakeError = { type: string; message: string; status?: number }
@@ -258,8 +259,68 @@ describe('opencode plugin', () => {
       'granny_submit_final',
       'granny_submit_findings',
       'granny_submit_implementation',
+      'granny_submit_plan_fix',
       'granny_submit_score',
     ])
+  })
+
+  describe('with a plan', () => {
+    const planReviewer = (always: boolean) => ({
+      name: 'codex',
+      engine: 'command',
+      command: `test -n {prompt} && if [ -e .granny/plan-reviewed ] && ${!always}; then echo "No findings." > {out}; else touch .granny/plan-reviewed; printf '%s\\n' "- [${always ? 'P1' : 'P2'}] Plan misses a step — $PLAN_FILE:2" '  detail' > {out}; fi`,
+    })
+    const runWithPlan = async (f: ReturnType<typeof fakeContext>, config: Record<string, unknown>) => {
+      const plan = join(repo, '.granny/plans/v1.md')
+      mkdirSync(join(repo, '.granny/plans'), { recursive: true })
+      writeFileSync(plan, '# plan\nstep 1\n')
+      process.env.PLAN_FILE = plan
+      writeFileSync(join(repo, 'granny.config.json'), JSON.stringify(config))
+      git(repo, 'add', 'granny.config.json')
+      git(repo, 'commit', '-qm', 'cfg')
+      await plugin.setup(f.ctx)
+      const started = await f.tools.get('granny_run').execute({ repo, branch: 'feat/x', plan: [plan], stages: [{ name: 'one', task: 'Do it.' }] }, { sessionID: 'parent' })
+      const id = /granny run (\S+) started/.exec(started.content)?.[1]
+      expect(id).toBeDefined()
+      return { id: id!, dir: join(repo, '.granny/runs', id!), plan }
+    }
+
+    it('reviews the plan, has a plan-fix session submit through granny_submit_plan_fix, then implements', async () => {
+      const f = fakeContext()
+      const { id, dir, plan } = await runWithPlan(f, { reviewers: [planReviewer(false)] })
+      const result = await finished(dir)
+      delete process.env.PLAN_FILE
+      expect(result.plan).toMatchObject({ outcome: 'clean', rounds: 2 })
+      expect(result.plan.history[0].findings[0]).toMatchObject({ id: 'codex-F1', file: plan, line: 2, score: 95 })
+      expect(f.created.map(s => s.title)).toEqual([
+        'granny · judge plan review r1',
+        'granny · fix plan review r1',
+        'granny · implement one',
+        'granny · pr-ready check',
+      ])
+      expect(f.created[1].permissions).not.toContainEqual({ action: 'edit', resource: '*', effect: 'deny' })
+      expect(promptsTo(f, 'granny · fix plan review r1')[0]).toContain('call the `granny_submit_plan_fix` tool exactly once')
+      expect(journalOf(dir)).toContainEqual(expect.objectContaining({ type: 'phase', title: 'Plan review' }))
+      await waitFor(() => f.prompts.some(p => p.sessionID === 'parent'))
+      const done = f.prompts.find(p => p.sessionID === 'parent')!.text
+      expect(done).toContain(`[granny] Run ${id} finished.`)
+      expect(done).toContain('- plan review: clean, 2 review round(s)\n- one: clean')
+    })
+
+    it('stops before stage 1 when the plan review hits the round cap, and says so', async () => {
+      const f = fakeContext()
+      const { id, dir } = await runWithPlan(f, { maxRounds: 1, reviewers: [planReviewer(true)] })
+      const result = await finished(dir)
+      delete process.env.PLAN_FILE
+      expect(result.plan).toMatchObject({ outcome: 'round-cap', rounds: 1 })
+      expect(result.stages).toEqual([])
+      expect(result.final).toBeNull()
+      expect(f.created.map(s => s.title)).toEqual(['granny · fix plan review r1'])
+      await waitFor(() => f.prompts.some(p => p.sessionID === 'parent'))
+      const done = f.prompts.find(p => p.sessionID === 'parent')!.text
+      expect(done).toContain(`[granny] Run ${id} finished.`)
+      expect(done).toContain('- plan review: round-cap, 1 review round(s) (1 unresolved) - stopped before stage 1, nothing was implemented')
+    })
   })
 
   it('lets the model pass plan files to granny_run and refuses a relative one', async () => {

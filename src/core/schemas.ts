@@ -27,6 +27,15 @@ export const SCHEMAS: Record<ResultKind, JsonSchema> = {
     },
     required: ['startSha', 'headSha', 'gatesGreen', 'gates', 'commits', 'untested'],
   },
+  planFix: {
+    type: 'object',
+    properties: {
+      files: { type: 'array', items: { type: 'string' }, description: 'absolute paths of the plan files you changed' },
+      changes: { type: 'string', description: 'what you changed in the plan, per finding id' },
+      deviations: { type: 'string', description: 'findings you did not apply, and why' },
+    },
+    required: ['files', 'changes'],
+  },
   findings: {
     type: 'object',
     properties: {

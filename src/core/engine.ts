@@ -1,5 +1,6 @@
 import { resolveConfig, resolveModel, type GrannyConfig, type ReviewerConfig, type RoleConfig } from './config'
 import {
+  agentPlanReviewPrompt,
   agentReviewPrompt,
   commandReviewPrompt,
   extractPrompt,
@@ -7,12 +8,15 @@ import {
   fixPrompt,
   implementPrompt,
   judgePrompt,
+  planFixPrompt,
+  planJudgePrompt,
+  planReviewPrompt,
   reviewCommandPrompt,
   worktreeCommandPrompt,
   type PromptContext,
 } from './prompts'
 import { isBlocker, mergeDuplicates, parseCodexReview, reviewFailure, triage } from './review'
-import { reportedBackend, reviewPlan, reviewStem } from './reviewer'
+import { planReviewScript, reportedBackend, reviewPlan, reviewStem } from './reviewer'
 import { SCHEMAS } from './schemas'
 import { shellQuote } from './shell'
 import { reportedWorktree, worktreePath, worktreeScript } from './worktree'
@@ -22,6 +26,8 @@ import type {
   Finding,
   Host,
   Implementation,
+  PlanFix,
+  PlanResult,
   ResultKind,
   Role,
   RoundRecord,
@@ -29,6 +35,10 @@ import type {
   StageResult,
   StageSpec,
 } from './types'
+
+type Subject = { kind: 'diff'; base: string } | { kind: 'plan'; files: string[] }
+
+const PLAN_PHASE = 'Plan review'
 
 export interface RunInput {
   repo: string
@@ -141,15 +151,29 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
   const attribute = (rv: ReviewerConfig, findings: Finding[]): Finding[] =>
     findings.map((f, i) => ({ ...f, id: `${rv.name}-F${i + 1}`, reviewer: rv.name }))
 
-  const review = async (rv: ReviewerConfig, name: string, reviewBase: string, round: number, attempt: number): Promise<Omit<ReviewerRound, 'reviewer'>> => {
+  const fixPlan = async (label: string, prompt: string): Promise<PlanFix> => {
+    const r = (await call('implementer', 'planFix', label, PLAN_PHASE, prompt, 'write', config.roles.implementer)) as PlanFix | null
+    if (!r) throw new Error(`${label}: implementer returned nothing`)
+    host.log(`${label}: plan edited - ${Array.isArray(r.files) && r.files.length ? r.files.join(', ') : 'no file reported'}`)
+    return r
+  }
+
+  const review = async (rv: ReviewerConfig, name: string, subject: Subject, round: number, attempt: number): Promise<Omit<ReviewerRound, 'reviewer'>> => {
     const tag = `${name} r${round} ${rv.name}${attempt > 1 ? ` #${attempt}` : ''}`
+    const phase = subject.kind === 'plan' ? PLAN_PHASE : 'Review'
     if (rv.engine === 'agent') {
-      const r = await call('reviewer', 'findings', `review ${tag}`, 'Review', agentReviewPrompt(p, name, reviewBase), 'read-only', rv)
+      const prompt = subject.kind === 'plan' ? agentPlanReviewPrompt(p, subject.files) : agentReviewPrompt(p, name, subject.base)
+      const r = await call('reviewer', 'findings', `review ${tag}`, phase, prompt, 'read-only', rv)
       if (!r) return { ran: false, findings: [], note: 'reviewer agent returned nothing' }
       return { ran: true, findings: Array.isArray(r.findings) ? r.findings : [] }
     }
 
-    const plan = reviewPlan(rv, config, host.name, reviewBase, reviewStem(config, slug(name), round, rv), commandReviewPrompt(p, name, reviewBase))
+    const stem = reviewStem(config, slug(name), round, rv)
+    const plan =
+      subject.kind === 'plan'
+        ? planReviewScript(rv, config, host.name, stem, planReviewPrompt(p, subject.files))
+        : reviewPlan(rv, config, host.name, subject.base, stem, commandReviewPrompt(p, name, subject.base))
+    if (!plan) return { ran: false, findings: [], note: 'this reviewer has no command for a plan review' }
     let ran: boolean
     let output: string
     let note: string | undefined
@@ -160,7 +184,7 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
       if (!ran) note = `review command exited ${r.code}: ${r.output.slice(-2000)}`
     } else {
       const script = `cd ${shellQuote(repo)} && ${plan.script}`
-      const r = await call('granny', 'command', `review ${tag}`, 'Review', reviewCommandPrompt(p, name, rv.name, script), 'read-only', config.roles.granny)
+      const r = await call('granny', 'command', `review ${tag}`, phase, reviewCommandPrompt(p, name, rv.name, script), 'read-only', config.roles.granny)
       ran = Boolean(r?.ran)
       output = String(r?.output ?? '')
       if (!ran) note = r ? `review command exited ${r.exitCode ?? '?'}${r.note ? ` (${r.note})` : ''}: ${output.slice(-2000)}` : 'review runner returned nothing'
@@ -170,12 +194,12 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
     const failure = reviewFailure(output)
     if (failure) return { ran: false, findings: [], note: `reviewer returned no usable result (${failure}): ${output.slice(-2000)}` }
 
-    const parsed = parseCodexReview(output, repo)
+    const parsed = parseCodexReview(output, subject.kind === 'plan' ? undefined : repo)
     if (parsed.markers <= parsed.findings.length) return { ran, findings: parsed.findings }
 
     host.log(`${tag}: parser read ${parsed.findings.length}/${parsed.markers} findings - asking an agent to extract them`)
     const extract = async (label: string, prompt: string): Promise<Finding[]> => {
-      const r = await call('granny', 'findings', label, 'Review', prompt, 'read-only', config.roles.granny)
+      const r = await call('granny', 'findings', label, phase, prompt, 'read-only', config.roles.granny)
       return Array.isArray(r?.findings) ? r.findings : []
     }
     const first = await extract(`extract ${tag}`, extractPrompt(name, output))
@@ -191,31 +215,32 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
     }
   }
 
-  const attempt = async (rv: ReviewerConfig, name: string, reviewBase: string, round: number, n: number): Promise<Omit<ReviewerRound, 'reviewer'>> => {
+  const attempt = async (rv: ReviewerConfig, name: string, subject: Subject, round: number, n: number): Promise<Omit<ReviewerRound, 'reviewer'>> => {
     try {
-      return await review(rv, name, reviewBase, round, n)
+      return await review(rv, name, subject, round, n)
     } catch (e) {
       return { ran: false, findings: [], note: `reviewer call failed: ${String((e as Error)?.message ?? e)}` }
     }
   }
 
-  const reviewAll = (name: string, reviewBase: string, round: number): Promise<ReviewerRound[]> =>
+  const reviewAll = (reviewers: ReviewerConfig[], name: string, subject: Subject, round: number): Promise<ReviewerRound[]> =>
     Promise.all(
-      config.reviewers.map(async reviewer => {
-        let r = await attempt(reviewer, name, reviewBase, round, 1)
+      reviewers.map(async reviewer => {
+        let r = await attempt(reviewer, name, subject, round, 1)
         if (!r.ran) {
           host.log(`${name} r${round} ${reviewer.name}: did not run - retrying once. ${r.note ?? ''}`)
-          r = await attempt(reviewer, name, reviewBase, round, 2)
+          r = await attempt(reviewer, name, subject, round, 2)
         }
         return { reviewer, ...r, findings: attribute(reviewer, r.findings) }
       }),
     )
 
-  const reviewLoop = async (name: string, reviewBase: string): Promise<Omit<StageResult, 'stage' | 'implementation'>> => {
+  const reviewLoop = async (name: string, subject: Subject, reviewers = config.reviewers): Promise<PlanResult> => {
+    const phase = subject.kind === 'plan' ? PLAN_PHASE : 'Review'
     const history: RoundRecord[] = []
     let unmerged: Finding[] = []
     for (let round = 1; round <= config.maxRounds; round++) {
-      const results = await reviewAll(name, reviewBase, round)
+      const results = await reviewAll(reviewers, name, subject, round)
       const failed = results.filter(r => !r.ran)
       const found = results.filter(r => r.ran).flatMap(r => r.findings)
       if (failed.length) {
@@ -242,7 +267,8 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
       unmerged = found
       let score: number | null = null
       if (judged.length) {
-        const scored = await call('judge', 'score', `judge ${name} r${round}`, 'Review', judgePrompt(p, reviewBase, judged), 'read-only', config.roles.judge)
+        const prompt = subject.kind === 'plan' ? planJudgePrompt(p, subject.files, judged) : judgePrompt(p, subject.base, judged)
+        const scored = await call('judge', 'score', `judge ${name} r${round}`, phase, prompt, 'read-only', config.roles.judge)
         if (!scored) host.log(`${name} r${round}: judge returned nothing - all ${judged.length} finding(s) go to the implementer unscored`)
         const per: Array<{ id: string; score: number; reason: string; duplicateOf?: string }> = Array.isArray(scored?.perFinding) ? scored.perFinding : []
         const judgedIds = new Set(judged.map(f => f.id))
@@ -271,11 +297,43 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
         return { outcome: 'residual-only', rounds: round, residual, unresolved: [], history }
       }
 
+      if (subject.kind === 'plan') {
+        await fixPlan(`fix ${name} r${round}`, planFixPrompt(p, subject.files, round, accepted))
+        continue
+      }
       const fix = await implement(`fix ${name} r${round}`, fixPrompt(p, name, round, accepted))
       if (!fix.gatesGreen) host.log(`${name} r${round}: WARNING fixer left gates red - ${fix.gates}`)
     }
     host.log(`${name}: hit the ${config.maxRounds}-round cap without a clean review`)
     return { outcome: 'round-cap', rounds: config.maxRounds, residual: [], unresolved: history.at(-1)?.findings ?? [], history }
+  }
+
+  const reviewThePlan = async (): Promise<PlanResult | undefined> => {
+    const skipped = (outcome: 'skipped' | 'review-skipped', why: string): PlanResult => {
+      host.log(why)
+      return { outcome, rounds: 0, residual: [], unresolved: [], history: [] }
+    }
+    if (!plans.length) return undefined
+    if (!config.planReview) return skipped('review-skipped', 'plan review off (planReview: false)')
+    if (fromStage > 1) return skipped('skipped', `plan review skipped - the run resumes from stage ${fromStage}`)
+
+    host.phase(PLAN_PHASE)
+    const name = 'plan review'
+    const able = config.reviewers.filter(rv => rv.engine !== 'command' || rv.command?.includes('{prompt}'))
+    const unable = config.reviewers.filter(rv => !able.includes(rv))
+    for (const rv of unable) host.log(`${name}: reviewer ${rv.name} skipped - its command has no {prompt}, so it cannot review a plan`)
+    if (!able.length) {
+      const note = `no reviewer can review a plan: ${unable.map(rv => rv.name).join(', ')} ${unable.length > 1 ? 'have commands' : 'has a command'} without {prompt} - add a reviewer that can, or set planReview to false`
+      host.log(`${name}: ${note}`)
+      return { outcome: 'review-failed', rounds: 0, residual: [], unresolved: [], history: [], note }
+    }
+    return reviewLoop(name, { kind: 'plan', files: plans }, able)
+  }
+
+  const planResult = await reviewThePlan()
+  if (planResult && (planResult.outcome === 'round-cap' || planResult.outcome === 'review-failed')) {
+    host.log(`plan review ended ${planResult.outcome} - stopping before stage 1; nothing was implemented`)
+    return { repo: input.repo, branch: input.branch, base, worktree: repo, plan: planResult, stages: [], final: null }
   }
 
   const stages: StageResult[] = []
@@ -298,7 +356,7 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
     host.phase('Review')
     const loop = st.review === false
       ? { outcome: 'review-skipped' as const, rounds: 0, residual: [], unresolved: [], history: [] }
-      : await reviewLoop(name, impl?.startSha || base)
+      : await reviewLoop(name, { kind: 'diff', base: impl?.startSha || base })
     stages.push({ stage: name, ...(impl ? { implementation: impl } : {}), ...loop })
   }
 
@@ -306,7 +364,7 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
   const final = (await call('granny', 'final', 'pr-ready check', 'PR ready', finalPrompt(p), 'write', config.roles.granny)) as FinalReport | null
   if (!final) host.log('final check returned nothing')
 
-  return { repo: input.repo, branch: input.branch, base, worktree: repo, stages, final }
+  return { repo: input.repo, branch: input.branch, base, worktree: repo, ...(planResult ? { plan: planResult } : {}), stages, final }
 }
 
 export type { GrannyConfig }

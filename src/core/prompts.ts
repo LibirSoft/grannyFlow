@@ -150,6 +150,32 @@ REVIEW:
 ${JSON.stringify(findings, null, 2)}`
 }
 
+export function planJudgePrompt(p: PromptContext, plans: string[], findings: Finding[]): string {
+  return `You are the JUDGE scoring a plan review. Repo ${p.repo}, branch ${p.branch}, plan ${plans.join(', ')}. Implementation has not started. Do not edit anything.
+${p.context ? 'Design context:\n' + p.context + '\n' : ''}
+The findings come from one or more reviewers; each names its reviewer. P0/P1 findings are not in this list: they go to the implementer without a score.
+For each finding below, open the cited plan line and the code, config or dependency it talks about, and judge whether it is real, correctly described and worth fixing in the plan before implementation starts; score it 0-100 (findings the repo refutes score low). When a finding reports the same problem as another finding in this list, score it too and set its duplicateOf to the id of the finding to keep. Then score the whole review 0-100 (correctness + actionability; mostly wrong or trivial findings = low).
+
+REVIEW:
+${JSON.stringify(findings, null, 2)}`
+}
+
+export function planFixPrompt(p: PromptContext, plans: string[], round: number, accepted: Finding[]): string {
+  return `${common(p)}
+
+You are the IMPLEMENTER, fixing the plan after plan review round ${round}. Implementation has not started: change only the plan.
+Edit the plan files in place at their absolute paths: ${plans.join(', ')}. Change nothing else - no code, no other file. Never stage or commit the plan files, even when they sit inside the repo: they stay uncommitted.
+${
+    round === 1
+      ? 'At the top of each plan file you change, add a section `## rN deltas (<date>)` - N one higher than the highest rN deltas section already in that file, r1 when there is none - listing each finding id and what you changed for it.'
+      : 'At the top of each plan file you change, extend the newest `## rN deltas (<date>)` section - an earlier round of this plan review added it - with each finding id and what you changed for it; add one (N one higher than the highest in that file, r1 when there is none) where it is missing.'
+  } Take the date from \`date +%F\` in your shell.
+Fix every finding below. A finding you believe is wrong: leave the plan as it is for it and explain why in deviations.
+
+FINDINGS (P0/P1 or score > ${p.config.threshold}):
+${JSON.stringify(accepted, null, 2)}`
+}
+
 export function finalPrompt(p: PromptContext): string {
   const attribution = p.config.aiAttribution
     ? ''
