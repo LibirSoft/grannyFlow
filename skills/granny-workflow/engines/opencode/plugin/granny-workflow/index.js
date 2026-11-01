@@ -274,7 +274,7 @@ var MARKER = /^\s*[-*]\s*\[(P[0-3]|[A-Za-z]+)\](.*)$/;
 var WORD_SEVERITY = new Map([["critical", "P0"], ["high", "P1"], ["medium", "P2"], ["low", "P3"]]);
 var LOCATION = /^(.+?)(?::(\d+)(?:-\d+)?)?$/;
 var PAREN_LOCATION = /^(.*\S)\s+\(([^()]+)\)$/;
-var FAILED_RENDER = /^Codex (?:did not return valid structured JSON|returned JSON with an unexpected review shape)\.$/m;
+var FAILED_RENDER = /^Codex (?:did not return valid structured JSON|returned JSON with an unexpected review shape|review completed without any stdout output)\.$/m;
 function parseCodexReview(text, repo) {
   const findings = [];
   let markers = 0;

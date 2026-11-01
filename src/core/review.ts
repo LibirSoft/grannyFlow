@@ -4,7 +4,8 @@ const MARKER = /^\s*[-*]\s*\[(P[0-3]|[A-Za-z]+)\](.*)$/
 const WORD_SEVERITY = new Map([['critical', 'P0'], ['high', 'P1'], ['medium', 'P2'], ['low', 'P3']])
 const LOCATION = /^(.+?)(?::(\d+)(?:-\d+)?)?$/
 const PAREN_LOCATION = /^(.*\S)\s+\(([^()]+)\)$/
-const FAILED_RENDER = /^Codex (?:did not return valid structured JSON|returned JSON with an unexpected review shape)\.$/m
+const FAILED_RENDER =
+  /^Codex (?:did not return valid structured JSON|returned JSON with an unexpected review shape|review completed without any stdout output)\.$/m
 
 export interface ParsedReview {
   findings: Finding[]

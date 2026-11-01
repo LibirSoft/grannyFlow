@@ -83,6 +83,14 @@ describe('runGranny', () => {
     expect(f.calls.some(c => c.kind === 'score' || c.kind === 'findings')).toBe(false)
   })
 
+  it('fails the review instead of reporting clean when the Codex plugin review printed nothing', async () => {
+    const f = fakeHost({ reviews: ['# Codex Review\n\nTarget: branch diff against start1\n\nCodex review completed without any stdout output.\n'] })
+    const r = await runGranny(f.host, input())
+    expect(r.stages[0]).toMatchObject({ outcome: 'review-failed', rounds: 1 })
+    expect(r.stages[0]!.note).toContain('reviewer returned no usable result (Codex review completed without any stdout output.)')
+    expect(f.calls.some(c => c.kind === 'score' || c.kind === 'findings')).toBe(false)
+  })
+
   it('sends every finding when the judge returns nothing, and says so', async () => {
     const f = fakeHost({ reviews: [review(finding('P3', 'Nit'), finding('P3', 'Other nit')), 'No issues.'], scores: [null] })
     await runGranny(f.host, input())
@@ -434,6 +442,15 @@ describe('the review script in a real shell', () => {
     expect(f.logs).toContain(`core r1: reviewer: codex-plugin review (${companionDir('1.0.10')}/codex-companion.mjs)`)
     expect(readFileSync(join(repo, workDir, 'review-core-r1.md'), 'utf8')).toBe(readFileSync(join(FIXTURES, 'codex-plugin-review.md'), 'utf8'))
     expect(readFileSync(join(repo, workDir, 'review-core-r1.log'), 'utf8')).toBe('[codex] progress\n')
+  })
+
+  it('fails the review when the companion exits 0 but Codex printed no review', async () => {
+    installCompanion('1.0.10', '# Codex Review\n\nTarget: branch diff against start1\n\nCodex review completed without any stdout output.\n')
+    const f = fakeHost({ name: 'claude-code', direct: false, shell: shell() })
+    const r = await runGranny(f.host, input({ repo, config: { maxRounds: 1, workDir } }))
+    expect(r.stages[0]).toMatchObject({ outcome: 'review-failed', rounds: 1 })
+    expect(r.stages[0]!.note).toContain('Codex review completed without any stdout output.')
+    expect(companionCalls()).toHaveLength(1)
   })
 
   it('falls back to the Codex CLI on Claude Code with engine auto when no companion is installed, and says why', async () => {

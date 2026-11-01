@@ -201,6 +201,13 @@ Raw final message:
     expect(reviewFailure(crlf(badShape))).toBe('Codex returned JSON with an unexpected review shape.')
   })
 
+  it('recognises the companion render for a native review that printed nothing', () => {
+    const empty = '# Codex Review\n\nTarget: branch diff against abc\n\nCodex review completed without any stdout output.\n\nstderr:\n\n```text\nwarning: x\n```\n'
+    expect(reviewFailure(empty)).toBe('Codex review completed without any stdout output.')
+    expect(reviewFailure(crlf(empty))).toBe('Codex review completed without any stdout output.')
+    expect(reviewFailure('- [P2] Parser — a.ts:1\n  Codex review completed without any stdout output.')).toBeUndefined()
+  })
+
   it('ignores clean reviews and finding text that quotes the render', () => {
     expect(reviewFailure(fixture('codex-plugin-adversarial-review.md'))).toBeUndefined()
     expect(reviewFailure('No material findings.')).toBeUndefined()
