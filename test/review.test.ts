@@ -5,6 +5,7 @@ import { isBlocker, parseCodexReview, reviewFailure, triage } from '../src/core/
 import type { Finding } from '../src/core/types'
 
 const fixture = (name: string) => readFileSync(join(import.meta.dir, 'fixtures', name), 'utf8')
+const crlf = (text: string) => text.replace(/\n/g, '\r\n')
 
 const REAL = `The patch changes the existing add function to perform subtraction, introducing an arithmetic regression.
 
@@ -85,6 +86,17 @@ Some closing words.`
     expect(findings.map(f => f.title)).toEqual(['Real'])
   })
 
+  it('reads CRLF output in the `[P1] Title — file:line` form', () => {
+    const text = crlf('Review comments:\n\n- [P1] Restore addition — /tmp/repo/math.js:2-2\n  First line.\n  Second line.\n- [P3] Typo — README.md\n  Fix it.\n')
+    const { findings, markers } = parseCodexReview(text, '/tmp/repo')
+    expect(markers).toBe(2)
+    expect(findings).toEqual([
+      { id: 'F1', severity: 'P1', file: 'math.js', line: 2, title: 'Restore addition', detail: 'First line.\nSecond line.' },
+      { id: 'F2', severity: 'P3', file: 'README.md', title: 'Typo', detail: 'Fix it.' },
+    ])
+    expect(parseCodexReview(crlf(REAL), '/tmp/repo')).toEqual(parseCodexReview(REAL, '/tmp/repo'))
+  })
+
   it('still counts an indented list of findings', () => {
     const { findings, markers } = parseCodexReview('Review comments:\n  - [P1] A — a.ts:1\n    detail a\n  - [P2] B — b.ts:2\n    detail b')
     expect(markers).toBe(2)
@@ -147,6 +159,18 @@ Reasoning:
     expect(findings[1]!.detail).toBe('Body.\nRecommendation: Check the signal.')
   })
 
+  it('reads CRLF output in the adversarial `[high] Title (file:12-14)` form', () => {
+    const text = crlf('Findings:\n- [high] Retry loop ignores cancel (src/run.ts:12-14)\n  Body.\n  Recommendation: Check the signal.\n- [low] Nit (a.ts)\n  d\n\nNext steps:\n- Fix it.\n')
+    const { findings, markers } = parseCodexReview(text)
+    expect(markers).toBe(2)
+    expect(findings).toEqual([
+      { id: 'F1', severity: 'P1', file: 'src/run.ts', line: 12, title: 'Retry loop ignores cancel', detail: 'Body.\nRecommendation: Check the signal.' },
+      { id: 'F2', severity: 'P3', file: 'a.ts', title: 'Nit', detail: 'd' },
+    ])
+    const real = fixture('codex-plugin-adversarial-review.md')
+    expect(parseCodexReview(crlf(real))).toEqual(parseCodexReview(real))
+  })
+
   it('keeps [Px] findings on the em-dash form and other bracketed words out of the count', () => {
     const { findings, markers } = parseCodexReview(
       '- [P1] Fix total() (cart.js:3)\n  d\n- [note] Not a finding (a.ts:1)\n- [Polish] Not one — a.ts:2\n- [constructor] Nor this — a.ts:3\n- [P2] Fix total() — cart.js:4',
@@ -173,6 +197,8 @@ Raw final message:
     const badShape = '# Codex Adversarial Review\n\nTarget: branch diff against abc\nCodex returned JSON with an unexpected review shape.\n\n- Validation error: Missing array `findings`.\n'
     expect(reviewFailure(noJson)).toBe('Codex did not return valid structured JSON.')
     expect(reviewFailure(badShape)).toBe('Codex returned JSON with an unexpected review shape.')
+    expect(reviewFailure(crlf(noJson))).toBe('Codex did not return valid structured JSON.')
+    expect(reviewFailure(crlf(badShape))).toBe('Codex returned JSON with an unexpected review shape.')
   })
 
   it('ignores clean reviews and finding text that quotes the render', () => {

@@ -137,6 +137,19 @@ describe('runGranny', () => {
     expect(r.stages[0]!.history[0]!.findings.map(x => x.title)).toEqual(['Real one'])
   })
 
+  it('reads findings from CRLF review output instead of reporting the stage clean', async () => {
+    const crlf = review(finding('P2', 'Native form'), '- [high] Adversarial form (src/b.ts:12-14)\n  Body.\n  Recommendation: Fix it.').replace(/\n/g, '\r\n')
+    const f = fakeHost({ reviews: [crlf, 'No issues.'], scores: [{ F1: 90, F2: 90 }] })
+    const r = await runGranny(f.host, input())
+    expect(r.stages[0]).toMatchObject({ outcome: 'clean', rounds: 2 })
+    expect(r.stages[0]!.history[0]!.findings.map(x => [x.severity, x.title, x.file, x.line, x.detail])).toEqual([
+      ['P2', 'Native form', 'src/a.ts', 3, 'Native form detail.'],
+      ['P1', 'Adversarial form', 'src/b.ts', 12, 'Body.\nRecommendation: Fix it.'],
+    ])
+    expect(f.calls.some(c => c.kind === 'findings')).toBe(false)
+    expect(f.calls.some(c => c.label === 'fix core r1')).toBe(true)
+  })
+
   it('falls back to an extraction agent when the parser misses findings', async () => {
     const f = fakeHost({
       reviews: ['- [P1] no location here\n  detail', 'No issues.'],

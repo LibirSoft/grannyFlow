@@ -279,8 +279,7 @@ function parseCodexReview(text, repo) {
   const findings = [];
   let markers = 0;
   let item = null;
-  for (const line of text.split(`
-`)) {
+  for (const line of text.split(/\r\n?|\n/)) {
     if (!line.trim())
       continue;
     const indent = line.length - line.trimStart().length;
