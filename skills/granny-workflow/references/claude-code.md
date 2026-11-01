@@ -24,7 +24,11 @@ Workflow({
 
 ## Models
 
-`opus`, `sonnet`, `haiku`, or a model ID the session accepts. A role without a model inherits the session model; the judge defaults to `sonnet`. `effort` is passed through (`low` … `max`). The review command runs inside a granny helper agent, because Workflow scripts have no shell; a cheap `roles.granny.model` keeps that step inexpensive, but granny also runs the final check, so do not go below `sonnet` there.
+`opus`, `sonnet`, `haiku`, or a model ID the session accepts. A role without a model inherits the session model; the judge defaults to `sonnet`. `effort` is passed through (`low` … `max`). The worktree setup and the review command run inside granny helper agents, because Workflow scripts have no shell; a cheap `roles.granny.model` keeps those steps inexpensive, but granny also runs the final check, so do not go below `sonnet` there.
+
+## Worktree
+
+With `worktree` on (the default) the run starts with phase "Worktree": a granny helper agent (label `worktree`, write access, `roles.granny`'s model) runs the setup script from `repo` and returns what it printed; the engine reads the `[granny] worktree: <path>` line from it and stops the run when the script fails - a dirty reused worktree, for example - before any other agent starts. Pass the main checkout as `repo` and leave `branch` alone: the script reuses the worktree that has it checked out or creates one ([config.md](config.md#worktree)). `agent()` has no working-directory option, so every later prompt carries the worktree instead: `Working repo: <worktree>` and `cd <worktree> &&` before each command; the review runner `cd`s there too. The result's `worktree` is the path. On resume the cached setup call returns the same path; a relaunch with `fromStage` runs the setup again and reuses the worktree.
 
 ## Reviewers
 
@@ -43,4 +47,4 @@ Same script, same args: `Workflow({ scriptPath, args, resumeFromRunId })`, where
 
 ## When it ends
 
-The result is `{ repo, branch, base, stages: [...], final }`. If anything looks empty, read `<transcriptDir>/journal.jsonl`, which records every agent's return value, before drawing conclusions. Then report per SKILL.md section 5 and wait.
+The result is `{ repo, branch, base, worktree, stages: [...], final }`. If anything looks empty, read `<transcriptDir>/journal.jsonl`, which records every agent's return value, before drawing conclusions. Then report per SKILL.md section 5 and wait.

@@ -45,6 +45,18 @@ describe('skill docs', () => {
     expect(read('references/claude-code.md')).toContain('Claude models only')
   })
 
+  it('documents the worktree in the config keys, the SKILL.md preflight and the Cursor protocol', () => {
+    const config = read('references/config.md')
+    expect(config).toMatch(/^\| `worktree` \| `true` \|/m)
+    expect(config).toMatch(/^\| `worktreeDir` \| `<parent of repo>\/<repo name>-worktrees` \|/m)
+    expect(config).toContain('## Worktree')
+    const skill = read('SKILL.md')
+    expect(skill).toContain('do not create or check out `branch` yourself')
+    expect(skill).not.toMatch(/^2\. `git -C <repo> status --short` is clean; create and check out `branch`/m)
+    expect(read('references/cursor.md')).toContain('## The worktree')
+    expect(read('references/cursor.md')).toContain('`git -C <repo> worktree list --porcelain`')
+  })
+
   it('points every repo reference at LibirSoft/grannyFlow', () => {
     expect(readRoot('README.md')).toContain('npx skills add LibirSoft/grannyFlow')
     const docs: Record<string, string> = {

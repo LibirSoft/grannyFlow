@@ -22,6 +22,8 @@ Layers, later wins:
 | `base` | `"main"` | branch never to touch; the run's `base` argument overrides it |
 | `gates` | `"auto"` | `"auto"`: agents discover the project's test/lint/build/typecheck commands. Or a list, e.g. `["bun test", "bun run check", "bun run build"]` |
 | `workDir` | `".granny"` | repo-relative, git-excluded: PR body, review outputs, run journals |
+| `worktree` | `true` | work in the branch's own git worktree: reuse the one that has the branch checked out, or create one - see [Worktree](#worktree). `false`: work in `repo`, on the branch checked out there |
+| `worktreeDir` | `<parent of repo>/<repo name>-worktrees` | where new worktrees go: an absolute path, or a path relative to the repo's parent directory (`~` is not expanded). A worktree is `<worktreeDir>/<branch-slug>` |
 | `language` | `"English"` | language of code, comments, commits and the PR body |
 | `aiAttribution` | `false` | `false` forbids Co-Authored-By / "Generated with" lines and the final check greps for them |
 | `rules` | red-green tests; code comments default none | extra house rules appended to every working prompt; `[]` removes them |
@@ -41,6 +43,27 @@ A role's or a reviewer's `model` is either one string for every host, or an obje
 - **Cursor** reads no config; set `model:` in the subagent files (see cursor.md).
 
 A host key that is missing means "inherit" on that host. Reviewers take `model` and `effort` from their own entry, never from a role.
+
+## Worktree
+
+With `worktree` on (the default) a setup step runs before the first stage - also on a resume and with `fromStage` - and picks where the run works:
+
+1. The branch is checked out somewhere, as `git worktree list --porcelain` lists it (the main checkout included): that path is reused.
+2. The branch exists but no worktree has it: `git worktree add <worktreeDir>/<branch-slug> <branch>`.
+3. The branch does not exist: `git worktree add -b <branch> <worktreeDir>/<branch-slug> <base>`.
+4. The reused worktree has uncommitted changes: the run fails before any agent starts, with that worktree's `git status --short` in the error. Commit or discard them, then run again.
+
+A resumed run, or one started again with `fromStage`, finds the worktree the first run made (case 1). `<branch-slug>` is the branch with every run of characters other than letters, digits, `.`, `_` and `-` turned into `-`, case kept (`feat/login` → `feat-login`). For repo `/work/app` and branch `feat/login` the new worktree is `/work/app-worktrees/feat-login`; with `"worktreeDir": "trees"` it is `/work/trees/feat-login`.
+
+Before it looks at the worktree, the step adds `/<workDir>/` to the common git dir's `info/exclude` (once), so the work dir never counts as a change. The step is a generated shell script, like the review script: on Claude Code a granny helper agent with write access runs it (label `worktree`, phase "Worktree"), on opencode the plugin runs it directly ([prompts.md](prompts.md) shows it). It prints `[granny] worktree: <path>`, and the engine logs `worktree: <path>`.
+
+From then on everything happens in that worktree: every agent prompt (`Working repo: <worktree>`, `cd <worktree> &&`), every review command, the gates, the review outputs and the PR body in `<worktree>/<workDir>/`, and the final check. The run's result names it as `worktree`. Granny never removes it: the user reviews and pushes from there.
+
+- Files that exist only in the main checkout - untracked, or in its git-excluded work dir - are not in a new worktree. Give plan files in `context` as absolute paths.
+- The project config is still read from `<repo>/granny.config.json`, the main checkout as it is.
+- On opencode the run files stay in `<repo>/<workDir>/runs/<id>/`, so `granny_status` finds runs by `repo`.
+
+With `worktree: false` the run works in `repo` itself, on the branch you checked out there.
 
 ## Reviewers
 
@@ -111,7 +134,7 @@ Two consequences:
 
 ### The Codex plugin
 
-The plugin path runs the newest `${CLAUDE_CONFIG_DIR:-$HOME/.claude}/plugins/cache/openai-codex/codex/<version>/scripts/codex-companion.mjs` from the repo - the highest `<version>`, compared numerically field by field (`1.10.0` after `1.9.3`) with `sort -t. -k1,1n -k2,2n -k3,3n`, which BSD/macOS `sort` runs too:
+The plugin path runs the newest `${CLAUDE_CONFIG_DIR:-$HOME/.claude}/plugins/cache/openai-codex/codex/<version>/scripts/codex-companion.mjs` from the worktree - the highest `<version>`, compared numerically field by field (`1.10.0` after `1.9.3`) with `sort -t. -k1,1n -k2,2n -k3,3n`, which BSD/macOS `sort` runs too:
 
 ```
 node <companion> review --wait --base <stage start sha> --scope branch [-m <model>]
@@ -144,7 +167,7 @@ An adversarial review on both hosts:
 
 ### Command reviewers
 
-Engine `command` runs the entry's `command` from the repo. Placeholders:
+Engine `command` runs the entry's `command` from the worktree (`repo` with `worktree: false`). Placeholders:
 
 | placeholder | filled with |
 |---|---|
@@ -205,6 +228,8 @@ The word severities map to `critical` → P0, `high` → P1, `medium` → P2, `l
   "base": "main",
   "gates": ["bun test", "bun run check", "bun run build"],
   "workDir": ".granny",
+  "worktree": true,
+  "worktreeDir": "/work/worktrees",
   "language": "English",
   "aiAttribution": false,
   "rules": ["Code comments: default none."]

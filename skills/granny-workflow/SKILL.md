@@ -8,6 +8,7 @@ description: Run a planned implementation through the granny loop - an implement
 You are **Granny**: you prepare the run, launch the engine, and report the result. The engine owns the loop; you do not implement, review or judge yourself. Invoking this skill is the user's opt-in to a multi-agent run.
 
 ```
+before the first stage: reuse the branch's worktree or create one (config worktree, default on); everything below runs there
 for each stage:
   implementer builds the stage ─► every reviewer reviews it, in parallel (base = stage start sha)
      ├─ a reviewer fails, then fails its one retry ─► stage review-failed
@@ -39,10 +40,10 @@ All paths in this skill are relative to the directory containing this `SKILL.md`
 
 | input | meaning |
 |---|---|
-| `repo` | absolute path of the git repo or worktree |
-| `branch` | feature branch; you create it in preflight |
+| `repo` | absolute path of the git repo (its main checkout) |
+| `branch` | feature branch. With `worktree` on (the default) the engine reuses the worktree that has it checked out, or creates one - with the branch, from `base`, when it does not exist yet; with `worktree: false` you create and check it out in preflight |
 | `base` | branch never to touch (default from config, `main`; check whether the repo uses `master`) |
-| `context` | files every agent reads first (plan, preamble, work orders), plus a one-line "these override older text" note when there are revisions |
+| `context` | files every agent reads first (plan, preamble, work orders), plus a one-line "these override older text" note when there are revisions. With the worktree on, the agents work in the worktree, where files that exist only in the main checkout (untracked, or in the git-excluded work dir such as `.granny/plans/`) are missing: name those by absolute path |
 | `stages` | `[{ name, task, implement?, review? }]` - one entry per stop-and-review point; `task` names exactly which work orders or sections to do; `review: false` skips the loop for that stage; `implement: false` makes a review-only stage (no task needed) that reviews `base...HEAD` and fixes what the judge accepts - use it to run granny on work that is already written |
 | `fromStage` | 1-based stage to resume from (earlier stages are skipped) |
 | `config` | per-run overrides, same shape as the config file |
@@ -72,8 +73,10 @@ Three layers, later wins: `~/.config/granny/config.json` (user), `<repo>/granny.
 ## 3. Preflight - inline, before launching
 
 1. The plan is current: if dependency versions or upstream behaviour moved since it was written, update the plan first (a dated "rN deltas" section at the top) and tell the user what changed.
-2. `git -C <repo> status --short` is clean; create and check out `branch`; never work on `base`.
-3. The work dir (default `.granny/`) is in `.git/info/exclude` - for a worktree, the common git dir's `info/exclude`. It holds the PR body, review outputs and run journals.
+2. Branch and worktree - never work on `base`:
+   - `worktree` on (the default): do not create or check out `branch` yourself; the engine's setup step does it before the first stage ([references/config.md](references/config.md#worktree)). Find out what it will do: when `git -C <repo> worktree list --porcelain` shows `branch refs/heads/<branch>` under some `worktree <path>` (the main checkout included), that path is reused and `git -C <path> status --short` must be clean, or the run fails before any agent starts; otherwise a worktree is created at `<worktreeDir>/<branch-slug>` (default `<parent of repo>/<repo name>-worktrees/<branch-slug>`, with `feat/login` as `feat-login`). Tell the user the path.
+   - `worktree: false`: `git -C <repo> status --short` is clean; create and check out `branch`.
+3. The work dir (default `.granny/`) is in the common git dir's `info/exclude` (`git -C <repo> rev-parse --git-common-dir`). With the worktree on, the setup step adds it; with it off, add it yourself. It holds the PR body and review outputs (in the worktree) and run journals.
 4. Reviewers - for each entry of `reviewers`, by the engine that will run (see [references/config.md](references/config.md#reviewers)):
    - Codex CLI (engine `codex`, or `auto` on opencode, or `auto` on Claude Code without the plugin or without `node`): `codex --version` works and Codex is logged in (`codex login status`).
    - Codex plugin (engine `codex-plugin`, or `auto` on Claude Code when it is installed and `command -v node` finds `node`): `node --version` works; `ls "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/cache/openai-codex/codex/*/scripts/codex-companion.mjs` finds the companion (for `codex-plugin` on opencode: with the opencode server's `HOME` and `CLAUDE_CONFIG_DIR`); `codex --version` works and Codex is logged in - the companion drives the CLI.
@@ -84,14 +87,14 @@ Three layers, later wins: `~/.config/granny/config.json` (user), `<repo>/granny.
 
 ## 4. Launch
 
-Follow your host reference. Then tell the user, in their language: the run id, the stages, threshold and round cap, the models per role, the reviewers, and that nothing will be pushed. Do not poll; you are notified when the run ends.
+Follow your host reference. Then tell the user, in their language: the run id, the worktree the run will work in, the stages, threshold and round cap, the models per role, the reviewers, and that nothing will be pushed. Do not poll; you are notified when the run ends.
 
 ## 5. When it completes
 
-Read the result. Report per stage: commits, gate numbers, review rounds, outcome (`clean`, `residual-only`, `round-cap`, `review-failed` with the reviewers its note names, `review-skipped`, `skipped`), residual and unresolved findings with the reviewer each came from (ids are `<reviewer>-F<n>`); then the final check, the PR body path, and deviations and untested items from the implementers. Before repeating a load-bearing claim from an agent, verify it yourself (open the file, rerun the gate).
+Read the result. Name the worktree first (`worktree` in the result; `repo` itself with `worktree: false`): the branch is checked out there, the user reviews and pushes from there, and granny never removes it - `git worktree remove <path>` is the user's call. Report per stage: commits, gate numbers, review rounds, outcome (`clean`, `residual-only`, `round-cap`, `review-failed` with the reviewers its note names, `review-skipped`, `skipped`), residual and unresolved findings with the reviewer each came from (ids are `<reviewer>-F<n>`); then the final check, the PR body path (inside the worktree), and deviations and untested items from the implementers. Before repeating a load-bearing claim from an agent, verify it yourself (open the file, rerun the gate - in the worktree).
 
 Then STOP and wait. No push, no `git remote add`, no PR, no tag - the user decides.
 
 ## Rules baked into the engine
 
-Never push, never open a PR, never rebase or force-push, never `git stash`, never `git remote add` · stage with explicit paths only · `cd <repo> &&` before every command · gates green before every commit · red-green tests for behaviour changes · no AI attribution in commits or the PR body (config `aiAttribution`) · artefacts in English (config `language`) · extra house rules from config `rules`.
+Never push, never open a PR, never rebase or force-push, never `git stash`, never `git remote add` · stage with explicit paths only · `cd <worktree> &&` before every command (`cd <repo> &&` with `worktree: false`) · gates green before every commit · red-green tests for behaviour changes · no AI attribution in commits or the PR body (config `aiAttribution`) · artefacts in English (config `language`) · extra house rules from config `rules`.

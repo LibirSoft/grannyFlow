@@ -6,7 +6,18 @@ Cursor has subagents but no workflow engine, so you run the loop yourself, step 
 
 Copy `engines/cursor/agents/*.md` to `~/.cursor/agents/` (all projects) or `<project>/.cursor/agents/`, and set `model:` in each file (`inherit` uses the chat's model). Cursor sometimes ignores a subagent's `model:`; check which model actually ran when it matters.
 
-Config: read `~/.config/granny/config.json` and `<repo>/granny.config.json` yourself and apply the layering in [config.md](config.md); only `threshold`, `maxRounds`, `base`, `gates`, `workDir`, `language`, `aiAttribution`, `rules` and `reviewers` apply here - of a reviewer, its `name`, `engine`, `mode`, `focus`, `command`, and `model` where the engine passes it on. An `agent` reviewer runs `granny-reviewer` on whatever model that subagent has.
+Config: read `~/.config/granny/config.json` and `<repo>/granny.config.json` yourself and apply the layering in [config.md](config.md); only `threshold`, `maxRounds`, `base`, `gates`, `workDir`, `worktree`, `worktreeDir`, `language`, `aiAttribution`, `rules` and `reviewers` apply here - of a reviewer, its `name`, `engine`, `mode`, `focus`, `command`, and `model` where the engine passes it on. An `agent` reviewer runs `granny-reviewer` on whatever model that subagent has.
+
+## The worktree
+
+With `worktree` on (the default), set it up by hand before the first stage - also when you resume with `fromStage` - by the rules the engines follow ([config.md](config.md#worktree)):
+
+1. Add the line `/<workDir>/` to `<common dir>/info/exclude` unless it is there, where `<common dir>` is what `git -C <repo> rev-parse --git-common-dir` prints (relative to `<repo>`).
+2. `git -C <repo> worktree list --porcelain`. When a `branch refs/heads/<branch>` line belongs to a `worktree <path>` entry (the main checkout included), that path is the worktree: `git -C <path> status --short` must print nothing. If it prints anything, stop before any subagent runs and tell the user - they commit or discard it, not you.
+3. Otherwise, when `git -C <repo> show-ref --verify --quiet refs/heads/<branch>` succeeds: `git -C <repo> worktree add <worktreeDir>/<branch-slug> <branch>`.
+4. Otherwise: `git -C <repo> worktree add -b <branch> <worktreeDir>/<branch-slug> <base>`.
+
+`<worktreeDir>` defaults to `<parent of repo>/<repo name>-worktrees`; `<branch-slug>` is the branch with every character other than letters, digits, `.`, `_` and `-` as `-` (`feat/login` → `feat-login`). The "Granny - worktree setup" command in [prompts.md](prompts.md) does all four steps in one go and prints `[granny] worktree: <path>`. From then on the worktree is `<repo>` in every prompt and every terminal command; name it in the report and never remove it. With `worktree: false`, work in `repo` on the branch checked out there.
 
 ## The loop
 
@@ -16,12 +27,12 @@ For each stage, from `fromStage` on:
 
 1. **Implement.** Delegate to `granny-implementer` with the "Implementer - stage" prompt. Keep its `startSha`.
 2. **Review**, round N (N starts at 1; skip the loop when the stage has `review: false`). Run every reviewer in `reviewers` - at the same time where you can (terminal commands in the background, subagents in parallel), otherwise one after another. For a reviewer named `<name>`:
-   - engine `codex`, or `auto` (the default; here it means the Codex CLI): run in the terminal, from the repo:
+   - engine `codex`, or `auto` (the default; here it means the Codex CLI): run in the terminal, from the worktree (the repo with `worktree: false`):
      `codex exec review --base <startSha> -o <workDir>/review-<stage>-rN-<name>.md > <workDir>/review-<stage>-rN-<name>.log 2>&1`
      It can take over 10 minutes; let it finish.
    - engine `codex-plugin`: the same, with the plugin command from [config.md](config.md#the-codex-plugin) (`node <companion> review --wait --base <startSha> --scope branch > ….md 2> ….log`, or `adversarial-review … -- <focus>`), with `CLAUDE_PLUGIN_DATA=<workDir>/codex-plugin-<name>` exported for it. No companion, or no `node` on `PATH`, is a failure. Adversarial findings read `- [high] Title (file:line)`: critical/high/medium/low are P0/P1/P2/P3.
    - engine `agent`: delegate to `granny-reviewer` with the "Reviewer - agent engine" prompt.
-   - engine `command`: run the reviewer's `command` from the repo, with `{base}` = `startSha`, `{out}` = `<workDir>/review-<stage>-rN-<name>.md`, `{model}` = its model, `{prompt}` = the "Reviewer - command engine" prompt - each value shell-quoted.
+   - engine `command`: run the reviewer's `command` from the worktree, with `{base}` = `startSha`, `{out}` = `<workDir>/review-<stage>-rN-<name>.md`, `{model}` = its model, `{prompt}` = the "Reviewer - command engine" prompt - each value shell-quoted.
 
    Read the findings from `- [P1] Title — file:line` lines (from the `.md`, or what the command printed when the `.md` is empty) and number each reviewer's findings `<name>-F1`, `<name>-F2`, …, noting the reviewer on each. Never invent findings.
 

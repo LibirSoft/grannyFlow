@@ -3,6 +3,7 @@
 An agent skill that takes a plan to a PR-ready branch: an **implementer** builds it stage by stage, any number of **reviewers** - Codex, a host model, any CLI - review every stage in parallel, P0/P1 findings go straight back to the implementer, a **judge** scores the rest and merges duplicates, and the findings that matter go back to the implementer until the review is clean. **Granny** - the agent you talk to - prepares the run, launches it, and reports. Nothing is pushed; you decide what happens next.
 
 ```
+before the first stage: reuse the branch's worktree or create one; everything below runs there
 for each stage:
   implementer builds the stage ─► every reviewer reviews it, in parallel (base = stage start sha)
      ├─ a reviewer fails, then fails its one retry ─► stage review-failed
@@ -55,7 +56,7 @@ Ask your agent to implement a plan with granny:
 
 > implement plans/auth/plan.md with granny - stage 1: WP-01..03, stage 2: WP-04..06
 
-Granny gathers the inputs (repo, branch, base, context files, stages), runs the preflight (clean tree, feature branch, git-excluded work dir), launches the run and tells you the run id. When it ends you get, per stage: commits, gate numbers, review rounds, outcome and the findings left for you; plus the final check and the PR body at `.granny/PR-BODY.md`.
+Granny gathers the inputs (repo, branch, base, context files, stages), runs the preflight (reviewers ready, git-excluded work dir), launches the run and tells you the run id. The run works in the branch's own git worktree: the one that already has the branch checked out, or a new one at `<parent of repo>/<repo name>-worktrees/<branch-slug>`, created for the branch or from `base`; your main checkout stays as it is. When it ends you get the worktree path and, per stage: commits, gate numbers, review rounds, outcome and the findings left for you; plus the final check and the PR body at `.granny/PR-BODY.md` in the worktree. Review and push from the worktree; granny never removes it.
 
 ## Configure
 
@@ -88,6 +89,8 @@ Three layers, later wins: `~/.config/granny/config.json`, `<repo>/granny.config.
 | `threshold` | `70` | findings scoring strictly above it are fixed; P0/P1 always are, without the judge |
 | `maxRounds` | `4` | review rounds per stage |
 | `gates` | `auto` | agents discover test/lint/build/typecheck, or list them |
+| `worktree` | `true` | work in the branch's own git worktree; `false` works in `repo` on the branch you checked out |
+| `worktreeDir` | `<parent of repo>/<repo name>-worktrees` | where new worktrees go; absolute, or relative to the repo's parent |
 | `aiAttribution` | `false` | forbid Co-Authored-By / "Generated with" lines |
 | `language`, `rules`, `base`, `workDir` | | see the reference |
 
@@ -97,6 +100,8 @@ Full reference: [skills/granny-workflow/references/config.md](skills/granny-work
 
 - Claude Code: relaunch the Workflow with `resumeFromRunId`; finished agent calls come back from cache.
 - opencode: no cache - relaunch with `fromStage` set to the first unfinished stage.
+
+Either way the run works in the worktree the first launch used.
 
 ## Develop
 
