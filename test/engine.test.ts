@@ -71,17 +71,19 @@ describe('runGranny', () => {
     expect(f.logs.at(-1)).toContain('2-round cap')
   })
 
-  it('stops the loop when the review command fails instead of inventing findings', async () => {
-    const f = fakeHost({ reviews: [{ code: 1, output: 'codex: not logged in' }] })
+  it('stops the loop when the review command fails twice instead of inventing findings', async () => {
+    const f = fakeHost({ reviews: [{ code: 1, output: 'codex: not logged in' }, { code: 1, output: 'codex: still not logged in' }] })
     const r = await runGranny(f.host, input())
     expect(r.stages[0]).toMatchObject({ outcome: 'review-failed', rounds: 1 })
+    expect(f.commands).toHaveLength(2)
     expect(r.stages[0]!.note).toContain('codex: review command exited 1')
-    expect(r.stages[0]!.note).toContain('not logged in')
+    expect(r.stages[0]!.note).toContain('still not logged in')
     expect(f.calls.some(c => c.kind === 'score')).toBe(false)
   })
 
   it('fails the review instead of reporting clean when Codex returned no structured result', async () => {
-    const f = fakeHost({ reviews: ['# Codex Adversarial Review\n\nCodex did not return valid structured JSON.\n\n- Parse error: Unexpected end of JSON input\n'] })
+    const render = '# Codex Adversarial Review\n\nCodex did not return valid structured JSON.\n\n- Parse error: Unexpected end of JSON input\n'
+    const f = fakeHost({ reviews: [render, render] })
     const r = await runGranny(f.host, input())
     expect(r.stages[0]).toMatchObject({ outcome: 'review-failed', rounds: 1 })
     expect(r.stages[0]!.note).toContain('Codex did not return valid structured JSON.')
@@ -90,7 +92,8 @@ describe('runGranny', () => {
   })
 
   it('fails the review instead of reporting clean when the Codex plugin review printed nothing', async () => {
-    const f = fakeHost({ reviews: ['# Codex Review\n\nTarget: branch diff against start1\n\nCodex review completed without any stdout output.\n'] })
+    const render = '# Codex Review\n\nTarget: branch diff against start1\n\nCodex review completed without any stdout output.\n'
+    const f = fakeHost({ reviews: [render, render] })
     const r = await runGranny(f.host, input())
     expect(r.stages[0]).toMatchObject({ outcome: 'review-failed', rounds: 1 })
     expect(r.stages[0]!.note).toContain('reviewer returned no usable result (Codex review completed without any stdout output.)')
@@ -182,7 +185,7 @@ describe('runGranny', () => {
   for (const [label, extracted] of [['an empty list', { findings: [] }], ['nothing', null]] as const) {
     it(`fails the review instead of reporting clean when extraction returns ${label}`, async () => {
       const f = fakeHost({
-        reviews: ['- [P1] no location here\n  detail'],
+        reviews: ['- [P1] no location here\n  detail', '- [P1] no location here\n  detail'],
         override: req => (req.kind === 'findings' ? extracted : undefined),
       })
       const r = await runGranny(f.host, input())
@@ -194,7 +197,8 @@ describe('runGranny', () => {
   }
 
   it('fails the review rather than fixing only the parsed part when extraction returns nothing', async () => {
-    const f = fakeHost({ reviews: [review(finding('P2', 'Parsed one'), '- [P1] unparseable\n  d')] })
+    const partial = review(finding('P2', 'Parsed one'), '- [P1] unparseable\n  d')
+    const f = fakeHost({ reviews: [partial, partial] })
     const r = await runGranny(f.host, input())
     expect(r.stages[0]).toMatchObject({ outcome: 'review-failed', rounds: 1 })
     expect(r.stages[0]!.note).toContain('2 finding marker(s), parser read 1')
@@ -223,10 +227,16 @@ describe('runGranny', () => {
     expect(r.stages[0]!.history[0]!.findings.map(x => x.title)).toEqual(['One', 'Two'])
   })
 
-  it('fails the review with both counts when extraction stays short after the retry', async () => {
-    const f = fakeHost({ reviews: [twoUnparseable], override: req => (req.kind === 'findings' ? extracted('Only one') : undefined) })
+  it('runs the reviewer again when extraction stays short after its retry, then fails the review with both counts', async () => {
+    const f = fakeHost({ reviews: [twoUnparseable, twoUnparseable], override: req => (req.kind === 'findings' ? extracted('Only one') : undefined) })
     const r = await runGranny(f.host, input())
-    expect(f.calls.filter(c => c.kind === 'findings')).toHaveLength(2)
+    expect(f.commands).toHaveLength(2)
+    expect(f.calls.filter(c => c.kind === 'findings').map(c => c.label)).toEqual([
+      'extract core r1 codex',
+      'extract core r1 codex retry',
+      'extract core r1 codex #2',
+      'extract core r1 codex #2 retry',
+    ])
     expect(r.stages[0]).toMatchObject({ outcome: 'review-failed', rounds: 1 })
     expect(r.stages[0]!.note).toContain('2 finding marker(s), parser read 0')
     expect(r.stages[0]!.note).toContain('extraction recovered 1, then 1 on a retry that named the count')
@@ -235,8 +245,9 @@ describe('runGranny', () => {
   })
 
   it('does not drop the unparsed rest when extraction returns only what the parser already read', async () => {
+    const partial = review(finding('P2', 'Parsed one'), '- [P1] unparseable\n  d')
     const f = fakeHost({
-      reviews: [review(finding('P2', 'Parsed one'), '- [P1] unparseable\n  d')],
+      reviews: [partial, partial],
       override: req => (req.kind === 'findings' ? extracted('Parsed one') : undefined),
     })
     const r = await runGranny(f.host, input())
@@ -504,32 +515,73 @@ describe('several reviewers', () => {
   })
 
   it('is clean only when every reviewer ran and none reported findings', async () => {
-    const f = fakeHost({ reviews: { codex: ['No issues.'], glm: [{ code: 2, output: 'glm: provider error' }] } })
+    const failing = { code: 2, output: 'glm: provider error' }
+    const f = fakeHost({ reviews: { codex: ['No issues.'], glm: [failing, failing] } })
     const r = await runGranny(f.host, input({ config: { reviewers: [{ name: 'codex' }, GLM] } }))
     expect(r.stages[0]).toMatchObject({ outcome: 'review-failed', rounds: 1, unresolved: [] })
-    expect(r.stages[0]!.note).toContain('reviewer(s) that did not run: glm')
+    expect(r.stages[0]!.note).toContain('reviewer(s) that did not run, also on a retry: glm')
     expect(r.stages[0]!.note).toContain('glm: review command exited 2')
     expect(r.stages[0]!.note).not.toContain('codex:')
   })
 
-  it('ends review-failed when a reviewer does not run, keeping the findings of the reviewers that did', async () => {
+  it('ends review-failed when a reviewer fails twice, keeping the findings of the reviewers that ran', async () => {
+    const notLoggedIn = { code: 1, output: 'codex: not logged in' }
     const f = fakeHost({
-      reviews: { codex: [{ code: 1, output: 'codex: not logged in' }], glm: [review(finding('P2', 'Kept'))] },
+      reviews: { codex: [notLoggedIn, notLoggedIn], glm: [review(finding('P2', 'Kept'))] },
       override: req => (req.role === 'reviewer' ? null : undefined),
     })
     const r = await runGranny(f.host, input({ config: { reviewers: [{ name: 'codex' }, { name: 'opus', engine: 'agent' }, GLM] } }))
     expect(r.stages[0]).toMatchObject({ outcome: 'review-failed', rounds: 1 })
     expect(r.stages[0]!.unresolved.map(x => [x.id, x.reviewer, x.title])).toEqual([['glm-F1', 'glm', 'Kept']])
-    expect(r.stages[0]!.note).toContain('reviewer(s) that did not run: codex, opus')
+    expect(r.stages[0]!.note).toContain('reviewer(s) that did not run, also on a retry: codex, opus')
     expect(r.stages[0]!.note).toContain('codex: review command exited 1')
     expect(r.stages[0]!.note).toContain('opus: reviewer agent returned nothing')
+    expect(f.calls.filter(c => c.role === 'reviewer').map(c => c.label)).toEqual(['review core r1 opus', 'review core r1 opus #2'])
+    expect(f.commands.filter(c => reviewerOf(c) === 'codex')).toHaveLength(2)
+    expect(f.commands.filter(c => reviewerOf(c) === 'glm')).toHaveLength(1)
     expect(f.calls.some(c => c.role === 'judge' || c.label.startsWith('fix'))).toBe(false)
   })
 
+  it('retries a reviewer that failed once and goes on with its second answer', async () => {
+    const f = fakeHost({
+      reviews: { codex: [{ code: 1, output: 'codex: stream disconnected' }, review(finding('P2', 'Found on the retry'))], glm: [review(finding('P2', 'From glm'))] },
+      scores: [{ 'codex-F1': 90, 'glm-F1': 90 }],
+    })
+    const r = await runGranny(f.host, input({ config: { maxRounds: 1, reviewers: [{ name: 'codex' }, GLM] } }))
+    expect(r.stages[0]).toMatchObject({ outcome: 'round-cap', rounds: 1 })
+    expect(r.stages[0]!.history[0]!.findings.map(x => [x.id, x.title])).toEqual([
+      ['codex-F1', 'Found on the retry'],
+      ['glm-F1', 'From glm'],
+    ])
+    expect(f.logs).toContain('core r1 codex: did not run - retrying once. review command exited 1: codex: stream disconnected')
+    expect(f.logs).toContain('core r1 codex #2: reviewer: codex CLI (codex exec review)')
+    expect(f.commands.filter(c => reviewerOf(c) === 'codex')).toHaveLength(2)
+  })
+
+  it('retries an agent reviewer that returned nothing, and a review runner on Claude Code', async () => {
+    let opus = 0
+    const f = fakeHost({
+      name: 'claude-code',
+      direct: false,
+      reviews: [{ code: 1, output: 'codex: boom' }, 'No issues.'],
+      override: req => (req.role === 'reviewer' ? (++opus === 1 ? null : { findings: [] }) : undefined),
+    })
+    const r = await runGranny(f.host, input({ config: { reviewers: [{ name: 'codex' }, { name: 'opus', engine: 'agent' }] } }))
+    expect(r.stages[0]).toMatchObject({ outcome: 'clean', rounds: 1 })
+    expect(f.calls.filter(c => c.label.startsWith('review')).map(c => c.label).sort()).toEqual([
+      'review core r1 codex',
+      'review core r1 codex #2',
+      'review core r1 opus',
+      'review core r1 opus #2',
+    ])
+    expect(f.logs).toContain('core r1 opus: did not run - retrying once. reviewer agent returned nothing')
+  })
+
   it('keeps the last round findings of a reviewer that stops running in a later round', async () => {
+    const crashed = { code: 1, output: 'codex: crashed' }
     const f = fakeHost({
       reviews: {
-        codex: [review(finding('P2', 'Codex round one')), { code: 1, output: 'codex: crashed' }],
+        codex: [review(finding('P2', 'Codex round one')), crashed, crashed],
         glm: [review(finding('P2', 'Glm round one')), review(finding('P2', 'Glm round two'))],
       },
       scores: [{ 'codex-F1': 90, 'glm-F1': 90 }],
@@ -671,7 +723,7 @@ describe('the review script in a real shell', () => {
     const r = await runGranny(f.host, input({ repo, config: { maxRounds: 1, workDir } }))
     expect(r.stages[0]).toMatchObject({ outcome: 'review-failed', rounds: 1 })
     expect(r.stages[0]!.note).toContain('Codex review completed without any stdout output.')
-    expect(companionCalls()).toHaveLength(1)
+    expect(companionCalls()).toHaveLength(2)
   })
 
   it('falls back to the Codex CLI on Claude Code with engine auto when no companion is installed, and says why', async () => {
@@ -730,12 +782,16 @@ describe('the review script in a real shell', () => {
         installBroker(record, exit)
         const f = fakeHost({ name: 'claude-code', direct: false, shell: shell({ CLAUDE_PLUGIN_DATA: userData }), scores: [{ 'codex-F1': 90 }] })
         const r = await runGranny(f.host, input({ repo, config: { maxRounds: 1, workDir } }))
-        const [companion, ...after] = records(record)
-        brokers.push(companion.broker)
+        const all = records(record)
+        const companions = all.filter(e => e.event === 'companion')
+        brokers.push(...companions.map(c => c.broker))
         const data = join(realpathSync(repo), workDir, 'codex-plugin-codex')
-        expect(realpathSync(companion.data)).toBe(data)
-        expect(after.map(h => ({ ...h, data: realpathSync(h.data) }))).toEqual([{ event: 'hook', argv: ['SessionEnd'], cwd: realpathSync(repo), data }])
-        expect(await until(() => !alive(companion.broker))).toBe(true)
+        const hook = { event: 'hook', argv: ['SessionEnd'], cwd: realpathSync(repo), data }
+        expect(all.map(e => ({ ...e, data: realpathSync(e.data) }))).toEqual(
+          companions.flatMap(c => [{ event: 'companion', data, broker: c.broker }, hook]),
+        )
+        expect(companions).toHaveLength(exit ? 2 : 1)
+        for (const c of companions) expect(await until(() => !alive(c.broker))).toBe(true)
         expect(existsSync(userData)).toBe(false)
         if (exit) expect(r.stages[0]).toMatchObject({ outcome: 'review-failed', rounds: 1 })
         else expect(titles(r)).toEqual([['P2', 'Reviewed by the plugin']])

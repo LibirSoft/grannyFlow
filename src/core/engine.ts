@@ -97,8 +97,8 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
   const attribute = (rv: ReviewerConfig, findings: Finding[]): Finding[] =>
     findings.map((f, i) => ({ ...f, id: `${rv.name}-F${i + 1}`, reviewer: rv.name }))
 
-  const review = async (rv: ReviewerConfig, name: string, reviewBase: string, round: number): Promise<Omit<ReviewerRound, 'reviewer'>> => {
-    const tag = `${name} r${round} ${rv.name}`
+  const review = async (rv: ReviewerConfig, name: string, reviewBase: string, round: number, attempt: number): Promise<Omit<ReviewerRound, 'reviewer'>> => {
+    const tag = `${name} r${round} ${rv.name}${attempt > 1 ? ` #${attempt}` : ''}`
     if (rv.engine === 'agent') {
       const r = await call('reviewer', 'findings', `review ${tag}`, 'Review', agentReviewPrompt(p, name, reviewBase), 'read-only', rv)
       if (!r) return { ran: false, findings: [], note: 'reviewer agent returned nothing' }
@@ -150,7 +150,11 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
   const reviewAll = (name: string, reviewBase: string, round: number): Promise<ReviewerRound[]> =>
     Promise.all(
       config.reviewers.map(async reviewer => {
-        const r = await review(reviewer, name, reviewBase, round)
+        let r = await review(reviewer, name, reviewBase, round, 1)
+        if (!r.ran) {
+          host.log(`${name} r${round} ${reviewer.name}: did not run - retrying once. ${r.note ?? ''}`)
+          r = await review(reviewer, name, reviewBase, round, 2)
+        }
         return { reviewer, ...r, findings: attribute(reviewer, r.findings) }
       }),
     )
@@ -164,7 +168,7 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
       if (failed.length) {
         const names = new Set(failed.map(r => r.reviewer.name))
         const earlier = (history.at(-1)?.findings ?? []).filter(f => f.reviewer !== undefined && names.has(f.reviewer))
-        const note = [`reviewer(s) that did not run: ${[...names].join(', ')}`, ...failed.map(r => `${r.reviewer.name}: ${r.note ?? 'no output'}`)].join('\n')
+        const note = [`reviewer(s) that did not run, also on a retry: ${[...names].join(', ')}`, ...failed.map(r => `${r.reviewer.name}: ${r.note ?? 'no output'}`)].join('\n')
         host.log(`${name} r${round}: review failed - stopping this stage's loop. ${note}`)
         return { outcome: 'review-failed', rounds: round, residual: [], unresolved: [...found, ...earlier], history, note }
       }

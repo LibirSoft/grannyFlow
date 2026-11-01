@@ -549,8 +549,8 @@ async function runGranny(host, input) {
     return r;
   };
   const attribute = (rv, findings) => findings.map((f, i) => ({ ...f, id: `${rv.name}-F${i + 1}`, reviewer: rv.name }));
-  const review = async (rv, name, reviewBase, round) => {
-    const tag = `${name} r${round} ${rv.name}`;
+  const review = async (rv, name, reviewBase, round, attempt) => {
+    const tag = `${name} r${round} ${rv.name}${attempt > 1 ? ` #${attempt}` : ""}`;
     if (rv.engine === "agent") {
       const r = await call("reviewer", "findings", `review ${tag}`, "Review", agentReviewPrompt(p, name, reviewBase), "read-only", rv);
       if (!r)
@@ -603,7 +603,11 @@ async function runGranny(host, input) {
     };
   };
   const reviewAll = (name, reviewBase, round) => Promise.all(config.reviewers.map(async (reviewer) => {
-    const r = await review(reviewer, name, reviewBase, round);
+    let r = await review(reviewer, name, reviewBase, round, 1);
+    if (!r.ran) {
+      host.log(`${name} r${round} ${reviewer.name}: did not run - retrying once. ${r.note ?? ""}`);
+      r = await review(reviewer, name, reviewBase, round, 2);
+    }
     return { reviewer, ...r, findings: attribute(reviewer, r.findings) };
   }));
   const reviewLoop = async (name, reviewBase) => {
@@ -615,7 +619,7 @@ async function runGranny(host, input) {
       if (failed.length) {
         const names = new Set(failed.map((r) => r.reviewer.name));
         const earlier = (history.at(-1)?.findings ?? []).filter((f) => f.reviewer !== undefined && names.has(f.reviewer));
-        const note = [`reviewer(s) that did not run: ${[...names].join(", ")}`, ...failed.map((r) => `${r.reviewer.name}: ${r.note ?? "no output"}`)].join(`
+        const note = [`reviewer(s) that did not run, also on a retry: ${[...names].join(", ")}`, ...failed.map((r) => `${r.reviewer.name}: ${r.note ?? "no output"}`)].join(`
 `);
         host.log(`${name} r${round}: review failed - stopping this stage's loop. ${note}`);
         return { outcome: "review-failed", rounds: round, residual: [], unresolved: [...found, ...earlier], history, note };
