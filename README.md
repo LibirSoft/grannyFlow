@@ -26,7 +26,7 @@ The loop is code, not a prompt: on Claude Code and opencode an engine drives eve
 ## Install
 
 ```sh
-npx skills add LibirSoft/granny-workflow
+npx skills add LibirSoft/grannyFlow
 ```
 
 This puts `skills/granny-workflow/` where your agents look for skills. Then, per host:
