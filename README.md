@@ -20,6 +20,11 @@ after the last stage: final check (gates, clean tree, no AI trailers, PR body) â
 
 The loop is code, not a prompt: on Claude Code and opencode an engine drives every step, so the threshold, round cap and stop conditions hold every time.
 
+- **Worktree** - the run works in the branch's own git worktree: the one that already has the branch checked out, or a new one next to the repo. Your main checkout stays as it is, and granny never removes the worktree.
+- **Plan review** - given plan files, the reviewers check the plan against the actual repo before anything is built; the implementer fixes it in place until it is clean, and a plan review that cannot get there stops the run.
+- **Reviewers** - as many as you configure, of any kind: Codex (the CLI or OpenAI's Codex plugin), a host model, or any CLI that answers a prompt. They all review every round at the same time; one that fails twice ends the stage `review-failed` instead of reading as clean.
+- **Judge** - P0/P1 findings skip it and go straight to the implementer. It scores every other finding 0-100 and merges duplicates across reviewers; findings above the threshold are fixed, the rest are left for you as residual.
+
 ## Hosts
 
 | host | engine | status |
@@ -97,6 +102,32 @@ Three layers, later wins: `~/.config/granny/config.json`, `<repo>/granny.config.
 | `worktreeDir` | `<parent of repo>/<repo name>-worktrees` | where new worktrees go; absolute, or relative to the repo's parent |
 | `aiAttribution` | `false` | forbid Co-Authored-By / "Generated with" lines |
 | `language`, `rules`, `base`, `workDir` | | see the reference |
+
+### Several reviewers
+
+Codex, Opus and GLM reviewing every stage. On opencode every reviewer that is not Codex can be an `agent` on a provider model:
+
+```json
+{
+  "reviewers": [
+    { "name": "codex", "engine": "auto" },
+    { "name": "opus", "engine": "agent", "model": { "opencode": "anthropic/claude-opus-5-5" } },
+    { "name": "glm", "engine": "agent", "model": { "opencode": "opencode/glm-5.3-flash-free" } }
+  ]
+}
+```
+
+A Claude Code agent runs Claude models only, so there GLM reviews through a CLI that reaches it - `opencode run`, with `{prompt}` filled with the review prompt:
+
+```json
+{
+  "reviewers": [
+    { "name": "codex", "engine": "auto" },
+    { "name": "opus", "engine": "agent", "model": "opus", "effort": "high" },
+    { "name": "glm", "engine": "command", "command": "opencode run -m opencode/glm-5.3-flash-free {prompt}" }
+  ]
+}
+```
 
 Full reference: [skills/granny-workflow/references/config.md](skills/granny-workflow/references/config.md).
 

@@ -8,18 +8,37 @@ const root = join(import.meta.dir, '..')
 const skill = join(root, 'skills/granny-workflow')
 const read = (p: string) => readFileSync(join(skill, p), 'utf8')
 const readRoot = (p: string) => readFileSync(join(root, p), 'utf8')
-const configBlocks = (md: string) =>
-  [...md.matchAll(/```json\n([\s\S]*?)```/g)].map(m => m[1]!).filter(b => /^\{\s*"(roles|reviewers)"/.test(b.trim()))
+const jsonBlocks = (md: string) => [...md.matchAll(/^[ \t]*```json\s*\n([\s\S]*?)^[ \t]*```/gm)].map(m => m[1]!)
 
 describe('skill docs', () => {
   it('ships prompts.md in sync with the engine prompts', () => {
     expect(read('references/prompts.md')).toBe(renderPrompts())
   })
 
-  it('has config examples that the engine accepts', () => {
-    const blocks = [...configBlocks(readRoot('README.md')), ...configBlocks(read('SKILL.md')), ...configBlocks(read('references/config.md'))]
-    expect(blocks.length).toBeGreaterThanOrEqual(4)
-    for (const block of blocks) expect(() => resolveConfig([JSON.parse(block)])).not.toThrow()
+  it('has only JSON examples that resolveConfig accepts on both hosts', () => {
+    const docs: Record<string, string> = { 'README.md': readRoot('README.md'), 'SKILL.md': read('SKILL.md') }
+    for (const f of readdirSync(join(skill, 'references'))) docs[`references/${f}`] = read(`references/${f}`)
+    const examples = Object.entries(docs).flatMap(([file, md]) => jsonBlocks(md).map(block => ({ file, block })))
+    expect(examples.length).toBeGreaterThanOrEqual(10)
+    for (const { file, block } of examples) {
+      for (const host of ['claude-code', 'opencode'] as const) {
+        let problem: string | undefined
+        try {
+          resolveConfig([JSON.parse(block)], host)
+        } catch (e) {
+          problem = String(e)
+        }
+        expect({ file, host, block, problem }).toEqual({ file, host, block, problem: undefined })
+      }
+    }
+  })
+
+  it('shows a Codex, Opus and GLM reviewer list in the README for opencode and for Claude Code', () => {
+    const configs = jsonBlocks(readRoot('README.md')).map(b => JSON.parse(b))
+    const glm = (c: any) => c.reviewers?.find((r: any) => r.name === 'glm')
+    const trio = configs.filter(c => ['codex', 'opus', 'glm'].every(n => c.reviewers?.some((r: any) => r.name === n)))
+    expect(trio.some(c => glm(c).engine === 'agent' && /^[\w.-]+\/[\w.-]+$/.test(glm(c).model?.opencode))).toBe(true)
+    expect(trio.some(c => glm(c).engine === 'command' && /^opencode run -m \S+ \{prompt\}$/.test(glm(c).command))).toBe(true)
   })
 
   it('has a SKILL.md with the frontmatter every host reads', () => {

@@ -36,7 +36,10 @@ There is no `roles.reviewer`: a config that has one is rejected with the migrati
 A role's or a reviewer's `model` is either one string for every host, or an object keyed by host:
 
 ```json
-{ "model": { "claude-code": "opus", "opencode": "anthropic/claude-opus-5-5" } }
+{
+  "roles": { "implementer": { "model": { "claude-code": "opus", "opencode": "anthropic/claude-opus-5-5" } } },
+  "reviewers": [{ "name": "codex", "engine": "codex", "model": "gpt-5.5" }]
+}
 ```
 
 - **Claude Code** passes it to `agent({ model })`: `opus`, `sonnet`, `haiku`, or a model ID the session accepts. `effort` (`low`, `medium`, `high`, `xhigh`, `max`) is passed as the agent's reasoning effort.
