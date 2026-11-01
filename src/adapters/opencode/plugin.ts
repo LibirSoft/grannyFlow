@@ -86,7 +86,7 @@ function git(repo: string, args: string[]): string {
   return r.stdout.trim()
 }
 
-export function preflight(repo: string, branch: string, workDir: string): string[] {
+export function preflight(repo: string, branch: string, workDir: string, worktree: boolean): string[] {
   const problems: string[] = []
   let current = ''
   try {
@@ -94,10 +94,12 @@ export function preflight(repo: string, branch: string, workDir: string): string
   } catch (e) {
     return [(e as Error).message]
   }
-  if (current !== branch) problems.push(`repo is on branch "${current}", expected "${branch}" - create and check it out first`)
-  const dirty = git(repo, ['status', '--porcelain'])
-    .split('\n')
-    .filter(l => l && !l.slice(3).startsWith(`${workDir}/`) && l.slice(3) !== workDir && l.slice(3) !== `${workDir}/`)
+  if (!worktree && current !== branch) problems.push(`repo is on branch "${current}", expected "${branch}" - create and check it out first`)
+  const dirty = !worktree || current === branch
+    ? git(repo, ['status', '--porcelain'])
+        .split('\n')
+        .filter(l => l && !l.slice(3).startsWith(`${workDir}/`) && l.slice(3) !== workDir && l.slice(3) !== `${workDir}/`)
+    : []
   if (dirty.length) problems.push(`working tree is not clean:\n${dirty.join('\n')}`)
   if (!problems.length) {
     const commonDir = git(repo, ['rev-parse', '--git-common-dir'])
@@ -120,7 +122,7 @@ function runId(): string {
   return `${new Date().toISOString().replace(/[-:]/g, '').replace('T', '-').slice(0, 15)}-${Math.random().toString(36).slice(2, 6)}`
 }
 
-function summarize(result: RunResult): string {
+function summarize(result: RunResult, worktree: boolean): string {
   const lines = result.stages.map(s => {
     const extra = [
       s.residual.length ? `${s.residual.length} residual` : '',
@@ -129,14 +131,18 @@ function summarize(result: RunResult): string {
     return `- ${s.stage}: ${s.outcome}, ${s.rounds} review round(s)${extra ? ` (${extra})` : ''}`
   })
   if (result.final) lines.push(`- final: gates ${result.final.gatesGreen ? 'green' : 'RED'}, PR body ${result.final.prBodyPath}${result.final.issues ? `, issues: ${result.final.issues}` : ''}`)
+  if (worktree) lines.push(`- worktree: ${result.worktree} - review and push from there; granny never removes it`)
   return lines.join('\n')
 }
 
 const RUN_INPUT_SCHEMA = {
   type: 'object',
   properties: {
-    repo: { type: 'string', description: 'Absolute path of the git repo or worktree' },
-    branch: { type: 'string', description: 'Feature branch, already created and checked out' },
+    repo: { type: 'string', description: 'Absolute path of the git repo; the run files go to <repo>/<workDir>/runs/' },
+    branch: {
+      type: 'string',
+      description: 'Feature branch. With config worktree on (default) granny reuses its worktree or creates one - do not check it out yourself; with worktree off it must be checked out in repo',
+    },
     base: { type: 'string', description: 'Branch never to touch; defaults to config.base' },
     context: { type: 'string', description: 'Files every agent reads first (plan, work orders) and override notes' },
     stages: {
@@ -250,7 +256,7 @@ export const createGrannyPlugin = ({ delays = DEFAULT_DELAYS, sleep = pause, kil
 
       const layers = [readJson(globalConfigPath()), readJson(join(input.repo, 'granny.config.json')), input.config]
       const config = resolveConfig(layers, 'opencode')
-      const blockers = preflight(input.repo, input.branch, config.workDir)
+      const blockers = preflight(input.repo, input.branch, config.workDir, config.worktree)
       if (blockers.length) return `granny_run refused:\n- ${blockers.join('\n- ')}`
 
       const id = runId()
@@ -328,7 +334,7 @@ export const createGrannyPlugin = ({ delays = DEFAULT_DELAYS, sleep = pause, kil
             title: `granny · ${req.label}`,
             agent: 'build',
             ...(model ? { model } : {}),
-            location: { directory: input.repo },
+            location: { directory: req.cwd },
             permissions: permissions(req.access),
           })
           run.sessions.add(session.id)
@@ -362,7 +368,7 @@ export const createGrannyPlugin = ({ delays = DEFAULT_DELAYS, sleep = pause, kil
           run.status = 'done'
           writeFileSync(join(dir, 'result.json'), JSON.stringify(result, null, 2))
           writeStatus({ finishedAt: stamp() })
-          await notify(`[granny] Run ${id} finished.\n${summarize(result)}\nCall granny_status with runId "${id}" for the full result, verify load-bearing claims yourself, report to the user and wait. Do not push.`)
+          await notify(`[granny] Run ${id} finished.\n${summarize(result, config.worktree)}\nCall granny_status with runId "${id}" for the full result, verify load-bearing claims yourself, report to the user and wait. Do not push.`)
         })
         .catch(async error => {
           run.status = run.cancelled ? 'cancelled' : 'failed'

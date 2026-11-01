@@ -923,7 +923,7 @@ function git(repo, args) {
     throw new Error(`git ${args.join(" ")}: ${(r.stderr || r.stdout).trim()}`);
   return r.stdout.trim();
 }
-function preflight(repo, branch, workDir) {
+function preflight(repo, branch, workDir, worktree) {
   const problems = [];
   let current = "";
   try {
@@ -931,10 +931,10 @@ function preflight(repo, branch, workDir) {
   } catch (e) {
     return [e.message];
   }
-  if (current !== branch)
+  if (!worktree && current !== branch)
     problems.push(`repo is on branch "${current}", expected "${branch}" - create and check it out first`);
-  const dirty = git(repo, ["status", "--porcelain"]).split(`
-`).filter((l) => l && !l.slice(3).startsWith(`${workDir}/`) && l.slice(3) !== workDir && l.slice(3) !== `${workDir}/`);
+  const dirty = !worktree || current === branch ? git(repo, ["status", "--porcelain"]).split(`
+`).filter((l) => l && !l.slice(3).startsWith(`${workDir}/`) && l.slice(3) !== workDir && l.slice(3) !== `${workDir}/`) : [];
   if (dirty.length)
     problems.push(`working tree is not clean:
 ${dirty.join(`
@@ -961,7 +961,7 @@ function stamp() {
 function runId() {
   return `${new Date().toISOString().replace(/[-:]/g, "").replace("T", "-").slice(0, 15)}-${Math.random().toString(36).slice(2, 6)}`;
 }
-function summarize(result) {
+function summarize(result, worktree) {
   const lines = result.stages.map((s) => {
     const extra = [
       s.residual.length ? `${s.residual.length} residual` : "",
@@ -971,14 +971,19 @@ function summarize(result) {
   });
   if (result.final)
     lines.push(`- final: gates ${result.final.gatesGreen ? "green" : "RED"}, PR body ${result.final.prBodyPath}${result.final.issues ? `, issues: ${result.final.issues}` : ""}`);
+  if (worktree)
+    lines.push(`- worktree: ${result.worktree} - review and push from there; granny never removes it`);
   return lines.join(`
 `);
 }
 var RUN_INPUT_SCHEMA = {
   type: "object",
   properties: {
-    repo: { type: "string", description: "Absolute path of the git repo or worktree" },
-    branch: { type: "string", description: "Feature branch, already created and checked out" },
+    repo: { type: "string", description: "Absolute path of the git repo; the run files go to <repo>/<workDir>/runs/" },
+    branch: {
+      type: "string",
+      description: "Feature branch. With config worktree on (default) granny reuses its worktree or creates one - do not check it out yourself; with worktree off it must be checked out in repo"
+    },
     base: { type: "string", description: "Branch never to touch; defaults to config.base" },
     context: { type: "string", description: "Files every agent reads first (plan, work orders) and override notes" },
     stages: {
@@ -1080,7 +1085,7 @@ var createGrannyPlugin = ({ delays = DEFAULT_DELAYS, sleep = pause, killGraceMs 
 - `)}`;
       const layers = [readJson(globalConfigPath()), readJson(join(input.repo, "granny.config.json")), input.config];
       const config = resolveConfig(layers, "opencode");
-      const blockers = preflight(input.repo, input.branch, config.workDir);
+      const blockers = preflight(input.repo, input.branch, config.workDir, config.worktree);
       if (blockers.length)
         return `granny_run refused:
 - ${blockers.join(`
@@ -1162,7 +1167,7 @@ When you are done, call the \`${tool}\` tool exactly once with your result. That
             title: `granny \xB7 ${req.label}`,
             agent: "build",
             ...model ? { model } : {},
-            location: { directory: input.repo },
+            location: { directory: req.cwd },
             permissions: permissions(req.access)
           });
           run.sessions.add(session.id);
@@ -1196,7 +1201,7 @@ When you are done, call the \`${tool}\` tool exactly once with your result. That
         writeFileSync(join(dir, "result.json"), JSON.stringify(result, null, 2));
         writeStatus({ finishedAt: stamp() });
         await notify(`[granny] Run ${id} finished.
-${summarize(result)}
+${summarize(result, config.worktree)}
 Call granny_status with runId "${id}" for the full result, verify load-bearing claims yourself, report to the user and wait. Do not push.`);
       }).catch(async (error) => {
         run.status = run.cancelled ? "cancelled" : "failed";

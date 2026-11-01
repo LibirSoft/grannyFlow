@@ -216,20 +216,36 @@ describe('opencode plugin', () => {
   })
   afterEach(() => {
     rmSync(repo, { recursive: true, force: true })
+    rmSync(`${repo}-worktrees`, { recursive: true, force: true })
     delete process.env.GRANNY_CONFIG
   })
 
-  it('preflight refuses the wrong branch and a dirty tree, then git-excludes the work dir', () => {
+  it('preflight with the worktree off refuses the wrong branch and a dirty tree, then git-excludes the work dir', () => {
     git(repo, 'checkout', '-q', 'main')
-    expect(preflight(repo, 'feat/x', '.granny')[0]).toContain('expected "feat/x"')
+    expect(preflight(repo, 'feat/x', '.granny', false)[0]).toContain('expected "feat/x"')
     git(repo, 'checkout', '-q', 'feat/x')
     writeFileSync(join(repo, 'dirty.txt'), 'x')
-    expect(preflight(repo, 'feat/x', '.granny')[0]).toContain('dirty.txt')
+    expect(preflight(repo, 'feat/x', '.granny', false)[0]).toContain('dirty.txt')
     rmSync(join(repo, 'dirty.txt'))
-    expect(preflight(repo, 'feat/x', '.granny')).toEqual([])
+    expect(preflight(repo, 'feat/x', '.granny', false)).toEqual([])
     expect(readFileSync(join(repo, '.git/info/exclude'), 'utf8')).toContain('/.granny/\n')
-    expect(preflight(repo, 'feat/x', '.granny')).toEqual([])
+    expect(preflight(repo, 'feat/x', '.granny', false)).toEqual([])
     expect(readFileSync(join(repo, '.git/info/exclude'), 'utf8').split('/.granny/').length).toBe(2)
+  })
+
+  it('preflight with the worktree on accepts any branch in repo, and a dirty repo unless the branch is checked out there', () => {
+    git(repo, 'checkout', '-q', 'main')
+    writeFileSync(join(repo, 'dirty.txt'), 'x')
+    expect(preflight(repo, 'feat/x', '.granny', true)).toEqual([])
+    expect(preflight(repo, 'feat/new', '.granny', true)).toEqual([])
+    expect(readFileSync(join(repo, '.git/info/exclude'), 'utf8').split('/.granny/').length).toBe(2)
+    git(repo, 'checkout', '-q', 'feat/x')
+    const problems = preflight(repo, 'feat/x', '.granny', true)
+    expect(problems).toHaveLength(1)
+    expect(problems[0]).toContain('working tree is not clean')
+    expect(problems[0]).toContain('dirty.txt')
+    rmSync(join(repo, 'dirty.txt'))
+    expect(preflight(repo, 'feat/x', '.granny', true)).toEqual([])
   })
 
   it('registers the run, status, cancel and submit tools', async () => {
@@ -315,6 +331,45 @@ describe('opencode plugin', () => {
     expect(status.content).toContain('"status": "done"')
     expect(status.content).toContain('"outcome": "clean"')
     expect(git(repo, 'status', '--porcelain')).toBe('')
+  })
+
+  it('works in a worktree of its own when repo is on another branch, and keeps the run files in repo', async () => {
+    git(repo, 'checkout', '-q', 'main')
+    writeFileSync(join(repo, 'granny.config.json'), JSON.stringify({ reviewers: [{ name: 'codex', engine: 'command', command: REVIEW_ONCE }] }))
+    const f = fakeContext()
+    await plugin.setup(f.ctx)
+    const started = await f.tools.get('granny_run').execute({ repo, branch: 'feat/x', stages: [{ name: 'one', task: 'Do it.' }] }, { sessionID: 'parent' })
+    const id = /granny run (\S+) started/.exec(started.content)?.[1]
+    expect(id).toBeDefined()
+    const dir = join(repo, '.granny/runs', id!)
+    const result = await finished(dir)
+    const wt = `${repo}-worktrees/feat-x`
+
+    expect(result).toMatchObject({ repo, worktree: wt })
+    expect(result.stages[0]).toMatchObject({ outcome: 'clean', rounds: 2 })
+    expect(f.created.map(s => s.location.directory)).toEqual(f.created.map(() => wt))
+    expect(existsSync(join(wt, '.granny/reviewed'))).toBe(true)
+    expect(existsSync(join(repo, '.granny/reviewed'))).toBe(false)
+    expect(git(wt, 'branch', '--show-current')).toBe('feat/x')
+    expect(git(repo, 'branch', '--show-current')).toBe('main')
+    expect(journalOf(dir)).toContainEqual(expect.objectContaining({ type: 'log', message: `worktree: ${wt}` }))
+
+    await waitFor(() => f.prompts.some(p => p.sessionID === 'parent'))
+    expect(f.prompts.find(p => p.sessionID === 'parent')!.text).toContain(`- worktree: ${wt} - review and push from there`)
+    expect((await f.tools.get('granny_status').execute({ repo }, {})).content).toContain(`"id": "${id}"`)
+  })
+
+  it('refuses to start with the worktree off when repo is not on the branch, or with it on when the branch is checked out dirty in repo', async () => {
+    const f = fakeContext()
+    await plugin.setup(f.ctx)
+    const run = (config: Record<string, unknown>) => f.tools.get('granny_run').execute({ repo, branch: 'feat/x', stages: [{ task: 't' }], config }, { sessionID: 'parent' })
+    git(repo, 'checkout', '-q', 'main')
+    expect((await run({ worktree: false })).content).toContain('repo is on branch "main", expected "feat/x"')
+    git(repo, 'checkout', '-q', 'feat/x')
+    writeFileSync(join(repo, 'dirty.txt'), 'x')
+    expect((await run({})).content).toMatch(/granny_run refused:[\s\S]*working tree is not clean[\s\S]*dirty\.txt/)
+    expect(f.created).toHaveLength(0)
+    expect(existsSync(join(repo, '.granny/runs'))).toBe(false)
   })
 
   it('backs off on a transient provider error and asks the model to continue instead of calling the tool', async () => {
@@ -438,7 +493,7 @@ describe('opencode plugin', () => {
       await after.createGrannyPlugin({ killGraceMs: 100 }).setup(f.ctx)
       const { id, dir } = await startWith(runTool, { command: 'test -n {base} && sleep 30' }, { name: 'one', implement: false })
       try {
-        await waitFor(() => journalOf(dir).some(e => e.type === 'command'))
+        await waitFor(() => journalOf(dir).some(e => e.type === 'command' && e.command.includes('sleep 30')))
         expect((await f.tools.get('granny_status').execute({ runId: id })).content).toContain(`"id": "${id}"`)
         expect((await f.tools.get('granny_cancel').execute({ runId: id })).content).toContain(`Cancelling ${id}`)
         await waitFor(() => readRun(dir, 'status.json').includes('"status": "cancelled"'), 2000)
