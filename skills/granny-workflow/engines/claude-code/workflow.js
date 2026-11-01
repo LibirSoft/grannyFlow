@@ -646,11 +646,18 @@ async function runGranny(host, input) {
       note: `review reported ${parsed.markers} finding marker(s), parser read ${parsed.findings.length}; extraction recovered ${first.length}, then ${second.length} on a retry that named the count: ${output.slice(-2000)}`
     };
   };
+  const attempt = async (rv, name, reviewBase, round, n) => {
+    try {
+      return await review(rv, name, reviewBase, round, n);
+    } catch (e) {
+      return { ran: false, findings: [], note: `reviewer call failed: ${String(e?.message ?? e)}` };
+    }
+  };
   const reviewAll = (name, reviewBase, round) => Promise.all(config.reviewers.map(async (reviewer) => {
-    let r = await review(reviewer, name, reviewBase, round, 1);
+    let r = await attempt(reviewer, name, reviewBase, round, 1);
     if (!r.ran) {
       host.log(`${name} r${round} ${reviewer.name}: did not run - retrying once. ${r.note ?? ""}`);
-      r = await review(reviewer, name, reviewBase, round, 2);
+      r = await attempt(reviewer, name, reviewBase, round, 2);
     }
     return { reviewer, ...r, findings: attribute(reviewer, r.findings) };
   }));

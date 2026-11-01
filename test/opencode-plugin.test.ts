@@ -38,6 +38,7 @@ interface Behaviour {
   contextThrows?: boolean
   providerError?: (title: string, attempt: number) => FakeError | undefined
   hangUntilInterrupted?: (title: string) => boolean
+  createFails?: (title: string) => boolean
 }
 
 function fakeContext(behaviour: Behaviour = {}) {
@@ -61,6 +62,7 @@ function fakeContext(behaviour: Behaviour = {}) {
     session: {
       get: async () => ({ id: 'parent', model: { providerID: 'opencode', id: 'parent-model' } }),
       create: async (input: any) => {
+        if (behaviour.createFails?.(input.title)) throw new Error('session.create: 503 Service Unavailable')
         const s = { id: `ses_${++n}`, ...input }
         created.push(s)
         messages.set(s.id, [])
@@ -530,6 +532,41 @@ describe('opencode plugin', () => {
         'granny · review one r1 b',
         'granny · review one r1 c',
       ])
+    })
+
+    describe("when one reviewer's session cannot be created", () => {
+      const broken = (title: string) => title.startsWith('granny · review one r1 bad')
+      const reviewers = [{ name: 'bad', engine: 'agent' }, { name: 'good', engine: 'agent' }]
+      const retried = (dir: string) =>
+        journalOf(dir).some(e => e.type === 'error' || (e.type === 'log' && e.message.startsWith('one r1 bad: did not run - retrying once.')))
+
+      it('keeps the run cancellable while the other reviewers still run', async () => {
+        const good = (title: string) => title.startsWith('granny · review one r1 good')
+        const f = fakeContext({ createFails: broken, hangUntilInterrupted: good })
+        await createGrannyPlugin({ killGraceMs: 100 }).setup(f.ctx)
+        const { id, dir } = await startRun(repo, f, { reviewers })
+        await waitFor(() => f.created.some(s => good(s.title)) && retried(dir))
+        expect(readRun(dir, 'status.json')).toContain('"status": "running"')
+
+        expect((await f.tools.get('granny_cancel').execute({ runId: id })).content).toContain(`Cancelling ${id}`)
+        await waitFor(() => readRun(dir, 'status.json').includes('"status": "cancelled"'), 2000)
+        expect(f.interrupted).toEqual(f.created.filter(s => good(s.title)).map(s => s.id))
+        expect(journalOf(dir)).toContainEqual(
+          expect.objectContaining({ type: 'log', message: 'one r1 bad: did not run - retrying once. reviewer call failed: session.create: 503 Service Unavailable' }),
+        )
+      })
+
+      it('ends the stage review-failed and the run done, naming the reviewer and the error', async () => {
+        const f = fakeContext({ createFails: broken })
+        await createGrannyPlugin({ killGraceMs: 100 }).setup(f.ctx)
+        const { dir } = await startRun(repo, f, { reviewers })
+        const result = await finished(dir)
+        expect(readRun(dir, 'status.json')).toContain('"status": "done"')
+        expect(result.stages[0]).toMatchObject({ outcome: 'review-failed', rounds: 1 })
+        expect(result.stages[0].note).toContain('reviewer(s) that did not run, also on a retry: bad')
+        expect(result.stages[0].note).toContain('bad: reviewer call failed: session.create: 503 Service Unavailable')
+        expect(f.created.map(s => s.title)).toContain('granny · review one r1 good')
+      })
     })
 
     describe('with the Codex plugin', () => {

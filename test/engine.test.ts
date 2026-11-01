@@ -6,7 +6,7 @@ import { resolveConfig } from '../src/core/config'
 import { runGranny, type RunInput } from '../src/core/engine'
 import { commandReviewPrompt } from '../src/core/prompts'
 import { alive, brokerCompanion, records, sessionEndHook, until } from './fake-companion'
-import { fakeHost, finding, review, reviewerOf } from './fake-host'
+import { fakeHost, finding, review, reviewerOf, type FakeOptions } from './fake-host'
 
 const input = (extra: Partial<RunInput> = {}): RunInput => ({
   repo: '/work/repo',
@@ -575,6 +575,90 @@ describe('several reviewers', () => {
       'review core r1 opus #2',
     ])
     expect(f.logs).toContain('core r1 opus: did not run - retrying once. reviewer agent returned nothing')
+  })
+
+  describe('when a reviewer call throws', () => {
+    const failOnce = () => {
+      let calls = 0
+      return () => {
+        if (++calls === 1) throw new Error('session request failed: 502')
+      }
+    }
+    const onRetry = review(finding('P1', 'Found on the retry'))
+    const paths: Array<[string, (fail: () => void) => FakeOptions, Record<string, unknown>]> = [
+      [
+        'an agent reviewer',
+        fail => ({
+          override: req => {
+            if (req.role !== 'reviewer') return undefined
+            fail()
+            return { findings: [{ id: 'F1', severity: 'P1', file: 'src/a.ts', line: 3, title: 'Found on the retry', detail: 'd' }] }
+          },
+        }),
+        { name: 'rv', engine: 'agent' },
+      ],
+      [
+        'a review command',
+        fail => ({
+          reviews: async () => {
+            fail()
+            return onRetry
+          },
+        }),
+        { name: 'rv', engine: 'codex' },
+      ],
+      [
+        'a review runner on Claude Code',
+        fail => ({
+          name: 'claude-code',
+          direct: false,
+          reviews: [onRetry],
+          override: req => {
+            if (req.kind === 'command') fail()
+            return undefined
+          },
+        }),
+        { name: 'rv', engine: 'codex' },
+      ],
+    ]
+    for (const [label, options, reviewer] of paths) {
+      it(`retries ${label} that threw and goes on with its second answer`, async () => {
+        const f = fakeHost(options(failOnce()))
+        const r = await runGranny(f.host, input({ config: { maxRounds: 1, reviewers: [reviewer] } }))
+        expect(r.stages[0]).toMatchObject({ outcome: 'round-cap', rounds: 1 })
+        expect(r.stages[0]!.history[0]!.findings.map(x => [x.id, x.reviewer, x.title])).toEqual([['rv-F1', 'rv', 'Found on the retry']])
+        expect(f.logs).toContain('core r1 rv: did not run - retrying once. reviewer call failed: session request failed: 502')
+      })
+    }
+
+    it('waits for the other reviewers and keeps their findings when it throws on the retry too', async () => {
+      const events: string[] = []
+      let thrown = 0
+      let release!: () => void
+      const bothThrown = new Promise<void>(resolve => (release = resolve))
+      const f = fakeHost({
+        reviews: async () => {
+          await Promise.race([bothThrown, Bun.sleep(1000)])
+          events.push('codex done')
+          return review(finding('P2', 'Kept'))
+        },
+        override: req => {
+          if (req.kind === 'final') events.push('final')
+          if (req.role !== 'reviewer') return undefined
+          events.push('opus threw')
+          if (++thrown === 2) release()
+          throw new Error('session request failed: 502')
+        },
+      })
+      const r = await runGranny(f.host, input({ config: { reviewers: [{ name: 'codex' }, { name: 'opus', engine: 'agent' }] } }))
+      expect(events).toEqual(['opus threw', 'opus threw', 'codex done', 'final'])
+      expect(r.stages[0]).toMatchObject({ outcome: 'review-failed', rounds: 1 })
+      expect(r.stages[0]!.unresolved.map(x => [x.id, x.reviewer, x.title])).toEqual([['codex-F1', 'codex', 'Kept']])
+      expect(r.stages[0]!.note).toContain('reviewer(s) that did not run, also on a retry: opus')
+      expect(r.stages[0]!.note).toContain('opus: reviewer call failed: session request failed: 502')
+      expect(f.calls.filter(c => c.role === 'reviewer').map(c => c.label)).toEqual(['review core r1 opus', 'review core r1 opus #2'])
+      expect(f.calls.some(c => c.role === 'judge' || c.label.startsWith('fix'))).toBe(false)
+    })
   })
 
   it('sends P0/P1 findings straight to the implementer and judges only the rest', async () => {

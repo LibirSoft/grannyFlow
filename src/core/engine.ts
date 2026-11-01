@@ -147,13 +147,21 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
     }
   }
 
+  const attempt = async (rv: ReviewerConfig, name: string, reviewBase: string, round: number, n: number): Promise<Omit<ReviewerRound, 'reviewer'>> => {
+    try {
+      return await review(rv, name, reviewBase, round, n)
+    } catch (e) {
+      return { ran: false, findings: [], note: `reviewer call failed: ${String((e as Error)?.message ?? e)}` }
+    }
+  }
+
   const reviewAll = (name: string, reviewBase: string, round: number): Promise<ReviewerRound[]> =>
     Promise.all(
       config.reviewers.map(async reviewer => {
-        let r = await review(reviewer, name, reviewBase, round, 1)
+        let r = await attempt(reviewer, name, reviewBase, round, 1)
         if (!r.ran) {
           host.log(`${name} r${round} ${reviewer.name}: did not run - retrying once. ${r.note ?? ''}`)
-          r = await review(reviewer, name, reviewBase, round, 2)
+          r = await attempt(reviewer, name, reviewBase, round, 2)
         }
         return { reviewer, ...r, findings: attribute(reviewer, r.findings) }
       }),
