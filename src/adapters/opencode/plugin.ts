@@ -1,11 +1,11 @@
-import { spawn, spawnSync, type ChildProcess } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { isAbsolute, join } from 'node:path'
 import { resolveConfig } from '../../core/config'
 import { checkInput, runGranny, type RunInput } from '../../core/engine'
 import { checkShape, SCHEMAS } from '../../core/schemas'
-import type { AgentRequest, Host, ResultKind, RunResult } from '../../core/types'
+import type { AgentRequest, CommandResult, Host, ResultKind, RunResult } from '../../core/types'
 
 type Status = 'running' | 'done' | 'failed' | 'cancelled'
 
@@ -17,7 +17,6 @@ interface RunState {
   cancelled: boolean
   abort: AbortController
   session?: string
-  child?: ChildProcess
 }
 
 type ModelRef = { providerID: string; id: string; variant?: string }
@@ -193,14 +192,51 @@ export function pause(ms: number, signal: AbortSignal): Promise<void> {
   })
 }
 
+function runCommand(command: string, cwd: string, signal: AbortSignal, killGraceMs: number): Promise<CommandResult> {
+  return new Promise(resolve => {
+    if (signal.aborted) return resolve({ code: 130, output: 'cancelled' })
+    const child = spawn('bash', ['-c', command], { cwd, env: process.env, detached: true })
+    let output = ''
+    let settled = false
+    const finish = (result: CommandResult) => {
+      if (settled) return
+      settled = true
+      signal.removeEventListener('abort', cancel)
+      resolve(result)
+    }
+    const signalGroup = (name: NodeJS.Signals) => {
+      try {
+        process.kill(-child.pid!, name)
+      } catch {}
+    }
+    const cancel = () => {
+      signalGroup('SIGTERM')
+      // Not cleared on close: a member that ignores SIGTERM may not hold our pipes.
+      setTimeout(() => {
+        signalGroup('SIGKILL')
+        finish({ code: 130, output: `${output}\ncancelled` })
+      }, killGraceMs).unref()
+    }
+    child.stdout?.on('data', d => (output += d))
+    child.stderr?.on('data', d => (output += d))
+    child.on('error', e => finish({ code: 127, output: String(e) }))
+    child.on('close', code => finish(signal.aborted ? { code: 130, output: `${output}\ncancelled` } : { code: code ?? 1, output }))
+    if (child.pid !== undefined) signal.addEventListener('abort', cancel, { once: true })
+  })
+}
+
 export interface RetryPolicy {
   delays: number[]
   sleep: (ms: number, signal: AbortSignal) => Promise<void>
 }
 
+export interface PluginOptions extends RetryPolicy {
+  killGraceMs: number
+}
+
 const DEFAULT_DELAYS = [30_000, 120_000, 300_000, 600_000]
 
-export const createGrannyPlugin = ({ delays = DEFAULT_DELAYS, sleep = pause }: Partial<RetryPolicy> = {}) => ({
+export const createGrannyPlugin = ({ delays = DEFAULT_DELAYS, sleep = pause, killGraceMs = 5_000 }: Partial<PluginOptions> = {}) => ({
   id: 'granny-workflow',
   async setup(ctx: any) {
     const startRun = async (input: RunInput, parentSession: string): Promise<string> => {
@@ -290,21 +326,10 @@ export const createGrannyPlugin = ({ delays = DEFAULT_DELAYS, sleep = pause }: P
           journal('agent-failed', { label: req.label, session: session.id })
           return null
         },
-        run(command, cwd) {
-          return new Promise(resolve => {
-            if (run.cancelled) return resolve({ code: 130, output: 'cancelled' })
-            journal('command', { command })
-            const child = spawn('bash', ['-c', command], { cwd, env: process.env })
-            run.child = child
-            let output = ''
-            child.stdout?.on('data', d => (output += d))
-            child.stderr?.on('data', d => (output += d))
-            child.on('error', e => resolve({ code: 127, output: String(e) }))
-            child.on('close', code => {
-              run.child = undefined
-              resolve({ code: code ?? 1, output })
-            })
-          })
+        async run(command, cwd) {
+          if (run.cancelled) return { code: 130, output: 'cancelled' }
+          journal('command', { command })
+          return runCommand(command, cwd, run.abort.signal, killGraceMs)
         },
         log: message => journal('log', { message }),
         phase: title => journal('phase', { title }),
@@ -406,7 +431,6 @@ You will receive a message when it finishes. Use granny_status { runId: "${id}" 
           if (!run || run.status !== 'running') return { content: `No running granny run "${value.runId}".` }
           run.cancelled = true
           run.abort.abort()
-          run.child?.kill('SIGTERM')
           if (run.session) await ctx.session.interrupt({ sessionID: run.session, resume: false }).catch(() => {})
           return { content: `Cancelling ${value.runId}; the current step is interrupted and nothing further starts.` }
         },

@@ -34,7 +34,7 @@ granny_run({ repo, branch, base, context, stages, fromStage?, config? })
 The plugin reads `~/.config/granny/config.json` and `<repo>/granny.config.json` itself; `config` holds run overrides only. It refuses to start when the repo is not on `branch` or the tree is dirty, and it adds the work dir to `.git/info/exclude`. It returns a run id at once and works in the background; child sessions appear as `granny · <step>`. When the run ends the plugin posts a `[granny] Run … finished` message into your session - that is your cue to report.
 
 - `granny_status({ runId })` - status, journal tail, result. `granny_status({ repo })` finds the latest run in that repo.
-- `granny_cancel({ runId })` - interrupts the current step; nothing further starts.
+- `granny_cancel({ runId })` - interrupts the current step; nothing further starts. A running review command is stopped with everything it started: its process group gets SIGTERM, then SIGKILL 5 s later.
 
 Run files: `<repo>/.granny/runs/<id>/` - `input.json`, `status.json`, `journal.jsonl`, `result.json`.
 
@@ -44,7 +44,7 @@ Models are `provider/model[#variant]` (`opencode models`). A role without a mode
 
 Every child session runs the `build` agent with these session rules: everything allowed except questions, `git push`, `git remote add`, `git stash`, `git rebase`, `git reset --hard` and `gh pr`. Read-only roles (judge, agent reviewer, extraction) additionally cannot edit, `git add` or `git commit`.
 
-The review command runs in the opencode server's environment: `codex` must be on that PATH and logged in.
+The review command runs in the opencode server's environment: `codex` must be on that PATH and logged in. It runs in its own process group, so stopping the opencode server does not stop a review that is in progress; use `granny_cancel` first.
 
 ## Provider errors
 

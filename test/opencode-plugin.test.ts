@@ -377,4 +377,54 @@ describe('opencode plugin', () => {
     expect(promptsTo(f, 'granny · implement one')).toHaveLength(1)
     expect(f.created).toHaveLength(1)
   })
+
+  describe('cancelling a running review command', () => {
+    let pids: string
+    const leftovers: number[] = []
+    beforeEach(() => {
+      pids = mkdtempSync(join(tmpdir(), 'granny-pids-'))
+    })
+    afterEach(() => {
+      for (const pid of leftovers.splice(0)) {
+        try {
+          process.kill(pid, 'SIGKILL')
+        } catch {}
+      }
+      rmSync(pids, { recursive: true, force: true })
+    })
+    const alive = (pid: number) => {
+      try {
+        process.kill(pid, 0)
+        return true
+      } catch (e) {
+        return (e as NodeJS.ErrnoException).code !== 'ESRCH'
+      }
+    }
+
+    const fixtures: Array<[string, (pidFile: string) => string]> = [
+      ['a grandchild', pidFile => `test -n {base} && bash -c 'sleep 300 & echo $! > ${pidFile}; wait'`],
+      ['a grandchild that ignores SIGTERM', pidFile => `test -n {base} && bash -c 'trap "" TERM; sleep 300 & echo $! > ${pidFile}; wait'`],
+      [
+        'a grandchild that ignores SIGTERM and holds the output pipe',
+        pidFile => `test -n {base}; bash -c 'trap "" TERM; sleep 300 & echo $! > ${pidFile}; wait' & wait`,
+      ],
+    ]
+    for (const [label, command] of fixtures) {
+      it(`stops ${label} and ends the run promptly`, async () => {
+        const pidFile = join(pids, 'grandchild.pid')
+        const f = fakeContext()
+        await createGrannyPlugin({ killGraceMs: 100 }).setup(f.ctx)
+        const { id, dir } = await startRun(repo, f, { roles: { reviewer: { command: command(pidFile) } } })
+        await waitFor(() => existsSync(pidFile) && readFileSync(pidFile, 'utf8').trim() !== '')
+        const pid = Number(readFileSync(pidFile, 'utf8'))
+        leftovers.push(pid)
+        expect(alive(pid)).toBe(true)
+
+        await f.tools.get('granny_cancel').execute({ runId: id })
+        await waitFor(() => readRun(dir, 'status.json').includes('"status": "cancelled"'), 2000)
+        await waitFor(() => !alive(pid), 2000)
+        expect(journalOf(dir)).toContainEqual(expect.objectContaining({ type: 'log', message: expect.stringContaining('review command exited 130') }))
+      })
+    }
+  })
 })

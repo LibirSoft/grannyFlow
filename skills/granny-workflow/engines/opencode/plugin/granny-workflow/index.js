@@ -744,8 +744,44 @@ function pause(ms, signal) {
     signal.addEventListener("abort", done, { once: true });
   });
 }
+function runCommand(command, cwd, signal, killGraceMs) {
+  return new Promise((resolve) => {
+    if (signal.aborted)
+      return resolve({ code: 130, output: "cancelled" });
+    const child = spawn("bash", ["-c", command], { cwd, env: process.env, detached: true });
+    let output = "";
+    let settled = false;
+    const finish = (result) => {
+      if (settled)
+        return;
+      settled = true;
+      signal.removeEventListener("abort", cancel);
+      resolve(result);
+    };
+    const signalGroup = (name) => {
+      try {
+        process.kill(-child.pid, name);
+      } catch {}
+    };
+    const cancel = () => {
+      signalGroup("SIGTERM");
+      setTimeout(() => {
+        signalGroup("SIGKILL");
+        finish({ code: 130, output: `${output}
+cancelled` });
+      }, killGraceMs).unref();
+    };
+    child.stdout?.on("data", (d) => output += d);
+    child.stderr?.on("data", (d) => output += d);
+    child.on("error", (e) => finish({ code: 127, output: String(e) }));
+    child.on("close", (code) => finish(signal.aborted ? { code: 130, output: `${output}
+cancelled` } : { code: code ?? 1, output }));
+    if (child.pid !== undefined)
+      signal.addEventListener("abort", cancel, { once: true });
+  });
+}
 var DEFAULT_DELAYS = [30000, 120000, 300000, 600000];
-var createGrannyPlugin = ({ delays = DEFAULT_DELAYS, sleep = pause } = {}) => ({
+var createGrannyPlugin = ({ delays = DEFAULT_DELAYS, sleep = pause, killGraceMs = 5000 } = {}) => ({
   id: "granny-workflow",
   async setup(ctx) {
     const startRun = async (input, parentSession) => {
@@ -842,22 +878,11 @@ When you are done, call the \`${tool}\` tool exactly once with your result. That
           journal("agent-failed", { label: req.label, session: session.id });
           return null;
         },
-        run(command, cwd) {
-          return new Promise((resolve) => {
-            if (run.cancelled)
-              return resolve({ code: 130, output: "cancelled" });
-            journal("command", { command });
-            const child = spawn("bash", ["-c", command], { cwd, env: process.env });
-            run.child = child;
-            let output = "";
-            child.stdout?.on("data", (d) => output += d);
-            child.stderr?.on("data", (d) => output += d);
-            child.on("error", (e) => resolve({ code: 127, output: String(e) }));
-            child.on("close", (code) => {
-              run.child = undefined;
-              resolve({ code: code ?? 1, output });
-            });
-          });
+        async run(command, cwd) {
+          if (run.cancelled)
+            return { code: 130, output: "cancelled" };
+          journal("command", { command });
+          return runCommand(command, cwd, run.abort.signal, killGraceMs);
         },
         log: (message) => journal("log", { message }),
         phase: (title) => journal("phase", { title })
@@ -967,7 +992,6 @@ ${result.length > 30000 ? result.slice(0, 30000) + `
             return { content: `No running granny run "${value.runId}".` };
           run.cancelled = true;
           run.abort.abort();
-          run.child?.kill("SIGTERM");
           if (run.session)
             await ctx.session.interrupt({ sessionID: run.session, resume: false }).catch(() => {});
           return { content: `Cancelling ${value.runId}; the current step is interrupted and nothing further starts.` };
