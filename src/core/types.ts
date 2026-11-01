@@ -1,0 +1,100 @@
+export type HostName = 'claude-code' | 'opencode'
+
+export type Role = 'granny' | 'implementer' | 'reviewer' | 'judge'
+
+export type ResultKind = 'implementation' | 'findings' | 'score' | 'command' | 'final'
+
+export type JsonSchema = {
+  type: 'object'
+  properties: Record<string, unknown>
+  required?: string[]
+  [key: string]: unknown
+}
+
+export interface AgentRequest {
+  role: Role
+  kind: ResultKind
+  label: string
+  phase: string
+  prompt: string
+  schema: JsonSchema
+  model?: string
+  effort?: string
+  access: 'write' | 'read-only'
+}
+
+export interface CommandResult {
+  code: number
+  output: string
+}
+
+export interface Host {
+  readonly name: HostName
+  agent(request: AgentRequest): Promise<any | null>
+  run?(command: string, cwd: string): Promise<CommandResult>
+  log(message: string): void
+  phase(title: string): void
+}
+
+export interface Finding {
+  id: string
+  severity: string
+  file: string
+  line?: number
+  title: string
+  detail: string
+  score?: number
+  reason?: string
+}
+
+export interface StageSpec {
+  name?: string
+  task?: string
+  implement?: boolean
+  review?: boolean
+}
+
+export interface Implementation {
+  startSha: string
+  headSha: string
+  gatesGreen: boolean
+  gates: string
+  commits: string[]
+  untested: string
+  deviations?: string
+}
+
+export interface RoundRecord {
+  round: number
+  score: number | null
+  findings: Finding[]
+}
+
+export type StageOutcome = 'clean' | 'residual-only' | 'round-cap' | 'review-failed' | 'review-skipped' | 'skipped'
+
+export interface StageResult {
+  stage: string
+  outcome: StageOutcome
+  rounds: number
+  implementation?: Implementation
+  residual: Finding[]
+  unresolved: Finding[]
+  history: RoundRecord[]
+  note?: string
+}
+
+export interface FinalReport {
+  gatesGreen: boolean
+  gates: string
+  commits: string[]
+  prBodyPath: string
+  issues: string
+}
+
+export interface RunResult {
+  repo: string
+  branch: string
+  base: string
+  stages: StageResult[]
+  final: FinalReport | null
+}
