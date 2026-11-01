@@ -164,6 +164,30 @@ describe('reviewers', () => {
   }
 })
 
+describe('worktree', () => {
+  it('is on by default, with the worktree dir derived from the repo at run time', () => {
+    expect(DEFAULT_CONFIG.worktree).toBe(true)
+    expect(resolveConfig([]).worktreeDir).toBeUndefined()
+  })
+
+  it('takes worktree and an absolute or relative worktreeDir from any layer', () => {
+    expect(resolveConfig([{ worktree: false }]).worktree).toBe(false)
+    expect(resolveConfig([{ worktreeDir: '/srv/wt' }, { worktree: true }])).toMatchObject({ worktree: true, worktreeDir: '/srv/wt' })
+    expect(resolveConfig([{ worktreeDir: '/srv/wt' }, { worktreeDir: 'my worktrees' }]).worktreeDir).toBe('my worktrees')
+  })
+
+  for (const [label, layer, message] of [
+    ['a worktree that is not a boolean', { worktree: 'yes' }, 'worktree must be a boolean'],
+    ['an empty worktreeDir', { worktreeDir: ' ' }, 'worktreeDir must be a non-empty path'],
+    ['a worktreeDir that is not a string', { worktreeDir: 5 }, 'worktreeDir must be a non-empty path'],
+    ['a worktreeDir that starts with ~', { worktreeDir: '~/wt' }, 'worktreeDir is not expanded by a shell - write the absolute path instead of ~'],
+  ] as const) {
+    it(`rejects ${label}`, () => {
+      expect(() => resolveConfig([layer])).toThrow(message)
+    })
+  }
+})
+
 describe('resolveModel', () => {
   it('uses a plain string on every host and picks the host key from an object', () => {
     expect(resolveModel('sonnet', 'claude-code')).toBe('sonnet')

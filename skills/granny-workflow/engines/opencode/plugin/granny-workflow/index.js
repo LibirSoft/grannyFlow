@@ -19,6 +19,7 @@ var DEFAULT_CONFIG = {
   base: "main",
   gates: "auto",
   workDir: ".granny",
+  worktree: true,
   language: "English",
   aiAttribution: false,
   rules: [
@@ -27,7 +28,7 @@ var DEFAULT_CONFIG = {
   ]
 };
 var ROLES = ["granny", "implementer", "judge"];
-var TOP_KEYS = new Set(["$schema", "roles", ...Object.keys(DEFAULT_CONFIG).filter((k) => k !== "roles")]);
+var TOP_KEYS = new Set(["$schema", "roles", "worktreeDir", ...Object.keys(DEFAULT_CONFIG).filter((k) => k !== "roles")]);
 var ROLE_KEYS = new Set(["model", "effort"]);
 var REVIEWER_KEYS = new Set(["name", "engine", "model", "effort", "mode", "focus", "command"]);
 var EFFORTS = new Set(["low", "medium", "high", "xhigh", "max"]);
@@ -183,6 +184,14 @@ function validate(c) {
   }
   if (typeof c.language !== "string" || !c.language)
     errors.push("language must be a non-empty string");
+  if (typeof c.worktree !== "boolean")
+    errors.push("worktree must be a boolean");
+  if (c.worktreeDir !== undefined) {
+    if (typeof c.worktreeDir !== "string" || !c.worktreeDir.trim())
+      errors.push("worktreeDir must be a non-empty path");
+    else if (c.worktreeDir.startsWith("~"))
+      errors.push("worktreeDir is not expanded by a shell - write the absolute path instead of ~");
+  }
   if (typeof c.aiAttribution !== "boolean")
     errors.push("aiAttribution must be a boolean");
   if (!Array.isArray(c.rules) || !c.rules.every((r) => typeof r === "string"))

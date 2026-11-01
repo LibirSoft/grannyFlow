@@ -27,6 +27,8 @@ export interface GrannyConfig {
   base: string
   gates: string[] | 'auto'
   workDir: string
+  worktree: boolean
+  worktreeDir?: string
   language: string
   aiAttribution: boolean
   rules: string[]
@@ -44,6 +46,7 @@ export const DEFAULT_CONFIG: GrannyConfig = {
   base: 'main',
   gates: 'auto',
   workDir: '.granny',
+  worktree: true,
   language: 'English',
   aiAttribution: false,
   rules: [
@@ -53,7 +56,7 @@ export const DEFAULT_CONFIG: GrannyConfig = {
 }
 
 const ROLES: ConfigRole[] = ['granny', 'implementer', 'judge']
-const TOP_KEYS = new Set(['$schema', 'roles', ...Object.keys(DEFAULT_CONFIG).filter(k => k !== 'roles')])
+const TOP_KEYS = new Set(['$schema', 'roles', 'worktreeDir', ...Object.keys(DEFAULT_CONFIG).filter(k => k !== 'roles')])
 const ROLE_KEYS = new Set(['model', 'effort'])
 const REVIEWER_KEYS = new Set(['name', 'engine', 'model', 'effort', 'mode', 'focus', 'command'])
 const EFFORTS = new Set(['low', 'medium', 'high', 'xhigh', 'max'])
@@ -195,6 +198,11 @@ function validate(c: GrannyConfig): string[] {
     errors.push('workDir must be a relative path inside the repo')
   }
   if (typeof c.language !== 'string' || !c.language) errors.push('language must be a non-empty string')
+  if (typeof c.worktree !== 'boolean') errors.push('worktree must be a boolean')
+  if (c.worktreeDir !== undefined) {
+    if (typeof c.worktreeDir !== 'string' || !c.worktreeDir.trim()) errors.push('worktreeDir must be a non-empty path')
+    else if (c.worktreeDir.startsWith('~')) errors.push('worktreeDir is not expanded by a shell - write the absolute path instead of ~')
+  }
   if (typeof c.aiAttribution !== 'boolean') errors.push('aiAttribution must be a boolean')
   if (!Array.isArray(c.rules) || !c.rules.every(r => typeof r === 'string')) errors.push('rules must be an array of strings')
 
