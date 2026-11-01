@@ -34,15 +34,18 @@ export function reviewPlan(c: GrannyConfig, host: HostName, base: string, stem: 
     return { script: wrap(cli), backend: cliLabel }
   }
 
-  const missing = `no Codex plugin companion at $codex_plugins/<version>/${COMPANION}`
-  const fallback =
+  const otherwise = (why: string, remedy: string) =>
     engine === 'auto' && mode === 'review'
-      ? `echo "${SAID}${cliLabel} - ${missing}" && ${cli}`
-      : `{ echo "${SAID}codex-plugin ${mode} unavailable - ${missing}; install OpenAI's Codex plugin for Claude Code" > ${log}; false; }`
+      ? `echo "${SAID}${cliLabel} - ${why}" && ${cli}`
+      : `{ echo "${SAID}codex-plugin ${mode} unavailable - ${why}; ${remedy}" > ${log}; false; }`
+  const missing = otherwise(`no Codex plugin companion at $codex_plugins/<version>/${COMPANION}`, "install OpenAI's Codex plugin for Claude Code")
+  const noNode = otherwise('node is not on PATH for the Codex plugin companion at $companion', 'install Node.js')
   const versions = `for d in "$codex_plugins"/*/; do d=\${d%/}; d=\${d##*/}; [ -f "$codex_plugins/$d/${COMPANION}" ] && printf '%s\\n' "$d"; done`
   const find = `${PLUGINS}; companion_version=$(${versions} | sort -t. -k1,1n -k2,2n -k3,3n | tail -n 1); companion="$codex_plugins/$companion_version/${COMPANION}"`
   const plugin = `echo "${SAID}codex-plugin ${mode} ($companion)" && ${companionCommand(c, base)} > ${md} 2> ${log}`
-  return { script: wrap(`${find}; if [ -n "$companion_version" ]; then ${plugin}; else ${fallback}; fi`) }
+  return {
+    script: wrap(`${find}; if [ -z "$companion_version" ]; then ${missing}; elif ! command -v node >/dev/null 2>&1; then ${noNode}; else ${plugin}; fi`),
+  }
 }
 
 export function reportedBackend(output: string): string | undefined {

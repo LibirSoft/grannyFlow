@@ -48,7 +48,7 @@ The review command runs in the opencode server's environment: `codex` must be on
 
 ## Reviewer
 
-Here the default engine `auto` always means the Codex CLI (`codex exec review`); it does not look for OpenAI's Codex plugin for Claude Code. To use the plugin, set `roles.reviewer.engine` to `codex-plugin`: the review script then runs the newest `${CLAUDE_CONFIG_DIR:-$HOME/.claude}/plugins/cache/openai-codex/codex/<version>/scripts/codex-companion.mjs`, read from the opencode server's environment, with `node`, and fails the review with a note when it is not there. `mode: "adversarial-review"` needs `codex-plugin` on opencode; with `auto`, `granny_run` refuses to start. The journal logs the backend every round (`<stage> r<n>: reviewer: ...`). Details: [config.md](config.md#reviewer).
+Here the default engine `auto` always means the Codex CLI (`codex exec review`); it does not look for OpenAI's Codex plugin for Claude Code. To use the plugin, set `roles.reviewer.engine` to `codex-plugin`: the review script then runs the newest `${CLAUDE_CONFIG_DIR:-$HOME/.claude}/plugins/cache/openai-codex/codex/<version>/scripts/codex-companion.mjs`, read from the opencode server's environment, with `node`, and fails the review with a note when the companion is not there or `node` is not on the server's `PATH`. `mode: "adversarial-review"` needs `codex-plugin` on opencode; with `auto`, `granny_run` refuses to start. The journal logs the backend every round (`<stage> r<n>: reviewer: ...`). Details: [config.md](config.md#reviewer).
 
 ## Provider errors
 

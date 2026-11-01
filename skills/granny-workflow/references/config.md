@@ -44,8 +44,8 @@ A host key that is missing means "inherit" on that host.
 
 | `engine` | runs |
 |---|---|
-| `auto` (default) | on Claude Code: the Codex plugin when its companion script is installed, otherwise the Codex CLI. On opencode: always the Codex CLI |
-| `codex-plugin` | OpenAI's Codex plugin for Claude Code, on either host. When the companion script is missing the review fails with a note saying so - it never falls back to the CLI |
+| `auto` (default) | on Claude Code: the Codex plugin when its companion script is installed and `node` is on `PATH`, otherwise the Codex CLI. On opencode: always the Codex CLI |
+| `codex-plugin` | OpenAI's Codex plugin for Claude Code, on either host. When the companion script is missing, or `node` is not on `PATH`, the review fails with a note saying so - it never falls back to the CLI |
 | `codex` | the Codex CLI: `codex exec review` |
 | `agent` | a model reviews the diff with the reviewer prompt; `model` is a host model |
 
@@ -56,11 +56,18 @@ node <companion> review --wait --base <stage start sha> --scope branch [-m <mode
 node <companion> adversarial-review --wait --base <stage start sha> --scope branch [-m <model>] [-- <focus>]
 ```
 
-Its stdout goes to the round's `.md` file and its progress to the `.log`, the same files the CLI uses. The plugin needs `node`, and the Codex CLI installed and logged in (the companion drives it). The engine logs which backend ran each round (`<stage> r<n>: reviewer: codex-plugin review (<companion path>)`, `... reviewer: codex CLI (codex exec review) - no Codex plugin companion at ...`), so you can see what `auto` chose.
+Its stdout goes to the round's `.md` file and its progress to the `.log`, the same files the CLI uses. The plugin needs `node` on `PATH` (checked with `command -v node` before the companion runs), and the Codex CLI installed and logged in (the companion drives it). The engine logs which backend ran each round, so you can see what `auto` chose:
+
+```
+<stage> r<n>: reviewer: codex-plugin review (<companion path>)
+<stage> r<n>: reviewer: codex CLI (codex exec review) - no Codex plugin companion at <dir>/<version>/scripts/codex-companion.mjs
+<stage> r<n>: reviewer: codex CLI (codex exec review) - node is not on PATH for the Codex plugin companion at <companion path>
+<stage> r<n>: reviewer: codex-plugin review unavailable - node is not on PATH for the Codex plugin companion at <companion path>; install Node.js
+```
 
 | key | values | |
 |---|---|---|
-| `mode` | `review` (default), `adversarial-review` | `review` is Codex's built-in reviewer; `adversarial-review` is the plugin's skeptical, ship/no-ship review with `critical`/`high`/`medium`/`low` findings. It needs the plugin: engine `codex-plugin`, or `auto` on Claude Code, where a missing companion fails the review instead of running a plain CLI review |
+| `mode` | `review` (default), `adversarial-review` | `review` is Codex's built-in reviewer; `adversarial-review` is the plugin's skeptical, ship/no-ship review with `critical`/`high`/`medium`/`low` findings. It needs the plugin: engine `codex-plugin`, or `auto` on Claude Code, where a missing companion or a missing `node` fails the review instead of running a plain CLI review |
 | `focus` | non-empty string | extra instructions for `adversarial-review` only (the plain review takes no focus text), passed shell-quoted after `--` |
 
 Rejected before any agent starts: `adversarial-review` with engine `codex` or `agent`, or with `auto` on opencode (where `auto` means the CLI); `focus` without `adversarial-review`; `command` with `codex-plugin`, or with `adversarial-review`.

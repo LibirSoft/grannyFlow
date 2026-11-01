@@ -20,7 +20,7 @@ For each stage, from `fromStage` on:
      `codex exec review --base <startSha> -o <workDir>/review-<stage>-rN.md > <workDir>/review-<stage>-rN.log 2>&1`
      It can take over 10 minutes; let it finish. Non-zero exit → the stage ends `review-failed`; never invent findings.
      Read the findings from `- [P1] Title — file:line` lines and number them F1, F2, ….
-   - engine `codex-plugin`: the same, with the plugin command from [config.md](config.md#reviewer) (`node <companion> review --wait --base <startSha> --scope branch > ….md 2> ….log`, or `adversarial-review … -- <focus>`). No companion → `review-failed`. Adversarial findings read `- [high] Title (file:line)`: critical/high/medium/low are P0/P1/P2/P3.
+   - engine `codex-plugin`: the same, with the plugin command from [config.md](config.md#reviewer) (`node <companion> review --wait --base <startSha> --scope branch > ….md 2> ….log`, or `adversarial-review … -- <focus>`). No companion, or no `node` on `PATH` → `review-failed`. Adversarial findings read `- [high] Title (file:line)`: critical/high/medium/low are P0/P1/P2/P3.
    - engine `agent`: delegate to `granny-reviewer` with the "Reviewer - agent engine" prompt.
    - No findings → stage `clean`.
 3. **Judge.** Delegate to `granny-judge` with the "Judge" prompt and the findings.

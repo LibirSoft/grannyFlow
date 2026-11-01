@@ -31,7 +31,7 @@ npx skills add LibirSoft/grannyFlow
 
 This puts `skills/granny-workflow/` where your agents look for skills. Then, per host:
 
-- **Claude Code** - nothing else. Optional: OpenAI's Codex plugin (`/plugin marketplace add openai/codex-plugin-cc`, then `/plugin install codex@openai-codex`); the default reviewer uses it when it is installed.
+- **Claude Code** - nothing else. Optional: OpenAI's Codex plugin (`/plugin marketplace add openai/codex-plugin-cc`, then `/plugin install codex@openai-codex`); the default reviewer uses it when it is installed and `node` is on `PATH`.
 - **opencode** - install the plugin (and optionally the `granny` primary agent), then restart the service:
 
   ```sh
@@ -46,7 +46,7 @@ This puts `skills/granny-workflow/` where your agents look for skills. Then, per
   cp <skill-dir>/engines/cursor/agents/*.md ~/.cursor/agents/
   ```
 
-The default reviewer is [Codex](https://github.com/openai/codex); install it and log in, or switch the reviewer to a model with `"engine": "agent"`. With the default engine `auto`, Claude Code runs the review through OpenAI's [Codex plugin for Claude Code](https://github.com/openai/codex-plugin-cc) when it is installed, and through the Codex CLI (`codex exec review`) otherwise; opencode always uses the CLI unless you set `"engine": "codex-plugin"`. The run log says which one ran.
+The default reviewer is [Codex](https://github.com/openai/codex); install it and log in, or switch the reviewer to a model with `"engine": "agent"`. With the default engine `auto`, Claude Code runs the review through OpenAI's [Codex plugin for Claude Code](https://github.com/openai/codex-plugin-cc) when it is installed and `node` is on `PATH`, and through the Codex CLI (`codex exec review`) otherwise; opencode always uses the CLI unless you set `"engine": "codex-plugin"`. The run log says which one ran.
 
 ## Use
 
@@ -78,7 +78,7 @@ Three layers, later wins: `~/.config/granny/config.json`, `<repo>/granny.config.
 |---|---|---|
 | `roles.<role>.model` | session model; judge `sonnet` on Claude Code | one string for every host, or `{ "claude-code": …, "opencode": … }` |
 | `roles.<role>.effort` | inherit | Claude Code only; on opencode use a `#variant` model suffix |
-| `roles.reviewer.engine` | `auto` | `auto`: the Codex plugin when installed (Claude Code only), else the Codex CLI; `codex-plugin`: the plugin, required; `codex`: the CLI (customisable with `command`); `agent`: a model |
+| `roles.reviewer.engine` | `auto` | `auto`: the Codex plugin when installed and `node` is on `PATH` (Claude Code only), else the Codex CLI; `codex-plugin`: the plugin, required; `codex`: the CLI (customisable with `command`); `agent`: a model |
 | `roles.reviewer.mode` | `review` | `adversarial-review` runs the Codex plugin's adversarial review, optionally steered by `roles.reviewer.focus` |
 | `threshold` | `70` | findings scoring strictly above it are fixed; P0/P1 always are |
 | `maxRounds` | `4` | review rounds per stage |

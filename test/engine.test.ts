@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { runGranny, type RunInput } from '../src/core/engine'
@@ -431,6 +431,13 @@ describe('the review script in a real shell', () => {
   const companionCalls = () =>
     existsSync(join(home, 'calls.jsonl')) ? readFileSync(join(home, 'calls.jsonl'), 'utf8').trim().split('\n').map(l => JSON.parse(l)) : []
   const missing = () => `no Codex plugin companion at ${home}/.claude/plugins/cache/openai-codex/codex/<version>/scripts/codex-companion.mjs`
+  const noNode = () => `node is not on PATH for the Codex plugin companion at ${companionDir('1.0.10')}/codex-companion.mjs`
+  const withoutNode = () => {
+    const tools = join(home, 'tools without node')
+    mkdirSync(tools)
+    for (const tool of ['bash', 'cat', 'mkdir', 'rm', 'sort', 'tail']) symlinkSync(Bun.which(tool)!, join(tools, tool))
+    return shell({ PATH: `${bin}:${tools}` })
+  }
   const titles = (r: Awaited<ReturnType<typeof runGranny>>) => r.stages[0]!.history[0]!.findings.map(x => [x.severity, x.title])
 
   it('runs the newest Codex plugin companion on Claude Code with engine auto, and says so', async () => {
@@ -499,6 +506,34 @@ describe('the review script in a real shell', () => {
     expect(titles(r)).toEqual([['P1', 'Reviewed start1']])
     expect(f.logs).toContain(`core r1: reviewer: codex CLI (codex exec review) - ${missing()}`)
   })
+
+  it('falls back to the Codex CLI on Claude Code with engine auto when a companion is installed but node is not on PATH', async () => {
+    installCompanions()
+    const f = fakeHost({ name: 'claude-code', direct: false, shell: withoutNode(), scores: [{ F1: 90 }] })
+    const r = await runGranny(f.host, input({ repo, config: { maxRounds: 1, workDir } }))
+    expect(titles(r)).toEqual([['P1', 'Reviewed start1']])
+    expect(companionCalls()).toEqual([])
+    expect(f.logs).toContain(`core r1: reviewer: codex CLI (codex exec review) - ${noNode()}`)
+  })
+
+  for (const [label, host, reviewer] of [
+    ['engine codex-plugin on Claude Code', 'claude-code', { engine: 'codex-plugin' }],
+    ['engine codex-plugin on opencode', 'opencode', { engine: 'codex-plugin' }],
+    ['adversarial-review on engine auto', 'claude-code', { mode: 'adversarial-review' }],
+  ] as const) {
+    it(`fails the review with a clear note when node is not on PATH for ${label} - no CLI fallback`, async () => {
+      installCompanions()
+      const mode = 'mode' in reviewer ? reviewer.mode : 'review'
+      const f = fakeHost({ name: host, direct: host === 'opencode', shell: withoutNode() })
+      const r = await runGranny(f.host, input({ repo, config: { maxRounds: 1, workDir, roles: { reviewer } } }))
+      expect(r.stages[0]).toMatchObject({ outcome: 'review-failed', rounds: 1 })
+      expect(r.stages[0]!.note).toContain(`codex-plugin ${mode} unavailable - ${noNode()}; install Node.js`)
+      expect(r.stages[0]!.note).not.toContain('Reviewed')
+      expect(r.stages[0]!.note).not.toContain('command not found')
+      expect(companionCalls()).toEqual([])
+      expect(f.logs.some(l => l.startsWith(`core r1: reviewer: codex-plugin ${mode} unavailable - node is not on PATH`))).toBe(true)
+    })
+  }
 
   it('runs the Codex CLI on opencode with engine auto even when a companion is installed', async () => {
     installCompanions()
