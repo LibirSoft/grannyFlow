@@ -71,10 +71,17 @@ describe('runGranny', () => {
     expect(f.calls.some(c => c.kind === 'score')).toBe(false)
   })
 
-  it('sends every finding when the judge returns nothing', async () => {
-    const f = fakeHost({ reviews: [review(finding('P3', 'Nit')), 'No issues.'], scores: [null] })
+  it('sends every finding when the judge returns nothing, and says so', async () => {
+    const f = fakeHost({ reviews: [review(finding('P3', 'Nit'), finding('P3', 'Other nit')), 'No issues.'], scores: [null] })
     await runGranny(f.host, input())
     expect(f.calls.some(c => c.label === 'fix core r1')).toBe(true)
+    expect(f.logs).toContain('core r1: judge returned nothing - all 2 finding(s) go to the implementer unscored')
+  })
+
+  it('does not report an unscored send when the judge answers', async () => {
+    const f = fakeHost({ reviews: [review(finding('P3', 'Nit')), 'No issues.'], scores: [{ F1: 90 }] })
+    await runGranny(f.host, input())
+    expect(f.logs.some(l => l.includes('judge returned nothing'))).toBe(false)
   })
 
   it('skips the review loop for stages marked review: false', async () => {

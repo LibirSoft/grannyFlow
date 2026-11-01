@@ -139,6 +139,7 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
       }
 
       const scored = await call('judge', 'score', `judge ${name} r${round}`, 'Review', judgePrompt(p, reviewBase, r.findings), 'read-only')
+      if (!scored) host.log(`${name} r${round}: judge returned nothing - all ${r.findings.length} finding(s) go to the implementer unscored`)
       const per: Array<{ id: string; score: number; reason: string }> = scored?.perFinding ?? []
       const findings: Finding[] = r.findings.map(f => {
         const s = per.find(x => x.id === f.id)
