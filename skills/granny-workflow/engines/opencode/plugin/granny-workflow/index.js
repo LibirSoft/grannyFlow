@@ -691,13 +691,15 @@ async function runGranny(host, input) {
   }));
   const reviewLoop = async (name, reviewBase) => {
     const history = [];
+    let unmerged = [];
     for (let round = 1;round <= config.maxRounds; round++) {
       const results = await reviewAll(name, reviewBase, round);
       const failed = results.filter((r) => !r.ran);
       const found = results.filter((r) => r.ran).flatMap((r) => r.findings);
       if (failed.length) {
         const names = new Set(failed.map((r) => r.reviewer.name));
-        const earlier = (history.at(-1)?.findings ?? []).filter((f) => f.reviewer !== undefined && names.has(f.reviewer));
+        const byFailed = (f) => f.reviewer !== undefined && names.has(f.reviewer);
+        const earlier = (history.at(-1)?.findings ?? []).flatMap((f) => byFailed(f) ? [f] : unmerged.filter((d) => byFailed(d) && f.duplicates?.includes(d.id)));
         const note = [`reviewer(s) that did not run, also on a retry: ${[...names].join(", ")}`, ...failed.map((r) => `${r.reviewer.name}: ${r.note ?? "no output"}`)].join(`
 `);
         host.log(`${name} r${round}: review failed - stopping this stage's loop. ${note}`);
@@ -713,6 +715,7 @@ async function runGranny(host, input) {
         host.log(`${name} r${round}: ${blockers.length} P0/P1 finding(s) go to the implementer without the judge: ${blockers.map((f) => f.id).join(", ")}`);
       }
       let findings = found;
+      unmerged = found;
       let score = null;
       if (judged.length) {
         const scored = await call("judge", "score", `judge ${name} r${round}`, "Review", judgePrompt(p, reviewBase, judged), "read-only", config.roles.judge);
@@ -728,6 +731,7 @@ async function runGranny(host, input) {
         const merge = mergeDuplicates(withScores, duplicateOf);
         for (const m of merge.merged)
           host.log(`${name} r${round}: judge merged ${m.id} into ${m.into} (duplicate)`);
+        unmerged = withScores;
         findings = merge.findings;
         score = typeof scored?.score === "number" ? scored.score : null;
       }

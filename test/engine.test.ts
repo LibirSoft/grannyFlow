@@ -785,6 +785,46 @@ describe('several reviewers', () => {
       ['codex-F1', 'Codex round one'],
     ])
   })
+
+  it('keeps a failed reviewer finding that the judge merged into the finding of a reviewer that is now clean', async () => {
+    const crashed = { code: 1, output: 'glm: crashed' }
+    const f = fakeHost({
+      reviews: {
+        codex: [review(finding('P2', 'Totals off by one')), 'No issues.'],
+        glm: [review(finding('P2', 'Totals skip the first item')), crashed, crashed],
+      },
+      scores: [{ 'codex-F1': 90, 'glm-F1': { score: 80, duplicateOf: 'codex-F1' } }],
+    })
+    const r = await runGranny(f.host, input({ config: { reviewers: [{ name: 'codex' }, GLM] } }))
+    expect(r.stages[0]).toMatchObject({ outcome: 'review-failed', rounds: 2 })
+    expect(r.stages[0]!.history[0]!.findings.map(x => [x.id, x.duplicates])).toEqual([['codex-F1', ['glm-F1']]])
+    expect(r.stages[0]!.unresolved).toEqual([expect.objectContaining({ id: 'glm-F1', reviewer: 'glm', title: 'Totals skip the first item', score: 80 })])
+  })
+
+  it('reports the merged findings of a failed reviewer under its own ids, next to what the others found this round', async () => {
+    const crashed = { code: 1, output: 'glm: crashed' }
+    const f = fakeHost({
+      reviews: {
+        codex: [review(finding('P2', 'Totals off by one'), finding('P2', 'Cache not invalidated')), review(finding('P2', 'New in round two'))],
+        glm: [review(finding('P2', 'Totals skip the first item'), finding('P2', 'Stale cache')), crashed, crashed],
+      },
+      scores: [
+        {
+          'codex-F1': 90,
+          'codex-F2': { score: 75, duplicateOf: 'glm-F2' },
+          'glm-F1': { score: 80, duplicateOf: 'codex-F1' },
+          'glm-F2': 90,
+        },
+      ],
+    })
+    const r = await runGranny(f.host, input({ config: { reviewers: [{ name: 'codex' }, GLM] } }))
+    expect(r.stages[0]).toMatchObject({ outcome: 'review-failed', rounds: 2 })
+    expect(r.stages[0]!.unresolved.map(x => [x.id, x.reviewer, x.title, x.duplicates])).toEqual([
+      ['codex-F1', 'codex', 'New in round two', undefined],
+      ['glm-F1', 'glm', 'Totals skip the first item', undefined],
+      ['glm-F2', 'glm', 'Stale cache', ['codex-F2']],
+    ])
+  })
 })
 
 const FAKE_CODEX = `#!/usr/bin/env bash

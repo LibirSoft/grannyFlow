@@ -25,7 +25,7 @@ For each stage, from `fromStage` on:
 
    Read the findings from `- [P1] Title — file:line` lines (from the `.md`, or what the command printed when the `.md` is empty) and number each reviewer's findings `<name>-F1`, `<name>-F2`, …, noting the reviewer on each. Never invent findings.
 
-   A reviewer that exits non-zero, prints that Codex got no usable result, (agent) returns no JSON block, or whose run or subagent call fails with an error did not run: let the other reviewers finish, then run that reviewer once more. If it fails again, the stage ends `review-failed`; name the failed reviewer(s) and keep the findings of the reviewers that ran as unresolved.
+   A reviewer that exits non-zero, prints that Codex got no usable result, (agent) returns no JSON block, or whose run or subagent call fails with an error did not run: let the other reviewers finish, then run that reviewer once more. If it fails again, the stage ends `review-failed`; name the failed reviewer(s) and keep the findings of the reviewers that ran as unresolved, plus the failed reviewer's findings from the round before - also one that the judge merged into another reviewer's finding.
 
    No reviewer reported a finding → stage `clean`.
 3. **Route.** Every P0/P1 finding (also critical/high) goes to the implementer as it is - do not give it to the judge.
