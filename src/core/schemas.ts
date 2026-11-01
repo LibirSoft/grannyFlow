@@ -53,7 +53,12 @@ export const SCHEMAS: Record<ResultKind, JsonSchema> = {
         type: 'array',
         items: {
           type: 'object',
-          properties: { id: { type: 'string' }, score: { type: 'number' }, reason: { type: 'string' } },
+          properties: {
+            id: { type: 'string' },
+            score: { type: 'number' },
+            reason: { type: 'string' },
+            duplicateOf: { type: 'string', description: 'id of another finding in this list that reports the same problem; omit when there is none' },
+          },
           required: ['id', 'score', 'reason'],
         },
       },

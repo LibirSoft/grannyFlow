@@ -10,7 +10,7 @@ import {
   reviewCommandPrompt,
   type PromptContext,
 } from './prompts'
-import { parseCodexReview, reviewFailure, triage } from './review'
+import { isBlocker, mergeDuplicates, parseCodexReview, reviewFailure, triage } from './review'
 import { reportedBackend, reviewPlan, reviewStem } from './reviewer'
 import { SCHEMAS } from './schemas'
 import { shellQuote } from './shell'
@@ -177,14 +177,30 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
         return { outcome: 'clean', rounds: round, residual: [], unresolved: [], history }
       }
 
-      const scored = await call('judge', 'score', `judge ${name} r${round}`, 'Review', judgePrompt(p, reviewBase, found), 'read-only', config.roles.judge)
-      if (!scored) host.log(`${name} r${round}: judge returned nothing - all ${found.length} finding(s) go to the implementer unscored`)
-      const per: Array<{ id: string; score: number; reason: string }> = scored?.perFinding ?? []
-      const findings: Finding[] = found.map(f => {
-        const s = per.find(x => x.id === f.id)
-        return s ? { ...f, score: s.score, reason: s.reason } : { ...f }
-      })
-      const score = typeof scored?.score === 'number' ? scored.score : null
+      const blockers = found.filter(isBlocker)
+      const judged = found.filter(f => !isBlocker(f))
+      if (blockers.length) {
+        host.log(`${name} r${round}: ${blockers.length} P0/P1 finding(s) go to the implementer without the judge: ${blockers.map(f => f.id).join(', ')}`)
+      }
+      let findings = found
+      let score: number | null = null
+      if (judged.length) {
+        const scored = await call('judge', 'score', `judge ${name} r${round}`, 'Review', judgePrompt(p, reviewBase, judged), 'read-only', config.roles.judge)
+        if (!scored) host.log(`${name} r${round}: judge returned nothing - all ${judged.length} finding(s) go to the implementer unscored`)
+        const per: Array<{ id: string; score: number; reason: string; duplicateOf?: string }> = Array.isArray(scored?.perFinding) ? scored.perFinding : []
+        const judgedIds = new Set(judged.map(f => f.id))
+        const duplicateOf = new Map(
+          per.filter(x => judgedIds.has(x.id) && typeof x.duplicateOf === 'string' && judgedIds.has(x.duplicateOf)).map(x => [x.id, x.duplicateOf!]),
+        )
+        const withScores = found.map(f => {
+          const s = judgedIds.has(f.id) ? per.find(x => x.id === f.id) : undefined
+          return s ? { ...f, score: s.score, reason: s.reason } : { ...f }
+        })
+        const merge = mergeDuplicates(withScores, duplicateOf)
+        for (const m of merge.merged) host.log(`${name} r${round}: judge merged ${m.id} into ${m.into} (duplicate)`)
+        findings = merge.findings
+        score = typeof scored?.score === 'number' ? scored.score : null
+      }
       history.push({ round, score, findings })
       host.log(`${name} r${round}: ${findings.length} finding(s), review score ${score} (informational)`)
 

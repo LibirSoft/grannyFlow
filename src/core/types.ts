@@ -46,6 +46,7 @@ export interface Finding {
   detail: string
   score?: number
   reason?: string
+  duplicates?: string[]
 }
 
 export interface StageSpec {

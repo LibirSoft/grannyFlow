@@ -292,7 +292,8 @@ function judgePrompt(p, reviewBase, findings) {
 ${p.context ? `Design context:
 ` + p.context + `
 ` : ""}
-For each finding below, open the cited code and judge whether it is real, correctly described and worth fixing; score it 0-100 (findings the code refutes score low). Then score the whole review 0-100 (correctness + actionability; mostly wrong or trivial findings = low).
+The findings come from one or more reviewers; each names its reviewer. P0/P1 findings are not in this list: they go to the implementer without a score.
+For each finding below, open the cited code and judge whether it is real, correctly described and worth fixing; score it 0-100 (findings the code refutes score low). When a finding reports the same problem as another finding in this list, score it too and set its duplicateOf to the id of the finding to keep. Then score the whole review 0-100 (correctness + actionability; mostly wrong or trivial findings = low).
 
 REVIEW:
 ${JSON.stringify(findings, null, 2)}`;
@@ -366,6 +367,44 @@ function reviewFailure(text) {
   return FAILED_RENDER.exec(text)?.[0];
 }
 var isBlocker = (f) => /^\s*(p0|p1|critical|high)\b/i.test(String(f.severity ?? ""));
+function mergeDuplicates(findings, duplicateOf) {
+  const ids = new Set(findings.map((f) => f.id));
+  const keeper = (id) => {
+    const seen = new Set([id]);
+    for (let current = id;; ) {
+      const next = duplicateOf.get(current);
+      if (next === undefined || !ids.has(next))
+        return current;
+      if (seen.has(next))
+        return id;
+      seen.add(next);
+      current = next;
+    }
+  };
+  const into = new Map;
+  for (const f of findings) {
+    const k = keeper(f.id);
+    if (k !== f.id)
+      into.set(f.id, k);
+  }
+  const kept = findings.filter((f) => !into.has(f.id)).map((f) => {
+    const dups = findings.filter((d) => into.get(d.id) === f.id);
+    if (!dups.length)
+      return f;
+    const group = [f, ...dups];
+    const merged = { ...f, duplicates: dups.map((d) => d.id) };
+    if (group.some((g) => g.score === undefined)) {
+      delete merged.score;
+      delete merged.reason;
+    } else {
+      const top = group.reduce((a, b) => b.score > a.score ? b : a);
+      merged.score = top.score;
+      merged.reason = top.reason;
+    }
+    return merged;
+  });
+  return { findings: kept, merged: [...into].map(([id, k]) => ({ id, into: k })) };
+}
 function triage(findings, threshold) {
   const accepted = [];
   const residual = [];
@@ -476,7 +515,12 @@ var SCHEMAS = {
         type: "array",
         items: {
           type: "object",
-          properties: { id: { type: "string" }, score: { type: "number" }, reason: { type: "string" } },
+          properties: {
+            id: { type: "string" },
+            score: { type: "number" },
+            reason: { type: "string" },
+            duplicateOf: { type: "string", description: "id of another finding in this list that reports the same problem; omit when there is none" }
+          },
           required: ["id", "score", "reason"]
         }
       },
@@ -656,15 +700,30 @@ async function runGranny(host, input) {
         host.log(`${name} r${round}: clean`);
         return { outcome: "clean", rounds: round, residual: [], unresolved: [], history };
       }
-      const scored = await call("judge", "score", `judge ${name} r${round}`, "Review", judgePrompt(p, reviewBase, found), "read-only", config.roles.judge);
-      if (!scored)
-        host.log(`${name} r${round}: judge returned nothing - all ${found.length} finding(s) go to the implementer unscored`);
-      const per = scored?.perFinding ?? [];
-      const findings = found.map((f) => {
-        const s = per.find((x) => x.id === f.id);
-        return s ? { ...f, score: s.score, reason: s.reason } : { ...f };
-      });
-      const score = typeof scored?.score === "number" ? scored.score : null;
+      const blockers = found.filter(isBlocker);
+      const judged = found.filter((f) => !isBlocker(f));
+      if (blockers.length) {
+        host.log(`${name} r${round}: ${blockers.length} P0/P1 finding(s) go to the implementer without the judge: ${blockers.map((f) => f.id).join(", ")}`);
+      }
+      let findings = found;
+      let score = null;
+      if (judged.length) {
+        const scored = await call("judge", "score", `judge ${name} r${round}`, "Review", judgePrompt(p, reviewBase, judged), "read-only", config.roles.judge);
+        if (!scored)
+          host.log(`${name} r${round}: judge returned nothing - all ${judged.length} finding(s) go to the implementer unscored`);
+        const per = Array.isArray(scored?.perFinding) ? scored.perFinding : [];
+        const judgedIds = new Set(judged.map((f) => f.id));
+        const duplicateOf = new Map(per.filter((x) => judgedIds.has(x.id) && typeof x.duplicateOf === "string" && judgedIds.has(x.duplicateOf)).map((x) => [x.id, x.duplicateOf]));
+        const withScores = found.map((f) => {
+          const s = judgedIds.has(f.id) ? per.find((x) => x.id === f.id) : undefined;
+          return s ? { ...f, score: s.score, reason: s.reason } : { ...f };
+        });
+        const merge = mergeDuplicates(withScores, duplicateOf);
+        for (const m of merge.merged)
+          host.log(`${name} r${round}: judge merged ${m.id} into ${m.into} (duplicate)`);
+        findings = merge.findings;
+        score = typeof scored?.score === "number" ? scored.score : null;
+      }
       history.push({ round, score, findings });
       host.log(`${name} r${round}: ${findings.length} finding(s), review score ${score} (informational)`);
       const { accepted, residual } = triage(findings, config.threshold);

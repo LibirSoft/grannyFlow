@@ -66,6 +66,43 @@ export function reviewFailure(text: string): string | undefined {
 export const isBlocker =(f: Pick<Finding, 'severity'>): boolean =>
   /^\s*(p0|p1|critical|high)\b/i.test(String(f.severity ?? ''))
 
+export function mergeDuplicates(findings: Finding[], duplicateOf: Map<string, string>): { findings: Finding[]; merged: Array<{ id: string; into: string }> } {
+  const ids = new Set(findings.map(f => f.id))
+  const keeper = (id: string): string => {
+    const seen = new Set([id])
+    for (let current = id; ; ) {
+      const next = duplicateOf.get(current)
+      if (next === undefined || !ids.has(next)) return current
+      if (seen.has(next)) return id
+      seen.add(next)
+      current = next
+    }
+  }
+  const into = new Map<string, string>()
+  for (const f of findings) {
+    const k = keeper(f.id)
+    if (k !== f.id) into.set(f.id, k)
+  }
+  const kept = findings
+    .filter(f => !into.has(f.id))
+    .map(f => {
+      const dups = findings.filter(d => into.get(d.id) === f.id)
+      if (!dups.length) return f
+      const group = [f, ...dups]
+      const merged: Finding = { ...f, duplicates: dups.map(d => d.id) }
+      if (group.some(g => g.score === undefined)) {
+        delete merged.score
+        delete merged.reason
+      } else {
+        const top = group.reduce((a, b) => (b.score! > a.score! ? b : a))
+        merged.score = top.score
+        merged.reason = top.reason
+      }
+      return merged
+    })
+  return { findings: kept, merged: [...into].map(([id, k]) => ({ id, into: k })) }
+}
+
 export function triage(findings: Finding[], threshold: number): { accepted: Finding[]; residual: Finding[] } {
   const accepted: Finding[] = []
   const residual: Finding[] = []

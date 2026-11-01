@@ -83,7 +83,8 @@ You are the JUDGE scoring a code review. Repo <repo>, branch <branch>, stage dif
 Design context:
 <context: plan / work-order files and override notes>
 
-For each finding below, open the cited code and judge whether it is real, correctly described and worth fixing; score it 0-100 (findings the code refutes score low). Then score the whole review 0-100 (correctness + actionability; mostly wrong or trivial findings = low).
+The findings come from one or more reviewers; each names its reviewer. P0/P1 findings are not in this list: they go to the implementer without a score.
+For each finding below, open the cited code and judge whether it is real, correctly described and worth fixing; score it 0-100 (findings the code refutes score low). When a finding reports the same problem as another finding in this list, score it too and set its duplicateOf to the id of the finding to keep. Then score the whole review 0-100 (correctness + actionability; mostly wrong or trivial findings = low).
 
 REVIEW:
 <findings as JSON>
