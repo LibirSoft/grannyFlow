@@ -148,7 +148,7 @@ A failed gate ends the stage `checks-failed` without a review (or ends its revie
 
 The labels are `check <stage> <check>` (`check final review <check>` for the `final` gate), the logs `<stage>: check tests failed (exit 1) - repair 1/2` and `<stage>: checks green after 1 repair (implement: tests)`. The result records every run: `stages[].checks`, and the `final` gate's and the final review's in `checks` (and `repos[].checks`), each `{ at, attempt, results: [{ name, passed, code, metric?, note? }] }` - outputs are not kept.
 
-On **opencode** granny executes the command itself. On **Claude Code** the Workflow script has no shell, so a granny helper agent (role `granny`) runs it and reports the exit code and output; the check is only as reliable as that report. On **Cursor** the session runs the checks itself.
+On **opencode** granny executes the command itself. On **Claude Code** the Workflow script has no shell, so a granny helper agent (role `granny`) runs it and reports the exit code and output; the check is only as reliable as that report. When the helper returns nothing or no exit code, granny runs the check once more; failing again, the gate ends `checks-failed` with the note `check runner failed` (code `?`) and no repair - the code may be fine, so the implementer is not asked to change it. On **Cursor** the session runs the checks itself.
 
 ## Plan review
 

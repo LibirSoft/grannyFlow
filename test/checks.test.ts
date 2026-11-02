@@ -348,6 +348,27 @@ describe('checks', () => {
     expect(r.stages[0]!.outcome).toBe('clean')
   })
 
+  it('on Claude Code, retry a check once when its runner returns nothing, and spend no repair on it', async () => {
+    let nulls = 1
+    const f = scripted({ 'run-tests': [green()] }, { name: 'claude-code', direct: false, override: req => (req.label === 'check core tests' && nulls-- > 0 ? null : undefined) })
+    const r = await runGranny(f.host, run({ checks: [TESTS] }))
+    expect(f.calls.filter(c => c.label === 'check core tests')).toHaveLength(2)
+    expect(f.calls.some(c => c.label.startsWith('repair'))).toBe(false)
+    expect(r.stages[0]!.outcome).toBe('clean')
+    expect(r.stages[0]!.checks?.map(c => c.results[0]!.passed)).toEqual([true])
+    expect(f.logs).toContain('core: the check tests runner failed (exit ?) - running it once more')
+  })
+
+  it('on Claude Code, end the gate "check runner failed" without a repair when the runner fails twice', async () => {
+    const f = scripted({ 'run-tests': [green()] }, { name: 'claude-code', direct: false, override: req => (req.label === 'check core tests' ? null : undefined) })
+    const r = await runGranny(f.host, run({ checks: [TESTS] }))
+    expect(f.calls.filter(c => c.label === 'check core tests')).toHaveLength(2)
+    expect(f.calls.some(c => c.label.startsWith('repair') || c.label.startsWith('review core'))).toBe(false)
+    expect(r.stages[0]).toMatchObject({ outcome: 'checks-failed', rounds: 0 })
+    expect(r.stages[0]!.note).toContain('check runner failed: tests')
+    expect(r.stages[0]!.checks?.[0]!.results[0]).toMatchObject({ name: 'tests', passed: false, code: '?', note: 'check runner failed' })
+  })
+
   it('on Claude Code, ask the helper to keep every line the metric matches when it shortens a long output', async () => {
     const pattern = 'All files\\s*\\|\\s*([0-9.]+)'
     const f = scripted({ 'run-cov': [green('All files | 91.2\n')], 'run-tests': [green()] }, { name: 'claude-code', direct: false })

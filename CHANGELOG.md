@@ -9,7 +9,7 @@
 - Stage outcome `checks-failed`: the checks stayed red, so the review did not run or stopped; the stages that build on it, and the later stages of its repo when it left its red commits on the run's branch, are not started. A red stage that ran in its own worktree is not merged back; its lane branch and worktree are left in place. A red whole branch ends `finalReview` `checks-failed`, so the run is not PR-ready - it is repaired only when a final review follows and no stage of the repo ended `checks-failed`; the final check still runs. A stage whose checks ran is never `gates-red`.
 - `stages[].checks` selects checks by name (default all, `[]` none); an unknown name stops the run before any agent starts. A repo's whole-branch gate runs the checks its stages selected.
 - The result records every check run: `stages[].checks`, and `checks` (also per repo in `repos`) for the whole-branch gate, each `{ at, attempt, results }`.
-- On opencode the server executes the check commands; on Claude Code a granny helper agent runs each one and reports its exit code (phase "Checks").
+- On opencode the server executes the check commands; on Claude Code a granny helper agent runs each one and reports its exit code (phase "Checks"). A helper that returns nothing or no exit code gets one retry; then the gate ends `checks-failed` with `check runner failed`, without spending a repair.
 
 ## 1.4.0
 

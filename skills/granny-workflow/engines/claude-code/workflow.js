@@ -1112,8 +1112,15 @@ ${a.note}` : ""}` : "the worktree runner returned nothing" };
   const runCheck = async (lane, name, check) => {
     const script = check.timeout ? `timeout ${check.timeout} bash -c ${shellQuote(check.run)}` : check.run;
     const ask = (repo, label, run) => checkCommandPrompt(repo, label, run, check.metric?.pattern);
-    const r = await shell(`check ${name} ${check.name}`, CHECKS_PHASE, script, lane.cwd, ask);
+    const once = () => shell(`check ${name} ${check.name}`, CHECKS_PHASE, script, lane.cwd, ask);
+    let r = await once();
+    if (typeof r.code !== "number") {
+      host.log(`${name}: the check ${check.name} runner failed (exit ${r.code}) - running it once more`);
+      r = await once();
+    }
     const base = { name: check.name, code: r.code, output: r.output };
+    if (typeof r.code !== "number")
+      return { ...base, passed: false, note: "check runner failed", broken: true };
     if (!r.ran || r.code !== 0) {
       const timedOut = check.timeout && r.code === 124 ? { note: `timed out after ${check.timeout}s` } : {};
       return { ...base, passed: false, ...timedOut };
@@ -1140,11 +1147,17 @@ ${a.note}` : ""}` : "the worktree runner returned nothing" };
       const results = [];
       for (const check of checks)
         results.push(await runCheck(lane, name, check));
-      runs.push({ at, attempt: repairs + 1, results: results.map(({ output, ...r }) => r) });
+      runs.push({ at, attempt: repairs + 1, results: results.map(({ output, broken, ...r }) => r) });
       const failed = results.filter((r) => !r.passed);
       if (!failed.length) {
         host.log(`${name}: checks green${repairs ? ` after ${repairs} repair${repairs > 1 ? "s" : ""}` : ""} (${at}: ${checks.map((c) => c.name).join(", ")})`);
         return { passed: true };
+      }
+      const broken = failed.filter((r) => r.broken);
+      if (broken.length) {
+        const note = `checks failed at ${at}: check runner failed: ${broken.map((r) => `${r.name} (${r.output.slice(-300)})`).join(", ")} - the command's own result is unknown, so no repair was spent on it`;
+        host.log(`${name}: checks-failed - ${note}`);
+        return { passed: false, note };
       }
       const configOf = (r) => checks.find((c) => c.name === r.name);
       const spent = failed.filter((r) => repairs >= budget(configOf(r)));
