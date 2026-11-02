@@ -468,10 +468,26 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
 
   const runStage = async (lane: Lane, st: StageSpec, i: number, name: string): Promise<StageResult> => {
     let impl: Implementation | undefined
+    let base = lane.base
+    const lastLine = (output: string) => output.trim().split('\n').at(-1)?.trim() ?? ''
+    const where = st.repo !== undefined && repoOf(st) !== primary ? { repo: repoOf(st) } : {}
     if (st.implement !== false) {
       host.phase('Implement')
+      const head = await shell(`head ${name}`, 'Implement', 'git rev-parse --verify HEAD', lane.cwd)
+      const start = head.ran && /^[0-9A-Za-z]+$/.test(lastLine(head.output)) ? lastLine(head.output) : undefined
+      if (start) base = start
+      else host.log(`${name}: could not read HEAD before the implementer ran - reviewing ${lane.base}...HEAD instead (exit ${head.code}): ${head.output.slice(-500)}`)
       impl = await implement(lane, `implement ${name}`, implementPrompt(lane.p, st, i, specs.length, name, buildsOnEarlier(i)))
       if (!impl.gatesGreen) host.log(`${name}: implementer ended with RED gates - review will see it`)
+      if (start && impl.startSha !== start) host.log(`${name}: the implementer reported startSha ${impl.startSha}, but HEAD was ${start} before it ran - reviewing ${start}...HEAD`)
+      const count = await shell(`commits ${name}`, 'Implement', `git rev-list --count ${shellQuote(base)}..HEAD`, lane.cwd)
+      if (!count.ran || !/^\d+$/.test(lastLine(count.output))) {
+        host.log(`${name}: could not count the commits in ${base}..HEAD - reviewing it anyway (exit ${count.code}): ${count.output.slice(-500)}`)
+      } else if (Number(lastLine(count.output)) === 0) {
+        const note = `the implementer made no commit: ${base}..HEAD is empty, so there was nothing to review`
+        host.log(`${name}: no-changes - ${note}`)
+        return { stage: name, ...where, implementation: impl, outcome: 'no-changes', rounds: 0, residual: [], unresolved: [], history: [], note }
+      }
     } else {
       host.log(`${name}: review-only stage - reviewing ${lane.base}...HEAD`)
     }
@@ -479,8 +495,8 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
     host.phase('Review')
     const loop = st.review === false
       ? { outcome: 'review-skipped' as const, rounds: 0, residual: [], unresolved: [], history: [] }
-      : await reviewLoop(lane, name, { kind: 'diff', base: impl?.startSha || lane.base })
-    return { stage: name, ...(st.repo !== undefined && repoOf(st) !== primary ? { repo: repoOf(st) } : {}), ...(impl ? { implementation: impl } : {}), ...loop }
+      : await reviewLoop(lane, name, { kind: 'diff', base })
+    return { stage: name, ...where, ...(impl ? { implementation: impl } : {}), ...loop }
   }
 
   const mergeLane = async (state: RepoState, lane: Lane, name: string): Promise<string | undefined> => {
@@ -532,7 +548,7 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
     }
   }
 
-  const deps = specs.map((st, i) => {
+  const builds = specs.map((st, i) => {
     const d = new Set<number>()
     if (st.after !== undefined) for (const n of st.after) d.add(n - 1)
     else {
@@ -543,9 +559,9 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
         }
       }
     }
-    if (!config.parallel && i > 0) d.add(i - 1)
     return d
   })
+  const deps = builds.map((d, i) => (!config.parallel && i > 0 ? new Set([...d, i - 1]) : d))
   const buildsOnEarlier = (i: number): boolean => {
     const seen = new Set<number>()
     const todo = [...deps[i]!]
@@ -562,7 +578,9 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
   const results: StageResult[] = []
   const done = new Set<number>()
   const running = new Map<number, Promise<void>>()
+  const undelivered = new Set<number>()
   let failure: { error: unknown } | undefined
+  const nameOf = (i: number) => `${i + 1} (${specs[i]!.name || `stage ${i + 1}`})`
   for (let i = 0; i < fromStage - 1; i++) {
     results[i] = { stage: specs[i]!.name || `stage ${i + 1}`, outcome: 'skipped', rounds: 0, residual: [], unresolved: [], history: [] }
     done.add(i)
@@ -571,12 +589,22 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
     if (!failure) {
       for (let i = 0; i < specs.length && running.size < limit; i++) {
         if (done.has(i) || running.has(i) || ![...deps[i]!].every(d => done.has(d))) continue
+        const blocker = [...builds[i]!].find(d => undelivered.has(d))
+        if (blocker !== undefined) {
+          const note = `not started: it builds on ${nameOf(blocker)}, which ${results[blocker]!.outcome === 'no-changes' ? 'ended no-changes' : 'was not started'}`
+          host.log(`${specs[i]!.name || `stage ${i + 1}`}: ${note}`)
+          results[i] = { stage: specs[i]!.name || `stage ${i + 1}`, outcome: 'skipped', rounds: 0, residual: [], unresolved: [], history: [], note }
+          done.add(i)
+          undelivered.add(i)
+          continue
+        }
         if (running.size) host.log(`${specs[i]!.name || `stage ${i + 1}`}: starting in parallel with ${[...running.keys()].map(j => specs[j]!.name || `stage ${j + 1}`).join(', ')}`)
         running.set(
           i,
           startStage(i).then(
             r => {
               results[i] = r
+              if (r.outcome === 'no-changes') undelivered.add(i)
               done.add(i)
               running.delete(i)
             },
@@ -591,7 +619,6 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
     if (!running.size) break
     await Promise.race(running.values())
   }
-  const nameOf = (i: number) => `${i + 1} (${specs[i]!.name || `stage ${i + 1}`})`
   const unfinished = specs.map((_, i) => i).filter(i => !done.has(i))
   if (failure) {
     const finished = [...done].sort((a, b) => a - b).filter(i => i >= fromStage - 1)

@@ -302,6 +302,18 @@ describe('runGranny', () => {
       expect(f.calls.filter(c => c.kind === 'findings')).toHaveLength(1)
     })
 
+    it("keeps a native Codex review that says in its own words it found nothing clean, through the extraction's confirmation", async () => {
+      const native = '# Codex Review\n\nTarget: branch diff against start1\n\nThe change threads the locale through the cache key and updates its tests; I did not find any discrete, actionable issues.\n'
+      for (const output of [native, 'The patch looks correct. No issues were found in the changed code.']) {
+        const f = fakeHost({ reviews: [output], override: req => (req.kind === 'findings' ? { findings: [], clean: true } : undefined) })
+        const r = await runGranny(f.host, input())
+        expect(r.stages[0]).toMatchObject({ outcome: 'clean', rounds: 1 })
+        const extract = f.calls.find(c => c.kind === 'findings')!
+        expect(extract.prompt).toContain(output)
+        expect(extract.prompt).toContain('set clean to true only if the output is a finished review that clearly says the changes have no problems')
+      }
+    })
+
     it('fails the review instead of reporting clean when the extraction finds none and does not confirm it', async () => {
       const f = fakeHost({ reviews: [prose, prose] })
       const r = await runGranny(f.host, input())
@@ -442,6 +454,69 @@ describe('runGranny', () => {
     await expect(runGranny(f.host, input({ config: { roles: { reviewer: { engine: 'agent' } } } }))).rejects.toThrow('roles.reviewer was replaced by "reviewers"')
     expect(f.calls).toHaveLength(0)
     expect(f.setups).toHaveLength(0)
+  })
+})
+
+describe('the base a stage review diffs against', () => {
+  const lying = (req: { kind: string }) =>
+    req.kind === 'implementation' ? { startSha: 'made-up', headSha: 'h', gatesGreen: true, gates: 'ok', commits: ['c'], untested: '' } : undefined
+
+  it('is the HEAD the engine read before the implementer ran, not the start the implementer reports', async () => {
+    const f = fakeHost({ override: lying })
+    const r = await runGranny(f.host, input())
+    expect(f.probes[0]).toBe('git rev-parse --verify HEAD')
+    expect(f.probes[1]).toBe('git rev-list --count start1..HEAD')
+    expect(f.commands[0]).toContain('codex exec review --base start1 -o')
+    expect(f.logs).toContain('core: the implementer reported startSha made-up, but HEAD was start1 before it ran - reviewing start1...HEAD')
+    expect(r.stages[0]).toMatchObject({ outcome: 'clean', implementation: { startSha: 'made-up' } })
+  })
+
+  it('reads HEAD through a granny helper agent on hosts without a shell', async () => {
+    const f = fakeHost({ name: 'claude-code', direct: false, override: lying })
+    await runGranny(f.host, input())
+    expect(f.probes).toEqual([`cd /work/repo && git rev-parse --verify HEAD`, `cd /work/repo && git rev-list --count start1..HEAD`])
+    expect(f.calls.find(c => c.label === 'review core r1 codex')!.prompt).toContain('--base start1')
+  })
+
+  it('falls back to the base, and says so, when HEAD cannot be read', async () => {
+    const f = fakeHost({ override: lying })
+    const run = f.host.run!
+    f.host.run = async (command, cwd) => (command.includes('git rev-parse --verify HEAD') ? { code: 128, output: 'fatal: not a git repository' } : run(command, cwd))
+    const r = await runGranny(f.host, input())
+    expect(f.logs.some(l => l.startsWith('core: could not read HEAD before the implementer ran - reviewing main...HEAD instead (exit 128): fatal: not a git repository'))).toBe(true)
+    expect(r.stages[0]).toMatchObject({ outcome: 'clean' })
+  })
+
+  it('ends the stage no-changes without a review when the implementer made no commit', async () => {
+    const f = fakeHost({ commits: 0 })
+    const r = await runGranny(f.host, input())
+    expect(r.stages[0]).toMatchObject({ stage: 'core', outcome: 'no-changes', rounds: 0, residual: [], unresolved: [], history: [] })
+    expect(r.stages[0]!.note).toBe('the implementer made no commit: start1..HEAD is empty, so there was nothing to review')
+    expect(f.commands).toHaveLength(0)
+    expect(f.calls.some(c => c.label.startsWith('review'))).toBe(false)
+    expect(r.final).not.toBeNull()
+  })
+
+  it('does not start the stages that build on a no-changes stage, and runs the others', async () => {
+    const f = fakeHost({ commits: base => (base === 'start1' ? 0 : 1) })
+    const r = await runGranny(
+      f.host,
+      input({ stages: [{ name: 'a', task: 'A' }, { name: 'b', task: 'B', after: [1] }, { name: 'c', task: 'C', after: [] }, { name: 'd', task: 'D', after: [2] }], config: { maxParallel: 1 } }),
+    )
+    expect(r.stages.map(s => [s.stage, s.outcome])).toEqual([['a', 'no-changes'], ['b', 'skipped'], ['c', 'clean'], ['d', 'skipped']])
+    expect(r.stages[1]!.note).toBe('not started: it builds on 1 (a), which ended no-changes')
+    expect(r.stages[3]!.note).toBe('not started: it builds on 2 (b), which was not started')
+    expect(f.calls.filter(c => c.kind === 'implementation').map(c => c.label)).toEqual(['implement a', 'implement c'])
+  })
+
+  it('keeps running the later stages of a sequential run that do not build on the no-changes stage', async () => {
+    const f = fakeHost({ commits: base => (base === 'start1' ? 0 : 1) })
+    const other = '/work/other'
+    const r = await runGranny(
+      f.host,
+      input({ repos: [other], stages: [{ name: 'a', task: 'A' }, { name: 'b', task: 'B', repo: other }], config: { parallel: false } }),
+    )
+    expect(r.stages.map(s => [s.stage, s.outcome])).toEqual([['a', 'no-changes'], ['b', 'clean']])
   })
 })
 

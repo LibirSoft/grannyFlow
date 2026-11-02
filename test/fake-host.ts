@@ -12,6 +12,8 @@ export interface FakeOptions {
   override?: (req: AgentRequest) => unknown
   shell?: { env?: Record<string, string> }
   worktree?: string | CommandResult | 'git' | ((command: string, cwd: string) => string)
+  /** Commits the engine's base..HEAD probe sees after an implementer ran (default 1); 'git' runs the probes in a real shell. */
+  commits?: number | 'git' | ((base: string) => number)
 }
 
 export interface Setup {
@@ -26,6 +28,9 @@ const asResult = (r: Review): CommandResult => (typeof r === 'string' ? { code: 
 export const reviewerOf = (command: string) => /review-.+?-r\d+-([a-z0-9-]+)\.md/.exec(command)?.[1]
 
 const isWorktreeSetup = (command: string) => command.includes('git worktree list --porcelain')
+const HEAD_PROBE = 'git rev-parse --verify HEAD'
+const COMMITS_PROBE = /git rev-list --count (\S+)\.\.HEAD/
+const isProbe = (command: string) => command.includes(HEAD_PROBE) || COMMITS_PROBE.test(command)
 
 const cdTarget = (line: string) => {
   const quoted = /^cd ((?:'[^']*'(?:\\''[^']*')*)|\S+) && /.exec(line)?.[1] ?? ''
@@ -54,7 +59,16 @@ export function fakeHost(opts: FakeOptions = {}) {
   const setups: Setup[] = []
   const logs: string[] = []
   const phases: string[] = []
+  const probes: string[] = []
   let impl = 0
+  const probe = async (command: string, cwd: string): Promise<CommandResult> => {
+    probes.push(command)
+    const c = opts.commits ?? 1
+    if (c === 'git') return bash(command, cwd, opts.shell?.env)
+    if (command.includes(HEAD_PROBE)) return { code: 0, output: `start${impl + 1}\n` }
+    const base = COMMITS_PROBE.exec(command)![1]!
+    return { code: 0, output: `${typeof c === 'function' ? c(base) : c}\n` }
+  }
   const setUp = async (command: string, cwd: string, repo: string): Promise<CommandResult> => {
     const w = opts.worktree
     if (w === 'git') return bash(command, cwd, opts.shell?.env)
@@ -77,6 +91,10 @@ export function fakeHost(opts: FakeOptions = {}) {
         const line = /Run exactly this:\n(.+)\n/.exec(req.prompt)?.[1] ?? ''
         setups.push({ command: line, cwd: '/', request: req })
         const r = await setUp(line, '/', cdTarget(line))
+        return { ran: r.code === 0, exitCode: r.code, output: r.output }
+      }
+      if (req.kind === 'command' && isProbe(req.prompt)) {
+        const r = await probe(/Run exactly this:\n(.+)\n/.exec(req.prompt)?.[1] ?? '', req.cwd)
         return { ran: r.code === 0, exitCode: r.code, output: r.output }
       }
       calls.push(req)
@@ -120,12 +138,13 @@ export function fakeHost(opts: FakeOptions = {}) {
         setups.push({ command, cwd })
         return setUp(command, cwd, cwd)
       }
+      if (isProbe(command)) return probe(command, cwd)
       commands.push(command)
       cwds.push(cwd)
       return nextReview(command, cwd)
     }
   }
-  return { host, calls, commands, cwds, setups, logs, phases }
+  return { host, calls, commands, cwds, setups, logs, phases, probes }
 }
 
 export const finding = (severity: string, title: string, file = 'src/a.ts', line = 3) =>

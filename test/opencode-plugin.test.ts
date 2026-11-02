@@ -97,6 +97,8 @@ function fakeContext(behaviour: Behaviour = {}) {
           skipped = true
           return
         }
+        const dir = created.find(s => s.id === sessionID)?.location?.directory
+        if (name === 'granny_submit_implementation' && dir) git(dir, 'commit', '-q', '--allow-empty', '-m', `feat: ${title}`)
         await tools.get(name).execute(CANNED[name], { sessionID })
       },
       context: async ({ sessionID }: { sessionID: string }) => {

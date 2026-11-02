@@ -227,6 +227,7 @@ describe('parallel stages in a real git repo', () => {
     runGranny(
       fakeHost({
         worktree: 'git',
+        commits: 'git',
         shell: {},
         override: async req => {
           if (req.label.startsWith('resolve')) {

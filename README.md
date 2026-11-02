@@ -17,7 +17,9 @@ optional - given a plan and "planReview": true (default false):
      ├─ clean, residual-only, or plan review off ─► stage 1
      └─ round-cap or review-failed ─► stop and report; nothing is implemented
 for each stage - independent stages at the same time (parallel, default on):
-  implementer builds the stage ─► every reviewer reviews it, in parallel (base = stage start sha)
+  granny reads HEAD, the implementer builds the stage
+     ├─ no commit since that HEAD ─► stage no-changes, not reviewed; the stages that build on it are skipped
+  every reviewer reviews it, in parallel (base = the HEAD granny read)
      ├─ a reviewer fails, then fails its one retry ─► stage review-failed
      ├─ no reviewer reports a finding ─────────────► stage clean
      └─ P0/P1 findings go straight to the implementer; the judge scores the rest 0-100 and merges duplicates

@@ -75,7 +75,7 @@ export interface RoundRecord {
   findings: Finding[]
 }
 
-export type StageOutcome = 'clean' | 'residual-only' | 'round-cap' | 'review-failed' | 'review-skipped' | 'skipped'
+export type StageOutcome = 'clean' | 'residual-only' | 'round-cap' | 'review-failed' | 'review-skipped' | 'no-changes' | 'skipped'
 
 export interface StageResult {
   stage: string

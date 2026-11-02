@@ -42,7 +42,7 @@ Prompts: [prompts.md](prompts.md). Each subagent ends its answer with a JSON blo
 
 For each stage, from `fromStage` on:
 
-1. **Implement.** Delegate to `granny-implementer` with the "Implementer - stage" prompt. Keep its `startSha`.
+1. **Implement.** Read `git rev-parse HEAD` in the worktree yourself and keep it as `startSha` - not the one the implementer reports (when they differ, say so). Delegate to `granny-implementer` with the "Implementer - stage" prompt. Then, when `git rev-list --count <startSha>..HEAD` is 0, the implementer made no commit: the stage ends `no-changes` without a review, and the stages that build on it (its `after`, or the previous stage in its repo) are not started - they end `skipped` with a note naming it.
 2. **Review**, round N (N starts at 1; skip the loop when the stage has `review: false`). Run every reviewer in `reviewers` - at the same time where you can (terminal commands in the background, subagents in parallel), otherwise one after another. For a reviewer named `<name>`:
    - engine `codex`, or `auto` (the default; here it means the Codex CLI): run in the terminal, from the worktree (the repo with `worktree: false`):
      `codex exec review --base <startSha> -o <workDir>/review-<stage>-rN-<name>.md > <workDir>/review-<stage>-rN-<name>.log 2>&1`
@@ -51,7 +51,7 @@ For each stage, from `fromStage` on:
    - engine `agent`: delegate to `granny-reviewer` with the "Reviewer - agent engine" prompt.
    - engine `command`: run the reviewer's `command` from the worktree, with `{base}` = `startSha`, `{out}` = `<workDir>/review-<stage>-rN-<name>.md`, `{model}` = its model, `{prompt}` = the "Reviewer - command engine" prompt - each value shell-quoted.
 
-   Read the findings from `- [P1] Title — file:line` lines (from the `.md`, or what the command printed when the `.md` is empty) and number each reviewer's findings `<name>-F1`, `<name>-F2`, …, noting the reviewer on each. Never invent findings.
+   Read the findings from `- [P1] Title — file:line` lines (from the `.md`, or what the command printed when the `.md` is empty) and number each reviewer's findings `<name>-F1`, `<name>-F2`, …, noting the reviewer on each. Never invent findings. Output with no such line is clean only when it says `No findings.` (or the plugin's `No material findings.`); otherwise read it: problems it describes in prose are findings, and output that is not a finished review saying the changes have no problems means the reviewer did not run (below).
 
    A reviewer that exits non-zero, prints that Codex got no usable result, (agent) returns no JSON block, or whose run or subagent call fails with an error did not run: let the other reviewers finish, then run that reviewer once more. If it fails again, the stage ends `review-failed`; name the failed reviewer(s) and keep the findings of the reviewers that ran as unresolved, plus the failed reviewer's findings from the round before - also one that the judge merged into another reviewer's finding.
 
