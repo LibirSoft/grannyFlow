@@ -223,6 +223,29 @@ describe('checks', () => {
     expect(r.stages[0]).toMatchObject({ outcome: 'clean', rounds: 2 })
   })
 
+  it('leave a parallel lane that ended checks-failed unmerged, with its worktree in place', async () => {
+    const lanePath = (command: string, cwd: string) => /wt='?([^';]+)'?; git worktree add/.exec(command)?.[1] ?? cwd
+    const slow = async (req: AgentRequest) => {
+      if (req.kind !== 'implementation') return undefined
+      await new Promise(r => setTimeout(r, 15))
+      return { startSha: 's', headSha: 'h', gatesGreen: true, gates: 'green', commits: [], untested: '' }
+    }
+    const f = scripted({ 'check-a': [green()], 'check-b': [red()] }, { worktree: lanePath, override: slow })
+    const r = await runGranny(
+      f.host,
+      run(
+        { worktree: true, maxRepairs: 0, checks: [{ name: 'a', run: 'check-a' }, { name: 'b', run: 'check-b' }] },
+        { stages: [{ name: 'one', task: 'WP-01', checks: ['a'] }, { name: 'two', task: 'WP-02', after: [], checks: ['b'] }] },
+      ),
+    )
+    const lane = '/work/repo-worktrees/feat-x--s2-two'
+    expect(f.calls.find(c => c.label === 'implement two')!.cwd).toBe(lane)
+    expect(r.stages[1]!.outcome).toBe('checks-failed')
+    expect(f.commands.some(c => c.startsWith('git merge'))).toBe(false)
+    expect(f.commands.some(c => c.includes('git worktree remove'))).toBe(false)
+    expect(r.stages[1]!.note).toContain(`ran in parallel on feat/x--s2-two; its checks stayed red, so it was not merged - its worktree ${lane} is left in place`)
+  })
+
   it('take over from the self-reported gates: green checks keep a red-gates stage clean', async () => {
     const redGates = (req: AgentRequest) =>
       req.kind === 'implementation' ? { startSha: 'start1', headSha: 'h', gatesGreen: false, gates: '1 failing', commits: ['c'], untested: '' } : undefined

@@ -678,6 +678,11 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
     const others = [main.cwd, ...used.filter(o => o !== main.repo).map(o => cwdOf.get(o)!)]
     const lane: Lane = { repo: main.repo, base: main.base, branch, cwd, p: promptFor(main.repo, cwd, branch, others, `${main.cwd}/${config.workDir}/PR-BODY-s${i + 1}-${slug(name)}.md`) }
     const result = await runStage(lane, st, i, name)
+    if (result.outcome === 'checks-failed') {
+      const note = `ran in parallel on ${branch}; its checks stayed red, so it was not merged - its worktree ${cwd} is left in place`
+      host.log(`${name}: ${note}`)
+      return { ...result, note: result.note ? `${result.note}\n${note}` : note }
+    }
     await lock(state)
     try {
       const note = await mergeLane(state, lane, name)
