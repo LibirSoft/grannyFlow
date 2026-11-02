@@ -13,18 +13,20 @@ Layers, later wins:
 
 | key | default | meaning |
 |---|---|---|
-| `roles.granny` | `{}` | model/effort for granny's helper steps: the worktree setup, the stage's HEAD and commit-count reads and the review-command runner (Claude Code), the extraction fallback, the final PR-ready check |
+| `roles.granny` | `{}` | model/effort for granny's helper steps: the worktree setup, the stage's HEAD and commit-count reads, the check runner and the review-command runner (Claude Code), the extraction fallback, the final PR-ready check |
 | `roles.planner` | `{}` | writes the plan and proposes the stages in a run with `goal` ([Planning](#planning)) |
-| `roles.implementer` | `{}` | builds each stage and fixes accepted findings; fixes the plan in the plan review |
+| `roles.implementer` | `{}` | builds each stage, fixes accepted findings and repairs failed checks; fixes the plan in the plan review |
 | `roles.judge` | `{ "model": { "claude-code": "sonnet" } }` | scores each finding that is not P0/P1 0-100 and marks duplicates |
 | `reviewers` | `[{ "name": "reviewer", "engine": "agent" }]` | the reviewers; every one of them reviews every round, all at the same time - see [Reviewers](#reviewers) |
 | `threshold` | `70` | a finding is sent back to the implementer when it is P0/P1 (also `critical`/`high`; these skip the judge), when the judge gave it no score, or when its score is **strictly above** this. The overall review score gates nothing |
-| `maxRounds` | `4` | review rounds per stage, for the plan review and for the final review; the stage ends `round-cap` after the last one |
+| `maxRounds` | `4` | review rounds per stage, for the plan review and for the final review; the stage ends `round-cap` after the last one. Check repairs are not review rounds and do not count |
 | `planReview` | `false` | `true`: with a `plan` in the run's input, review the plan files before stage 1 - see [Plan review](#plan-review). It costs extra tokens; no effect without `plan` |
 | `finalReview` | `true` | after the last stage, review each repo's whole branch (`<base>...HEAD`) once more for cross-stage duplication, inconsistencies and merge resolutions - see [Final review](#final-review). Skipped for a repo with one stage and no lane merge; `false`: never |
 | `parallel` | `true` | run independent stages at the same time - stages in different repos, and stages whose `after` frees them from the one before; a same-repo stage runs in its own worktree and is merged back - see [Parallel stages](#parallel-stages). `false`: one stage at a time, in list order |
 | `maxParallel` | `3` | the most stages running at once (each runs its own reviewers too) |
 | `base` | `"main"` | branch never to touch; the run's `base` argument overrides it |
+| `checks` | `[]` | commands granny runs itself after the implementer, after every fix and on the whole branch before the final review; a red one goes back to the implementer for a repair, and one that stays red ends the stage `checks-failed` - see [Checks](#checks). `[]`: off |
+| `maxRepairs` | `2` | repairs per check gate before a red check ends it `checks-failed`; a check's own `maxRepairs` overrides it |
 | `gates` | `"auto"` | `"auto"`: agents discover the project's test/lint/build/typecheck commands. Or a list, e.g. `["bun test", "bun run check", "bun run build"]` |
 | `workDir` | `".granny"` | repo-relative, git-excluded: PR body, review outputs, run journals |
 | `worktree` | `true` | work in the branch's own git worktree: reuse the one that has the branch checked out, or create one - see [Worktree](#worktree). `false`: work in `repo`, on the branch checked out there |
@@ -101,7 +103,7 @@ A run can span several repos and run stages side by side. On by default (`"paral
 
 **Scheduling.** A stage starts once every stage it waits for has finished (whatever its outcome), with at most `maxParallel` running. Stages before `fromStage` count as finished. When a stage throws (an implementer that returns nothing, a worktree that cannot be set up), nothing new starts, the stages already running finish, then the run fails with that error.
 
-**Several repos.** Each repo the stages use gets its own worktree on the run's branch, set up like the primary's ([Worktree](#worktree)); with a `worktreeDir`, other repos' worktrees are `<worktreeDir>/<repo name>-<branch-slug>` so they do not collide. Every prompt names the other repos' worktrees and forbids touching them. After the last stage, the final check runs in every repo (labels `pr-ready check` and `pr-ready check <repo name>`), and the result's `repos` lists `{ repo, base, worktree, finalReview?, final }` for each; `worktree`, `finalReview` and `final` stay the primary's. Each stage in another repo carries `repo` in the result. Only the primary's `granny.config.json` is read: a `gates` list applies to every repo, so keep `"auto"` when the repos differ.
+**Several repos.** Each repo the stages use gets its own worktree on the run's branch, set up like the primary's ([Worktree](#worktree)); with a `worktreeDir`, other repos' worktrees are `<worktreeDir>/<repo name>-<branch-slug>` so they do not collide. Every prompt names the other repos' worktrees and forbids touching them. After the last stage, the final check runs in every repo (labels `pr-ready check` and `pr-ready check <repo name>`), and the result's `repos` lists `{ repo, base, worktree, finalReview?, checks?, final }` for each; `worktree`, `finalReview` and `final` stay the primary's. Each stage in another repo carries `repo` in the result. Only the primary's `granny.config.json` is read: a `gates` list applies to every repo, so keep `"auto"` when the repos differ.
 
 **The same repo.** A stage whose repo is busy with another stage runs in its own worktree on the branch `<branch>--s<N>-<stage-slug>`, branched from the run's branch as it is when the stage starts (logged `<stage>: <branch> is busy in <repo> - running in parallel on <lane branch>`). It is implemented and reviewed there, and writes its PR-body notes to `<workDir>/PR-BODY-s<N>-<stage-slug>.md` in the run's worktree; the final check folds them into the PR body. Once its review loop ends, granny waits until no stage is working in the run's worktree, then runs `git merge --no-edit <lane branch>` there. On a conflict the implementer resolves it (label `resolve merge <stage>`) and concludes the merge; a merge it leaves unfinished fails the run. Then the lane worktree is removed and its branch deleted (only when the lane has no uncommitted change; otherwise both stay, and the stage's note says so). The stage's `note` records `ran in parallel on <lane branch>, merged`. Only stages with no shared files belong in parallel; the planner marks them with `after`.
 
@@ -114,6 +116,39 @@ It runs once every stage has finished - not when a stage threw and the run faile
 A repo with exactly one stage and no lane merge is skipped - its stage review already covered the same diff - with the log line `final review skipped - one stage and no lane merge, so its stage review already covered the whole branch` and outcome `skipped` (that holds for a single stage with `review: false` too: it opted out of review). A repo no stage worked in gets no final review.
 
 The result's `finalReview` is the primary repo's `{ outcome, rounds, residual, unresolved, history, note? }`, and each entry of `repos` carries its own `finalReview`. A final review that ends `round-cap` or `review-failed` does not stop the run: the final check still runs, the log says `final review ended <outcome> - the final check still runs, but the branch has <n> unresolved finding(s)`, and the report must say the branch still has unresolved findings.
+
+## Checks
+
+`gates` are what the agents are told to run; whether they did is their own report (`gatesGreen`). `checks` are run by granny itself, and a stage does not reach review until they pass. Off by default (`[]`).
+
+```json
+{
+  "checks": [
+    { "name": "tests", "run": "bun test", "timeout": 600 },
+    { "name": "typecheck", "run": "bun run typecheck", "maxRepairs": 1 },
+    { "name": "coverage", "run": "bun test --coverage", "metric": { "pattern": "All files\\s*\\|\\s*([0-9.]+)", "min": 80 } }
+  ],
+  "maxRepairs": 2
+}
+```
+
+A check is `{ name, run, maxRepairs?, timeout?, metric? }`: a unique `name`, the shell command `run`, its own repair budget (else the top-level `maxRepairs`), `timeout` in seconds - the command then runs as `timeout <s> sh -c '<run>'`, so the host needs coreutils `timeout`; exit 124 is reported as `timed out after <s>s` - and `metric: { pattern, min?, max? }`. A check passes when its command exits 0 and, with `metric`, the **last** match of `pattern` (a JavaScript regular expression, matched with the `g` and `m` flags) in the output has a first capture group that parses as a number within `[min, max]`. No match, or no number in it, fails with `metric not found in output`. `pattern` must compile and have a capture group, and `metric` needs `min`, `max` or both.
+
+**Where they run** - each place is one *check gate*, in phase "Checks":
+
+- `implement`: after the implementer finished a stage (and made a commit), before its review. Not for a review-only stage (`implement: false`).
+- `fix r<n>`: after every fix round of a stage review and of the final review, before the next review round. Not in the plan review.
+- `final`: once per repo that had stages, on the whole branch with all checks, after the last stage and the lane merges, before the final review - also with `finalReview` off or skipped.
+
+A stage runs every check unless its spec lists `checks` by name (`"checks": ["tests"]`; `[]` runs none at its gates). A name the config does not have stops the run before any agent starts. The `final` gate always runs them all.
+
+**A gate** runs its checks one after another in the stage's worktree. All green: on to the review. Otherwise, when a red check has used its repair budget at this gate, the gate fails; else the implementer gets a repair (label `repair <stage> <gate> #<n>`) with each red check's name, command, exit code, metric note and the last 3000 characters of its output, told to fix the code and never delete, skip or weaken a test, check, threshold, the granny config or a check script - and to explain in `deviations` when it cannot pass without that. Then every check of the gate runs again. Each gate has its own repair count; repairs are not review rounds.
+
+A failed gate ends the stage `checks-failed` without a review (or ends its review loop), with a note naming the red checks, their exit code or metric, and the last repair's deviations; the stages that build on it are not started, as after `no-changes`. A stage that ran in its own worktree is still merged back, so the `final` gate sees it red too. A failed `final` gate means the branch is not PR-ready: the final review does not run, `finalReview` says `checks-failed` with that note, and the final check still runs. A stage whose gates ran is never `gates-red`: the checks decide, not the implementer's report. With no checks configured, `gates-red` applies as usual.
+
+The labels are `check <stage> <check>` (`check final review <check>` for the `final` gate), the logs `<stage>: check tests failed (exit 1) - repair 1/2` and `<stage>: checks green after 1 repair (implement: tests)`. The result records every run: `stages[].checks`, and the `final` gate's and the final review's in `checks` (and `repos[].checks`), each `{ at, attempt, results: [{ name, passed, code, metric?, note? }] }` - outputs are not kept.
+
+On **opencode** granny executes the command itself. On **Claude Code** the Workflow script has no shell, so a granny helper agent (role `granny`) runs it and reports the exit code and output; the check is only as reliable as that report. On **Cursor** the session runs the checks itself.
 
 ## Plan review
 

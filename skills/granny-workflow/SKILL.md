@@ -21,14 +21,18 @@ for each stage - independent stages at the same time (config parallel, default o
   works in that repo's worktree; one whose repo is busy works in its own worktree and is merged back after its loop
   granny reads HEAD, the implementer builds the stage
      ├─ no commit since that HEAD ─► stage no-changes, not reviewed; the stages that build on it are skipped
+  checks (config checks, default none): granny runs them itself; red ones go back to the implementer for a repair, up to maxRepairs
+     (on Claude Code a granny helper agent runs each command and reports the exit code; on opencode granny runs it directly)
+     ├─ still red ─► stage checks-failed, not reviewed; the stages that build on it are skipped
   every reviewer reviews it, in parallel (base = the HEAD granny read)
      ├─ a reviewer fails, then fails its one retry ─► stage review-failed
-     ├─ no reviewer reports a finding ─────────────► stage clean (gates-red when the last implementer or fix left gates red)
+     ├─ no reviewer reports a finding ─────────────► stage clean (without checks: gates-red when the last implementer or fix left gates red)
      └─ P0/P1 findings go straight to the implementer; the judge scores the rest 0-100 and merges duplicates
-          ├─ any P0/P1, or score > threshold ─► implementer fixes those ─► review again
+          ├─ any P0/P1, or score > threshold ─► implementer fixes those ─► checks again ─► review again
           └─ none ─► stage done; the rest are "residual" for the user
      cap: maxRounds reviews per stage
-after the last stage (none threw): final review ─► the same loop on each repo's whole branch (base...HEAD), looking for
+after the last stage (none threw): the checks on each repo's whole branch - red after the repairs: finalReview checks-failed, not PR-ready;
+     then the final review ─► the same loop on each repo's whole branch (base...HEAD), looking for
      cross-stage duplication, inconsistencies and merge resolutions ("finalReview", default on; skipped for one stage, no lane merge)
      round-cap or review-failed here does not stop the run: report the unresolved findings
 then: granny's final check in every repo (gates, clean tree, no AI trailers, PR body) ─► report ─► WAIT
@@ -36,9 +40,9 @@ then: granny's final check in every repo (gates, clean tree, no AI trailers, PR 
 
 | role | does | default model |
 |---|---|---|
-| granny | you; plus the engine's helper steps: worktree setup, the stage's HEAD and commit-count reads and the review-command runner (Claude Code), extraction fallback, final PR-ready check | session model |
+| granny | you; plus the engine's helper steps: worktree setup, the stage's HEAD and commit-count reads, the check runner and the review-command runner (Claude Code), extraction fallback, final PR-ready check | session model |
 | planner | in a run with `goal`: explores the repo, writes the plan file and proposes the stages; writes nothing else | session model |
-| implementer | builds each stage, fixes accepted findings, commits; in the plan review, fixes the plan files in place without committing them | session model |
+| implementer | builds each stage, fixes accepted findings, repairs failed checks, commits; in the plan review, fixes the plan files in place without committing them | session model |
 | reviewers | config `reviewers`, a list; every reviewer reviews every stage, all at the same time. Engines: `agent` a host model (the default list is one `agent` reviewer on the session model); `auto` (an entry's engine when it names none) runs OpenAI's Codex plugin when it is installed on Claude Code and `node` is on `PATH`, otherwise the Codex CLI (`codex exec review`); `codex-plugin` forces the plugin (and allows `mode: "adversarial-review"`), `codex` the CLI, `command` any CLI | one reviewer, `reviewer`, engine `agent` on the session model |
 | judge | scores each finding that is not P0/P1 and merges duplicates; the overall review score is informational only | `sonnet` on Claude Code, session model on opencode |
 
@@ -62,7 +66,7 @@ All paths in this skill are relative to the directory containing this `SKILL.md`
 | `goal` | what to build, when there is no plan yet - the planner writes it; exclusive with `stages` and `fromStage`. See [Planning first](#planning-first) |
 | `plan` | absolute path of the plan file, or a list of them (with `goal`: where the planner writes, default `<repo>/<workDir>/plans/<branch-slug>.md`); relative paths are rejected. Every agent reads them first. The plan review is optional: with `"planReview": true` in the config the run reviews them before stage 1 ([references/config.md](references/config.md#plan-review)). It runs every reviewer, the judge and the implementer over the plan for up to `maxRounds` rounds before any code is written, so it costs extra tokens. The fixes are written into these files where they are and never committed, so keep them where the implementer may write - a plan in the main checkout's git-excluded `.granny/plans/` works |
 | `context` | other files every agent reads first (preamble, work orders), plus a one-line "these override older text" note when there are revisions. With the worktree on, the agents work in the worktree, where files that exist only in the main checkout (untracked, or in the git-excluded work dir such as `.granny/plans/`) are missing: name those by absolute path |
-| `stages` | not with `goal`; `[{ name, task, implement?, review?, repo?, after? }]` - one entry per stop-and-review point; `repo` is the repo the stage works in (default `repo`); `after` lists the 1-based numbers of earlier stages it waits for, `[]` to start it right away - without it a stage waits for the previous stage in its repo; `task` names exactly which work orders or sections to do; `review: false` skips the loop for that stage; `implement: false` makes a review-only stage (no task needed) that reviews `base...HEAD` and fixes what the judge accepts - use it to run granny on work that is already written |
+| `stages` | not with `goal`; `[{ name, task, implement?, review?, repo?, after?, checks? }]` - one entry per stop-and-review point; `checks` names the config checks this stage runs (default all, `[]` none); `repo` is the repo the stage works in (default `repo`); `after` lists the 1-based numbers of earlier stages it waits for, `[]` to start it right away - without it a stage waits for the previous stage in its repo; `task` names exactly which work orders or sections to do; `review: false` skips the loop for that stage; `implement: false` makes a review-only stage (no task needed) that reviews `base...HEAD` and fixes what the judge accepts - use it to run granny on work that is already written |
 | `fromStage` | 1-based stage to resume from (earlier stages are skipped) |
 | `config` | per-run overrides, same shape as the config file |
 
@@ -94,6 +98,18 @@ Three layers, later wins: `~/.config/granny/config.json` (user), `<repo>/granny.
 }
 ```
 
+Checks are off by default. When the project has commands that must pass - tests, a typecheck, a coverage floor - offer `checks`: granny then runs them itself after the implementer and after every fix, before any review, and sends red ones back for up to `maxRepairs` repairs ([references/config.md](references/config.md#checks)):
+
+```json
+{
+  "checks": [
+    { "name": "tests", "run": "bun test" },
+    { "name": "coverage", "run": "bun test --coverage", "metric": { "pattern": "All files\\s*\\|\\s*([0-9.]+)", "min": 80 } }
+  ],
+  "maxRepairs": 2
+}
+```
+
 ## 3. Preflight - inline, before launching
 
 1. The plan is current. With `plan` given and `"planReview": true`, the run's plan review checks it against the repo and fixes it (a dated "rN deltas" section at the top) before stage 1; tell the user that a plan review that ends `round-cap` or `review-failed` stops the run before anything is implemented. Without a plan review (no `plan`, `planReview` off, or a resume with `fromStage`): if dependency versions or upstream behaviour moved since it was written, update the plan yourself first, the same way, and tell the user what changed.
@@ -117,7 +133,7 @@ Follow your host reference. Then tell the user, in their language: the run id, t
 
 A planning run (result has `draft`): give the plan file paths, the planner's summary, the proposed stages and its open questions, then - when the plan review ran - its outcome and its residual or unresolved findings; read the plan file yourself before vouching for it. Ask the user to approve or change the plan and the stages, and to answer the questions. Then STOP. On approval, launch a new run with `plan: draft.files` and the approved `stages` (with `"planReview": true` in the config, add `"planReview": false` to the run overrides when the plan is unchanged since its review). After a plan review that ended `round-cap` or `review-failed`, say the plan still has unresolved findings and let the user decide.
 
-Otherwise, read the result. Name the worktree first (`worktree` in the result; `repo` itself with `worktree: false`): the branch is checked out there, the user reviews and pushes from there, and granny never removes it - `git worktree remove <path>` is the user's call. Then the plan review, when the result has `plan`: its outcome (`clean`, `residual-only`, `round-cap`, `review-failed`, `skipped` on a resume, `review-skipped` with `planReview` off), its rounds, the residual and unresolved plan findings, and that the plan files now carry uncommitted fixes. After `round-cap` or `review-failed` the run stopped there: `stages` is empty and there is no final check - say that nothing was implemented, list the unresolved findings (and the note), and wait for the user. Otherwise report per stage: commits, gate numbers, review rounds, outcome (`clean`, `residual-only`, `round-cap`, `review-failed` with the reviewers its note names, `review-skipped`, `gates-red` - the review found nothing to fix but the implementer or the last fix left the gates red, so the stage is not clean (its note has the gates; residual findings are kept) -, `no-changes` - the implementer made no commit, nothing was reviewed, and the stages that build on it were not started -, `skipped` on a resume or, with a note, because a stage it builds on delivered nothing), residual and unresolved findings with the reviewer each came from (ids are `<reviewer>-F<n>`); then the final review (`finalReview` in the result, and per repo in `repos`): its outcome, rounds and findings - `skipped` with its note for a repo with one stage and no lane merge, `review-skipped` with `finalReview` off; after `round-cap` or `review-failed` say clearly that the branch still has unresolved findings although the final check ran; then the final check, the PR body path (inside the worktree), and deviations and untested items from the implementers. A run over several repos has `repos` in the result: name every repo's worktree and final check, and each stage's `repo`. A stage whose note says it ran in parallel on a lane branch was merged into the run's branch; when the note says its worktree was left in place, tell the user. Before repeating a load-bearing claim from an agent, verify it yourself (open the file, rerun the gate - in the worktree).
+Otherwise, read the result. Name the worktree first (`worktree` in the result; `repo` itself with `worktree: false`): the branch is checked out there, the user reviews and pushes from there, and granny never removes it - `git worktree remove <path>` is the user's call. Then the plan review, when the result has `plan`: its outcome (`clean`, `residual-only`, `round-cap`, `review-failed`, `skipped` on a resume, `review-skipped` with `planReview` off), its rounds, the residual and unresolved plan findings, and that the plan files now carry uncommitted fixes. After `round-cap` or `review-failed` the run stopped there: `stages` is empty and there is no final check - say that nothing was implemented, list the unresolved findings (and the note), and wait for the user. Otherwise report per stage: commits, gate numbers, review rounds, outcome (`clean`, `residual-only`, `round-cap`, `review-failed` with the reviewers its note names, `review-skipped`, `gates-red` - the review found nothing to fix but the implementer or the last fix left the gates red, so the stage is not clean (its note has the gates; residual findings are kept; never with checks configured for the stage) -, `checks-failed` - granny's own checks stayed red after the repairs, so the review did not run or stopped; its note names the red checks, their exit code or metric and the implementer's deviations, `checks` has every run, and the stages that build on it were not started -, `no-changes` - the implementer made no commit, nothing was reviewed, and the stages that build on it were not started -, `skipped` on a resume or, with a note, because a stage it builds on delivered nothing), residual and unresolved findings with the reviewer each came from (ids are `<reviewer>-F<n>`); then the final review (`finalReview` in the result, and per repo in `repos`): its outcome, rounds and findings - `skipped` with its note for a repo with one stage and no lane merge, `review-skipped` with `finalReview` off, `checks-failed` when the checks on the whole branch stayed red - then say plainly that the branch is NOT PR-ready, with the note and `checks` from the result; after `round-cap` or `review-failed` say clearly that the branch still has unresolved findings although the final check ran; then the final check, the PR body path (inside the worktree), and deviations and untested items from the implementers. A run over several repos has `repos` in the result: name every repo's worktree and final check, and each stage's `repo`. A stage whose note says it ran in parallel on a lane branch was merged into the run's branch; when the note says its worktree was left in place, tell the user. Before repeating a load-bearing claim from an agent, verify it yourself (open the file, rerun the gate - in the worktree).
 
 Then STOP and wait. No push, no `git remote add`, no PR, no tag - the user decides.
 
