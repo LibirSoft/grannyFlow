@@ -484,6 +484,8 @@ describe('the base a stage review diffs against', () => {
     f.host.run = async (command, cwd) => (command.includes('git rev-parse --verify HEAD') ? { code: 128, output: 'fatal: not a git repository' } : run(command, cwd))
     const r = await runGranny(f.host, input())
     expect(f.logs.some(l => l.startsWith('core: could not read HEAD before the implementer ran - reviewing main...HEAD instead (exit 128): fatal: not a git repository'))).toBe(true)
+    expect(f.commands[0]).toContain('codex exec review --base main -o')
+    expect(f.probes).toEqual(['git rev-list --count main..HEAD'])
     expect(r.stages[0]).toMatchObject({ outcome: 'clean' })
   })
 

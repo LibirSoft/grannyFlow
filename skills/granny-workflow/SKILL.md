@@ -33,7 +33,7 @@ after the last stage: granny's final check in every repo (gates, clean tree, no 
 
 | role | does | default model |
 |---|---|---|
-| granny | you; plus the engine's helper steps: worktree setup and review-command runner (Claude Code), extraction fallback, final PR-ready check | session model |
+| granny | you; plus the engine's helper steps: worktree setup, the stage's HEAD and commit-count reads and the review-command runner (Claude Code), extraction fallback, final PR-ready check | session model |
 | planner | in a run with `goal`: explores the repo, writes the plan file and proposes the stages; writes nothing else | session model |
 | implementer | builds each stage, fixes accepted findings, commits; in the plan review, fixes the plan files in place without committing them | session model |
 | reviewers | config `reviewers`, a list; every reviewer reviews every stage, all at the same time. Engines: `auto` (default) runs OpenAI's Codex plugin when it is installed on Claude Code and `node` is on `PATH`, otherwise the Codex CLI (`codex exec review`); `codex-plugin` forces the plugin (and allows `mode: "adversarial-review"`), `codex` the CLI, `agent` a host model, `command` any CLI | one reviewer, `codex`, on Codex's default model |
