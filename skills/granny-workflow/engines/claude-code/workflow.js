@@ -971,6 +971,10 @@ function stageErrors(stages, known) {
   });
   return errors;
 }
+function stageCheckErrors(stages, checks) {
+  const names = new Set(checks.map((c) => c.name));
+  return (stages ?? []).flatMap((st, i) => (Array.isArray(st?.checks) ? st.checks : []).filter((n) => !names.has(n)).map((n) => `stages[${i}].checks names "${n}", which is not in config checks (${[...names].join(", ") || "none configured"})`));
+}
 var planFiles = (input) => input.plan === undefined ? [] : Array.isArray(input.plan) ? input.plan : [input.plan];
 async function runGranny(host, input) {
   const inputErrors = checkInput(input);
@@ -987,8 +991,7 @@ async function runGranny(host, input) {
   const baseOf = (repo) => repo === primary ? base : extra.find((r) => r.repo === repo).base;
   const specs = input.stages ?? [];
   const repoOf = (st) => st.repo === undefined ? primary : trimPath(st.repo);
-  const checkNames = new Set(config.checks.map((c) => c.name));
-  const unknownChecks = specs.flatMap((st, i) => (st.checks ?? []).filter((n) => !checkNames.has(n)).map((n) => `stages[${i}].checks names "${n}", which is not in config checks (${[...checkNames].join(", ") || "none configured"})`));
+  const unknownChecks = stageCheckErrors(specs, config.checks);
   if (unknownChecks.length)
     throw new Error(`Invalid granny input:
 - ${unknownChecks.join(`

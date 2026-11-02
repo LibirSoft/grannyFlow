@@ -163,6 +163,13 @@ function stageErrors(stages: StageSpec[], known: Set<string>): string[] {
   return errors
 }
 
+export function stageCheckErrors(stages: StageSpec[] | undefined, checks: CheckConfig[]): string[] {
+  const names = new Set(checks.map(c => c.name))
+  return (stages ?? []).flatMap((st, i) =>
+    (Array.isArray(st?.checks) ? st.checks : []).filter(n => !names.has(n)).map(n => `stages[${i}].checks names "${n}", which is not in config checks (${[...names].join(', ') || 'none configured'})`),
+  )
+}
+
 const planFiles = (input: RunInput): string[] => (input.plan === undefined ? [] : Array.isArray(input.plan) ? input.plan : [input.plan])
 
 export async function runGranny(host: Host, input: RunInput): Promise<RunResult> {
@@ -178,10 +185,7 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
   const baseOf = (repo: string) => (repo === primary ? base : extra.find(r => r.repo === repo)!.base)
   const specs = input.stages ?? []
   const repoOf = (st: StageSpec) => (st.repo === undefined ? primary : trimPath(st.repo))
-  const checkNames = new Set(config.checks.map(c => c.name))
-  const unknownChecks = specs.flatMap((st, i) =>
-    (st.checks ?? []).filter(n => !checkNames.has(n)).map(n => `stages[${i}].checks names "${n}", which is not in config checks (${[...checkNames].join(', ') || 'none configured'})`),
-  )
+  const unknownChecks = stageCheckErrors(specs, config.checks)
   if (unknownChecks.length) throw new Error(`Invalid granny input:\n- ${unknownChecks.join('\n- ')}`)
   const checksOf = (st: StageSpec): CheckConfig[] => (st.checks === undefined ? config.checks : config.checks.filter(c => st.checks!.includes(c.name)))
 

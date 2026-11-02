@@ -3,7 +3,7 @@ import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, write
 import { homedir } from 'node:os'
 import { isAbsolute, join } from 'node:path'
 import { resolveConfig } from '../../core/config'
-import { checkInput, runGranny, type RunInput } from '../../core/engine'
+import { checkInput, runGranny, stageCheckErrors, type RunInput } from '../../core/engine'
 import { checkShape, SCHEMAS } from '../../core/schemas'
 import type { AgentRequest, CommandResult, Host, PlanResult, ResultKind, RunResult } from '../../core/types'
 
@@ -312,6 +312,8 @@ export const createGrannyPlugin = ({ delays = DEFAULT_DELAYS, sleep = pause, kil
 
       const layers = [readJson(globalConfigPath()), readJson(join(input.repo, 'granny.config.json')), input.config]
       const config = resolveConfig(layers, 'opencode')
+      const unknownChecks = stageCheckErrors(input.stages, config.checks)
+      if (unknownChecks.length) return `granny_run refused:\n- ${unknownChecks.join('\n- ')}`
       const blockers = preflight(input.repo, input.branch, config.workDir, config.worktree)
       for (const repo of stageRepos(input)) blockers.push(...preflight(repo, input.branch, config.workDir, config.worktree).map(b => `${repo}: ${b}`))
       if (blockers.length) return `granny_run refused:\n- ${blockers.join('\n- ')}`
