@@ -11,6 +11,10 @@
 - The result records every check run: `stages[].checks`, and `checks` (also per repo in `repos`) for the whole-branch gate, each `{ at, attempt, results }`.
 - On opencode the server executes the check commands; on Claude Code a granny helper agent runs each one and reports its exit code (phase "Checks"). A helper that returns nothing or no exit code gets one retry; then the gate ends `checks-failed` with `check runner failed`, without spending a repair.
 
+### Changed
+
+- A stage that runs in its own worktree branches from the commit the stage busy in the run's worktree started on, not from the run's branch tip, so its checks never run on that stage's unfinished commits.
+
 ## 1.4.0
 
 ### Changed

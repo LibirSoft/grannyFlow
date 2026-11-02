@@ -1,4 +1,8 @@
 import { describe, expect, it } from 'bun:test'
+import { spawnSync } from 'node:child_process'
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { resolveConfig } from '../src/core/config'
 import { runGranny, type RunInput } from '../src/core/engine'
 import type { AgentRequest, CommandResult } from '../src/core/types'
@@ -440,5 +444,75 @@ describe('checks config', () => {
     expect(message).toContain('checks[0].run')
     expect(message).toContain('checks[1].name "a" is already used')
     expect(message).toContain('checks[1].timeout')
+  })
+})
+
+describe('checks on a parallel lane in a real git repo', () => {
+  const git = (cwd: string, ...args: string[]) => {
+    const r = spawnSync('git', args, { cwd, encoding: 'utf8' })
+    if (r.status !== 0) throw new Error(`git ${args.join(' ')}: ${r.stderr}`)
+    return r.stdout.trim()
+  }
+  const init = (repo: string) => {
+    mkdirSync(repo)
+    git(repo, 'init', '-q', '-b', 'main')
+    git(repo, 'config', 'user.email', 't@t')
+    git(repo, 'config', 'user.name', 't')
+    writeFileSync(join(repo, 'a.txt'), 'a\n')
+    git(repo, 'add', 'a.txt')
+    git(repo, 'commit', '-qm', 'init')
+  }
+  const commit = (cwd: string, file: string, text?: string) => {
+    if (text === undefined) git(cwd, 'rm', '-q', file)
+    else {
+      writeFileSync(join(cwd, file), text)
+      git(cwd, 'add', file)
+    }
+    git(cwd, 'commit', '-qm', `${text === undefined ? 'fix' : 'test'}: ${file}`)
+  }
+  const done = (cwd: string, start: string) => ({ startSha: start, headSha: git(cwd, 'rev-parse', 'HEAD'), gatesGreen: true, gates: 'green', commits: [], untested: '' })
+
+  it('branch a lane from where the busy stage started, not from its unfinished red commits', async () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), 'granny-checks-lane-')))
+    const a = join(root, 'a')
+    const b = join(root, 'b')
+    try {
+      init(a)
+      init(b)
+      const f = fakeHost({
+        worktree: 'git',
+        commits: 'git',
+        shell: {},
+        override: async req => {
+          if (req.kind !== 'implementation') return undefined
+          const start = git(req.cwd, 'rev-parse', 'HEAD')
+          if (req.label === 'implement one') {
+            commit(req.cwd, 'red.txt', 'a failing test, fixed in the next commit\n')
+            await new Promise(r => setTimeout(r, 300))
+            commit(req.cwd, 'red.txt')
+          } else commit(req.cwd, `${req.label.split(' ')[1]}.txt`, 'x\n')
+          return done(req.cwd, start)
+        },
+      })
+      const r = await runGranny(f.host, {
+        repo: a,
+        repos: [b],
+        branch: 'feat/x',
+        base: 'main',
+        stages: [
+          { name: 'one', task: 'WP-01' },
+          { name: 'pre', task: 'WP-02', repo: b, after: [], checks: [] },
+          { name: 'two', task: 'WP-03', after: [2] },
+        ],
+        config: { reviewers: [{ name: 'a', engine: 'agent' }], maxRepairs: 0, checks: [{ name: 'tests', run: 'test ! -e red.txt' }] },
+      })
+      expect(r.stages.map(s => s.outcome)).toEqual(['clean', 'clean', 'clean'])
+      expect(r.stages[2]!.note).toBe('ran in parallel on feat/x--s3-two, merged')
+      const wt = join(root, 'a-worktrees', 'feat-x')
+      expect(existsSync(join(wt, 'two.txt'))).toBe(true)
+      expect(existsSync(join(wt, 'red.txt'))).toBe(false)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
   })
 })

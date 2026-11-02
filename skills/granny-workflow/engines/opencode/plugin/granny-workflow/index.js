@@ -1434,7 +1434,7 @@ the last repair's deviations: ${deviations}` : ""}`;
     else
       s.locked = false;
   };
-  const runStage = async (lane, st, i, name) => {
+  const runStage = async (lane, st, i, name, began) => {
     let impl;
     let base = lane.base;
     const lastLine = (output) => output.trim().split(`
@@ -1448,6 +1448,7 @@ the last repair's deviations: ${deviations}` : ""}`;
       host.phase("Implement");
       const head = await shell(`head ${name}`, "Implement", "git rev-parse --verify HEAD", lane.cwd);
       const start = head.ran && /^[0-9A-Za-z]+$/.test(lastLine(head.output)) ? lastLine(head.output) : undefined;
+      began?.(start);
       if (start)
         base = start;
       else
@@ -1471,6 +1472,7 @@ the last repair's deviations: ${deviations}` : ""}`;
           return { stage: name, ...where, implementation: impl, outcome: "checks-failed", rounds: 0, residual: [], unresolved: [], history: [], note: gate.note, ...ran() };
       }
     } else {
+      began?.();
       host.log(`${name}: review-only stage - reviewing ${lane.base}...HEAD`);
     }
     host.phase("Review");
@@ -1510,19 +1512,30 @@ the last repair's deviations: ${deviations}` : ""}`;
     const name = st.name || `stage ${i + 1}`;
     const state = repoState.get(repoOf(st));
     if (tryLock(state)) {
+      let began = () => {};
+      state.started = new Promise((resolve) => began = resolve);
       try {
-        const result = await runStage(state.lane, st, i, name);
+        const result = await runStage(state.lane, st, i, name, began);
         if (result.outcome === "checks-failed")
           state.red ??= i;
         return result;
       } finally {
+        began();
+        state.started = undefined;
         unlock(state);
       }
     }
     const branch = `${input.branch}--s${i + 1}-${slug(name)}`;
     host.log(`${name}: ${state.lane.branch} is busy in ${baseName(state.lane.repo)} - running in parallel on ${branch}`);
     const main = state.lane;
-    const setup = state.setup.then(() => setUpWorktree(main.repo, branch, input.branch, `worktree ${name}`, main.repo !== primary));
+    const started = state.started;
+    const from = async () => {
+      const start = await started;
+      if (start)
+        host.log(`${name}: branching ${branch} from ${start.slice(0, 8)}, where the stage still running on ${main.branch} started, not from its unfinished commits`);
+      return start ?? input.branch;
+    };
+    const setup = state.setup.then(async () => setUpWorktree(main.repo, branch, await from(), `worktree ${name}`, main.repo !== primary));
     state.setup = setup.catch(() => {});
     const cwd = await setup;
     const others = [main.cwd, ...used.filter((o) => o !== main.repo).map((o) => cwdOf.get(o))];

@@ -101,6 +101,7 @@ interface RepoState {
   setup: Promise<unknown>
   merges: number
   red?: number
+  started?: Promise<string | undefined>
 }
 
 const saidSomething = (d: unknown): string | undefined =>
@@ -598,7 +599,7 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
     else s.locked = false
   }
 
-  const runStage = async (lane: Lane, st: StageSpec, i: number, name: string): Promise<StageResult> => {
+  const runStage = async (lane: Lane, st: StageSpec, i: number, name: string, began?: (start?: string) => void): Promise<StageResult> => {
     let impl: Implementation | undefined
     let base = lane.base
     const lastLine = (output: string) => output.trim().split('\n').at(-1)?.trim() ?? ''
@@ -611,6 +612,7 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
       host.phase('Implement')
       const head = await shell(`head ${name}`, 'Implement', 'git rev-parse --verify HEAD', lane.cwd)
       const start = head.ran && /^[0-9A-Za-z]+$/.test(lastLine(head.output)) ? lastLine(head.output) : undefined
+      began?.(start)
       if (start) base = start
       else host.log(`${name}: could not read HEAD before the implementer ran - reviewing ${lane.base}...HEAD instead (exit ${head.code}): ${head.output.slice(-500)}`)
       impl = await implement(lane, `implement ${name}`, implementPrompt(lane.p, st, i, specs.length, name, buildsOnEarlier(i)))
@@ -629,6 +631,7 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
         if (!gate.passed) return { stage: name, ...where, implementation: impl, outcome: 'checks-failed', rounds: 0, residual: [], unresolved: [], history: [], note: gate.note, ...ran() }
       }
     } else {
+      began?.()
       host.log(`${name}: review-only stage - reviewing ${lane.base}...HEAD`)
     }
 
@@ -676,18 +679,28 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
     const name = st.name || `stage ${i + 1}`
     const state = repoState.get(repoOf(st))!
     if (tryLock(state)) {
+      let began: (start?: string) => void = () => {}
+      state.started = new Promise(resolve => (began = resolve))
       try {
-        const result = await runStage(state.lane, st, i, name)
+        const result = await runStage(state.lane, st, i, name, began)
         if (result.outcome === 'checks-failed') state.red ??= i
         return result
       } finally {
+        began()
+        state.started = undefined
         unlock(state)
       }
     }
     const branch = `${input.branch}--s${i + 1}-${slug(name)}`
     host.log(`${name}: ${state.lane.branch} is busy in ${baseName(state.lane.repo)} - running in parallel on ${branch}`)
     const main = state.lane
-    const setup = state.setup.then(() => setUpWorktree(main.repo, branch, input.branch, `worktree ${name}`, main.repo !== primary))
+    const started = state.started
+    const from = async () => {
+      const start = await started
+      if (start) host.log(`${name}: branching ${branch} from ${start.slice(0, 8)}, where the stage still running on ${main.branch} started, not from its unfinished commits`)
+      return start ?? input.branch
+    }
+    const setup = state.setup.then(async () => setUpWorktree(main.repo, branch, await from(), `worktree ${name}`, main.repo !== primary))
     state.setup = setup.catch(() => {})
     const cwd = await setup
     const others = [main.cwd, ...used.filter(o => o !== main.repo).map(o => cwdOf.get(o)!)]
