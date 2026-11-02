@@ -308,6 +308,7 @@ describe('opencode plugin', () => {
       const done = f.prompts.find(p => p.sessionID === 'parent')!.text
       expect(done).toContain(`[granny] Run ${id} finished.`)
       expect(done).toContain('- plan review: clean, 2 review round(s)\n- one: clean')
+      expect(done).toContain('- final review: skipped, 0 review round(s) - one stage and no lane merge, so its stage review already covered the whole branch\n- final: gates green')
     })
 
     it('stops before stage 1 when the plan review hits the round cap, and says so', async () => {

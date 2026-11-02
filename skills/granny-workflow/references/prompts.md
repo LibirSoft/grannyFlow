@@ -289,6 +289,12 @@ REVIEW:
 <findings as JSON>
 ```
 
+## Final review - the note every reviewer prompt (after its first line naming the diff) and the judge prompt (after its first line) carry, with name `final review` and diff base `<base>`
+
+```text
+This is the whole-branch review: every stage was already reviewed on its own, so look across them - duplicated code or helpers that several stages added, inconsistencies between stages (naming, contracts, config, docs, tests) - and check the merge commits and their conflict resolutions especially (`git log --merges` and `git show <merge>`): both sides' intent must survive.
+```
+
 ## Extraction fallback
 
 ```text

@@ -170,6 +170,9 @@ ${script}
 Set ran=true only if it exited 0, exitCode to its exit code, and output to everything it printed, verbatim and complete. If it failed, set ran=false and explain in note. Never invent output.`
 }
 
+export const WHOLE_BRANCH_NOTE =
+  'This is the whole-branch review: every stage was already reviewed on its own, so look across them - duplicated code or helpers that several stages added, inconsistencies between stages (naming, contracts, config, docs, tests) - and check the merge commits and their conflict resolutions especially (`git log --merges` and `git show <merge>`): both sides\' intent must survive.'
+
 export interface StageTask {
   number: number
   total: number
@@ -188,19 +191,20 @@ const reviewAsks = (stage?: StageTask): string[] => [
   'Also report clean-code and design problems - duplication, unclear naming, needless abstraction, deviations from the design the plan or context lays out - as P2/P3 unless they break something.',
 ]
 
-export function agentReviewPrompt(p: PromptContext, name: string, reviewBase: string, stage?: StageTask): string {
+export function agentReviewPrompt(p: PromptContext, name: string, reviewBase: string, stage?: StageTask, note?: string): string {
   return `${common(p)}
 
 You are the REVIEWER. Do not edit, stage or commit anything.
-${taskSection(stage)}Review the changes of stage "${name}": \`cd ${shellQuote(p.repo)} && git diff ${shellQuote(reviewBase)}...HEAD\` plus \`git log --oneline ${shellQuote(reviewBase)}..HEAD\`.
+${taskSection(stage)}Review the changes of stage "${name}": \`cd ${shellQuote(p.repo)} && git diff ${shellQuote(reviewBase)}...HEAD\` plus \`git log --oneline ${shellQuote(reviewBase)}..HEAD\`.${note ? `\n${note}` : ''}
 ${reviewAsks(stage).join('\n')}
 Return findings with id (F1, F2, ...), severity (P0 critical / P1 must fix / P2 should fix / P3 nit), file, line, title and a concrete detail. Zero findings means the stage is clean.`
 }
 
-export function commandReviewPrompt(p: PromptContext, name: string, reviewBase: string, stage?: StageTask): string {
+export function commandReviewPrompt(p: PromptContext, name: string, reviewBase: string, stage?: StageTask, note?: string): string {
   return [
     'You are a code REVIEWER. Do not edit, stage or commit anything.',
     `Repo ${p.repo}, branch \`${p.branch}\`. Review the changes of stage "${name}": \`cd ${shellQuote(p.repo)} && git diff ${shellQuote(reviewBase)}...HEAD\` plus \`git log --oneline ${shellQuote(reviewBase)}..HEAD\`.`,
+    note ?? '',
     p.context ? `Design context, read it first: ${p.context}` : '',
     taskSection(stage),
     ...reviewAsks(stage),
@@ -253,9 +257,9 @@ RAW REVIEW OUTPUT:
 ${output}`
 }
 
-export function judgePrompt(p: PromptContext, reviewBase: string, findings: Finding[], earlier: EarlierRound[] = [], stage?: StageTask): string {
+export function judgePrompt(p: PromptContext, reviewBase: string, findings: Finding[], earlier: EarlierRound[] = [], stage?: StageTask, note?: string): string {
   return `You are the JUDGE scoring a code review. Repo ${p.repo}, branch ${p.branch}, stage diff \`${shellQuote(reviewBase)}...HEAD\`. Do not edit anything.
-${p.context ? 'Design context:\n' + p.context + '\n' : ''}${taskSection(stage)}
+${note ? note + '\n' : ''}${p.context ? 'Design context:\n' + p.context + '\n' : ''}${taskSection(stage)}
 The findings come from one or more reviewers; each names its reviewer. ${judgeRouting(p, findings)}
 For each finding below, open the cited code and judge whether it is real, correctly described and worth fixing; score it 0-100 (findings the code refutes score low).${stage ? ' Score against the TASK: a finding about work another stage owns scores low; a missing part of this stage\'s task is worth fixing.' : ''} When a finding reports the same problem as another finding in this list, score it too and set its duplicateOf to the id of the finding to keep. Then score the whole review 0-100 (correctness + actionability; mostly wrong or trivial findings = low).
 ${judgeHistory(earlier)}

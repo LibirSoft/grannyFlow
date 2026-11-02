@@ -22,6 +22,7 @@ var DEFAULT_CONFIG = {
   workDir: ".granny",
   worktree: true,
   planReview: false,
+  finalReview: true,
   parallel: true,
   maxParallel: 3,
   language: "English",
@@ -198,6 +199,8 @@ function validate(c) {
   }
   if (typeof c.planReview !== "boolean")
     errors.push("planReview must be a boolean");
+  if (typeof c.finalReview !== "boolean")
+    errors.push("finalReview must be a boolean");
   if (typeof c.parallel !== "boolean")
     errors.push("parallel must be a boolean");
   if (!Number.isInteger(c.maxParallel) || c.maxParallel < 1)
@@ -466,6 +469,7 @@ ${script}
 
 Set ran=true only if it exited 0, exitCode to its exit code, and output to everything it printed, verbatim and complete. If it failed, set ran=false and explain in note. Never invent output.`;
 }
+var WHOLE_BRANCH_NOTE = "This is the whole-branch review: every stage was already reviewed on its own, so look across them - duplicated code or helpers that several stages added, inconsistencies between stages (naming, contracts, config, docs, tests) - and check the merge commits and their conflict resolutions especially (`git log --merges` and `git show <merge>`): both sides' intent must survive.";
 var taskSection = (stage) => stage ? `Stage ${stage.number}/${stage.total} "${stage.name}" was asked to do this - its TASK:
 ${stage.task}
 ` : "";
@@ -474,19 +478,21 @@ var reviewAsks = (stage) => [
   ...stage ? ["Check the diff against the TASK: a part of the task the diff does not do is a finding, and so is a change outside it (scope creep, unrelated edits); work the task leaves to other stages is not a finding."] : [],
   "Also report clean-code and design problems - duplication, unclear naming, needless abstraction, deviations from the design the plan or context lays out - as P2/P3 unless they break something."
 ];
-function agentReviewPrompt(p, name, reviewBase, stage) {
+function agentReviewPrompt(p, name, reviewBase, stage, note) {
   return `${common(p)}
 
 You are the REVIEWER. Do not edit, stage or commit anything.
-${taskSection(stage)}Review the changes of stage "${name}": \`cd ${shellQuote(p.repo)} && git diff ${shellQuote(reviewBase)}...HEAD\` plus \`git log --oneline ${shellQuote(reviewBase)}..HEAD\`.
+${taskSection(stage)}Review the changes of stage "${name}": \`cd ${shellQuote(p.repo)} && git diff ${shellQuote(reviewBase)}...HEAD\` plus \`git log --oneline ${shellQuote(reviewBase)}..HEAD\`.${note ? `
+${note}` : ""}
 ${reviewAsks(stage).join(`
 `)}
 Return findings with id (F1, F2, ...), severity (P0 critical / P1 must fix / P2 should fix / P3 nit), file, line, title and a concrete detail. Zero findings means the stage is clean.`;
 }
-function commandReviewPrompt(p, name, reviewBase, stage) {
+function commandReviewPrompt(p, name, reviewBase, stage, note) {
   return [
     "You are a code REVIEWER. Do not edit, stage or commit anything.",
     `Repo ${p.repo}, branch \`${p.branch}\`. Review the changes of stage "${name}": \`cd ${shellQuote(p.repo)} && git diff ${shellQuote(reviewBase)}...HEAD\` plus \`git log --oneline ${shellQuote(reviewBase)}..HEAD\`.`,
+    note ?? "",
     p.context ? `Design context, read it first: ${p.context}` : "",
     taskSection(stage),
     ...reviewAsks(stage),
@@ -525,9 +531,10 @@ Extract every finding it reports - each one, none merged, none dropped, none inv
 RAW REVIEW OUTPUT:
 ${output}`;
 }
-function judgePrompt(p, reviewBase, findings, earlier = [], stage) {
+function judgePrompt(p, reviewBase, findings, earlier = [], stage, note) {
   return `You are the JUDGE scoring a code review. Repo ${p.repo}, branch ${p.branch}, stage diff \`${shellQuote(reviewBase)}...HEAD\`. Do not edit anything.
-${p.context ? `Design context:
+${note ? note + `
+` : ""}${p.context ? `Design context:
 ` + p.context + `
 ` : ""}${taskSection(stage)}
 The findings come from one or more reviewers; each names its reviewer. ${judgeRouting(p, findings)}
@@ -819,6 +826,7 @@ function reportedWorktree(output) {
 // src/core/engine.ts
 var PLAN_PHASE = "Plan review";
 var DRAFT_PHASE = "Plan";
+var FINAL_REVIEW_PHASE = "Final review";
 var slug = (s) => s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "stage";
 var trimPath = (s) => s.replace(/\/+$/, "") || "/";
 var repoPathOf = (r) => typeof r === "string" ? r : r && typeof r === "object" ? r.repo : undefined;
@@ -1002,7 +1010,7 @@ ${a.note}` : ""}` : "the worktree runner returned nothing" };
   const repoState = new Map(used.map((r) => {
     const cwd = cwdOf.get(r);
     const others = used.filter((o) => o !== r).map((o) => cwdOf.get(o));
-    return [r, { lane: { repo: r, base: baseOf(r), branch: input.branch, cwd, p: promptFor(r, cwd, input.branch, others) }, locked: false, waiters: [], setup: Promise.resolve() }];
+    return [r, { lane: { repo: r, base: baseOf(r), branch: input.branch, cwd, p: promptFor(r, cwd, input.branch, others) }, locked: false, waiters: [], setup: Promise.resolve(), merges: 0 }];
   }));
   const primaryLane = repoState.get(primary).lane;
   const implement = async (lane, label, prompt) => {
@@ -1020,19 +1028,20 @@ ${a.note}` : ""}` : "the worktree runner returned nothing" };
     host.log(`${label}: plan edited - ${Array.isArray(r.files) && r.files.length ? r.files.join(", ") : "no file reported"}`);
     return r;
   };
+  const phaseOf = (subject) => subject.kind === "plan" ? PLAN_PHASE : subject.note ? FINAL_REVIEW_PHASE : "Review";
   const review = async (lane, rv, name, subject, round, attempt) => {
     const { p, cwd } = lane;
     const tag = `${name} r${round} ${rv.name}${attempt > 1 ? ` #${attempt}` : ""}`;
-    const phase = subject.kind === "plan" ? PLAN_PHASE : "Review";
+    const phase = phaseOf(subject);
     if (rv.engine === "agent") {
-      const prompt = subject.kind === "plan" ? agentPlanReviewPrompt(p, subject.files) : agentReviewPrompt(p, name, subject.base, subject.stage);
+      const prompt = subject.kind === "plan" ? agentPlanReviewPrompt(p, subject.files) : agentReviewPrompt(p, name, subject.base, subject.stage, subject.note);
       const r = await call("reviewer", "findings", `review ${tag}`, phase, prompt, "read-only", rv, cwd);
       if (!r)
         return { ran: false, findings: [], note: "reviewer agent returned nothing" };
       return { ran: true, findings: Array.isArray(r.findings) ? r.findings : [] };
     }
     const stem = reviewStem(config, slug(name), round, rv);
-    const plan = subject.kind === "plan" ? planReviewScript(rv, config, host.name, lane.base, stem, planReviewPrompt(p, subject.files)) : reviewPlan(rv, config, host.name, subject.base, stem, commandReviewPrompt(p, name, subject.base, subject.stage));
+    const plan = subject.kind === "plan" ? planReviewScript(rv, config, host.name, lane.base, stem, planReviewPrompt(p, subject.files)) : reviewPlan(rv, config, host.name, subject.base, stem, commandReviewPrompt(p, name, subject.base, subject.stage, subject.note));
     if (!plan)
       return { ran: false, findings: [], note: "this reviewer has no command for a plan review" };
     let ran;
@@ -1105,7 +1114,7 @@ ${a.note}` : ""}` : "the worktree runner returned nothing" };
   }));
   const reviewLoop = async (lane, name, subject, reviewers = config.reviewers, gates) => {
     const { p } = lane;
-    const phase = subject.kind === "plan" ? PLAN_PHASE : "Review";
+    const phase = phaseOf(subject);
     const history = [];
     const earlier = [];
     let unmerged = [];
@@ -1139,7 +1148,7 @@ ${a.note}` : ""}` : "the worktree runner returned nothing" };
       unmerged = found;
       let score = null;
       if (judged.length) {
-        const prompt = subject.kind === "plan" ? planJudgePrompt(p, subject.files, judged, earlier) : judgePrompt(p, subject.base, judged, earlier, subject.stage);
+        const prompt = subject.kind === "plan" ? planJudgePrompt(p, subject.files, judged, earlier) : judgePrompt(p, subject.base, judged, earlier, subject.stage, subject.note);
         const scored = await call("judge", "score", `judge ${name} r${round}`, phase, prompt, "read-only", config.roles.judge, lane.cwd);
         if (!scored)
           host.log(`${name} r${round}: judge returned nothing - all ${judged.length} finding(s) go to the implementer unscored`);
@@ -1325,6 +1334,7 @@ ${a.note}` : ""}` : "the worktree runner returned nothing" };
     await lock(state);
     try {
       const note = await mergeLane(state, lane, name);
+      state.merges++;
       return note ? { ...result, note: result.note ? `${result.note}
 ${note}` : note } : result;
     } finally {
@@ -1412,15 +1422,45 @@ ${note}` : note } : result;
   }
   if (unfinished.length)
     throw new Error(`scheduler stopped with stages that never started: ${unfinished.map(nameOf).join(", ")}`);
+  const states = [...repoState.values()];
+  const stageCount = (s) => specs.filter((st) => repoOf(st) === s.lane.repo).length;
+  const finalReview = async (s) => {
+    const stages = stageCount(s);
+    if (!stages)
+      return;
+    const name = s.lane.repo === primary ? "final review" : `final review ${baseName(s.lane.repo)}`;
+    const skipped = (outcome, log, note) => {
+      host.log(log);
+      return { outcome, rounds: 0, residual: [], unresolved: [], history: [], note };
+    };
+    if (!config.finalReview)
+      return skipped("review-skipped", `${name} off (finalReview: false)`, "off (finalReview: false)");
+    const why = "one stage and no lane merge, so its stage review already covered the whole branch";
+    if (stages === 1 && !s.merges)
+      return skipped("skipped", `${name} skipped - ${why}`, why);
+    host.phase(FINAL_REVIEW_PHASE);
+    host.log(`${name}: reviewing ${s.lane.base}...HEAD across ${stages} stage(s)${s.merges ? ` and ${s.merges} lane merge(s)` : ""}`);
+    const r = await reviewLoop(s.lane, name, { kind: "diff", base: s.lane.base, note: WHOLE_BRANCH_NOTE });
+    if (r.outcome === "round-cap" || r.outcome === "review-failed") {
+      host.log(`${name} ended ${r.outcome} - the final check still runs, but the branch has ${r.unresolved.length} unresolved finding(s)`);
+    }
+    return r;
+  };
+  const reviews = new Map;
+  if (config.parallel)
+    (await Promise.all(states.map(async (s) => [s, await finalReview(s)]))).forEach(([s, r]) => reviews.set(s, r));
+  else
+    for (const s of states)
+      reviews.set(s, await finalReview(s));
   host.phase("PR ready");
   const check = async (s) => {
     const label = s.lane.repo === primary ? "pr-ready check" : `pr-ready check ${baseName(s.lane.repo)}`;
     const final = await call("granny", "final", label, "PR ready", finalPrompt(s.lane.p), "write", config.roles.granny, s.lane.cwd);
     if (!final)
       host.log(s.lane.repo === primary ? "final check returned nothing" : `${label} returned nothing`);
-    return { repo: s.lane.repo, base: s.lane.base, worktree: s.lane.cwd, final };
+    const review = reviews.get(s);
+    return { repo: s.lane.repo, base: s.lane.base, worktree: s.lane.cwd, ...review ? { finalReview: review } : {}, final };
   };
-  const states = [...repoState.values()];
   const finals = [];
   if (config.parallel)
     finals.push(...await Promise.all(states.map(check)));
@@ -1428,6 +1468,7 @@ ${note}` : note } : result;
     for (const s of states)
       finals.push(await check(s));
   const final = finals[0].final;
+  const primaryReview = finals[0].finalReview;
   return {
     repo: input.repo,
     branch: input.branch,
@@ -1435,6 +1476,7 @@ ${note}` : note } : result;
     worktree,
     ...planResult ? { plan: planResult } : {},
     stages: results,
+    ...primaryReview ? { finalReview: primaryReview } : {},
     final,
     ...finals.length > 1 ? { repos: finals } : {}
   };
@@ -1562,6 +1604,12 @@ function summarize(result, worktree) {
     const stopped = result.plan.outcome === "round-cap" || result.plan.outcome === "review-failed";
     lines.unshift(`${line(result.plan, "plan review")}${stopped ? " - stopped before stage 1, nothing was implemented" : ""}`);
   }
+  const reviewLine = (s, name) => `${line(s, name)}${s.outcome === "skipped" || s.outcome === "review-skipped" ? ` - ${s.note ?? "not run"}` : s.outcome === "round-cap" || s.outcome === "review-failed" ? " - the branch still has unresolved findings; the final check ran anyway" : ""}`;
+  if (result.finalReview)
+    lines.push(reviewLine(result.finalReview, "final review"));
+  for (const r of result.repos?.slice(1) ?? [])
+    if (r.finalReview)
+      lines.push(reviewLine(r.finalReview, `final review ${r.repo}`));
   if (result.final)
     lines.push(`- final: gates ${result.final.gatesGreen ? "green" : "RED"}, PR body ${result.final.prBodyPath}${result.final.issues ? `, issues: ${result.final.issues}` : ""}`);
   for (const r of result.repos?.slice(1) ?? []) {

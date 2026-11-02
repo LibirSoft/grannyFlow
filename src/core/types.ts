@@ -118,6 +118,7 @@ export interface RepoResult {
   repo: string
   base: string
   worktree: string
+  finalReview?: PlanResult
   final: FinalReport | null
 }
 
@@ -129,6 +130,7 @@ export interface RunResult {
   draft?: PlanDraft
   plan?: PlanResult
   stages: StageResult[]
+  finalReview?: PlanResult
   final: FinalReport | null
   repos?: RepoResult[]
 }

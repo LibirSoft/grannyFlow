@@ -17,6 +17,7 @@ import {
   planReviewPrompt,
   worktreeCommandPrompt,
   type EarlierRound,
+  WHOLE_BRANCH_NOTE,
 } from '../src/core/prompts'
 import { worktreeScript } from '../src/core/worktree'
 
@@ -92,6 +93,7 @@ export function renderPrompts(): string {
       'Judge - from round 2 on (the plan judge gets the same EARLIER ROUNDS block; one "Round N sent" entry per earlier fix round, and P0/P1 findings join the list once a fixer declined findings)',
       judgePrompt(p, '<stage start sha>', [], earlier, stage).replace(/\[\]$/, '<findings as JSON>'),
     ],
+    ['Final review - the note every reviewer prompt (after its first line naming the diff) and the judge prompt (after its first line) carry, with name `final review` and diff base `<base>`', WHOLE_BRANCH_NOTE],
     ['Extraction fallback', extractPrompt('<stage name>', '<raw review output>')],
     ['Granny - final check', finalPrompt(p)],
   ]
