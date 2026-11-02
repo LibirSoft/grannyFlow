@@ -31,7 +31,7 @@ for each stage - independent stages at the same time (config parallel, default o
           ├─ any P0/P1, or score > threshold ─► implementer fixes those ─► checks again ─► review again
           └─ none ─► stage done; the rest are "residual" for the user
      cap: maxRounds reviews per stage
-after the last stage (none threw): the checks on each repo's whole branch - red after the repairs: finalReview checks-failed, not PR-ready;
+after the last stage (none threw): the checks its stages selected on each repo's whole branch, repaired only when a final review follows - red: finalReview checks-failed, not PR-ready;
      then the final review ─► the same loop on each repo's whole branch (base...HEAD), looking for
      cross-stage duplication, inconsistencies and merge resolutions ("finalReview", default on; skipped for one stage, no lane merge)
      round-cap or review-failed here does not stop the run: report the unresolved findings

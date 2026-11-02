@@ -37,7 +37,7 @@ for each stage - independent stages at the same time (parallel, default on):
           └─ none ─► stage done; the rest are "residual" for you
      cap: maxRounds reviews per stage
      a stage in another repo works in that repo's worktree; one whose repo is busy works in its own worktree, merged back after
-after the last stage (none threw): the checks on every repo's whole branch (red after the repairs: not PR-ready, no final review),
+after the last stage (none threw): the checks its stages selected on every repo's whole branch (repaired only when a final review follows; red: not PR-ready, no final review),
      then the final review in every repo with more than one stage or a lane merge (finalReview, default on)
      ─► the same loop on the whole branch (base...HEAD): cross-stage duplication, inconsistencies, merge resolutions
 then: final check in every repo (gates, clean tree, no AI trailers, PR body) ─► report ─► wait
