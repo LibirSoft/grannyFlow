@@ -462,7 +462,7 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
     let impl: Implementation | undefined
     if (st.implement !== false) {
       host.phase('Implement')
-      impl = await implement(lane, `implement ${name}`, implementPrompt(lane.p, st, i, specs.length, name))
+      impl = await implement(lane, `implement ${name}`, implementPrompt(lane.p, st, i, specs.length, name, buildsOnEarlier(i)))
       if (!impl.gatesGreen) host.log(`${name}: implementer ended with RED gates - review will see it`)
     } else {
       host.log(`${name}: review-only stage - reviewing ${lane.base}...HEAD`)
@@ -538,6 +538,18 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
     if (!config.parallel && i > 0) d.add(i - 1)
     return d
   })
+  const buildsOnEarlier = (i: number): boolean => {
+    const seen = new Set<number>()
+    const todo = [...deps[i]!]
+    while (todo.length) {
+      const j = todo.pop()!
+      if (seen.has(j)) continue
+      seen.add(j)
+      if (repoOf(specs[j]!) === repoOf(specs[i]!)) return true
+      todo.push(...deps[j]!)
+    }
+    return false
+  }
   const limit = config.parallel ? config.maxParallel : 1
   const results: StageResult[] = []
   const done = new Set<number>()

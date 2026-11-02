@@ -63,9 +63,13 @@ Then split the work orders into stages, one per stop-and-review point: one stage
 Return files (the absolute paths you wrote), stages ([{ name, task, after${repos.length ? ', repo' : ''} }]), summary (a few lines for the user: the approach and the work orders) and questions (decisions only the user can make, each with the default the plan assumes; empty when none).`
 }
 
-export function implementPrompt(p: PromptContext, stage: StageSpec, index: number, total: number, name: string): string {
+export function implementPrompt(p: PromptContext, stage: StageSpec, index: number, total: number, name: string, builds = index > 0): string {
   const pr = prBodyOf(p)
-  const earlier = index === 0 ? '' : `${p.others?.length ? 'Earlier stages in this repo are done and reviewed' : 'Earlier stages are done and reviewed'} - read \`git log --oneline ${shellQuote(p.base)}..HEAD\`, the code and ${pr} first.\n`
+  const earlier = builds
+    ? `${p.others?.length ? 'Earlier stages in this repo are done and reviewed' : 'Earlier stages are done and reviewed'} - read \`git log --oneline ${shellQuote(p.base)}..HEAD\`, the code and ${pr} first.\n`
+    : index === 0
+      ? ''
+      : 'This stage does not build on the other stages: they run in parallel, elsewhere or later. Expect no commits from them on this branch.\n'
   return `${common(p)}
 
 You are the IMPLEMENTER.

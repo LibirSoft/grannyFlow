@@ -267,9 +267,10 @@ Write the plan for an implementer who has not seen this conversation: the goal a
 Then split the work orders into stages, one per stop-and-review point: one stage for a small plan; for a larger plan a checkpoint where later work builds on earlier foundations. Each stage's task names exactly which work orders it does.${repoAsk(p, repos)}
 Return files (the absolute paths you wrote), stages ([{ name, task, after${repos.length ? ", repo" : ""} }]), summary (a few lines for the user: the approach and the work orders) and questions (decisions only the user can make, each with the default the plan assumes; empty when none).`;
 }
-function implementPrompt(p, stage, index, total, name) {
+function implementPrompt(p, stage, index, total, name, builds = index > 0) {
   const pr = prBodyOf(p);
-  const earlier = index === 0 ? "" : `${p.others?.length ? "Earlier stages in this repo are done and reviewed" : "Earlier stages are done and reviewed"} - read \`git log --oneline ${shellQuote(p.base)}..HEAD\`, the code and ${pr} first.
+  const earlier = builds ? `${p.others?.length ? "Earlier stages in this repo are done and reviewed" : "Earlier stages are done and reviewed"} - read \`git log --oneline ${shellQuote(p.base)}..HEAD\`, the code and ${pr} first.
+` : index === 0 ? "" : `This stage does not build on the other stages: they run in parallel, elsewhere or later. Expect no commits from them on this branch.
 `;
   return `${common(p)}
 
@@ -1160,7 +1161,7 @@ ${a.note}` : ""}` : "the worktree runner returned nothing" };
     let impl;
     if (st.implement !== false) {
       host.phase("Implement");
-      impl = await implement(lane, `implement ${name}`, implementPrompt(lane.p, st, i, specs.length, name));
+      impl = await implement(lane, `implement ${name}`, implementPrompt(lane.p, st, i, specs.length, name, buildsOnEarlier(i)));
       if (!impl.gatesGreen)
         host.log(`${name}: implementer ended with RED gates - review will see it`);
     } else {
@@ -1238,6 +1239,20 @@ ${note}` : note } : result;
       d.add(i - 1);
     return d;
   });
+  const buildsOnEarlier = (i) => {
+    const seen = new Set;
+    const todo = [...deps[i]];
+    while (todo.length) {
+      const j = todo.pop();
+      if (seen.has(j))
+        continue;
+      seen.add(j);
+      if (repoOf(specs[j]) === repoOf(specs[i]))
+        return true;
+      todo.push(...deps[j]);
+    }
+    return false;
+  };
   const limit = config.parallel ? config.maxParallel : 1;
   const results = [];
   const done = new Set;

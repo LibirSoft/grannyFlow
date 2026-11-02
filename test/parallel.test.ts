@@ -324,3 +324,18 @@ it('runs the lane setup, the merge and the cleanup through granny helper agents 
   expect(f.calls.find(c => c.label === 'implement bee')!.cwd).toBe('/work/b-worktrees/feat-x')
   expect(r.stages.map(s => s.outcome)).toEqual(['clean', 'clean', 'clean'])
 })
+
+it('tells only a stage that builds on earlier work in its repo to read the earlier stages', async () => {
+  const f = fakeHost()
+  await runGranny(f.host, {
+    repo: A,
+    branch: 'feat/x',
+    repos: [B],
+    stages: [{ name: 'one', task: 'a' }, { name: 'two', task: 'b', after: [] }, { name: 'bee', task: 'c', repo: B }, { name: 'three', task: 'd', after: [2] }],
+  })
+  const prompt = (label: string) => f.calls.find(c => c.label === label)!.prompt
+  expect(prompt('implement one')).not.toContain('Earlier stages')
+  expect(prompt('implement two')).toContain('This stage does not build on the other stages')
+  expect(prompt('implement bee')).toContain('This stage does not build on the other stages')
+  expect(prompt('implement three')).toContain('Earlier stages in this repo are done and reviewed')
+})
