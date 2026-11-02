@@ -90,12 +90,15 @@ describe('checks', () => {
   })
 
   it('end the stage checks-failed when the repair budget runs out, skip the review and the stages built on it', async () => {
-    const f = scripted({ 'run-tests': [red()] })
+    const giveUp = (req: AgentRequest) =>
+      req.label === 'repair core implement #2' ? { startSha: 's', headSha: 'h', gatesGreen: false, gates: 'red', commits: [], untested: '', deviations: 'the test pins a removed API' } : undefined
+    const f = scripted({ 'run-tests': [red()] }, { override: giveUp })
     const r = await runGranny(f.host, run({ checks: [TESTS] }, { stages: [{ name: 'core', task: 'WP-01' }, { name: 'more', task: 'WP-02' }] }))
     expect(f.calls.filter(c => c.label.startsWith('repair core')).map(c => c.label)).toEqual(['repair core implement #1', 'repair core implement #2'])
     expect(f.calls.some(c => c.label.startsWith('review core'))).toBe(false)
     expect(r.stages[0]).toMatchObject({ outcome: 'checks-failed', rounds: 0 })
     expect(r.stages[0]!.note).toContain('tests (exit 1)')
+    expect(r.stages[0]!.note).toContain("the last repair's deviations: the test pins a removed API")
     expect(r.stages[0]!.checks).toHaveLength(3)
     expect(r.stages[1]).toMatchObject({ stage: 'more', outcome: 'skipped' })
     expect(r.stages[1]!.note).toContain('ended checks-failed')
@@ -229,8 +232,8 @@ describe('checks', () => {
       run({ maxRepairs: 1, checks: [TESTS] }, { stages: [{ name: 'one', task: 'WP-01', checks: [] }, { name: 'two', task: 'WP-02', checks: [] }] }),
     )
     expect(r.stages.map(s => s.outcome)).toEqual(['clean', 'clean'])
-    expect(f.calls.some(c => c.label.includes('final review'))).toBe(false)
-    expect(f.calls.map(c => c.label)).toContain('repair branch final #1')
+    expect(f.calls.some(c => c.label.startsWith('review final review'))).toBe(false)
+    expect(f.calls.map(c => c.label)).toContain('repair final review final #1')
     expect(r.finalReview).toMatchObject({ outcome: 'checks-failed', rounds: 0 })
     expect(r.finalReview!.note).toContain('tests (exit 1)')
     expect(r.checks?.map(c => [c.at, c.attempt])).toEqual([
@@ -262,7 +265,7 @@ describe('checks', () => {
     expect(check).toMatchObject({ kind: 'command', role: 'granny', phase: 'Checks', cwd: REPO })
     expect(check.prompt).toContain(`cd ${REPO} && run-tests`)
     expect(check.prompt).toContain('Never invent output or an exit code')
-    expect(f.calls.some(c => c.label === 'check branch tests')).toBe(true)
+    expect(f.calls.some(c => c.label === 'check final review tests')).toBe(true)
     expect(r.stages[0]!.outcome).toBe('clean')
   })
 

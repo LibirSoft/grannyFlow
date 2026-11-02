@@ -102,6 +102,8 @@ interface RepoState {
   merges: number
 }
 
+const saidSomething = (d: unknown): string | undefined =>
+  typeof d === 'string' && d.trim() && !/^\s*(none|n\/a|-|no deviations)?\.?\s*$/i.test(d) ? d : undefined
 const slug = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'stage'
 const trimPath = (s: string) => s.replace(/\/+$/, '') || '/'
 const repoPathOf = (r: RepoInput): unknown => (typeof r === 'string' ? r : r && typeof r === 'object' ? r.repo : undefined)
@@ -307,6 +309,7 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
   const checkGate = async (lane: Lane, name: string, at: string, checks: CheckConfig[], runs: CheckRun[], stage?: StageTask): Promise<{ passed: boolean; note?: string }> => {
     host.phase(CHECKS_PHASE)
     const budget = (c: CheckConfig) => c.maxRepairs ?? config.maxRepairs
+    let deviations: string | undefined
     for (let repairs = 0; ; repairs++) {
       const results: Array<CheckResult & { output: string }> = []
       for (const check of checks) results.push(await runCheck(lane, name, check))
@@ -319,13 +322,13 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
       const configOf = (r: CheckResult) => checks.find(c => c.name === r.name)!
       const spent = failed.filter(r => repairs >= budget(configOf(r)))
       if (spent.length) {
-        const note = `checks failed at ${at} after ${repairs} repair(s): ${failed.map(r => `${r.name} (${detail(r)})`).join(', ')}; out of repairs: ${spent.map(r => `${r.name} (${budget(configOf(r))})`).join(', ')}`
+        const note = `checks failed at ${at} after ${repairs} repair(s): ${failed.map(r => `${r.name} (${detail(r)})`).join(', ')}; out of repairs: ${spent.map(r => `${r.name} (${budget(configOf(r))})`).join(', ')}${deviations ? `\nthe last repair's deviations: ${deviations}` : ''}`
         host.log(`${name}: checks-failed - ${note}`)
         return { passed: false, note }
       }
       for (const r of failed) host.log(`${name}: check ${r.name} failed (${detail(r)}) - repair ${repairs + 1}/${budget(configOf(r))}`)
       const sent: FailedCheck[] = failed.map(r => ({ ...r, run: configOf(r).run }))
-      await implement(lane, `repair ${name} ${at} #${repairs + 1}`, repairPrompt(lane.p, name, at, repairs + 1, sent, stage))
+      deviations = saidSomething((await implement(lane, `repair ${name} ${at} #${repairs + 1}`, repairPrompt(lane.p, name, at, repairs + 1, sent, stage))).deviations)
     }
   }
 
@@ -520,7 +523,7 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
         if (!fix.gatesGreen) host.log(`${name} r${round}: WARNING fixer left gates red - ${fix.gates}`)
         deviations = fix.deviations
       }
-      const said = typeof deviations === 'string' && deviations.trim() && !/^\s*(none|n\/a|-|no deviations)?\.?\s*$/i.test(deviations) ? deviations : undefined
+      const said = saidSomething(deviations)
       if (said) history.at(-1)!.deviations = said
       earlier.push({ round, sent: accepted, ...(said ? { deviations: said } : {}) })
       if (subject.kind === 'diff' && checks.length) {
@@ -766,7 +769,7 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
     const runs: CheckRun[] = []
     if (config.checks.length) {
       finalRuns.set(s, runs)
-      const gate = await checkGate(s.lane, s.lane.repo === primary ? 'branch' : `branch ${baseName(s.lane.repo)}`, 'final', config.checks, runs)
+      const gate = await checkGate(s.lane, name, 'final', config.checks, runs)
       if (!gate.passed) {
         host.log(`${name} not run - the final checks failed, so the branch is not PR-ready; the final check still runs`)
         return { outcome: 'checks-failed', rounds: 0, residual: [], unresolved: [], history: [], note: gate.note }

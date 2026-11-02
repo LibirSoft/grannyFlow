@@ -922,6 +922,7 @@ var PLAN_PHASE = "Plan review";
 var DRAFT_PHASE = "Plan";
 var FINAL_REVIEW_PHASE = "Final review";
 var CHECKS_PHASE = "Checks";
+var saidSomething = (d) => typeof d === "string" && d.trim() && !/^\s*(none|n\/a|-|no deviations)?\.?\s*$/i.test(d) ? d : undefined;
 var slug = (s) => s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "stage";
 var trimPath = (s) => s.replace(/\/+$/, "") || "/";
 var repoPathOf = (r) => typeof r === "string" ? r : r && typeof r === "object" ? r.repo : undefined;
@@ -1150,6 +1151,7 @@ ${a.note}` : ""}` : "the worktree runner returned nothing" };
   const checkGate = async (lane, name, at, checks, runs, stage) => {
     host.phase(CHECKS_PHASE);
     const budget = (c) => c.maxRepairs ?? config.maxRepairs;
+    let deviations;
     for (let repairs = 0;; repairs++) {
       const results = [];
       for (const check of checks)
@@ -1163,14 +1165,15 @@ ${a.note}` : ""}` : "the worktree runner returned nothing" };
       const configOf = (r) => checks.find((c) => c.name === r.name);
       const spent = failed.filter((r) => repairs >= budget(configOf(r)));
       if (spent.length) {
-        const note = `checks failed at ${at} after ${repairs} repair(s): ${failed.map((r) => `${r.name} (${detail(r)})`).join(", ")}; out of repairs: ${spent.map((r) => `${r.name} (${budget(configOf(r))})`).join(", ")}`;
+        const note = `checks failed at ${at} after ${repairs} repair(s): ${failed.map((r) => `${r.name} (${detail(r)})`).join(", ")}; out of repairs: ${spent.map((r) => `${r.name} (${budget(configOf(r))})`).join(", ")}${deviations ? `
+the last repair's deviations: ${deviations}` : ""}`;
         host.log(`${name}: checks-failed - ${note}`);
         return { passed: false, note };
       }
       for (const r of failed)
         host.log(`${name}: check ${r.name} failed (${detail(r)}) - repair ${repairs + 1}/${budget(configOf(r))}`);
       const sent = failed.map((r) => ({ ...r, run: configOf(r).run }));
-      await implement(lane, `repair ${name} ${at} #${repairs + 1}`, repairPrompt(lane.p, name, at, repairs + 1, sent, stage));
+      deviations = saidSomething((await implement(lane, `repair ${name} ${at} #${repairs + 1}`, repairPrompt(lane.p, name, at, repairs + 1, sent, stage))).deviations);
     }
   };
   const attribute = (rv, findings) => findings.map((f, i) => ({ ...f, id: `${rv.name}-F${i + 1}`, reviewer: rv.name }));
@@ -1353,7 +1356,7 @@ ${a.note}` : ""}` : "the worktree runner returned nothing" };
           host.log(`${name} r${round}: WARNING fixer left gates red - ${fix.gates}`);
         deviations = fix.deviations;
       }
-      const said = typeof deviations === "string" && deviations.trim() && !/^\s*(none|n\/a|-|no deviations)?\.?\s*$/i.test(deviations) ? deviations : undefined;
+      const said = saidSomething(deviations);
       if (said)
         history.at(-1).deviations = said;
       earlier.push({ round, sent: accepted, ...said ? { deviations: said } : {} });
@@ -1603,7 +1606,7 @@ ${note}` : note } : result;
     const runs = [];
     if (config.checks.length) {
       finalRuns.set(s, runs);
-      const gate = await checkGate(s.lane, s.lane.repo === primary ? "branch" : `branch ${baseName(s.lane.repo)}`, "final", config.checks, runs);
+      const gate = await checkGate(s.lane, name, "final", config.checks, runs);
       if (!gate.passed) {
         host.log(`${name} not run - the final checks failed, so the branch is not PR-ready; the final check still runs`);
         return { outcome: "checks-failed", rounds: 0, residual: [], unresolved: [], history: [], note: gate.note };
