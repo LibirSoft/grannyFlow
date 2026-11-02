@@ -6,7 +6,7 @@ Cursor has subagents but no workflow engine, so you run the loop yourself, step 
 
 Copy `engines/cursor/agents/*.md` to `~/.cursor/agents/` (all projects) or `<project>/.cursor/agents/`, and set `model:` in each file (`inherit` uses the chat's model). Cursor sometimes ignores a subagent's `model:`; check which model actually ran when it matters.
 
-Config: read `~/.config/granny/config.json` and `<repo>/granny.config.json` yourself and apply the layering in [config.md](config.md); only `threshold`, `maxRounds`, `planReview`, `base`, `gates`, `workDir`, `worktree`, `worktreeDir`, `language`, `aiAttribution`, `rules` and `reviewers` apply here - of a reviewer, its `name`, `engine`, `mode`, `focus`, `command`, and `model` where the engine passes it on. An `agent` reviewer runs `granny-reviewer` on whatever model that subagent has.
+Config: read `~/.config/granny/config.json` and `<repo>/granny.config.json` yourself and apply the layering in [config.md](config.md); only `threshold`, `maxRounds`, `planReview`, `finalReview`, `base`, `gates`, `workDir`, `worktree`, `worktreeDir`, `language`, `aiAttribution`, `rules` and `reviewers` apply here - of a reviewer, its `name`, `engine`, `mode`, `focus`, `command`, and `model` where the engine passes it on. An `agent` reviewer runs `granny-reviewer` on whatever model that subagent has.
 
 ## The worktree
 
@@ -65,7 +65,9 @@ For each stage, from `fromStage` on:
 
 Dedupe happens only among the findings that are not P0/P1, so a P2 that repeats a P1 is judged on its own; and a reviewer that labels everything P0/P1 never reaches the judge.
 
-After the last stage, do the "Granny - final check" yourself - in every repo the stages worked in - then report per SKILL.md section 5 and wait.
+After the last stage - unless a stage failed - run the final review ([config.md](config.md#final-review)), with `finalReview` on, in every repo that had more than one stage or a merged lane: the review loop above, steps 2-5, named `final review` (`final review <repo name>` in another repo), on the diff from the repo's `<base>` (`codex exec review --base <base>`, `{base}` = `<base>`), with the "Final review" note from [prompts.md](prompts.md) added to every reviewer prompt and the judge prompt; the implementer fixes on the run's branch. A `round-cap` or `review-failed` here does not stop you: report it with the unresolved findings.
+
+Then do the "Granny - final check" yourself - in every repo the stages worked in - then report per SKILL.md section 5 and wait.
 
 ## Parallel stages
 

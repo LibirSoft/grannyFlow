@@ -25,7 +25,9 @@ for each stage - independent stages at the same time (parallel, default on):
           └─ none ─► stage done; the rest are "residual" for you
      cap: maxRounds reviews per stage
      a stage in another repo works in that repo's worktree; one whose repo is busy works in its own worktree, merged back after
-after the last stage: final check in every repo (gates, clean tree, no AI trailers, PR body) ─► report ─► wait
+after the last stage (none threw): final review in every repo with more than one stage or a lane merge (finalReview, default on)
+     ─► the same loop on the whole branch (base...HEAD): cross-stage duplication, inconsistencies, merge resolutions
+then: final check in every repo (gates, clean tree, no AI trailers, PR body) ─► report ─► wait
 ```
 
 </details>
@@ -122,6 +124,7 @@ Three layers, later wins: `~/.config/granny/config.json`, `<repo>/granny.config.
 | `threshold` | `70` | findings scoring strictly above it are fixed; P0/P1 always are, without the judge |
 | `maxRounds` | `4` | review rounds per stage, and for the plan review |
 | `planReview` | `false` | `true` reviews the plan files before stage 1 when the run has a `plan` (extra tokens); skipped when it resumes with `fromStage` |
+| `finalReview` | `true` | after the last stage, review each repo's whole branch for cross-stage duplication, inconsistencies and merge resolutions; skipped for a repo with one stage and no lane merge |
 | `parallel` | `true` | run independent stages at the same time (other repos, or `after` in the same repo); `false`: one at a time, in order |
 | `maxParallel` | `3` | the most stages running at once |
 | `gates` | `auto` | agents discover test/lint/build/typecheck, or list them |
