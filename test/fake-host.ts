@@ -11,7 +11,7 @@ export interface FakeOptions {
   scores?: Array<Record<string, number | { score: number; duplicateOf?: string }> | null>
   override?: (req: AgentRequest) => unknown
   shell?: { env?: Record<string, string> }
-  worktree?: string | CommandResult | 'git'
+  worktree?: string | CommandResult | 'git' | ((command: string, cwd: string) => string)
 }
 
 export interface Setup {
@@ -58,6 +58,7 @@ export function fakeHost(opts: FakeOptions = {}) {
   const setUp = async (command: string, cwd: string, repo: string): Promise<CommandResult> => {
     const w = opts.worktree
     if (w === 'git') return bash(command, cwd, opts.shell?.env)
+    if (typeof w === 'function') return { code: 0, output: `[granny] worktree: ${w(command, cwd)}\n` }
     if (typeof w === 'object') return w
     return { code: 0, output: `[granny] worktree: ${w ?? repo}\n` }
   }

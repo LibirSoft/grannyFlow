@@ -29,7 +29,7 @@ Run granny from the TUI, the desktop app or `opencode run` against the backgroun
 ## Launch
 
 ```
-granny_run({ repo, branch, base, context, plan?, stages, fromStage?, config? })
+granny_run({ repo, branch, base, context, plan?, stages, repos?, fromStage?, config? })
 granny_run({ repo, branch, base, context, goal, plan?, config? })   // plan first, then stop
 ```
 
@@ -41,6 +41,9 @@ The plugin reads `~/.config/granny/config.json` and `<repo>/granny.config.json` 
 
 - `worktree` on (the default): `repo` may be on any branch and need not be clean - unless `branch` is checked out in `repo`, because then `repo` is the worktree the run reuses, and a dirty tree there refuses the run. Do not check out `branch` yourself. The run's first step, in the background, reuses the worktree that has `branch` checked out or creates one ([config.md](config.md#worktree)); a dirty reused worktree fails the run before any child session starts. Every child session is created in the worktree (`location.directory`), and the review commands run there.
 - `worktree: false`: it refuses to start when `repo` is not on `branch` or the tree is dirty.
+- `repos` (objects `{ repo, base? }`): every repo a stage names with `repo` gets the same checks, with the repo in front of each problem.
+
+Independent stages run at the same time, up to `maxParallel` ([config.md](config.md#parallel-stages)): each stage has its own child sessions, and a same-repo stage that runs in its own worktree has its sessions created there; its merge and cleanup run as commands in the server. The completion message lists each stage with its repo, the final check of every other repo, and every repo's worktree. The global plugin install below is needed for every repo and every worktree a run touches.
 
 It returns a run id at once and works in the background; child sessions appear as `granny · <step>`. When the run ends the plugin posts a `[granny] Run … finished` message into your session, with a `- worktree: <path>` line - that is your cue to report.
 

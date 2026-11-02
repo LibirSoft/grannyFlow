@@ -13,6 +13,7 @@ Workflow({
   script: <contents of workflow.js>,              // or scriptPath: <scratchpad copy of workflow.js>
   args: {
     repo, branch, base, context, plan, stages,    // plan: absolute path or list; fromStage when resuming by stage
+    repos,                                         // optional: other repos the stages work in
     // or, to plan first: repo, branch, base, context, goal, plan?  (no stages)
     config: [<user config>, <project config>, <run overrides>]   // omit missing layers
   }
@@ -35,6 +36,10 @@ With `worktree` on (the default) the run starts with phase "Worktree": a granny 
 
 With `goal` in args (and no `stages`), phase "Plan" runs after "Worktree": one `agent()` call, label `plan`, `roles.planner`'s model and effort, write access, schema `{ files, stages, summary, questions? }`. It writes the plan at the absolute path in its prompt - by default the main checkout's `<workDir>/plans/<branch-slug>.md`, which the session can write - then the plan review runs on it when `"planReview": true`, and the Workflow ends with `draft`, `plan`, `stages: []` and `final: null` ([config.md](config.md#planning)).
 
+## Parallel stages
+
+With `parallel` on (the default) the engine starts independent stages together, up to `maxParallel` ([config.md](config.md#parallel-stages)): each stage's `agent()` calls run concurrently with the other stages', next to the reviewers each stage already runs at once. The Workflow runs a limited number of agents at a time and queues the rest, so keep `maxParallel` times the number of reviewers modest. With `repos`, phase "Worktree" runs one setup agent per repo (labels `worktree` and `worktree <repo name>`); a stage that runs in its own worktree has one more (`worktree <stage>`), and its merge and cleanup run in granny helper agents too (labels `merge <stage>`, `cleanup <stage>`), since the Workflow script has no shell. The final check runs once per repo. The phase bar shows the phase the last stage entered; each agent's own phase is still right.
+
 ## Plan review
 
 The plan review is optional; enable it with `"planReview": true`. It runs every reviewer, the judge and the implementer over the plan for up to `maxRounds` rounds before any code is written, so it costs extra tokens. With `plan` in args and `planReview` on, phase "Plan review" runs after "Worktree" and before the first "Implement" ([config.md](config.md#plan-review)). The reviewers run as in a stage, each Codex engine through its granny helper agent with the plan-review script (`codex exec --sandbox read-only ...` or the plugin's `node <companion> task ...`); the judge and the fix (`fix plan review r<n>`, the implementer with write access, result `{ files, changes, deviations }`) are `agent()` calls in that phase. The fix agent writes the plan files at their absolute paths - a plan in the main checkout works, since the session works there too - and dates its `rN deltas` section with its shell's `date`, because the Workflow script has no clock. A plan review that ends `round-cap` or `review-failed` ends the Workflow there, with `stages: []` and `final: null`.
@@ -56,4 +61,4 @@ Same script, same args: `Workflow({ scriptPath, args, resumeFromRunId })`, where
 
 ## When it ends
 
-The result is `{ repo, branch, base, worktree, draft?, plan?, stages: [...], final }`; `draft` is there in a planning run; `plan` is there when args had a `plan`. If anything looks empty, read `<transcriptDir>/journal.jsonl`, which records every agent's return value, before drawing conclusions. Then report per SKILL.md section 5 and wait.
+The result is `{ repo, branch, base, worktree, draft?, plan?, stages: [...], final, repos? }`; `repos` is there when the run spans several repos; `draft` is there in a planning run; `plan` is there when args had a `plan`. If anything looks empty, read `<transcriptDir>/journal.jsonl`, which records every agent's return value, before drawing conclusions. Then report per SKILL.md section 5 and wait.

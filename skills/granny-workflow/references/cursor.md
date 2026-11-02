@@ -65,4 +65,8 @@ For each stage, from `fromStage` on:
 
 Dedupe happens only among the findings that are not P0/P1, so a P2 that repeats a P1 is judged on its own; and a reviewer that labels everything P0/P1 never reaches the judge.
 
-After the last stage, do the "Granny - final check" yourself, then report per SKILL.md section 5 and wait.
+After the last stage, do the "Granny - final check" yourself - in every repo the stages worked in - then report per SKILL.md section 5 and wait.
+
+## Parallel stages
+
+The engines run independent stages together ([config.md](config.md#parallel-stages)); here you may do the same when you can run subagents in parallel, otherwise run the stages in list order - the result is the same, only slower. Keep the order rules: a stage starts only after the stages in its `after` (without `after`: the previous stage in its repo). A stage in another repo of `repos` works in that repo's own worktree, set up like the first. A stage that runs while another stage of the same repo is still busy gets its own worktree: `git -C <repo> worktree add -b <branch>--s<N>-<stage-slug> <worktreeDir>/<branch-slug>--s<N>-<stage-slug> <branch>`. After its review loop, and once no stage works in the run's worktree, run `git merge --no-edit <lane branch>` there; on a conflict hand the "Implementer - merge" prompt to `granny-implementer`, and check that `git rev-parse -q --verify MERGE_HEAD` prints nothing afterwards. Then, when the lane has no uncommitted change, `git worktree remove --force <lane>` and `git branch -d <lane branch>`.

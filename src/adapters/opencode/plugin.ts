@@ -116,6 +116,12 @@ export function preflight(repo: string, branch: string, workDir: string, worktre
   return problems
 }
 
+export function stageRepos(input: RunInput): string[] {
+  const top = (p: string) => p.replace(/\/+$/, '') || '/'
+  const primary = top(input.repo)
+  return [...new Set((input.stages ?? []).flatMap(st => (typeof st.repo === 'string' && top(st.repo) !== primary ? [top(st.repo)] : [])))]
+}
+
 function stamp(): string {
   return new Date().toISOString()
 }
@@ -132,7 +138,7 @@ function summarize(result: RunResult, worktree: boolean): string {
     ].filter(Boolean).join(', ')
     return `- ${name}: ${s.outcome}, ${s.rounds} review round(s)${extra ? ` (${extra})` : ''}`
   }
-  const lines = result.stages.map(s => line(s, s.stage))
+  const lines = result.stages.map(s => `${line(s, s.repo ? `${s.stage} (${s.repo})` : s.stage)}${s.note && s.note.includes('in parallel on') ? ` - ${s.note.split('\n').at(-1)}` : ''}`)
   if (result.draft) {
     lines.push(`- plan written: ${result.draft.files.join(', ')} - ${result.draft.stages.length} proposed stage(s)${result.draft.questions ? ', open questions for the user' : ''}`)
     if (result.plan) lines.push(line(result.plan, 'plan review'))
@@ -142,7 +148,10 @@ function summarize(result: RunResult, worktree: boolean): string {
     lines.unshift(`${line(result.plan, 'plan review')}${stopped ? ' - stopped before stage 1, nothing was implemented' : ''}`)
   }
   if (result.final) lines.push(`- final: gates ${result.final.gatesGreen ? 'green' : 'RED'}, PR body ${result.final.prBodyPath}${result.final.issues ? `, issues: ${result.final.issues}` : ''}`)
-  if (worktree) lines.push(`- worktree: ${result.worktree} - review and push from there; granny never removes it`)
+  for (const r of result.repos?.slice(1) ?? []) {
+    lines.push(`- final ${r.repo}: ${r.final ? `gates ${r.final.gatesGreen ? 'green' : 'RED'}, PR body ${r.final.prBodyPath}${r.final.issues ? `, issues: ${r.final.issues}` : ''}` : 'returned nothing'}`)
+  }
+  if (worktree) lines.push(`- worktree: ${result.worktree}${result.repos?.length ? ` (and ${result.repos.slice(1).map(r => r.worktree).join(', ')})` : ''} - review and push from there; granny never removes it`)
   return lines.join('\n')
 }
 
@@ -155,6 +164,15 @@ const RUN_INPUT_SCHEMA = {
       description: 'Feature branch. With config worktree on (default) granny reuses its worktree or creates one - do not check it out yourself; with worktree off it must be checked out in repo',
     },
     base: { type: 'string', description: 'Branch never to touch; defaults to config.base' },
+    repos: {
+      type: 'array',
+      description: 'Other repos the work spans. Stages name the one they work in with repo; each repo gets its own worktree on the same branch',
+      items: {
+        type: 'object',
+        properties: { repo: { type: 'string', description: 'Absolute path' }, base: { type: 'string', description: 'Its base branch; defaults to config.base' } },
+        required: ['repo'],
+      },
+    },
     goal: {
       type: 'string',
       description: 'What to build, when there is no plan yet: the planner writes the plan (to plan, default <repo>/<workDir>/plans/<branch-slug>.md) and proposes stages, the plan review runs, and the run stops for the user to approve. Exclusive with stages and fromStage',
@@ -175,6 +193,12 @@ const RUN_INPUT_SCHEMA = {
           task: { type: 'string', description: 'Exactly which work orders / sections this stage does; required unless implement is false' },
           implement: { type: 'boolean', description: 'false makes a review-only stage: review base...HEAD, then fix' },
           review: { type: 'boolean', description: 'false skips the review loop for this stage' },
+          repo: { type: 'string', description: 'Absolute path of the repo this stage works in: repo (default) or one of repos' },
+          after: {
+            type: 'array',
+            items: { type: 'number' },
+            description: '1-based numbers of earlier stages this one waits for; [] starts it right away. Omitted: it waits for the previous stage in the same repo. Independent stages run in parallel (config parallel, on by default), a same-repo one in its own worktree that is merged back',
+          },
         },
       },
     },
@@ -277,6 +301,7 @@ export const createGrannyPlugin = ({ delays = DEFAULT_DELAYS, sleep = pause, kil
       const layers = [readJson(globalConfigPath()), readJson(join(input.repo, 'granny.config.json')), input.config]
       const config = resolveConfig(layers, 'opencode')
       const blockers = preflight(input.repo, input.branch, config.workDir, config.worktree)
+      for (const repo of stageRepos(input)) blockers.push(...preflight(repo, input.branch, config.workDir, config.worktree).map(b => `${repo}: ${b}`))
       if (blockers.length) return `granny_run refused:\n- ${blockers.join('\n- ')}`
 
       const id = runId()
@@ -397,7 +422,7 @@ export const createGrannyPlugin = ({ delays = DEFAULT_DELAYS, sleep = pause, kil
           if (!run.cancelled) await notify(`[granny] Run ${id} failed: ${String(error?.message ?? error)}\nCall granny_status with runId "${id}" and report to the user.`)
         })
 
-      return `granny run ${id} started on ${input.repo} (${input.branch}), ${input.goal !== undefined ? 'planning only' : `${input.stages?.length ?? 0} stage(s)`}, threshold ${config.threshold}, maxRounds ${config.maxRounds}.
+      return `granny run ${id} started on ${input.repo} (${input.branch}), ${input.goal !== undefined ? 'planning only' : `${input.stages?.length ?? 0} stage(s)${config.parallel ? `, up to ${config.maxParallel} in parallel` : ''}`}, threshold ${config.threshold}, maxRounds ${config.maxRounds}.
 Journal: ${join(dir, 'journal.jsonl')}
 You will receive a message when it finishes. Use granny_status { runId: "${id}" } to check progress and granny_cancel to stop it. Do not poll in a loop.`
     }

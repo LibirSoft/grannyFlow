@@ -16,7 +16,9 @@ optional - given a plan and "planReview": true (default false; not with fromStag
      the implementer fixes accepted findings in the plan files in place, uncommitted, and the plan is reviewed again
      ├─ clean, residual-only, or plan review off ─► stage 1
      └─ round-cap or review-failed ─► STOP before implementing ─► report
-for each stage:
+for each stage - independent stages at the same time (config parallel, default on, up to maxParallel):
+  a stage waits for the stages in its after (default: the previous stage in its repo); one in another repo
+  works in that repo's worktree; one whose repo is busy works in its own worktree and is merged back after its loop
   implementer builds the stage ─► every reviewer reviews it, in parallel (base = stage start sha)
      ├─ a reviewer fails, then fails its one retry ─► stage review-failed
      ├─ no reviewer reports a finding ─────────────► stage clean
@@ -24,7 +26,7 @@ for each stage:
           ├─ any P0/P1, or score > threshold ─► implementer fixes those ─► review again
           └─ none ─► stage done; the rest are "residual" for the user
      cap: maxRounds reviews per stage
-after the last stage: granny's final check (gates, clean tree, no AI trailers, PR body) ─► report ─► WAIT
+after the last stage: granny's final check in every repo (gates, clean tree, no AI trailers, PR body) ─► report ─► WAIT
 ```
 
 | role | does | default model |
@@ -51,14 +53,17 @@ All paths in this skill are relative to the directory containing this `SKILL.md`
 | `repo` | absolute path of the git repo (its main checkout) |
 | `branch` | feature branch. With `worktree` on (the default) the engine reuses the worktree that has it checked out, or creates one - with the branch, from `base`, when it does not exist yet; with `worktree: false` you create and check it out in preflight |
 | `base` | branch never to touch (default from config, `main`; check whether the repo uses `master`) |
+| `repos` | other repos the work spans, besides `repo`: absolute paths, or `{ repo, base }` when one's base branch differs. Each gets its own worktree on `branch`; stages pick theirs with `repo`. With `goal`, the planner explores them too. See [Parallel stages](references/config.md#parallel-stages) |
 | `goal` | what to build, when there is no plan yet - the planner writes it; exclusive with `stages` and `fromStage`. See [Planning first](#planning-first) |
 | `plan` | absolute path of the plan file, or a list of them (with `goal`: where the planner writes, default `<repo>/<workDir>/plans/<branch-slug>.md`); relative paths are rejected. Every agent reads them first. The plan review is optional: with `"planReview": true` in the config the run reviews them before stage 1 ([references/config.md](references/config.md#plan-review)). It runs every reviewer, the judge and the implementer over the plan for up to `maxRounds` rounds before any code is written, so it costs extra tokens. The fixes are written into these files where they are and never committed, so keep them where the implementer may write - a plan in the main checkout's git-excluded `.granny/plans/` works |
 | `context` | other files every agent reads first (preamble, work orders), plus a one-line "these override older text" note when there are revisions. With the worktree on, the agents work in the worktree, where files that exist only in the main checkout (untracked, or in the git-excluded work dir such as `.granny/plans/`) are missing: name those by absolute path |
-| `stages` | not with `goal`; `[{ name, task, implement?, review? }]` - one entry per stop-and-review point; `task` names exactly which work orders or sections to do; `review: false` skips the loop for that stage; `implement: false` makes a review-only stage (no task needed) that reviews `base...HEAD` and fixes what the judge accepts - use it to run granny on work that is already written |
+| `stages` | not with `goal`; `[{ name, task, implement?, review?, repo?, after? }]` - one entry per stop-and-review point; `repo` is the repo the stage works in (default `repo`); `after` lists the 1-based numbers of earlier stages it waits for, `[]` to start it right away - without it a stage waits for the previous stage in its repo; `task` names exactly which work orders or sections to do; `review: false` skips the loop for that stage; `implement: false` makes a review-only stage (no task needed) that reviews `base...HEAD` and fixes what the judge accepts - use it to run granny on work that is already written |
 | `fromStage` | 1-based stage to resume from (earlier stages are skipped) |
 | `config` | per-run overrides, same shape as the config file |
 
 Stage split: one stage for a small plan. For a larger plan put a review checkpoint where later work builds on earlier foundations (for example "foundation + core logic" → review → "integrations + e2e + docs" → review).
+
+Parallel work: granny runs independent stages at the same time by default - do not ask the user. When the same change goes to several repos (a logo in two frontends, a Resilience4j config in every service), give each repo its own stage with `repo`; they start together. Inside one repo, mark a stage that needs nothing from the one before with `after: []` (or the numbers it does need): it runs in its own worktree and is merged back. Only do that for stages that touch different files; when in doubt, leave `after` out and the stages run in order. The user turns it off with `"parallel": false`.
 
 ### Planning first
 
@@ -107,7 +112,7 @@ Follow your host reference. Then tell the user, in their language: the run id, t
 
 A planning run (result has `draft`): give the plan file paths, the planner's summary, the proposed stages and its open questions, then - when the plan review ran - its outcome and its residual or unresolved findings; read the plan file yourself before vouching for it. Ask the user to approve or change the plan and the stages, and to answer the questions. Then STOP. On approval, launch a new run with `plan: draft.files` and the approved `stages` (with `"planReview": true` in the config, add `"planReview": false` to the run overrides when the plan is unchanged since its review). After a plan review that ended `round-cap` or `review-failed`, say the plan still has unresolved findings and let the user decide.
 
-Otherwise, read the result. Name the worktree first (`worktree` in the result; `repo` itself with `worktree: false`): the branch is checked out there, the user reviews and pushes from there, and granny never removes it - `git worktree remove <path>` is the user's call. Then the plan review, when the result has `plan`: its outcome (`clean`, `residual-only`, `round-cap`, `review-failed`, `skipped` on a resume, `review-skipped` with `planReview` off), its rounds, the residual and unresolved plan findings, and that the plan files now carry uncommitted fixes. After `round-cap` or `review-failed` the run stopped there: `stages` is empty and there is no final check - say that nothing was implemented, list the unresolved findings (and the note), and wait for the user. Otherwise report per stage: commits, gate numbers, review rounds, outcome (`clean`, `residual-only`, `round-cap`, `review-failed` with the reviewers its note names, `review-skipped`, `skipped`), residual and unresolved findings with the reviewer each came from (ids are `<reviewer>-F<n>`); then the final check, the PR body path (inside the worktree), and deviations and untested items from the implementers. Before repeating a load-bearing claim from an agent, verify it yourself (open the file, rerun the gate - in the worktree).
+Otherwise, read the result. Name the worktree first (`worktree` in the result; `repo` itself with `worktree: false`): the branch is checked out there, the user reviews and pushes from there, and granny never removes it - `git worktree remove <path>` is the user's call. Then the plan review, when the result has `plan`: its outcome (`clean`, `residual-only`, `round-cap`, `review-failed`, `skipped` on a resume, `review-skipped` with `planReview` off), its rounds, the residual and unresolved plan findings, and that the plan files now carry uncommitted fixes. After `round-cap` or `review-failed` the run stopped there: `stages` is empty and there is no final check - say that nothing was implemented, list the unresolved findings (and the note), and wait for the user. Otherwise report per stage: commits, gate numbers, review rounds, outcome (`clean`, `residual-only`, `round-cap`, `review-failed` with the reviewers its note names, `review-skipped`, `skipped`), residual and unresolved findings with the reviewer each came from (ids are `<reviewer>-F<n>`); then the final check, the PR body path (inside the worktree), and deviations and untested items from the implementers. A run over several repos has `repos` in the result: name every repo's worktree and final check, and each stage's `repo`. A stage whose note says it ran in parallel on a lane branch was merged into the run's branch; when the note says its worktree was left in place, tell the user. Before repeating a load-bearing claim from an agent, verify it yourself (open the file, rerun the gate - in the worktree).
 
 Then STOP and wait. No push, no `git remote add`, no PR, no tag - the user decides.
 

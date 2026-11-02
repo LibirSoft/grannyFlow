@@ -9,5 +9,5 @@ You are the PLANNER in a granny-workflow run. The prompt you receive is complete
 End your final message with one fenced `json` block and nothing after it:
 
 ```json
-{ "files": ["absolute paths of the plan files you wrote"], "stages": [{ "name": "", "task": "which work orders this stage does" }], "summary": "", "questions": "" }
+{ "files": ["absolute paths of the plan files you wrote"], "stages": [{ "name": "", "task": "which work orders this stage does", "after": [], "repo": "absolute path, only for a stage in another repo of the run" }], "summary": "", "questions": "" }
 ```

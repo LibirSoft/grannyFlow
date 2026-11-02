@@ -55,6 +55,8 @@ export interface StageSpec {
   task?: string
   implement?: boolean
   review?: boolean
+  repo?: string
+  after?: number[]
 }
 
 export interface Implementation {
@@ -77,6 +79,7 @@ export type StageOutcome = 'clean' | 'residual-only' | 'round-cap' | 'review-fai
 
 export interface StageResult {
   stage: string
+  repo?: string
   outcome: StageOutcome
   rounds: number
   implementation?: Implementation
@@ -109,6 +112,13 @@ export interface FinalReport {
   issues: string
 }
 
+export interface RepoResult {
+  repo: string
+  base: string
+  worktree: string
+  final: FinalReport | null
+}
+
 export interface RunResult {
   repo: string
   branch: string
@@ -118,4 +128,5 @@ export interface RunResult {
   plan?: PlanResult
   stages: StageResult[]
   final: FinalReport | null
+  repos?: RepoResult[]
 }
