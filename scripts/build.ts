@@ -5,6 +5,7 @@ import {
   agentPlanReviewPrompt,
   agentReviewPrompt,
   commandReviewPrompt,
+  draftPrompt,
   extractPrompt,
   finalPrompt,
   fixPrompt,
@@ -65,6 +66,7 @@ export function renderPrompts(): string {
   const setup = `cd '<repo>' && ${worktreeScript(p.config, '<branch>', '<base>', '<worktreeDir>/<branch-slug>')}`
   const sections: Array<[string, string]> = [
     ['Granny - worktree setup, the helper agent on Claude Code (on Cursor, run the command yourself)', worktreeCommandPrompt('<repo>', '<branch>', setup)],
+    ['Planner - a run with goal (context here is the run\'s context only; the plan files do not exist yet)', draftPrompt({ ...p, context: '<context: work-order files and override notes>' }, '<goal>', ['<repo>/.granny/plans/<branch-slug>.md'])],
     ['Plan reviewer - agent engine', agentPlanReviewPrompt(p, plans)],
     ['Plan reviewer - codex exec, the Codex plugin task and the {prompt} of a command engine', planReviewPrompt(p, plans)],
     ['Judge - plan review', planJudgePrompt(p, plans, []).replace(/\[\]$/, '<findings as JSON>')],

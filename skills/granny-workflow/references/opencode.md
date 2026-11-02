@@ -29,7 +29,10 @@ Run granny from the TUI, the desktop app or `opencode run` against the backgroun
 
 ```
 granny_run({ repo, branch, base, context, plan?, stages, fromStage?, config? })
+granny_run({ repo, branch, base, context, goal, plan?, config? })   // plan first, then stop
 ```
+
+With `goal` the planner writes the plan (to `plan`, default `<repo>/<workDir>/plans/<branch-slug>.md`) in a child session with write access on `roles.planner`'s model, the plan review runs, and the run ends with `draft` in its result and nothing implemented ([config.md](config.md#planning)). Its session works in the worktree, so the default path is in the main checkout: check that your permissions let a session edit it.
 
 `plan` is a list of absolute plan file paths; with it and config `planReview` on, the run reviews the plan before stage 1 ([Plan review](#plan-review)).
 

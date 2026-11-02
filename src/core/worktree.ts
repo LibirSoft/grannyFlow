@@ -14,7 +14,7 @@ function normalize(path: string): string {
   return `/${parts.join('/')}`
 }
 
-const branchSlug = (branch: string) => branch.replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '') || 'branch'
+export const branchSlug = (branch: string) => branch.replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '') || 'branch'
 
 export function worktreePath(repo: string, branch: string, worktreeDir?: string): string {
   const top = normalize(repo)

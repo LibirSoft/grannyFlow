@@ -259,6 +259,7 @@ describe('opencode plugin', () => {
       'granny_submit_final',
       'granny_submit_findings',
       'granny_submit_implementation',
+      'granny_submit_plan',
       'granny_submit_plan_fix',
       'granny_submit_score',
     ])

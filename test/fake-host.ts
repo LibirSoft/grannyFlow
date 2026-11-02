@@ -85,6 +85,8 @@ export function fakeHost(opts: FakeOptions = {}) {
         case 'implementation':
           impl++
           return { startSha: `start${impl}`, headSha: `head${impl}`, gatesGreen: true, gates: 'all green', commits: [`commit ${impl}`], untested: '' }
+        case 'draft':
+          return { files: ['/work/repo/.granny/plans/feat-x.md'], stages: [{ name: 'core', task: 'WP-01' }], summary: 'one stage' }
         case 'planFix':
           return { files: ['/plans/v1.md'], changes: 'fixed' }
         case 'score': {

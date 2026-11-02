@@ -23,6 +23,7 @@ type ModelRef = { providerID: string; id: string; variant?: string }
 
 const SUBMIT: Partial<Record<ResultKind, string>> = {
   implementation: 'granny_submit_implementation',
+  draft: 'granny_submit_plan',
   planFix: 'granny_submit_plan_fix',
   findings: 'granny_submit_findings',
   score: 'granny_submit_score',
@@ -132,7 +133,11 @@ function summarize(result: RunResult, worktree: boolean): string {
     return `- ${name}: ${s.outcome}, ${s.rounds} review round(s)${extra ? ` (${extra})` : ''}`
   }
   const lines = result.stages.map(s => line(s, s.stage))
-  if (result.plan) {
+  if (result.draft) {
+    lines.push(`- plan written: ${result.draft.files.join(', ')} - ${result.draft.stages.length} proposed stage(s)${result.draft.questions ? ', open questions for the user' : ''}`)
+    if (result.plan) lines.push(line(result.plan, 'plan review'))
+    lines.push('- stopped after planning, nothing was implemented: show the user the plan, the stages and the questions, and wait for their approval')
+  } else if (result.plan) {
     const stopped = result.plan.outcome === 'round-cap' || result.plan.outcome === 'review-failed'
     lines.unshift(`${line(result.plan, 'plan review')}${stopped ? ' - stopped before stage 1, nothing was implemented' : ''}`)
   }
@@ -150,15 +155,19 @@ const RUN_INPUT_SCHEMA = {
       description: 'Feature branch. With config worktree on (default) granny reuses its worktree or creates one - do not check it out yourself; with worktree off it must be checked out in repo',
     },
     base: { type: 'string', description: 'Branch never to touch; defaults to config.base' },
+    goal: {
+      type: 'string',
+      description: 'What to build, when there is no plan yet: the planner writes the plan (to plan, default <repo>/<workDir>/plans/<branch-slug>.md) and proposes stages, the plan review runs, and the run stops for the user to approve. Exclusive with stages and fromStage',
+    },
     context: { type: 'string', description: 'Files every agent reads first (work orders, notes) and override notes' },
     plan: {
       type: 'array',
       items: { type: 'string' },
-      description: 'Absolute paths of the plan files. Every agent reads them; with config planReview on (default) the reviewers review them before stage 1 and the implementer fixes them in place, uncommitted',
+      description: 'Absolute paths of the plan files (with goal: where the planner writes the plan). Every agent reads them; with config planReview on (default) the reviewers review them before stage 1 and the implementer fixes them in place, uncommitted',
     },
     stages: {
       type: 'array',
-      description: 'One entry per stop-and-review point',
+      description: 'One entry per stop-and-review point; required unless goal is given',
       items: {
         type: 'object',
         properties: {
@@ -172,7 +181,7 @@ const RUN_INPUT_SCHEMA = {
     fromStage: { type: 'number', description: '1-based stage to resume from; earlier stages are skipped' },
     config: { type: 'object', description: 'Per-run overrides of granny.config.json (same shape)' },
   },
-  required: ['repo', 'branch', 'stages'],
+  required: ['repo', 'branch'],
 }
 
 export interface ProviderError {
@@ -388,7 +397,7 @@ export const createGrannyPlugin = ({ delays = DEFAULT_DELAYS, sleep = pause, kil
           if (!run.cancelled) await notify(`[granny] Run ${id} failed: ${String(error?.message ?? error)}\nCall granny_status with runId "${id}" and report to the user.`)
         })
 
-      return `granny run ${id} started on ${input.repo} (${input.branch}), ${input.stages.length} stage(s), threshold ${config.threshold}, maxRounds ${config.maxRounds}.
+      return `granny run ${id} started on ${input.repo} (${input.branch}), ${input.goal !== undefined ? 'planning only' : `${input.stages?.length ?? 0} stage(s)`}, threshold ${config.threshold}, maxRounds ${config.maxRounds}.
 Journal: ${join(dir, 'journal.jsonl')}
 You will receive a message when it finishes. Use granny_status { runId: "${id}" } to check progress and granny_cancel to stop it. Do not poll in a loop.`
     }

@@ -31,6 +31,7 @@ after the last stage: final check (gates, clean tree, no AI trailers, PR body) â
 The loop is code, not a prompt: on Claude Code and opencode an engine drives every step, so the threshold, round cap and stop conditions hold every time.
 
 - **Worktree** - the run works in the branch's own git worktree: the one that already has the branch checked out, or a new one next to the repo. Your main checkout stays as it is, and granny never removes the worktree.
+- **Planner** - no plan yet? Give granny the goal instead: a planner agent explores the repo, writes the plan to the git-excluded `.granny/plans/<branch>.md` and proposes the stages, the plan review cleans it, and the run stops for your approval. Approve (or edit) and granny implements it in a second run.
 - **Plan review** - given plan files, the reviewers check the plan against the actual repo before anything is built; the implementer fixes it in place until it is clean, and a plan review that cannot get there stops the run.
 - **Reviewers** - as many as you configure, of any kind: Codex (the CLI or OpenAI's Codex plugin), a host model, or any CLI that answers a prompt. They all review every round at the same time; one that fails twice ends the stage `review-failed` instead of reading as clean.
 - **Judge** - P0/P1 findings skip it and go straight to the implementer. It scores every other finding 0-100 and merges duplicates across reviewers; findings above the threshold are fixed, the rest are left for you as residual.
@@ -39,14 +40,14 @@ The loop is code, not a prompt: on Claude Code and opencode an engine drives eve
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/hosts-dark.svg">
-  <img src="docs/images/hosts-light.svg" alt="One core engine in src/core is built into a Claude Code Workflow script and an opencode plugin; Cursor follows the same rules by hand. Roles: granny, implementer, reviewers, judge, each with its own model and effort">
+  <img src="docs/images/hosts-light.svg" alt="One core engine in src/core is built into a Claude Code Workflow script and an opencode plugin; Cursor follows the same rules by hand. Roles: granny, planner, implementer, reviewers, judge, each with its own model and effort">
 </picture>
 
 | host | engine | status |
 |---|---|---|
 | Claude Code | Workflow script (`engines/claude-code/workflow.js`): every role is an `agent()` call with its own model, effort and JSON schema; the reviewers are concurrent calls | full |
 | opencode 2.x | server plugin (`engines/opencode/plugin/granny-workflow/`): every role is a child session with its own model and permissions; review commands run directly, concurrently with agent reviewers | full |
-| Cursor | none - the skill walks the agent through the same loop with three subagents | manual, not deterministic |
+| Cursor | none - the skill walks the agent through the same loop with four subagents | manual, not deterministic |
 
 ## Install
 
@@ -78,6 +79,12 @@ The default is one reviewer, [Codex](https://github.com/openai/codex); install i
 Ask your agent to implement a plan with granny:
 
 > implement plans/auth/plan.md with granny - stage 1: WP-01..03, stage 2: WP-04..06
+
+No plan yet? Ask granny to plan it first:
+
+> plan OAuth login with granny on feat/oauth
+
+The planner writes `.granny/plans/feat-oauth.md` with work orders and proposed stages, the reviewers review it, and the run stops: you get the plan, the stages and the planner's open questions. Once you approve, granny launches the implementation run with that plan and those stages.
 
 Granny gathers the inputs (repo, branch, base, plan files, context files, stages), runs the preflight (reviewers ready, git-excluded work dir), launches the run and tells you the run id. Given plan files, the run reviews the plan first: the reviewers check it against the actual repo (wrong assumptions, missing steps, risky ordering, untestable acceptance criteria, version drift), the implementer fixes the accepted findings in the plan files in place - with a dated `rN deltas` section at the top, never committed - and the plan is reviewed again until it is clean. If the plan review hits the round cap or a reviewer fails, the run stops before implementing anything and reports. The run works in the branch's own git worktree: the one that already has the branch checked out, or a new one at `<parent of repo>/<repo name>-worktrees/<branch-slug>`, created for the branch or from `base`; your main checkout stays as it is. When it ends you get the worktree path and, per stage: commits, gate numbers, review rounds, outcome and the findings left for you; plus the final check and the PR body at `.granny/PR-BODY.md` in the worktree. Review and push from the worktree; granny never removes it.
 

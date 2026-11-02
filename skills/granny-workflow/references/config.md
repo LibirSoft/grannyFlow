@@ -14,6 +14,7 @@ Layers, later wins:
 | key | default | meaning |
 |---|---|---|
 | `roles.granny` | `{}` | model/effort for granny's helper steps: the worktree setup and the review-command runner (Claude Code), the extraction fallback, the final PR-ready check |
+| `roles.planner` | `{}` | writes the plan and proposes the stages in a run with `goal` ([Planning](#planning)) |
 | `roles.implementer` | `{}` | builds each stage and fixes accepted findings; fixes the plan in the plan review |
 | `roles.judge` | `{ "model": { "claude-code": "sonnet" } }` | scores each finding that is not P0/P1 0-100 and marks duplicates |
 | `reviewers` | `[{ "name": "codex", "engine": "auto" }]` | the reviewers; every one of them reviews every round, all at the same time - see [Reviewers](#reviewers) |
@@ -69,6 +70,12 @@ From then on everything happens in that worktree: every agent prompt (`Working r
 - On opencode the run files stay in `<repo>/<workDir>/runs/<id>/`, so `granny_status` finds runs by `repo`.
 
 With `worktree: false` the run works in `repo` itself, on the branch you checked out there.
+
+## Planning
+
+A run with `goal` instead of `stages` plans the work and stops; it implements nothing. `goal` says what to build, in the user's words plus whatever granny gathered; `context` works as in any run. In phase "Plan", after the worktree setup, the planner (role `planner`, write access, label `plan`) explores the repo in the worktree and writes the plan to `plan` - one absolute path or a list - or, without `plan`, to `<repo>/<workDir>/plans/<branch-slug>.md` in the main checkout (git-excluded, so never committed; `feat/login` → `feat-login.md`). An existing file there is revised, not replaced. The plan names the current state of the code, the approach, work orders `WP-01`, … with files, steps and testable acceptance criteria, the gates, risks and open questions. The planner returns `{ files, stages: [{ name, task }], summary, questions? }`; a planner that returns nothing, no absolute plan path or no stage with a task fails the run.
+
+The files it returned are then the run's plan: with `planReview` on, the plan review below runs on them as on any plan. Then the run ends with `draft` (the planner's result), `plan` (the plan review), `stages: []` and `final: null`. Granny shows the user the plan, the proposed stages and the open questions, and waits. Once the user approves - after editing the plan or the stages if they want - granny launches a second run with `plan: draft.files` and the approved `stages`; when the plan is unchanged since its review, add the run override `"planReview": false` so it is not reviewed twice. `goal` is exclusive with `stages` and `fromStage`.
 
 ## Plan review
 
