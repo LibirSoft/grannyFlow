@@ -292,7 +292,8 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
 
   const runCheck = async (lane: Lane, name: string, check: CheckConfig): Promise<CheckResult & { output: string }> => {
     const script = check.timeout ? `timeout ${check.timeout} bash -c ${shellQuote(check.run)}` : check.run
-    const r = await shell(`check ${name} ${check.name}`, CHECKS_PHASE, script, lane.cwd, checkCommandPrompt)
+    const ask = (repo: string, label: string, run: string) => checkCommandPrompt(repo, label, run, check.metric?.pattern)
+    const r = await shell(`check ${name} ${check.name}`, CHECKS_PHASE, script, lane.cwd, ask)
     const base = { name: check.name, code: r.code, output: r.output }
     if (!r.ran || r.code !== 0) {
       const timedOut = check.timeout && r.code === 124 ? { note: `timed out after ${check.timeout}s` } : {}

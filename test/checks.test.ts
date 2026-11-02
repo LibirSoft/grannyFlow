@@ -269,6 +269,19 @@ describe('checks', () => {
     expect(r.stages[0]!.outcome).toBe('clean')
   })
 
+  it('on Claude Code, ask the helper to keep every line the metric matches when it shortens a long output', async () => {
+    const pattern = 'All files\\s*\\|\\s*([0-9.]+)'
+    const f = scripted({ 'run-cov': [green('All files | 91.2\n')], 'run-tests': [green()] }, { name: 'claude-code', direct: false })
+    const r = await runGranny(f.host, run({ checks: [{ name: 'cov', run: 'run-cov', metric: { pattern, min: 80 } }, TESTS] }))
+    const cov = f.calls.find(c => c.label === 'check core cov')!.prompt
+    expect(cov).toContain(`every line that matches the regular expression \`${pattern}\``)
+    expect(cov).toContain('then the last 3000 characters')
+    const tests = f.calls.find(c => c.label === 'check core tests')!.prompt
+    expect(tests).not.toContain('regular expression')
+    expect(tests).toContain('the last 3000 characters are enough')
+    expect(r.stages[0]!.checks?.[0]!.results[0]).toMatchObject({ name: 'cov', passed: true, metric: 91.2 })
+  })
+
   it('reject a stage that selects a check the config does not have, before anything runs', async () => {
     const f = scripted({})
     await expect(runGranny(f.host, run({ checks: [TESTS] }, { stages: [{ name: 'core', task: 'WP-01', checks: ['tset'] }] }))).rejects.toThrow(

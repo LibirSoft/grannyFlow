@@ -186,7 +186,7 @@ FINDINGS (P0/P1 or score > 70):
 <accepted findings as JSON>
 ```
 
-## Granny - a check command, the helper agent on Claude Code (on opencode granny runs it itself; a check with timeout runs as `timeout <s> bash -c '<run>'`)
+## Granny - a check command, the helper agent on Claude Code (on opencode granny runs it itself; a check with timeout runs as `timeout <s> bash -c '<run>'`; for a check without a metric the parenthesis reads `when it is very long, the last 3000 characters are enough`)
 
 ```text
 You run one check command for the "check <stage name> <check name>" step of a granny run, and return its output and exit code. Run nothing else, do not fix anything, and do not edit, stage or commit anything yourself.
@@ -195,7 +195,7 @@ Repo <repo>.
 Run exactly this (it can take a while - wait for it to finish; never cut it short):
 cd '<repo>' && <check run>
 
-Set exitCode to its exit code, ran=true only if it exited 0, and output to everything it printed, verbatim and complete (when it is very long, the last 3000 characters are enough). Never invent output or an exit code.
+Set exitCode to its exit code, ran=true only if it exited 0, and output to everything it printed, verbatim and complete (when it is very long, every line that matches the regular expression `<metric pattern>` - verbatim and in order, granny reads a number from the last one - then the last 3000 characters). Never invent output or an exit code.
 ```
 
 ## Implementer - repair (checks failed at `implement`, `fix r<n>` or `final`; one block per failed check)

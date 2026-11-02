@@ -532,14 +532,15 @@ ${script}
 
 Set ran=true only if it exited 0, exitCode to its exit code, and output to everything it printed, verbatim and complete. If it failed, set ran=false and explain in note. Never invent output.`;
 }
-function checkCommandPrompt(repo, check, script) {
+function checkCommandPrompt(repo, check, script, metric) {
+  const shorter = metric ? `when it is very long, every line that matches the regular expression \`${metric}\` - verbatim and in order, granny reads a number from the last one - then the last 3000 characters` : "when it is very long, the last 3000 characters are enough";
   return `You run one check command for the "${check}" step of a granny run, and return its output and exit code. Run nothing else, do not fix anything, and do not edit, stage or commit anything yourself.
 Repo ${repo}.
 
 Run exactly this (it can take a while - wait for it to finish; never cut it short):
 ${script}
 
-Set exitCode to its exit code, ran=true only if it exited 0, and output to everything it printed, verbatim and complete (when it is very long, the last 3000 characters are enough). Never invent output or an exit code.`;
+Set exitCode to its exit code, ran=true only if it exited 0, and output to everything it printed, verbatim and complete (${shorter}). Never invent output or an exit code.`;
 }
 function repairPrompt(p, name, at, attempt, failed, stage) {
   const list = failed.map((f) => [
@@ -1131,7 +1132,8 @@ ${a.note}` : ""}` : "the worktree runner returned nothing" };
   };
   const runCheck = async (lane, name, check) => {
     const script = check.timeout ? `timeout ${check.timeout} bash -c ${shellQuote(check.run)}` : check.run;
-    const r = await shell(`check ${name} ${check.name}`, CHECKS_PHASE, script, lane.cwd, checkCommandPrompt);
+    const ask = (repo, label, run) => checkCommandPrompt(repo, label, run, check.metric?.pattern);
+    const r = await shell(`check ${name} ${check.name}`, CHECKS_PHASE, script, lane.cwd, ask);
     const base = { name: check.name, code: r.code, output: r.output };
     if (!r.ran || r.code !== 0) {
       const timedOut = check.timeout && r.code === 124 ? { note: `timed out after ${check.timeout}s` } : {};

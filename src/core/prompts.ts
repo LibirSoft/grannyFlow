@@ -170,14 +170,17 @@ ${script}
 Set ran=true only if it exited 0, exitCode to its exit code, and output to everything it printed, verbatim and complete. If it failed, set ran=false and explain in note. Never invent output.`
 }
 
-export function checkCommandPrompt(repo: string, check: string, script: string): string {
+export function checkCommandPrompt(repo: string, check: string, script: string, metric?: string): string {
+  const shorter = metric
+    ? `when it is very long, every line that matches the regular expression \`${metric}\` - verbatim and in order, granny reads a number from the last one - then the last 3000 characters`
+    : 'when it is very long, the last 3000 characters are enough'
   return `You run one check command for the "${check}" step of a granny run, and return its output and exit code. Run nothing else, do not fix anything, and do not edit, stage or commit anything yourself.
 Repo ${repo}.
 
 Run exactly this (it can take a while - wait for it to finish; never cut it short):
 ${script}
 
-Set exitCode to its exit code, ran=true only if it exited 0, and output to everything it printed, verbatim and complete (when it is very long, the last 3000 characters are enough). Never invent output or an exit code.`
+Set exitCode to its exit code, ran=true only if it exited 0, and output to everything it printed, verbatim and complete (${shorter}). Never invent output or an exit code.`
 }
 
 export interface FailedCheck {
