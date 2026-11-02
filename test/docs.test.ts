@@ -107,11 +107,11 @@ describe('skill docs', () => {
     expect(readRoot('README.md')).toMatch(/^\| `planReview` \| `true` \|/m)
   })
 
-  it('releases 1.0.0 with a CHANGELOG entry for the package version', () => {
+  it('releases 1.1.0 with a CHANGELOG entry for the package version', () => {
     const { version } = JSON.parse(readRoot('package.json'))
-    expect(version).toBe('1.0.0')
+    expect(version).toBe('1.1.0')
     const changelog = readRoot('CHANGELOG.md')
-    expect(changelog.replace(/^## Unreleased\n[\s\S]*?(?=^## )/m, '').match(/^## (\S+)/m)?.[1]).toBe(version)
+    expect(changelog.match(/^## (\S+)/m)?.[1]).toBe(version)
     expect(changelog).not.toMatch(/used to|previously|no longer|migrat|upgrad|replaces/i)
   })
 
