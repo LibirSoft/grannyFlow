@@ -111,7 +111,7 @@ Three layers, later wins: `~/.config/granny/config.json`, `<repo>/granny.config.
 | `reviewers[].mode` | `review` | `adversarial-review` runs the Codex plugin's adversarial review, optionally steered by `focus` |
 | `threshold` | `70` | findings scoring strictly above it are fixed; P0/P1 always are, without the judge |
 | `maxRounds` | `4` | review rounds per stage, and for the plan review |
-| `planReview` | `true` | review the plan files before stage 1 when the run has a `plan`; skipped when it resumes with `fromStage` |
+| `planReview` | `false` | `true` reviews the plan files before stage 1 when the run has a `plan` (extra tokens); skipped when it resumes with `fromStage` |
 | `gates` | `auto` | agents discover test/lint/build/typecheck, or list them |
 | `worktree` | `true` | work in the branch's own git worktree; `false` works in `repo` on the branch you checked out |
 | `worktreeDir` | `<parent of repo>/<repo name>-worktrees` | where new worktrees go; absolute, or relative to the repo's parent |

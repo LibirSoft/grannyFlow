@@ -19,7 +19,7 @@ Layers, later wins:
 | `reviewers` | `[{ "name": "codex", "engine": "auto" }]` | the reviewers; every one of them reviews every round, all at the same time - see [Reviewers](#reviewers) |
 | `threshold` | `70` | a finding is sent back to the implementer when it is P0/P1 (also `critical`/`high`; these skip the judge), when the judge gave it no score, or when its score is **strictly above** this. The overall review score gates nothing |
 | `maxRounds` | `4` | review rounds per stage, and for the plan review; the stage ends `round-cap` after the last one |
-| `planReview` | `true` | with a `plan` in the run's input, review the plan files before stage 1 - see [Plan review](#plan-review). No effect without `plan` |
+| `planReview` | `false` | `true`: with a `plan` in the run's input, review the plan files before stage 1 - see [Plan review](#plan-review). It costs extra tokens; no effect without `plan` |
 | `base` | `"main"` | branch never to touch; the run's `base` argument overrides it |
 | `gates` | `"auto"` | `"auto"`: agents discover the project's test/lint/build/typecheck commands. Or a list, e.g. `["bun test", "bun run check", "bun run build"]` |
 | `workDir` | `".granny"` | repo-relative, git-excluded: PR body, review outputs, run journals |

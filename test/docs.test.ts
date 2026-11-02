@@ -95,7 +95,7 @@ describe('skill docs', () => {
 
   it('documents the plan review in the config keys, SKILL.md, the host references and the Cursor protocol', () => {
     const config = read('references/config.md')
-    expect(config).toMatch(/^\| `planReview` \| `true` \|/m)
+    expect(config).toMatch(/^\| `planReview` \| `false` \|/m)
     expect(config).toContain('## Plan review')
     expect(config).toContain('"planReview": true')
     const skill = read('SKILL.md')
@@ -104,7 +104,7 @@ describe('skill docs', () => {
     expect(read('references/claude-code.md')).toContain('repo, branch, base, context, plan, stages')
     expect(read('references/opencode.md')).toContain('granny_run({ repo, branch, base, context, plan?, stages')
     expect(read('references/cursor.md')).toContain('## The plan review')
-    expect(readRoot('README.md')).toMatch(/^\| `planReview` \| `true` \|/m)
+    expect(readRoot('README.md')).toMatch(/^\| `planReview` \| `false` \|/m)
   })
 
   it('releases 1.0.0 with a CHANGELOG entry for the package version', () => {
