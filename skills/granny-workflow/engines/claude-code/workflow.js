@@ -1,7 +1,7 @@
 export const meta = {
   name: 'granny-workflow',
   description: 'Plan a goal (then stop for approval), or implement a plan stage by stage; after each stage loop review -> judge -> fix until clean; end PR-ready without pushing',
-  whenToUse: 'Launched by the granny-workflow skill with args {repo, branch, base, context, goal, plan, stages, config}',
+  whenToUse: 'Launched by the granny-workflow skill with args {repo, branch, base, repos, context, goal, plan, stages, config}',
   phases: [
     { title: 'Worktree' },
     { title: 'Plan' },
@@ -926,7 +926,7 @@ ${a.note}` : ""}` : "the worktree runner returned nothing" };
   const repoState = new Map(used.map((r) => {
     const cwd = cwdOf.get(r);
     const others = used.filter((o) => o !== r).map((o) => cwdOf.get(o));
-    return [r, { lane: { repo: r, base: baseOf(r), branch: input.branch, cwd, p: promptFor(r, cwd, input.branch, others) }, locked: false, waiters: [] }];
+    return [r, { lane: { repo: r, base: baseOf(r), branch: input.branch, cwd, p: promptFor(r, cwd, input.branch, others) }, locked: false, waiters: [], setup: Promise.resolve() }];
   }));
   const primaryLane = repoState.get(primary).lane;
   const implement = async (lane, label, prompt) => {
@@ -1180,7 +1180,9 @@ ${a.note}` : ""}` : "the worktree runner returned nothing" };
     const branch = `${input.branch}--s${i + 1}-${slug(name)}`;
     host.log(`${name}: ${state.lane.branch} is busy in ${baseName(state.lane.repo)} - running in parallel on ${branch}`);
     const main = state.lane;
-    const cwd = await setUpWorktree(main.repo, branch, input.branch, `worktree ${name}`, main.repo !== primary);
+    const setup = state.setup.then(() => setUpWorktree(main.repo, branch, input.branch, `worktree ${name}`, main.repo !== primary));
+    state.setup = setup.catch(() => {});
+    const cwd = await setup;
     const others = [main.cwd, ...used.filter((o) => o !== main.repo).map((o) => cwdOf.get(o))];
     const lane = { repo: main.repo, base: main.base, branch, cwd, p: promptFor(main.repo, cwd, branch, others, `${main.cwd}/${config.workDir}/PR-BODY-s${i + 1}-${slug(name)}.md`) };
     const result = await runStage(lane, st, i, name);
@@ -1240,11 +1242,15 @@ ${note}` : note } : result;
       break;
     await Promise.race(running.values());
   }
+  const nameOf = (i) => `${i + 1} (${specs[i].name || `stage ${i + 1}`})`;
+  const unfinished = specs.map((_, i) => i).filter((i) => !done.has(i));
   if (failure) {
-    if (done.size < specs.length)
-      host.log(`a stage failed - waited for the stages already running; ${specs.length - done.size} stage(s) did not finish`);
+    const finished = [...done].sort((a, b) => a - b).filter((i) => i >= fromStage - 1);
+    host.log(`a stage failed - waited for the stages already running. Finished: ${finished.map(nameOf).join(", ") || "none"}. Not finished: ${unfinished.map(nameOf).join(", ")}`);
     throw failure.error;
   }
+  if (unfinished.length)
+    throw new Error(`scheduler stopped with stages that never started: ${unfinished.map(nameOf).join(", ")}`);
   host.phase("PR ready");
   const check = async (s) => {
     const label = s.lane.repo === primary ? "pr-ready check" : `pr-ready check ${baseName(s.lane.repo)}`;

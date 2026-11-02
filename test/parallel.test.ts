@@ -172,7 +172,7 @@ describe('parallel stages', () => {
     }))).rejects.toThrow('implement logo a: implementer returned nothing')
     expect(finished).toBe(true)
     expect(started).toEqual(['implement logo a', 'implement logo b'])
-    expect(f.logs.some(l => l.includes('a stage failed - waited for the stages already running'))).toBe(true)
+    expect(f.logs).toContain('a stage failed - waited for the stages already running. Finished: 2 (logo b). Not finished: 1 (logo a), 3 (more a)')
   })
 
   it('treats stages before fromStage as done', async () => {
@@ -298,4 +298,29 @@ it('documents a run input that checkInput accepts in the config reference', () =
   const md = fs.readFileSync(require('node:path').join(import.meta.dir, '../skills/granny-workflow/references/config.md'), 'utf8')
   const block = /```jsonc\n([\s\S]*?)```/.exec(md)![1]!
   expect(checkInput(JSON.parse(block))).toEqual([])
+})
+
+it('runs the lane setup, the merge and the cleanup through granny helper agents on Claude Code', async () => {
+  const f = fakeHost({
+    name: 'claude-code',
+    direct: false,
+    worktree: (command: string, cwd: string) => /wt='?([^';]+)'?; git worktree add/.exec(command)?.[1] ?? cwd,
+    override: async req => (req.label === 'implement one' ? new Promise(r => setTimeout(() => r(undefined), 15)) : undefined),
+  })
+  const r = await runGranny(f.host, {
+    repo: A,
+    branch: 'feat/x',
+    repos: [B],
+    stages: [{ name: 'one', task: 'a' }, { name: 'two', task: 'b', after: [] }, { name: 'bee', task: 'c', repo: B }],
+  })
+  expect(f.setups.map(s => s.request!.label)).toEqual(['worktree', 'worktree b', 'worktree two'])
+  expect(f.setups[2]!.command).toContain(`cd ${A} && `)
+  const merge = f.calls.find(c => c.label === 'merge two')!
+  expect(merge.kind).toBe('command')
+  expect(merge.cwd).toBe('/work/a-worktrees/feat-x')
+  expect(merge.prompt).toContain('cd /work/a-worktrees/feat-x && git merge --no-edit feat/x--s2-two')
+  expect(f.calls.find(c => c.label === 'cleanup two')!.prompt).toContain('git worktree remove --force /work/a-worktrees/feat-x--s2-two')
+  expect(f.calls.find(c => c.label === 'implement two')!.cwd).toBe('/work/a-worktrees/feat-x--s2-two')
+  expect(f.calls.find(c => c.label === 'implement bee')!.cwd).toBe('/work/b-worktrees/feat-x')
+  expect(r.stages.map(s => s.outcome)).toEqual(['clean', 'clean', 'clean'])
 })

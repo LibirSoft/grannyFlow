@@ -57,7 +57,7 @@ Details: [config.md](config.md#reviewers).
 
 ## Resume
 
-Same script, same args: `Workflow({ scriptPath, args, resumeFromRunId })`, where `scriptPath` is the path the first launch returned when you passed `script`, or the same scratchpad copy you launched with (leave it in place until the run is done). Unchanged agent calls return cached results instantly, so the run continues where it stopped. To restart from a stage instead, add `fromStage` to args.
+Same script, same args: `Workflow({ scriptPath, args, resumeFromRunId })`, where `scriptPath` is the path the first launch returned when you passed `script`, or the same scratchpad copy you launched with (leave it in place until the run is done). Unchanged agent calls return cached results instantly, so the run continues where it stopped. To restart from a stage instead, add `fromStage` to args. With parallel stages, `fromStage` runs every stage from there on again, also those that finished beside the failed one (the log line `a stage failed ... Finished: ... Not finished: ...` names them), so prefer `resumeFromRunId`, which returns their cached results.
 
 ## When it ends
 

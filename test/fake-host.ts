@@ -73,7 +73,7 @@ export function fakeHost(opts: FakeOptions = {}) {
   const host: Host = {
     name: opts.name ?? 'opencode',
     async agent(req) {
-      if (req.label === 'worktree') {
+      if (req.label === 'worktree' || (req.kind === 'command' && req.label.startsWith('worktree '))) {
         const line = /Run exactly this:\n(.+)\n/.exec(req.prompt)?.[1] ?? ''
         setups.push({ command: line, cwd: '/', request: req })
         const r = await setUp(line, '/', cdTarget(line))
@@ -100,7 +100,7 @@ export function fakeHost(opts: FakeOptions = {}) {
           return { score: 50, perFinding, rationale: 'r' }
         }
         case 'command': {
-          const script = /never cut it short\):\n(.+)\n/.exec(req.prompt)?.[1] ?? ''
+          const script = /never cut it short\):\n(.+)\n/.exec(req.prompt)?.[1] ?? /Run exactly this:\n(.+)\n/.exec(req.prompt)?.[1] ?? ''
           commands.push(script)
           const r = await nextReview(script, '/')
           return { ran: r.code === 0, exitCode: r.code, output: r.output }
