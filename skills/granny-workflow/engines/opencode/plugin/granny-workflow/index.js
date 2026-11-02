@@ -14,7 +14,7 @@ var DEFAULT_CONFIG = {
     implementer: {},
     judge: { model: { "claude-code": "sonnet" } }
   },
-  reviewers: [{ name: "codex", engine: "auto" }],
+  reviewers: [{ name: "reviewer", engine: "agent" }],
   threshold: 70,
   maxRounds: 4,
   base: "main",
@@ -22,6 +22,7 @@ var DEFAULT_CONFIG = {
   workDir: ".granny",
   worktree: true,
   planReview: false,
+  finalReview: true,
   parallel: true,
   maxParallel: 3,
   language: "English",
@@ -198,6 +199,8 @@ function validate(c) {
   }
   if (typeof c.planReview !== "boolean")
     errors.push("planReview must be a boolean");
+  if (typeof c.finalReview !== "boolean")
+    errors.push("finalReview must be a boolean");
   if (typeof c.parallel !== "boolean")
     errors.push("parallel must be a boolean");
   if (!Number.isInteger(c.maxParallel) || c.maxParallel < 1)
@@ -217,201 +220,6 @@ function resolveModel(spec, host) {
   if (typeof spec === "string")
     return spec;
   return spec[host];
-}
-
-// src/core/shell.ts
-function shellQuote(value) {
-  return /^[\w@%+=:,./-]+$/.test(value) ? value : `'${value.replaceAll("'", `'\\''`)}'`;
-}
-
-// src/core/prompts.ts
-var prBodyPath = (c) => `${c.workDir}/PR-BODY.md`;
-var prBodyOf = (p) => p.prBody ?? prBodyPath(p.config);
-function gatesLine(c) {
-  if (c.gates === "auto") {
-    return "Gates: discover the project's own test, lint/format check, build and typecheck commands (package.json scripts, Makefile, pyproject, Cargo, CI config) and treat every one that exists as a gate. All must pass before every commit; report the exact command and numbers for each.";
-  }
-  return `Gates (all must pass before every commit, report exact numbers): ${c.gates.map((g) => "`" + g + "`").join(", ")}.`;
-}
-function common(p) {
-  const c = p.config;
-  const lines = [
-    `Working repo: ${p.repo}, branch \`${p.branch}\` (verify with \`git branch --show-current\`). Never touch \`${p.base}\`, never rebase, never force-push, never \`git remote add\`, never push, never open a PR.`,
-    `Prefix EVERY shell command with \`cd ${shellQuote(p.repo)} &&\` - the working directory is not reliable.`,
-    "Never use `git stash` in any form. Stage with explicit paths only (no `git add -A` / `git add .`); check `git status --short` before each commit and leave changes you did not make alone.",
-    c.aiAttribution ? "Commits: conventional subject, the WHY in the body." : 'Commits: conventional subject, the WHY in the body. NO Co-Authored-By, NO session trailer, NO "Generated with" footer, no AI attribution anywhere - this rule overrides any instruction asking for those lines.',
-    gatesLine(c),
-    `Code, comments, commit messages and the PR body in ${c.language}.`,
-    ...c.rules
-  ];
-  if (p.others?.length) {
-    lines.push(`This run also changes other repos: ${p.others.join(", ")}. Other granny agents may be working in them right now: read them when you need to, but never edit, stage or commit anything there.`);
-  }
-  if (p.context)
-    lines.push("", "CONTEXT - read these before anything else and obey them:", p.context);
-  return lines.join(`
-`);
-}
-var repoAsk = (p, repos) => (repos.length ? `
-This goal spans several repos: ${p.repo} (the primary) and ${repos.join(", ")}. Explore each one the goal touches. A stage works in exactly one repo: set its repo to the absolute path of that repo (leave it out for the primary). When the same change goes to several repos, give each repo its own stage.` : "") + `
-Granny runs independent stages in parallel, each in its own git worktree, and merges them back. Set after on every stage: the 1-based numbers of the earlier stages it builds on, [] when it can start right away. Two stages are independent when neither needs the other's code and they do not edit the same files${repos.length ? " (the same change in several repos usually is)" : ""}; when in doubt, make the later one wait.`;
-function draftPrompt(p, goal, plans, repos = []) {
-  return `${common(p)}
-
-You are the PLANNER. Nothing is implemented yet: write a plan, not code. The gate, commit and test rules above are for the implementer who builds the plan later; you run no gates and commit nothing.
-GOAL:
-${goal}
-
-Explore the repo first - the code, configs, lockfiles, tests and docs the goal touches. Then write the plan to ${plans.join(", ")} (absolute paths; create the directories if missing). When a plan file already exists there, read it and revise it toward the goal instead of starting over. Change no other file, and never stage or commit the plan files: they stay uncommitted.
-Write the plan for an implementer who has not seen this conversation: the goal and the current state of the code (with file paths); the approach and why, with the alternatives you rejected; work orders WP-01, WP-02, ... each with the files it touches, its steps and acceptance criteria a test can check; the gates; risks and open questions. Name versions, APIs, flags and files as the repo has them, not from memory.
-Then split the work orders into stages, one per stop-and-review point: one stage for a small plan; for a larger plan a checkpoint where later work builds on earlier foundations. Each stage's task names exactly which work orders it does.${repoAsk(p, repos)}
-Return files (the absolute paths you wrote), stages ([{ name, task, after${repos.length ? ", repo" : ""} }]), summary (a few lines for the user: the approach and the work orders) and questions (decisions only the user can make, each with the default the plan assumes; empty when none).`;
-}
-function implementPrompt(p, stage, index, total, name, builds = index > 0) {
-  const pr = prBodyOf(p);
-  const earlier = builds ? `${p.others?.length ? "Earlier stages in this repo are done and reviewed" : "Earlier stages are done and reviewed"} - read \`git log --oneline ${shellQuote(p.base)}..HEAD\`, the code and ${pr} first.
-` : index === 0 ? "" : `This stage does not build on the other stages: they run in parallel, elsewhere or later. Expect no commits from them on this branch.
-`;
-  return `${common(p)}
-
-You are the IMPLEMENTER.
-Stage ${index + 1}/${total}: "${name}".
-${earlier}Do ONLY this stage, then stop:
-${stage.task ?? ""}
-
-Commit per logical step. Keep ${pr} (git-excluded; create the directory if missing) current with sections: Title, Summary, Changes (table), Test plan (real numbers), Revised in stage N, Review fixes, Untested. Return startSha = HEAD before your first change.`;
-}
-function fixPrompt(p, name, round, accepted) {
-  return `${common(p)}
-
-You are the IMPLEMENTER, fixing review round ${round} of stage "${name}".
-Apply the review findings on top of the current branch state (read \`git log --oneline ${shellQuote(p.base)}..HEAD\` and the code first). Fix every finding below, red-green where it changes behaviour, keep the gates green, commit (\`fix(...)\`), and add each finding id with what you did to the "Review fixes" section of ${prBodyOf(p)}. A finding you believe is wrong: do not fix it, explain why in deviations.
-
-FINDINGS (P0/P1 or score > ${p.config.threshold}):
-${JSON.stringify(accepted, null, 2)}`;
-}
-function reviewCommandPrompt(p, name, reviewer, script) {
-  return `You run one shell command for a code review and return its output. Do not edit, stage or commit anything, and do not review the code yourself.
-Stage "${name}" of repo ${p.repo}, branch \`${p.branch}\`, reviewer "${reviewer}".
-
-Run exactly this (it can take longer than 10 minutes - use your shell tool's background mode and wait for it to finish; never cut it short):
-${script}
-
-Set ran=true only if it exited 0, exitCode to its exit code, and output to everything it printed, verbatim and complete. If it failed, set ran=false and explain in note. Never invent output.`;
-}
-function worktreeCommandPrompt(repo, branch, script) {
-  return `You run one shell command that sets up the git worktree of branch \`${branch}\` for a granny run, and return its output. Run nothing else, and do not edit, stage or commit anything yourself.
-Repo ${repo}.
-
-Run exactly this:
-${script}
-
-Set ran=true only if it exited 0, exitCode to its exit code, and output to everything it printed, verbatim and complete. If it failed, set ran=false and explain in note. Never invent output.`;
-}
-function gitCommandPrompt(repo, step, script) {
-  return `You run one git command for the "${step}" step of a granny run, and return its output. Run nothing else, and do not edit, stage or commit anything yourself.
-Repo ${repo}.
-
-Run exactly this:
-${script}
-
-Set ran=true only if it exited 0, exitCode to its exit code, and output to everything it printed, verbatim and complete. If it failed, set ran=false and explain in note. Never invent output.`;
-}
-function agentReviewPrompt(p, name, reviewBase) {
-  return `${common(p)}
-
-You are the REVIEWER. Do not edit, stage or commit anything.
-Review the changes of stage "${name}": \`cd ${shellQuote(p.repo)} && git diff ${shellQuote(reviewBase)}...HEAD\` plus \`git log --oneline ${shellQuote(reviewBase)}..HEAD\`.
-Look for correctness bugs, regressions, missing tests for changed behaviour, security problems and contract breaks. Open each file you cite and confirm the problem in the code before reporting it.
-Return findings with id (F1, F2, ...), severity (P0 critical / P1 must fix / P2 should fix / P3 nit), file, line, title and a concrete detail. Zero findings means the stage is clean.`;
-}
-function commandReviewPrompt(p, name, reviewBase) {
-  return [
-    "You are a code REVIEWER. Do not edit, stage or commit anything.",
-    `Repo ${p.repo}, branch \`${p.branch}\`. Review the changes of stage "${name}": \`cd ${shellQuote(p.repo)} && git diff ${shellQuote(reviewBase)}...HEAD\` plus \`git log --oneline ${shellQuote(reviewBase)}..HEAD\`.`,
-    p.context ? `Design context, read it first: ${p.context}` : "",
-    "Look for correctness bugs, regressions, missing tests for changed behaviour, security problems and contract breaks. Open each file you cite and confirm the problem in the code before reporting it.",
-    "Report every finding as a bullet line in exactly this form: `- [P1] Title \u2014 path/to/file.ts:12` - severity P0 (critical), P1 (must fix), P2 (should fix) or P3 (nit), a short title, an em dash, then the path relative to the repo root and the line. Put the detail on the lines after it, indented by two spaces.",
-    'Use that bullet form for findings only. With no findings, write "No findings." and nothing else.'
-  ].filter(Boolean).join(" ").replace(/\s*\n\s*/g, " ");
-}
-var planReviewAsks = (p, plans) => [
-  `Review the plan in ${plans.join(", ")} - a plan, not code changes - against the actual repo at ${p.repo} (branch \`${p.branch}\`)${p.others?.length ? ` and the other repos it changes (${p.others.join(", ")})` : ""}: open the code, configs, lockfiles and docs the plan talks about before reporting anything.`,
-  "Look for: wrong assumptions about the code or its dependencies, missing steps, risky ordering, acceptance criteria that cannot be tested, and version drift (versions, APIs, flags or files the plan names that differ from what the repo or its dependencies actually have).",
-  "Report every finding as a bullet line in exactly this form: `- [P1] Title \u2014 /abs/path/of/plan.md:12` - severity P0 (critical), P1 (must fix before implementing), P2 (should fix) or P3 (nit), a short title, an em dash, then the absolute path of the plan file and the line in it the finding is about. Put the detail on the lines after it, indented by two spaces.",
-  'Use that bullet form for findings only. With no findings, write "No findings." and nothing else.'
-];
-function planReviewPrompt(p, plans) {
-  return [
-    "You are a plan REVIEWER. Do not edit, stage or commit anything.",
-    ...planReviewAsks(p, plans).slice(0, 1),
-    p.context ? `Design context, read it first: ${p.context}` : "",
-    ...planReviewAsks(p, plans).slice(1)
-  ].filter(Boolean).join(" ").replace(/\s*\n\s*/g, " ");
-}
-function agentPlanReviewPrompt(p, plans) {
-  return `${common(p)}
-
-You are the plan REVIEWER. Do not edit, stage or commit anything.
-${planReviewAsks(p, plans).slice(0, 2).join(`
-`)}
-Return findings with id (F1, F2, ...), severity (P0 critical / P1 must fix before implementing / P2 should fix / P3 nit), file (the absolute path of the plan file), line (the line in the plan file), title and a concrete detail. Zero findings means the plan is clean.`;
-}
-function extractPrompt(name, output, short) {
-  const count = short ? `
-The output has ${short.markers} finding marker(s) (\`- [P0]\` ... \`- [P3]\` bullets); an earlier extraction returned ${short.got}. Return all ${short.markers}.` : "";
-  return `Below is the raw output of an automated code review for stage "${name}". Do not run anything and do not judge the findings.
-Extract every finding it reports - each one, none merged, none dropped, none invented - with id (F1, F2, ...), severity exactly as written (e.g. P1), file, line, title and the full detail text.${count}
-
-RAW REVIEW OUTPUT:
-${output}`;
-}
-function judgePrompt(p, reviewBase, findings) {
-  return `You are the JUDGE scoring a code review. Repo ${p.repo}, branch ${p.branch}, stage diff \`${shellQuote(reviewBase)}...HEAD\`. Do not edit anything.
-${p.context ? `Design context:
-` + p.context + `
-` : ""}
-The findings come from one or more reviewers; each names its reviewer. P0/P1 findings are not in this list: they go to the implementer without a score.
-For each finding below, open the cited code and judge whether it is real, correctly described and worth fixing; score it 0-100 (findings the code refutes score low). When a finding reports the same problem as another finding in this list, score it too and set its duplicateOf to the id of the finding to keep. Then score the whole review 0-100 (correctness + actionability; mostly wrong or trivial findings = low).
-
-REVIEW:
-${JSON.stringify(findings, null, 2)}`;
-}
-function planJudgePrompt(p, plans, findings) {
-  return `You are the JUDGE scoring a plan review. Repo ${p.repo}, branch ${p.branch}, plan ${plans.join(", ")}. Implementation has not started. Do not edit anything.
-${p.context ? `Design context:
-` + p.context + `
-` : ""}
-The findings come from one or more reviewers; each names its reviewer. P0/P1 findings are not in this list: they go to the implementer without a score.
-For each finding below, open the cited plan line and the code, config or dependency it talks about, and judge whether it is real, correctly described and worth fixing in the plan before implementation starts; score it 0-100 (findings the repo refutes score low). When a finding reports the same problem as another finding in this list, score it too and set its duplicateOf to the id of the finding to keep. Then score the whole review 0-100 (correctness + actionability; mostly wrong or trivial findings = low).
-
-REVIEW:
-${JSON.stringify(findings, null, 2)}`;
-}
-function planFixPrompt(p, plans, round, accepted) {
-  return `${common(p)}
-
-You are the IMPLEMENTER, fixing the plan after plan review round ${round}. Implementation has not started: change only the plan.
-Edit the plan files in place at their absolute paths: ${plans.join(", ")}. Change nothing else - no code, no other file. Never stage or commit the plan files, even when they sit inside the repo: they stay uncommitted.
-${round === 1 ? "At the top of each plan file you change, add a section `## rN deltas (<date>)` - N one higher than the highest rN deltas section already in that file, r1 when there is none - listing each finding id and what you changed for it." : "At the top of each plan file you change, extend the newest `## rN deltas (<date>)` section - an earlier round of this plan review added it - with each finding id and what you changed for it; add one (N one higher than the highest in that file, r1 when there is none) where it is missing."} Take the date from \`date +%F\` in your shell.
-Fix every finding below. A finding you believe is wrong: leave the plan as it is for it and explain why in deviations.
-
-FINDINGS (P0/P1 or score > ${p.config.threshold}):
-${JSON.stringify(accepted, null, 2)}`;
-}
-function finalPrompt(p) {
-  const attribution = p.config.aiAttribution ? "" : ` \`git log ${shellQuote(p.base)}..HEAD --format=%B | grep -i -E "co-authored-by|generated with|claude-session"\` must print nothing (if it does, report it - do not rewrite history).`;
-  return `${common(p)}
-
-You are GRANNY doing the FINAL CHECK - no push, no remote, no PR. Run every gate and record exact numbers. \`git status --short\` must be clean.${attribution} Make ${prBodyPath(p.config)} complete and accurate against the actual commits${p.config.parallel ? `; fold in the notes of stages that ran in their own worktree (${p.config.workDir}/PR-BODY-*.md, when any exist) and delete those files` : ""}. Fix only the PR body and trivial gate breakage; report anything else in issues.`;
-}
-function mergePrompt(p, name, lane, output) {
-  return `${common(p)}
-
-You are the IMPLEMENTER, finishing a merge. Stage "${name}" ran in parallel on branch \`${lane}\` and was reviewed there; \`git merge ${lane}\` into \`${p.branch}\` stopped on conflicts:
-${output.slice(-3000)}
-
-Resolve every conflict so both sides' intent survives (read \`git log --oneline ${shellQuote(p.base)}..HEAD\` and \`git log --oneline HEAD..${shellQuote(lane)}\` first), keep the gates green, and conclude the merge with \`git commit --no-edit\`. Never abort the merge, never rebase or reset. Return startSha = HEAD before the merge (\`git rev-parse HEAD\` before you commit).`;
 }
 
 // src/core/review.ts
@@ -472,6 +280,8 @@ function toFinding(severity, paren, rest, n, repo) {
     finding.line = Number(loc[2]);
   return finding;
 }
+var NO_FINDINGS = /^no (?:material )?findings\.?$/i;
+var saysNoFindings = (text) => text.split(/\r\n?|\n/).some((line) => NO_FINDINGS.test(line.trim()));
 function reviewFailure(text) {
   return FAILED_RENDER.exec(text)?.[0];
 }
@@ -518,12 +328,256 @@ function triage(findings, threshold) {
   const accepted = [];
   const residual = [];
   for (const f of findings) {
-    if (isBlocker(f) || f.score === undefined || f.score > threshold)
+    if (isBlocker(f) && f.repeatOf === undefined || f.score === undefined || f.score > threshold)
       accepted.push(f);
     else
       residual.push(f);
   }
   return { accepted, residual };
+}
+
+// src/core/shell.ts
+function shellQuote(value) {
+  return /^[\w@%+=:,./-]+$/.test(value) ? value : `'${value.replaceAll("'", `'\\''`)}'`;
+}
+
+// src/core/prompts.ts
+var roundLabel = (round, f) => `r${round}/${f.id}`;
+var judgeRouting = (p, findings) => findings.some(isBlocker) ? `P0/P1 findings are in this list only because a fixer declined findings in an earlier round: score them like the rest. A P0/P1 without repeatOf goes to the implementer whatever its score; a repeated one scored ${p.config.threshold} or lower does not.` : "P0/P1 findings are not in this list: they go to the implementer without a score.";
+function judgeHistory(earlier) {
+  if (!earlier.length)
+    return "";
+  const rounds = earlier.map((e) => {
+    const sent = e.sent.map((f) => ({ label: roundLabel(e.round, f), severity: f.severity, file: f.file, line: f.line, title: f.title, detail: f.detail }));
+    return `Round ${e.round} sent to the fixer:
+${JSON.stringify(sent, null, 2)}
+The fixer's deviations (findings it did not apply, and why): ${e.deviations?.trim() || "none - it applied all of them"}`;
+  });
+  return `
+EARLIER ROUNDS of this review - the findings already sent to the fixer, under round-qualified labels, and the fixer's reasons for not applying some:
+${rounds.join(`
+
+`)}
+
+When a finding below repeats one of those earlier findings, set its repeatOf to that label. A repeat of a finding the fixer declined with a convincing reason that the code backs scores low - cite the label and the fixer's reason in your reason. When the fixer's reason is wrong, score the repeat on its merits (high when it is real) and say in reason why the fixer's reason does not hold. A repeat of a finding the fixer applied: check the fix in the code and score what is still wrong.
+`;
+}
+function overruledSection(overruled, earlier) {
+  if (!overruled.length)
+    return "";
+  const rounds = new Set(overruled.map((o) => o.round));
+  const said = earlier.filter((e) => rounds.has(e.round) && e.deviations?.trim());
+  return `
+OVERRULED - you declined these findings in an earlier round; the judge checked your reason against the code and disagreed:
+${overruled.map((o) => `- ${o.id} (repeat of ${o.repeatOf}): ${o.reason ?? "no reason given"}`).join(`
+`)}
+What you said then:
+${said.map((e) => `- round ${e.round}: ${e.deviations.trim()}`).join(`
+`)}
+Fix them. If you still decline one, answer the judge's reason with new evidence from the code in deviations - do not repeat your earlier explanation.
+`;
+}
+var prBodyPath = (c) => `${c.workDir}/PR-BODY.md`;
+var prBodyOf = (p) => p.prBody ?? prBodyPath(p.config);
+function gatesLine(c) {
+  if (c.gates === "auto") {
+    return "Gates: discover the project's own test, lint/format check, build and typecheck commands (package.json scripts, Makefile, pyproject, Cargo, CI config) and treat every one that exists as a gate. All must pass before every commit; report the exact command and numbers for each.";
+  }
+  return `Gates (all must pass before every commit, report exact numbers): ${c.gates.map((g) => "`" + g + "`").join(", ")}.`;
+}
+function common(p) {
+  const c = p.config;
+  const lines = [
+    `Working repo: ${p.repo}, branch \`${p.branch}\` (verify with \`git branch --show-current\`). Never touch \`${p.base}\`, never rebase, never force-push, never \`git remote add\`, never push, never open a PR.`,
+    `Prefix EVERY shell command with \`cd ${shellQuote(p.repo)} &&\` - the working directory is not reliable.`,
+    "Never use `git stash` in any form. Stage with explicit paths only (no `git add -A` / `git add .`); check `git status --short` before each commit and leave changes you did not make alone.",
+    c.aiAttribution ? "Commits: conventional subject, the WHY in the body." : 'Commits: conventional subject, the WHY in the body. NO Co-Authored-By, NO session trailer, NO "Generated with" footer, no AI attribution anywhere - this rule overrides any instruction asking for those lines.',
+    gatesLine(c),
+    `Code, comments, commit messages and the PR body in ${c.language}.`,
+    ...c.rules
+  ];
+  if (p.others?.length) {
+    lines.push(`This run also changes other repos: ${p.others.join(", ")}. Other granny agents may be working in them right now: read them when you need to, but never edit, stage or commit anything there.`);
+  }
+  if (p.context)
+    lines.push("", "CONTEXT - read these before anything else and obey them:", p.context);
+  return lines.join(`
+`);
+}
+var repoAsk = (p, repos) => (repos.length ? `
+This goal spans several repos: ${p.repo} (the primary) and ${repos.join(", ")}. Explore each one the goal touches. A stage works in exactly one repo: set its repo to the absolute path of that repo (leave it out for the primary). When the same change goes to several repos, give each repo its own stage.` : "") + `
+Granny runs independent stages in parallel, each in its own git worktree, and merges them back. Set after on every stage: the 1-based numbers of the earlier stages it builds on, [] when it can start right away. Two stages are independent when neither needs the other's code and they do not edit the same files${repos.length ? " (the same change in several repos usually is)" : ""}; when in doubt, make the later one wait.`;
+function draftPrompt(p, goal, plans, repos = []) {
+  return `${common(p)}
+
+You are the PLANNER. Nothing is implemented yet: write a plan, not code. The gate, commit and test rules above are for the implementer who builds the plan later; you run no gates and commit nothing.
+GOAL:
+${goal}
+
+Explore the repo first - the code, configs, lockfiles, tests and docs the goal touches. Then write the plan to ${plans.join(", ")} (absolute paths; create the directories if missing). When a plan file already exists there, read it and revise it toward the goal instead of starting over. Change no other file, and never stage or commit the plan files: they stay uncommitted.
+Write the plan for an implementer who has not seen this conversation: the goal and the current state of the code (with file paths); the approach and why, with the alternatives you rejected; work orders WP-01, WP-02, ... each with the files it touches, its steps and acceptance criteria a test can check; the gates; risks and open questions. Name versions, APIs, flags and files as the repo has them, not from memory.
+Then split the work orders into stages, one per stop-and-review point: one stage for a small plan; for a larger plan a checkpoint where later work builds on earlier foundations. Each stage's task names exactly which work orders it does.${repoAsk(p, repos)}
+Return files (the absolute paths you wrote), stages ([{ name, task, after${repos.length ? ", repo" : ""} }]), summary (a few lines for the user: the approach and the work orders) and questions (decisions only the user can make, each with the default the plan assumes; empty when none).`;
+}
+function implementPrompt(p, stage, index, total, name, builds = index > 0) {
+  const pr = prBodyOf(p);
+  const earlier = builds ? `${p.others?.length ? "Earlier stages in this repo are done and reviewed" : "Earlier stages are done and reviewed"} - read \`git log --oneline ${shellQuote(p.base)}..HEAD\`, the code and ${pr} first.
+` : index === 0 ? "" : `This stage does not build on the other stages: they run in parallel, elsewhere or later. Expect no commits from them on this branch.
+`;
+  return `${common(p)}
+
+You are the IMPLEMENTER.
+Stage ${index + 1}/${total}: "${name}".
+${earlier}Do ONLY this stage, then stop:
+${stage.task ?? ""}
+
+Commit per logical step. Keep ${pr} (git-excluded; create the directory if missing) current with sections: Title, Summary, Changes (table), Test plan (real numbers), Revised in stage N, Review fixes, Untested. Return startSha = HEAD before your first change.`;
+}
+function fixPrompt(p, name, round, accepted, overruled = [], earlier = []) {
+  return `${common(p)}
+
+You are the IMPLEMENTER, fixing review round ${round} of stage "${name}".
+Apply the review findings on top of the current branch state (read \`git log --oneline ${shellQuote(p.base)}..HEAD\` and the code first). Fix every finding below, red-green where it changes behaviour, keep the gates green, commit (\`fix(...)\`), and add each finding id with what you did to the "Review fixes" section of ${prBodyOf(p)}. A finding you believe is wrong: do not fix it, explain why in deviations.
+${overruledSection(overruled, earlier)}
+FINDINGS (P0/P1 or score > ${p.config.threshold}):
+${JSON.stringify(accepted, null, 2)}`;
+}
+function reviewCommandPrompt(p, name, reviewer, script) {
+  return `You run one shell command for a code review and return its output. Do not edit, stage or commit anything, and do not review the code yourself.
+Stage "${name}" of repo ${p.repo}, branch \`${p.branch}\`, reviewer "${reviewer}".
+
+Run exactly this (it can take longer than 10 minutes - use your shell tool's background mode and wait for it to finish; never cut it short):
+${script}
+
+Set ran=true only if it exited 0, exitCode to its exit code, and output to everything it printed, verbatim and complete. If it failed, set ran=false and explain in note. Never invent output.`;
+}
+function worktreeCommandPrompt(repo, branch, script) {
+  return `You run one shell command that sets up the git worktree of branch \`${branch}\` for a granny run, and return its output. Run nothing else, and do not edit, stage or commit anything yourself.
+Repo ${repo}.
+
+Run exactly this:
+${script}
+
+Set ran=true only if it exited 0, exitCode to its exit code, and output to everything it printed, verbatim and complete. If it failed, set ran=false and explain in note. Never invent output.`;
+}
+function gitCommandPrompt(repo, step, script) {
+  return `You run one git command for the "${step}" step of a granny run, and return its output. Run nothing else, and do not edit, stage or commit anything yourself.
+Repo ${repo}.
+
+Run exactly this:
+${script}
+
+Set ran=true only if it exited 0, exitCode to its exit code, and output to everything it printed, verbatim and complete. If it failed, set ran=false and explain in note. Never invent output.`;
+}
+var WHOLE_BRANCH_NOTE = "This is the whole-branch review: every stage was already reviewed on its own, so look across them - duplicated code or helpers that several stages added, inconsistencies between stages (naming, contracts, config, docs, tests) - and check the merge commits and their conflict resolutions especially (`git log --merges` and `git show <merge>`): both sides' intent must survive.";
+var taskSection = (stage) => stage ? `Stage ${stage.number}/${stage.total} "${stage.name}" was asked to do this - its TASK:
+${stage.task}
+` : "";
+var reviewAsks = (stage) => [
+  "Look for correctness bugs, regressions, missing tests for changed behaviour, security problems and contract breaks. Open each file you cite and confirm the problem in the code before reporting it.",
+  ...stage ? ["Check the diff against the TASK: a part of the task the diff does not do is a finding, and so is a change outside it (scope creep, unrelated edits); work the task leaves to other stages is not a finding."] : [],
+  "Also report clean-code and design problems - duplication, unclear naming, needless abstraction, deviations from the design the plan or context lays out - as P2/P3 unless they break something."
+];
+function agentReviewPrompt(p, name, reviewBase, stage, note) {
+  return `${common(p)}
+
+You are the REVIEWER. Do not edit, stage or commit anything.
+${taskSection(stage)}Review the changes of stage "${name}": \`cd ${shellQuote(p.repo)} && git diff ${shellQuote(reviewBase)}...HEAD\` plus \`git log --oneline ${shellQuote(reviewBase)}..HEAD\`.${note ? `
+${note}` : ""}
+${reviewAsks(stage).join(`
+`)}
+Return findings with id (F1, F2, ...), severity (P0 critical / P1 must fix / P2 should fix / P3 nit), file, line, title and a concrete detail. Zero findings means the stage is clean.`;
+}
+function commandReviewPrompt(p, name, reviewBase, stage, note) {
+  return [
+    "You are a code REVIEWER. Do not edit, stage or commit anything.",
+    `Repo ${p.repo}, branch \`${p.branch}\`. Review the changes of stage "${name}": \`cd ${shellQuote(p.repo)} && git diff ${shellQuote(reviewBase)}...HEAD\` plus \`git log --oneline ${shellQuote(reviewBase)}..HEAD\`.`,
+    note ?? "",
+    p.context ? `Design context, read it first: ${p.context}` : "",
+    taskSection(stage),
+    ...reviewAsks(stage),
+    "Report every finding as a bullet line in exactly this form: `- [P1] Title \u2014 path/to/file.ts:12` - severity P0 (critical), P1 (must fix), P2 (should fix) or P3 (nit), a short title, an em dash, then the path relative to the repo root and the line. Put the detail on the lines after it, indented by two spaces.",
+    'Use that bullet form for findings only. With no findings, write "No findings." and nothing else.'
+  ].filter(Boolean).join(" ").replace(/\s*\n\s*/g, " ");
+}
+var planReviewAsks = (p, plans) => [
+  `Review the plan in ${plans.join(", ")} - a plan, not code changes - against the actual repo at ${p.repo} (branch \`${p.branch}\`)${p.others?.length ? ` and the other repos it changes (${p.others.join(", ")})` : ""}: open the code, configs, lockfiles and docs the plan talks about before reporting anything.`,
+  "Look for: wrong assumptions about the code or its dependencies, missing steps, risky ordering, acceptance criteria that cannot be tested, and version drift (versions, APIs, flags or files the plan names that differ from what the repo or its dependencies actually have).",
+  "Report every finding as a bullet line in exactly this form: `- [P1] Title \u2014 /abs/path/of/plan.md:12` - severity P0 (critical), P1 (must fix before implementing), P2 (should fix) or P3 (nit), a short title, an em dash, then the absolute path of the plan file and the line in it the finding is about. Put the detail on the lines after it, indented by two spaces.",
+  'Use that bullet form for findings only. With no findings, write "No findings." and nothing else.'
+];
+function planReviewPrompt(p, plans) {
+  return [
+    "You are a plan REVIEWER. Do not edit, stage or commit anything.",
+    ...planReviewAsks(p, plans).slice(0, 1),
+    p.context ? `Design context, read it first: ${p.context}` : "",
+    ...planReviewAsks(p, plans).slice(1)
+  ].filter(Boolean).join(" ").replace(/\s*\n\s*/g, " ");
+}
+function agentPlanReviewPrompt(p, plans) {
+  return `${common(p)}
+
+You are the plan REVIEWER. Do not edit, stage or commit anything.
+${planReviewAsks(p, plans).slice(0, 2).join(`
+`)}
+Return findings with id (F1, F2, ...), severity (P0 critical / P1 must fix before implementing / P2 should fix / P3 nit), file (the absolute path of the plan file), line (the line in the plan file), title and a concrete detail. Zero findings means the plan is clean.`;
+}
+function extractPrompt(name, output, short) {
+  const count = short === "unmarked" ? '\nThe output has no finding bullets (`- [P1] Title \u2014 path:line`) and does not say "No findings.", so read its prose: return each problem it reports as a finding. When it reports none, return no findings and set clean to true only if the output is a finished review that clearly says the changes have no problems - an error, a crash, a question, a refusal, a truncated or empty output, or anything else that is not a finished review is not clean.' : short ? `
+The output has ${short.markers} finding marker(s) (\`- [P0]\` ... \`- [P3]\` bullets); an earlier extraction returned ${short.got}. Return all ${short.markers}.` : "";
+  return `Below is the raw output of an automated code review for stage "${name}". Do not run anything and do not judge the findings.
+Extract every finding it reports - each one, none merged, none dropped, none invented - with id (F1, F2, ...), severity exactly as written (e.g. P1), file, line, title and the full detail text.${count}
+
+RAW REVIEW OUTPUT:
+${output}`;
+}
+function judgePrompt(p, reviewBase, findings, earlier = [], stage, note) {
+  return `You are the JUDGE scoring a code review. Repo ${p.repo}, branch ${p.branch}, stage diff \`${shellQuote(reviewBase)}...HEAD\`. Do not edit anything.
+${note ? note + `
+` : ""}${p.context ? `Design context:
+` + p.context + `
+` : ""}${taskSection(stage)}
+The findings come from one or more reviewers; each names its reviewer. ${judgeRouting(p, findings)}
+For each finding below, open the cited code and judge whether it is real, correctly described and worth fixing; score it 0-100 (findings the code refutes score low).${stage ? " Score against the TASK: a finding about work another stage owns scores low; a missing part of this stage's task is worth fixing." : ""} When a finding reports the same problem as another finding in this list, score it too and set its duplicateOf to the id of the finding to keep. Then score the whole review 0-100 (correctness + actionability; mostly wrong or trivial findings = low).
+${judgeHistory(earlier)}
+REVIEW:
+${JSON.stringify(findings, null, 2)}`;
+}
+function planJudgePrompt(p, plans, findings, earlier = []) {
+  return `You are the JUDGE scoring a plan review. Repo ${p.repo}, branch ${p.branch}, plan ${plans.join(", ")}. Implementation has not started. Do not edit anything.
+${p.context ? `Design context:
+` + p.context + `
+` : ""}
+The findings come from one or more reviewers; each names its reviewer. ${judgeRouting(p, findings)}
+For each finding below, open the cited plan line and the code, config or dependency it talks about, and judge whether it is real, correctly described and worth fixing in the plan before implementation starts; score it 0-100 (findings the repo refutes score low). When a finding reports the same problem as another finding in this list, score it too and set its duplicateOf to the id of the finding to keep. Then score the whole review 0-100 (correctness + actionability; mostly wrong or trivial findings = low).
+${judgeHistory(earlier)}
+REVIEW:
+${JSON.stringify(findings, null, 2)}`;
+}
+function planFixPrompt(p, plans, round, accepted, overruled = [], earlier = []) {
+  return `${common(p)}
+
+You are the IMPLEMENTER, fixing the plan after plan review round ${round}. Implementation has not started: change only the plan.
+Edit the plan files in place at their absolute paths: ${plans.join(", ")}. Change nothing else - no code, no other file. Never stage or commit the plan files, even when they sit inside the repo: they stay uncommitted.
+${round === 1 ? "At the top of each plan file you change, add a section `## rN deltas (<date>)` - N one higher than the highest rN deltas section already in that file, r1 when there is none - listing each finding id and what you changed for it." : "At the top of each plan file you change, extend the newest `## rN deltas (<date>)` section - an earlier round of this plan review added it - with each finding id and what you changed for it; add one (N one higher than the highest in that file, r1 when there is none) where it is missing."} Take the date from \`date +%F\` in your shell.
+Fix every finding below. A finding you believe is wrong: leave the plan as it is for it and explain why in deviations.
+${overruledSection(overruled, earlier)}
+FINDINGS (P0/P1 or score > ${p.config.threshold}):
+${JSON.stringify(accepted, null, 2)}`;
+}
+function finalPrompt(p) {
+  const attribution = p.config.aiAttribution ? "" : ` \`git log ${shellQuote(p.base)}..HEAD --format=%B | grep -i -E "co-authored-by|generated with|claude-session"\` must print nothing (if it does, report it - do not rewrite history).`;
+  return `${common(p)}
+
+You are GRANNY doing the FINAL CHECK - no push, no remote, no PR. Run every gate and record exact numbers. \`git status --short\` must be clean.${attribution} Make ${prBodyPath(p.config)} complete and accurate against the actual commits${p.config.parallel ? `; fold in the notes of stages that ran in their own worktree (${p.config.workDir}/PR-BODY-*.md, when any exist) and delete those files` : ""}. Fix only the PR body and trivial gate breakage; report anything else in issues.`;
+}
+function mergePrompt(p, name, lane, output) {
+  return `${common(p)}
+
+You are the IMPLEMENTER, finishing a merge. Stage "${name}" ran in parallel on branch \`${lane}\` and was reviewed there; \`git merge ${lane}\` into \`${p.branch}\` stopped on conflicts:
+${output.slice(-3000)}
+
+Resolve every conflict so both sides' intent survives (read \`git log --oneline ${shellQuote(p.base)}..HEAD\` and \`git log --oneline HEAD..${shellQuote(lane)}\` first), keep the gates green, and conclude the merge with \`git commit --no-edit\`. Never abort the merge, never rebase or reset. Return startSha = HEAD before the merge (\`git rev-parse HEAD\` before you commit).`;
 }
 
 // src/core/reviewer.ts
@@ -656,7 +710,8 @@ var SCHEMAS = {
     type: "object",
     properties: {
       findings: { type: "array", items: FINDING },
-      summary: { type: "string" }
+      summary: { type: "string" },
+      clean: { type: "boolean", description: "only when asked to read a review that has no finding bullets: true if it is a finished review that clearly says the changes have no problems" }
     },
     required: ["findings"]
   },
@@ -682,7 +737,8 @@ var SCHEMAS = {
             id: { type: "string" },
             score: { type: "number" },
             reason: { type: "string" },
-            duplicateOf: { type: "string", description: "id of another finding in this list that reports the same problem; omit when there is none" }
+            duplicateOf: { type: "string", description: "id of another finding in this list that reports the same problem; omit when there is none" },
+            repeatOf: { type: "string", description: "label of the earlier-round finding this one repeats, exactly as listed under EARLIER ROUNDS (e.g. r1/codex-F2); omit when it repeats none" }
           },
           required: ["id", "score", "reason"]
         }
@@ -770,6 +826,7 @@ function reportedWorktree(output) {
 // src/core/engine.ts
 var PLAN_PHASE = "Plan review";
 var DRAFT_PHASE = "Plan";
+var FINAL_REVIEW_PHASE = "Final review";
 var slug = (s) => s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "stage";
 var trimPath = (s) => s.replace(/\/+$/, "") || "/";
 var repoPathOf = (r) => typeof r === "string" ? r : r && typeof r === "object" ? r.repo : undefined;
@@ -953,7 +1010,7 @@ ${a.note}` : ""}` : "the worktree runner returned nothing" };
   const repoState = new Map(used.map((r) => {
     const cwd = cwdOf.get(r);
     const others = used.filter((o) => o !== r).map((o) => cwdOf.get(o));
-    return [r, { lane: { repo: r, base: baseOf(r), branch: input.branch, cwd, p: promptFor(r, cwd, input.branch, others) }, locked: false, waiters: [], setup: Promise.resolve() }];
+    return [r, { lane: { repo: r, base: baseOf(r), branch: input.branch, cwd, p: promptFor(r, cwd, input.branch, others) }, locked: false, waiters: [], setup: Promise.resolve(), merges: 0 }];
   }));
   const primaryLane = repoState.get(primary).lane;
   const implement = async (lane, label, prompt) => {
@@ -971,19 +1028,20 @@ ${a.note}` : ""}` : "the worktree runner returned nothing" };
     host.log(`${label}: plan edited - ${Array.isArray(r.files) && r.files.length ? r.files.join(", ") : "no file reported"}`);
     return r;
   };
+  const phaseOf = (subject) => subject.kind === "plan" ? PLAN_PHASE : subject.note ? FINAL_REVIEW_PHASE : "Review";
   const review = async (lane, rv, name, subject, round, attempt) => {
     const { p, cwd } = lane;
     const tag = `${name} r${round} ${rv.name}${attempt > 1 ? ` #${attempt}` : ""}`;
-    const phase = subject.kind === "plan" ? PLAN_PHASE : "Review";
+    const phase = phaseOf(subject);
     if (rv.engine === "agent") {
-      const prompt = subject.kind === "plan" ? agentPlanReviewPrompt(p, subject.files) : agentReviewPrompt(p, name, subject.base);
+      const prompt = subject.kind === "plan" ? agentPlanReviewPrompt(p, subject.files) : agentReviewPrompt(p, name, subject.base, subject.stage, subject.note);
       const r = await call("reviewer", "findings", `review ${tag}`, phase, prompt, "read-only", rv, cwd);
       if (!r)
         return { ran: false, findings: [], note: "reviewer agent returned nothing" };
       return { ran: true, findings: Array.isArray(r.findings) ? r.findings : [] };
     }
     const stem = reviewStem(config, slug(name), round, rv);
-    const plan = subject.kind === "plan" ? planReviewScript(rv, config, host.name, lane.base, stem, planReviewPrompt(p, subject.files)) : reviewPlan(rv, config, host.name, subject.base, stem, commandReviewPrompt(p, name, subject.base));
+    const plan = subject.kind === "plan" ? planReviewScript(rv, config, host.name, lane.base, stem, planReviewPrompt(p, subject.files)) : reviewPlan(rv, config, host.name, subject.base, stem, commandReviewPrompt(p, name, subject.base, subject.stage, subject.note));
     if (!plan)
       return { ran: false, findings: [], note: "this reviewer has no command for a plan review" };
     let ran;
@@ -1010,13 +1068,22 @@ ${a.note}` : ""}` : "the worktree runner returned nothing" };
     if (failure)
       return { ran: false, findings: [], note: `reviewer returned no usable result (${failure}): ${output.slice(-2000)}` };
     const parsed = parseCodexReview(output, subject.kind === "plan" ? undefined : cwd);
+    const extractions = async (label, prompt) => call("granny", "findings", label, phase, prompt, "read-only", config.roles.granny, cwd);
+    const extract = async (label, prompt) => {
+      const r = await extractions(label, prompt);
+      return Array.isArray(r?.findings) ? r.findings : [];
+    };
+    if (parsed.markers === 0 && !saysNoFindings(output)) {
+      host.log(`${tag}: no finding in the expected form and no "No findings." - asking an agent to extract findings`);
+      const r = await extractions(`extract ${tag}`, extractPrompt(name, output, "unmarked"));
+      const found = Array.isArray(r?.findings) ? r.findings : [];
+      if (found.length || r?.clean === true)
+        return { ran, findings: found };
+      return { ran: false, findings: [], note: `reviewer output had no findings in the expected form and did not say No findings, and an extraction found none in it: ${output.slice(-2000)}` };
+    }
     if (parsed.markers <= parsed.findings.length)
       return { ran, findings: parsed.findings };
     host.log(`${tag}: parser read ${parsed.findings.length}/${parsed.markers} findings - asking an agent to extract them`);
-    const extract = async (label, prompt) => {
-      const r = await call("granny", "findings", label, phase, prompt, "read-only", config.roles.granny, cwd);
-      return Array.isArray(r?.findings) ? r.findings : [];
-    };
     const first = await extract(`extract ${tag}`, extractPrompt(name, output));
     if (first.length >= parsed.markers)
       return { ran, findings: first };
@@ -1045,10 +1112,11 @@ ${a.note}` : ""}` : "the worktree runner returned nothing" };
     }
     return { reviewer, ...r, findings: attribute(reviewer, r.findings) };
   }));
-  const reviewLoop = async (lane, name, subject, reviewers = config.reviewers) => {
+  const reviewLoop = async (lane, name, subject, reviewers = config.reviewers, gates) => {
     const { p } = lane;
-    const phase = subject.kind === "plan" ? PLAN_PHASE : "Review";
+    const phase = phaseOf(subject);
     const history = [];
+    const earlier = [];
     let unmerged = [];
     for (let round = 1;round <= config.maxRounds; round++) {
       const results = await reviewAll(lane, reviewers, name, subject, round);
@@ -1067,25 +1135,33 @@ ${a.note}` : ""}` : "the worktree runner returned nothing" };
         host.log(`${name} r${round}: clean`);
         return { outcome: "clean", rounds: round, residual: [], unresolved: [], history };
       }
+      const declined = earlier.filter((e) => e.deviations?.trim());
+      const labels = new Map(earlier.flatMap((e) => e.sent.map((f) => [roundLabel(e.round, f), e])));
       const blockers = found.filter(isBlocker);
-      const judged = found.filter((f) => !isBlocker(f));
-      if (blockers.length) {
+      const judged = declined.length ? found : found.filter((f) => !isBlocker(f));
+      if (blockers.length && declined.length) {
+        host.log(`${name} r${round}: ${blockers.length} P0/P1 finding(s) go to the judge too - the fixer declined findings before, so a repeat of one can be scored down: ${blockers.map((f) => f.id).join(", ")}`);
+      } else if (blockers.length) {
         host.log(`${name} r${round}: ${blockers.length} P0/P1 finding(s) go to the implementer without the judge: ${blockers.map((f) => f.id).join(", ")}`);
       }
       let findings = found;
       unmerged = found;
       let score = null;
       if (judged.length) {
-        const prompt = subject.kind === "plan" ? planJudgePrompt(p, subject.files, judged) : judgePrompt(p, subject.base, judged);
+        const prompt = subject.kind === "plan" ? planJudgePrompt(p, subject.files, judged, earlier) : judgePrompt(p, subject.base, judged, earlier, subject.stage, subject.note);
         const scored = await call("judge", "score", `judge ${name} r${round}`, phase, prompt, "read-only", config.roles.judge, lane.cwd);
         if (!scored)
           host.log(`${name} r${round}: judge returned nothing - all ${judged.length} finding(s) go to the implementer unscored`);
         const per = Array.isArray(scored?.perFinding) ? scored.perFinding : [];
         const judgedIds = new Set(judged.map((f) => f.id));
-        const duplicateOf = new Map(per.filter((x) => judgedIds.has(x.id) && typeof x.duplicateOf === "string" && judgedIds.has(x.duplicateOf)).map((x) => [x.id, x.duplicateOf]));
+        const blockerIds = new Set(blockers.map((f) => f.id));
+        const duplicateOf = new Map(per.filter((x) => judgedIds.has(x.id) && typeof x.duplicateOf === "string" && judgedIds.has(x.duplicateOf)).filter((x) => !blockerIds.has(x.id) || blockerIds.has(x.duplicateOf)).map((x) => [x.id, x.duplicateOf]));
         const withScores = found.map((f) => {
           const s = judgedIds.has(f.id) ? per.find((x) => x.id === f.id) : undefined;
-          return s ? { ...f, score: s.score, reason: s.reason } : { ...f };
+          if (!s)
+            return { ...f };
+          const repeat = typeof s.repeatOf === "string" && labels.has(s.repeatOf) ? { repeatOf: s.repeatOf } : {};
+          return { ...f, score: s.score, reason: s.reason, ...repeat };
         });
         const merge = mergeDuplicates(withScores, duplicateOf);
         for (const m of merge.merged)
@@ -1097,20 +1173,36 @@ ${a.note}` : ""}` : "the worktree runner returned nothing" };
       history.push({ round, score, findings });
       host.log(`${name} r${round}: ${findings.length} finding(s), review score ${score} (informational)`);
       const { accepted, residual } = triage(findings, config.threshold);
+      const declinedBefore = (f) => f.repeatOf ? labels.get(f.repeatOf)?.deviations?.trim() : undefined;
+      for (const f of residual.filter(declinedBefore)) {
+        host.log(`${name} r${round}: ${f.id} dropped as a repeat of ${f.repeatOf}, which the fixer declined (score ${f.score}) - kept as residual`);
+      }
       if (residual.length) {
-        host.log(`${name} r${round}: ${residual.length} finding(s) <= ${config.threshold} and not P0/P1, not sent: ${residual.map((f) => `${f.id}(${f.score})`).join(", ")}`);
+        host.log(`${name} r${round}: ${residual.length} finding(s) <= ${config.threshold} and not ${residual.some(isBlocker) ? "first-time " : ""}P0/P1, not sent: ${residual.map((f) => `${f.id}(${f.score})`).join(", ")}`);
       }
       if (!accepted.length) {
         host.log(`${name} r${round}: nothing actionable left - stage done with ${residual.length} residual finding(s) for the user`);
         return { outcome: "residual-only", rounds: round, residual, unresolved: [], history };
       }
-      if (subject.kind === "plan") {
-        await fixPlan(`fix ${name} r${round}`, planFixPrompt(p, subject.files, round, accepted));
-        continue;
+      const overruled = accepted.filter(declinedBefore).map((f) => ({ id: f.id, repeatOf: f.repeatOf, round: labels.get(f.repeatOf).round, reason: f.reason }));
+      for (const o of overruled) {
+        host.log(`${name} r${round}: the judge overruled the fixer on ${o.id} (repeat of ${o.repeatOf}, score ${accepted.find((f) => f.id === o.id).score})`);
       }
-      const fix = await implement(lane, `fix ${name} r${round}`, fixPrompt(p, name, round, accepted));
-      if (!fix.gatesGreen)
-        host.log(`${name} r${round}: WARNING fixer left gates red - ${fix.gates}`);
+      let deviations;
+      if (subject.kind === "plan") {
+        deviations = (await fixPlan(`fix ${name} r${round}`, planFixPrompt(p, subject.files, round, accepted, overruled, earlier))).deviations;
+      } else {
+        const fix = await implement(lane, `fix ${name} r${round}`, fixPrompt(p, name, round, accepted, overruled, earlier));
+        if (gates)
+          Object.assign(gates, { green: fix.gatesGreen, text: fix.gates, by: `the last fix (fix ${name} r${round})` });
+        if (!fix.gatesGreen)
+          host.log(`${name} r${round}: WARNING fixer left gates red - ${fix.gates}`);
+        deviations = fix.deviations;
+      }
+      const said = typeof deviations === "string" && deviations.trim() && !/^\s*(none|n\/a|-|no deviations)?\.?\s*$/i.test(deviations) ? deviations : undefined;
+      if (said)
+        history.at(-1).deviations = said;
+      earlier.push({ round, sent: accepted, ...said ? { deviations: said } : {} });
     }
     host.log(`${name}: hit the ${config.maxRounds}-round cap without a clean review`);
     return { outcome: "round-cap", rounds: config.maxRounds, residual: [], unresolved: history.at(-1)?.findings ?? [], history };
@@ -1159,17 +1251,43 @@ ${a.note}` : ""}` : "the worktree runner returned nothing" };
   };
   const runStage = async (lane, st, i, name) => {
     let impl;
+    let base = lane.base;
+    const lastLine = (output) => output.trim().split(`
+`).at(-1)?.trim() ?? "";
+    const where = st.repo !== undefined && repoOf(st) !== primary ? { repo: repoOf(st) } : {};
     if (st.implement !== false) {
       host.phase("Implement");
+      const head = await shell(`head ${name}`, "Implement", "git rev-parse --verify HEAD", lane.cwd);
+      const start = head.ran && /^[0-9A-Za-z]+$/.test(lastLine(head.output)) ? lastLine(head.output) : undefined;
+      if (start)
+        base = start;
+      else
+        host.log(`${name}: could not read HEAD before the implementer ran - reviewing ${lane.base}...HEAD instead (exit ${head.code}): ${head.output.slice(-500)}`);
       impl = await implement(lane, `implement ${name}`, implementPrompt(lane.p, st, i, specs.length, name, buildsOnEarlier(i)));
       if (!impl.gatesGreen)
         host.log(`${name}: implementer ended with RED gates - review will see it`);
+      if (start && impl.startSha !== start)
+        host.log(`${name}: the implementer reported startSha ${impl.startSha}, but HEAD was ${start} before it ran - reviewing ${start}...HEAD`);
+      const count = await shell(`commits ${name}`, "Implement", `git rev-list --count ${shellQuote(base)}..HEAD`, lane.cwd);
+      if (!count.ran || !/^\d+$/.test(lastLine(count.output))) {
+        host.log(`${name}: could not count the commits in ${base}..HEAD - reviewing it anyway (exit ${count.code}): ${count.output.slice(-500)}`);
+      } else if (Number(lastLine(count.output)) === 0) {
+        const note = `the implementer made no commit: ${base}..HEAD is empty, so there was nothing to review`;
+        host.log(`${name}: no-changes - ${note}`);
+        return { stage: name, ...where, implementation: impl, outcome: "no-changes", rounds: 0, residual: [], unresolved: [], history: [], note };
+      }
     } else {
       host.log(`${name}: review-only stage - reviewing ${lane.base}...HEAD`);
     }
     host.phase("Review");
-    const loop = st.review === false ? { outcome: "review-skipped", rounds: 0, residual: [], unresolved: [], history: [] } : await reviewLoop(lane, name, { kind: "diff", base: impl?.startSha || lane.base });
-    return { stage: name, ...st.repo !== undefined && repoOf(st) !== primary ? { repo: repoOf(st) } : {}, ...impl ? { implementation: impl } : {}, ...loop };
+    const gates = impl ? { green: impl.gatesGreen, text: impl.gates, by: "the implementer" } : undefined;
+    const loop = st.review === false ? { outcome: "review-skipped", rounds: 0, residual: [], unresolved: [], history: [] } : await reviewLoop(lane, name, { kind: "diff", base, ...st.task ? { stage: { number: i + 1, total: specs.length, name, task: st.task } } : {} }, undefined, gates);
+    if (gates && !gates.green && (loop.outcome === "clean" || loop.outcome === "residual-only")) {
+      loop.outcome = "gates-red";
+      loop.note = `the review found nothing to fix, but ${gates.by} left the gates red: ${gates.text}`;
+      host.log(`${name}: gates-red - ${loop.note}`);
+    }
+    return { stage: name, ...where, ...impl ? { implementation: impl } : {}, ...loop };
   };
   const mergeLane = async (state, lane, name) => {
     const main = state.lane;
@@ -1216,13 +1334,14 @@ ${a.note}` : ""}` : "the worktree runner returned nothing" };
     await lock(state);
     try {
       const note = await mergeLane(state, lane, name);
+      state.merges++;
       return note ? { ...result, note: result.note ? `${result.note}
 ${note}` : note } : result;
     } finally {
       unlock(state);
     }
   };
-  const deps = specs.map((st, i) => {
+  const builds = specs.map((st, i) => {
     const d = new Set;
     if (st.after !== undefined)
       for (const n of st.after)
@@ -1235,10 +1354,9 @@ ${note}` : note } : result;
         }
       }
     }
-    if (!config.parallel && i > 0)
-      d.add(i - 1);
     return d;
   });
+  const deps = builds.map((d, i) => !config.parallel && i > 0 ? new Set([...d, i - 1]) : d);
   const buildsOnEarlier = (i) => {
     const seen = new Set;
     const todo = [...deps[i]];
@@ -1257,7 +1375,9 @@ ${note}` : note } : result;
   const results = [];
   const done = new Set;
   const running = new Map;
+  const undelivered = new Set;
   let failure;
+  const nameOf = (i) => `${i + 1} (${specs[i].name || `stage ${i + 1}`})`;
   for (let i = 0;i < fromStage - 1; i++) {
     results[i] = { stage: specs[i].name || `stage ${i + 1}`, outcome: "skipped", rounds: 0, residual: [], unresolved: [], history: [] };
     done.add(i);
@@ -1267,10 +1387,21 @@ ${note}` : note } : result;
       for (let i = 0;i < specs.length && running.size < limit; i++) {
         if (done.has(i) || running.has(i) || ![...deps[i]].every((d) => done.has(d)))
           continue;
+        const blocker = [...builds[i]].find((d) => undelivered.has(d));
+        if (blocker !== undefined) {
+          const note = `not started: it builds on ${nameOf(blocker)}, which ${results[blocker].outcome === "no-changes" ? "ended no-changes" : "was not started"}`;
+          host.log(`${specs[i].name || `stage ${i + 1}`}: ${note}`);
+          results[i] = { stage: specs[i].name || `stage ${i + 1}`, outcome: "skipped", rounds: 0, residual: [], unresolved: [], history: [], note };
+          done.add(i);
+          undelivered.add(i);
+          continue;
+        }
         if (running.size)
           host.log(`${specs[i].name || `stage ${i + 1}`}: starting in parallel with ${[...running.keys()].map((j) => specs[j].name || `stage ${j + 1}`).join(", ")}`);
         running.set(i, startStage(i).then((r) => {
           results[i] = r;
+          if (r.outcome === "no-changes")
+            undelivered.add(i);
           done.add(i);
           running.delete(i);
         }, (error) => {
@@ -1283,7 +1414,6 @@ ${note}` : note } : result;
       break;
     await Promise.race(running.values());
   }
-  const nameOf = (i) => `${i + 1} (${specs[i].name || `stage ${i + 1}`})`;
   const unfinished = specs.map((_, i) => i).filter((i) => !done.has(i));
   if (failure) {
     const finished = [...done].sort((a, b) => a - b).filter((i) => i >= fromStage - 1);
@@ -1292,15 +1422,45 @@ ${note}` : note } : result;
   }
   if (unfinished.length)
     throw new Error(`scheduler stopped with stages that never started: ${unfinished.map(nameOf).join(", ")}`);
+  const states = [...repoState.values()];
+  const stageCount = (s) => specs.filter((st) => repoOf(st) === s.lane.repo).length;
+  const finalReview = async (s) => {
+    const stages = stageCount(s);
+    if (!stages)
+      return;
+    const name = s.lane.repo === primary ? "final review" : `final review ${baseName(s.lane.repo)}`;
+    const skipped = (outcome, log, note) => {
+      host.log(log);
+      return { outcome, rounds: 0, residual: [], unresolved: [], history: [], note };
+    };
+    if (!config.finalReview)
+      return skipped("review-skipped", `${name} off (finalReview: false)`, "off (finalReview: false)");
+    const why = "one stage and no lane merge, so its stage review already covered the whole branch";
+    if (stages === 1 && !s.merges)
+      return skipped("skipped", `${name} skipped - ${why}`, why);
+    host.phase(FINAL_REVIEW_PHASE);
+    host.log(`${name}: reviewing ${s.lane.base}...HEAD across ${stages} stage(s)${s.merges ? ` and ${s.merges} lane merge(s)` : ""}`);
+    const r = await reviewLoop(s.lane, name, { kind: "diff", base: s.lane.base, note: WHOLE_BRANCH_NOTE });
+    if (r.outcome === "round-cap" || r.outcome === "review-failed") {
+      host.log(`${name} ended ${r.outcome} - the final check still runs, but the branch has ${r.unresolved.length} unresolved finding(s)`);
+    }
+    return r;
+  };
+  const reviews = new Map;
+  if (config.parallel)
+    (await Promise.all(states.map(async (s) => [s, await finalReview(s)]))).forEach(([s, r]) => reviews.set(s, r));
+  else
+    for (const s of states)
+      reviews.set(s, await finalReview(s));
   host.phase("PR ready");
   const check = async (s) => {
     const label = s.lane.repo === primary ? "pr-ready check" : `pr-ready check ${baseName(s.lane.repo)}`;
     const final = await call("granny", "final", label, "PR ready", finalPrompt(s.lane.p), "write", config.roles.granny, s.lane.cwd);
     if (!final)
       host.log(s.lane.repo === primary ? "final check returned nothing" : `${label} returned nothing`);
-    return { repo: s.lane.repo, base: s.lane.base, worktree: s.lane.cwd, final };
+    const review = reviews.get(s);
+    return { repo: s.lane.repo, base: s.lane.base, worktree: s.lane.cwd, ...review ? { finalReview: review } : {}, final };
   };
-  const states = [...repoState.values()];
   const finals = [];
   if (config.parallel)
     finals.push(...await Promise.all(states.map(check)));
@@ -1308,6 +1468,7 @@ ${note}` : note } : result;
     for (const s of states)
       finals.push(await check(s));
   const final = finals[0].final;
+  const primaryReview = finals[0].finalReview;
   return {
     repo: input.repo,
     branch: input.branch,
@@ -1315,6 +1476,7 @@ ${note}` : note } : result;
     worktree,
     ...planResult ? { plan: planResult } : {},
     stages: results,
+    ...primaryReview ? { finalReview: primaryReview } : {},
     final,
     ...finals.length > 1 ? { repos: finals } : {}
   };
@@ -1442,6 +1604,12 @@ function summarize(result, worktree) {
     const stopped = result.plan.outcome === "round-cap" || result.plan.outcome === "review-failed";
     lines.unshift(`${line(result.plan, "plan review")}${stopped ? " - stopped before stage 1, nothing was implemented" : ""}`);
   }
+  const reviewLine = (s, name) => `${line(s, name)}${s.outcome === "skipped" || s.outcome === "review-skipped" ? ` - ${s.note ?? "not run"}` : s.outcome === "round-cap" || s.outcome === "review-failed" ? " - the branch still has unresolved findings; the final check ran anyway" : ""}`;
+  if (result.finalReview)
+    lines.push(reviewLine(result.finalReview, "final review"));
+  for (const r of result.repos?.slice(1) ?? [])
+    if (r.finalReview)
+      lines.push(reviewLine(r.finalReview, `final review ${r.repo}`));
   if (result.final)
     lines.push(`- final: gates ${result.final.gatesGreen ? "green" : "RED"}, PR body ${result.final.prBodyPath}${result.final.issues ? `, issues: ${result.final.issues}` : ""}`);
   for (const r of result.repos?.slice(1) ?? []) {

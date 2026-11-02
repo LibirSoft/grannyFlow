@@ -17,15 +17,19 @@ optional - given a plan and "planReview": true (default false):
      ├─ clean, residual-only, or plan review off ─► stage 1
      └─ round-cap or review-failed ─► stop and report; nothing is implemented
 for each stage - independent stages at the same time (parallel, default on):
-  implementer builds the stage ─► every reviewer reviews it, in parallel (base = stage start sha)
+  granny reads HEAD, the implementer builds the stage
+     ├─ no commit since that HEAD ─► stage no-changes, not reviewed; the stages that build on it are skipped
+  every reviewer reviews it, in parallel (base = the HEAD granny read)
      ├─ a reviewer fails, then fails its one retry ─► stage review-failed
-     ├─ no reviewer reports a finding ─────────────► stage clean
+     ├─ no reviewer reports a finding ─────────────► stage clean (gates-red when the last implementer or fix left gates red)
      └─ P0/P1 findings go straight to the implementer; the judge scores the rest 0-100 and merges duplicates
           ├─ any P0/P1, or score > threshold ─► implementer fixes those ─► review again
           └─ none ─► stage done; the rest are "residual" for you
      cap: maxRounds reviews per stage
      a stage in another repo works in that repo's worktree; one whose repo is busy works in its own worktree, merged back after
-after the last stage: final check in every repo (gates, clean tree, no AI trailers, PR body) ─► report ─► wait
+after the last stage (none threw): final review in every repo with more than one stage or a lane merge (finalReview, default on)
+     ─► the same loop on the whole branch (base...HEAD): cross-stage duplication, inconsistencies, merge resolutions
+then: final check in every repo (gates, clean tree, no AI trailers, PR body) ─► report ─► wait
 ```
 
 </details>
@@ -60,7 +64,7 @@ npx skills add LibirSoft/grannyFlow
 
 This puts `skills/granny-workflow/` where your agents look for skills. Then, per host:
 
-- **Claude Code** - nothing else. Optional: OpenAI's Codex plugin (`/plugin marketplace add openai/codex-plugin-cc`, then `/plugin install codex@openai-codex`); the default reviewer uses it when it is installed and `node` is on `PATH`.
+- **Claude Code** - nothing else. Optional: OpenAI's Codex plugin (`/plugin marketplace add openai/codex-plugin-cc`, then `/plugin install codex@openai-codex`); a reviewer with engine `auto` or `codex-plugin` uses it when it is installed and `node` is on `PATH`.
 - **opencode** - install the plugin globally (and optionally the `granny` primary agent), then restart the service. A per-project install breaks with worktrees on, since the role sessions run in the worktree, where the plugin is missing:
 
   ```sh
@@ -75,7 +79,7 @@ This puts `skills/granny-workflow/` where your agents look for skills. Then, per
   cp <skill-dir>/engines/cursor/agents/*.md ~/.cursor/agents/
   ```
 
-The default is one reviewer, [Codex](https://github.com/openai/codex); install it and log in, or configure other reviewers: a host model (`"engine": "agent"`) or any CLI that answers a prompt (`"engine": "command"`, e.g. `"opencode run -m <provider/model> {prompt}"`). With the default engine `auto`, Claude Code runs the Codex review through OpenAI's [Codex plugin for Claude Code](https://github.com/openai/codex-plugin-cc) when it is installed and `node` is on `PATH`, and through the Codex CLI (`codex exec review`) otherwise; opencode always uses the CLI unless you set `"engine": "codex-plugin"`. The run log says which one ran.
+The default is one reviewer on the model you selected in the host (`"engine": "agent"`). Add others as you like: [Codex](https://github.com/openai/codex) (`"engine": "auto"`; install it and log in) or any CLI that answers a prompt (`"engine": "command"`, e.g. `"opencode run -m <provider/model> {prompt}"`). With engine `auto`, Claude Code runs the Codex review through OpenAI's [Codex plugin for Claude Code](https://github.com/openai/codex-plugin-cc) when it is installed and `node` is on `PATH`, and through the Codex CLI (`codex exec review`) otherwise; opencode always uses the CLI unless you set `"engine": "codex-plugin"`. The run log says which one ran.
 
 ## Use
 
@@ -116,12 +120,13 @@ Three layers, later wins: `~/.config/granny/config.json`, `<repo>/granny.config.
 |---|---|---|
 | `roles.<role>.model` | session model; judge `sonnet` on Claude Code | one string for every host, or `{ "claude-code": …, "opencode": … }` |
 | `roles.<role>.effort` | inherit | Claude Code only; on opencode use a `#variant` model suffix |
-| `reviewers` | `[{ "name": "codex", "engine": "auto" }]` | all review every round, in parallel; each has a unique `name`, an `engine` and its own `model`/`effort` |
+| `reviewers` | `[{ "name": "reviewer", "engine": "agent" }]` | all review every round, in parallel; each has a unique `name`, an `engine` and its own `model`/`effort` |
 | `reviewers[].engine` | `auto` | `auto`: the Codex plugin when installed and `node` is on `PATH` (Claude Code only), else the Codex CLI; `codex-plugin`: the plugin, required; `codex`: the CLI; `agent`: a host model (Claude models only on Claude Code); `command`: any CLI, with `{base}`, `{out}`, `{model}` and `{prompt}` placeholders |
 | `reviewers[].mode` | `review` | `adversarial-review` runs the Codex plugin's adversarial review, optionally steered by `focus` |
-| `threshold` | `70` | findings scoring strictly above it are fixed; P0/P1 always are, without the judge |
+| `threshold` | `70` | findings scoring strictly above it are fixed; P0/P1 always are, without the judge - except a repeat of a finding the fixer declined, which the judge scores like the rest |
 | `maxRounds` | `4` | review rounds per stage, and for the plan review |
 | `planReview` | `false` | `true` reviews the plan files before stage 1 when the run has a `plan` (extra tokens); skipped when it resumes with `fromStage` |
+| `finalReview` | `true` | after the last stage, review each repo's whole branch for cross-stage duplication, inconsistencies and merge resolutions; skipped for a repo with one stage and no lane merge |
 | `parallel` | `true` | run independent stages at the same time (other repos, or `after` in the same repo); `false`: one at a time, in order |
 | `maxParallel` | `3` | the most stages running at once |
 | `gates` | `auto` | agents discover test/lint/build/typecheck, or list them |

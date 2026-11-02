@@ -1,6 +1,6 @@
 {
   "name": "granny-workflow",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "private": true,
   "description": "Plan → implement → review → judge → fix loop for coding agents (Claude Code, opencode, Cursor)",
   "license": "MIT",

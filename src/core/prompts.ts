@@ -1,6 +1,56 @@
 import type { GrannyConfig } from './config'
+import { isBlocker } from './review'
 import { shellQuote } from './shell'
 import type { Finding, StageSpec } from './types'
+
+export interface EarlierRound {
+  round: number
+  sent: Finding[]
+  deviations?: string
+}
+
+export interface Overruled {
+  id: string
+  repeatOf: string
+  round: number
+  reason?: string
+}
+
+export const roundLabel = (round: number, f: Pick<Finding, 'id'>) => `r${round}/${f.id}`
+
+const judgeRouting = (p: PromptContext, findings: Finding[]): string =>
+  findings.some(isBlocker)
+    ? `P0/P1 findings are in this list only because a fixer declined findings in an earlier round: score them like the rest. A P0/P1 without repeatOf goes to the implementer whatever its score; a repeated one scored ${p.config.threshold} or lower does not.`
+    : 'P0/P1 findings are not in this list: they go to the implementer without a score.'
+
+function judgeHistory(earlier: EarlierRound[]): string {
+  if (!earlier.length) return ''
+  const rounds = earlier.map(e => {
+    const sent = e.sent.map(f => ({ label: roundLabel(e.round, f), severity: f.severity, file: f.file, line: f.line, title: f.title, detail: f.detail }))
+    return `Round ${e.round} sent to the fixer:
+${JSON.stringify(sent, null, 2)}
+The fixer's deviations (findings it did not apply, and why): ${e.deviations?.trim() || 'none - it applied all of them'}`
+  })
+  return `
+EARLIER ROUNDS of this review - the findings already sent to the fixer, under round-qualified labels, and the fixer's reasons for not applying some:
+${rounds.join('\n\n')}
+
+When a finding below repeats one of those earlier findings, set its repeatOf to that label. A repeat of a finding the fixer declined with a convincing reason that the code backs scores low - cite the label and the fixer's reason in your reason. When the fixer's reason is wrong, score the repeat on its merits (high when it is real) and say in reason why the fixer's reason does not hold. A repeat of a finding the fixer applied: check the fix in the code and score what is still wrong.
+`
+}
+
+function overruledSection(overruled: Overruled[], earlier: EarlierRound[]): string {
+  if (!overruled.length) return ''
+  const rounds = new Set(overruled.map(o => o.round))
+  const said = earlier.filter(e => rounds.has(e.round) && e.deviations?.trim())
+  return `
+OVERRULED - you declined these findings in an earlier round; the judge checked your reason against the code and disagreed:
+${overruled.map(o => `- ${o.id} (repeat of ${o.repeatOf}): ${o.reason ?? 'no reason given'}`).join('\n')}
+What you said then:
+${said.map(e => `- round ${e.round}: ${e.deviations!.trim()}`).join('\n')}
+Fix them. If you still decline one, answer the judge's reason with new evidence from the code in deviations - do not repeat your earlier explanation.
+`
+}
 
 export interface PromptContext {
   repo: string
@@ -80,12 +130,12 @@ ${stage.task ?? ''}
 Commit per logical step. Keep ${pr} (git-excluded; create the directory if missing) current with sections: Title, Summary, Changes (table), Test plan (real numbers), Revised in stage N, Review fixes, Untested. Return startSha = HEAD before your first change.`
 }
 
-export function fixPrompt(p: PromptContext, name: string, round: number, accepted: Finding[]): string {
+export function fixPrompt(p: PromptContext, name: string, round: number, accepted: Finding[], overruled: Overruled[] = [], earlier: EarlierRound[] = []): string {
   return `${common(p)}
 
 You are the IMPLEMENTER, fixing review round ${round} of stage "${name}".
 Apply the review findings on top of the current branch state (read \`git log --oneline ${shellQuote(p.base)}..HEAD\` and the code first). Fix every finding below, red-green where it changes behaviour, keep the gates green, commit (\`fix(...)\`), and add each finding id with what you did to the "Review fixes" section of ${prBodyOf(p)}. A finding you believe is wrong: do not fix it, explain why in deviations.
-
+${overruledSection(overruled, earlier)}
 FINDINGS (P0/P1 or score > ${p.config.threshold}):
 ${JSON.stringify(accepted, null, 2)}`
 }
@@ -120,21 +170,44 @@ ${script}
 Set ran=true only if it exited 0, exitCode to its exit code, and output to everything it printed, verbatim and complete. If it failed, set ran=false and explain in note. Never invent output.`
 }
 
-export function agentReviewPrompt(p: PromptContext, name: string, reviewBase: string): string {
+export const WHOLE_BRANCH_NOTE =
+  'This is the whole-branch review: every stage was already reviewed on its own, so look across them - duplicated code or helpers that several stages added, inconsistencies between stages (naming, contracts, config, docs, tests) - and check the merge commits and their conflict resolutions especially (`git log --merges` and `git show <merge>`): both sides\' intent must survive.'
+
+export interface StageTask {
+  number: number
+  total: number
+  name: string
+  task: string
+}
+
+const taskSection = (stage?: StageTask): string =>
+  stage ? `Stage ${stage.number}/${stage.total} "${stage.name}" was asked to do this - its TASK:\n${stage.task}\n` : ''
+
+const reviewAsks = (stage?: StageTask): string[] => [
+  'Look for correctness bugs, regressions, missing tests for changed behaviour, security problems and contract breaks. Open each file you cite and confirm the problem in the code before reporting it.',
+  ...(stage
+    ? ['Check the diff against the TASK: a part of the task the diff does not do is a finding, and so is a change outside it (scope creep, unrelated edits); work the task leaves to other stages is not a finding.']
+    : []),
+  'Also report clean-code and design problems - duplication, unclear naming, needless abstraction, deviations from the design the plan or context lays out - as P2/P3 unless they break something.',
+]
+
+export function agentReviewPrompt(p: PromptContext, name: string, reviewBase: string, stage?: StageTask, note?: string): string {
   return `${common(p)}
 
 You are the REVIEWER. Do not edit, stage or commit anything.
-Review the changes of stage "${name}": \`cd ${shellQuote(p.repo)} && git diff ${shellQuote(reviewBase)}...HEAD\` plus \`git log --oneline ${shellQuote(reviewBase)}..HEAD\`.
-Look for correctness bugs, regressions, missing tests for changed behaviour, security problems and contract breaks. Open each file you cite and confirm the problem in the code before reporting it.
+${taskSection(stage)}Review the changes of stage "${name}": \`cd ${shellQuote(p.repo)} && git diff ${shellQuote(reviewBase)}...HEAD\` plus \`git log --oneline ${shellQuote(reviewBase)}..HEAD\`.${note ? `\n${note}` : ''}
+${reviewAsks(stage).join('\n')}
 Return findings with id (F1, F2, ...), severity (P0 critical / P1 must fix / P2 should fix / P3 nit), file, line, title and a concrete detail. Zero findings means the stage is clean.`
 }
 
-export function commandReviewPrompt(p: PromptContext, name: string, reviewBase: string): string {
+export function commandReviewPrompt(p: PromptContext, name: string, reviewBase: string, stage?: StageTask, note?: string): string {
   return [
     'You are a code REVIEWER. Do not edit, stage or commit anything.',
     `Repo ${p.repo}, branch \`${p.branch}\`. Review the changes of stage "${name}": \`cd ${shellQuote(p.repo)} && git diff ${shellQuote(reviewBase)}...HEAD\` plus \`git log --oneline ${shellQuote(reviewBase)}..HEAD\`.`,
+    note ?? '',
     p.context ? `Design context, read it first: ${p.context}` : '',
-    'Look for correctness bugs, regressions, missing tests for changed behaviour, security problems and contract breaks. Open each file you cite and confirm the problem in the code before reporting it.',
+    taskSection(stage),
+    ...reviewAsks(stage),
     'Report every finding as a bullet line in exactly this form: `- [P1] Title — path/to/file.ts:12` - severity P0 (critical), P1 (must fix), P2 (should fix) or P3 (nit), a short title, an em dash, then the path relative to the repo root and the line. Put the detail on the lines after it, indented by two spaces.',
     'Use that bullet form for findings only. With no findings, write "No findings." and nothing else.',
   ]
@@ -170,10 +243,13 @@ ${planReviewAsks(p, plans).slice(0, 2).join('\n')}
 Return findings with id (F1, F2, ...), severity (P0 critical / P1 must fix before implementing / P2 should fix / P3 nit), file (the absolute path of the plan file), line (the line in the plan file), title and a concrete detail. Zero findings means the plan is clean.`
 }
 
-export function extractPrompt(name: string, output: string, short?: { markers: number; got: number }): string {
-  const count = short
-    ? `\nThe output has ${short.markers} finding marker(s) (\`- [P0]\` ... \`- [P3]\` bullets); an earlier extraction returned ${short.got}. Return all ${short.markers}.`
-    : ''
+export function extractPrompt(name: string, output: string, short?: { markers: number; got: number } | 'unmarked'): string {
+  const count =
+    short === 'unmarked'
+      ? '\nThe output has no finding bullets (`- [P1] Title — path:line`) and does not say "No findings.", so read its prose: return each problem it reports as a finding. When it reports none, return no findings and set clean to true only if the output is a finished review that clearly says the changes have no problems - an error, a crash, a question, a refusal, a truncated or empty output, or anything else that is not a finished review is not clean.'
+      : short
+        ? `\nThe output has ${short.markers} finding marker(s) (\`- [P0]\` ... \`- [P3]\` bullets); an earlier extraction returned ${short.got}. Return all ${short.markers}.`
+        : ''
   return `Below is the raw output of an automated code review for stage "${name}". Do not run anything and do not judge the findings.
 Extract every finding it reports - each one, none merged, none dropped, none invented - with id (F1, F2, ...), severity exactly as written (e.g. P1), file, line, title and the full detail text.${count}
 
@@ -181,27 +257,27 @@ RAW REVIEW OUTPUT:
 ${output}`
 }
 
-export function judgePrompt(p: PromptContext, reviewBase: string, findings: Finding[]): string {
+export function judgePrompt(p: PromptContext, reviewBase: string, findings: Finding[], earlier: EarlierRound[] = [], stage?: StageTask, note?: string): string {
   return `You are the JUDGE scoring a code review. Repo ${p.repo}, branch ${p.branch}, stage diff \`${shellQuote(reviewBase)}...HEAD\`. Do not edit anything.
-${p.context ? 'Design context:\n' + p.context + '\n' : ''}
-The findings come from one or more reviewers; each names its reviewer. P0/P1 findings are not in this list: they go to the implementer without a score.
-For each finding below, open the cited code and judge whether it is real, correctly described and worth fixing; score it 0-100 (findings the code refutes score low). When a finding reports the same problem as another finding in this list, score it too and set its duplicateOf to the id of the finding to keep. Then score the whole review 0-100 (correctness + actionability; mostly wrong or trivial findings = low).
-
+${note ? note + '\n' : ''}${p.context ? 'Design context:\n' + p.context + '\n' : ''}${taskSection(stage)}
+The findings come from one or more reviewers; each names its reviewer. ${judgeRouting(p, findings)}
+For each finding below, open the cited code and judge whether it is real, correctly described and worth fixing; score it 0-100 (findings the code refutes score low).${stage ? ' Score against the TASK: a finding about work another stage owns scores low; a missing part of this stage\'s task is worth fixing.' : ''} When a finding reports the same problem as another finding in this list, score it too and set its duplicateOf to the id of the finding to keep. Then score the whole review 0-100 (correctness + actionability; mostly wrong or trivial findings = low).
+${judgeHistory(earlier)}
 REVIEW:
 ${JSON.stringify(findings, null, 2)}`
 }
 
-export function planJudgePrompt(p: PromptContext, plans: string[], findings: Finding[]): string {
+export function planJudgePrompt(p: PromptContext, plans: string[], findings: Finding[], earlier: EarlierRound[] = []): string {
   return `You are the JUDGE scoring a plan review. Repo ${p.repo}, branch ${p.branch}, plan ${plans.join(', ')}. Implementation has not started. Do not edit anything.
 ${p.context ? 'Design context:\n' + p.context + '\n' : ''}
-The findings come from one or more reviewers; each names its reviewer. P0/P1 findings are not in this list: they go to the implementer without a score.
+The findings come from one or more reviewers; each names its reviewer. ${judgeRouting(p, findings)}
 For each finding below, open the cited plan line and the code, config or dependency it talks about, and judge whether it is real, correctly described and worth fixing in the plan before implementation starts; score it 0-100 (findings the repo refutes score low). When a finding reports the same problem as another finding in this list, score it too and set its duplicateOf to the id of the finding to keep. Then score the whole review 0-100 (correctness + actionability; mostly wrong or trivial findings = low).
-
+${judgeHistory(earlier)}
 REVIEW:
 ${JSON.stringify(findings, null, 2)}`
 }
 
-export function planFixPrompt(p: PromptContext, plans: string[], round: number, accepted: Finding[]): string {
+export function planFixPrompt(p: PromptContext, plans: string[], round: number, accepted: Finding[], overruled: Overruled[] = [], earlier: EarlierRound[] = []): string {
   return `${common(p)}
 
 You are the IMPLEMENTER, fixing the plan after plan review round ${round}. Implementation has not started: change only the plan.
@@ -212,7 +288,7 @@ ${
       : 'At the top of each plan file you change, extend the newest `## rN deltas (<date>)` section - an earlier round of this plan review added it - with each finding id and what you changed for it; add one (N one higher than the highest in that file, r1 when there is none) where it is missing.'
   } Take the date from \`date +%F\` in your shell.
 Fix every finding below. A finding you believe is wrong: leave the plan as it is for it and explain why in deviations.
-
+${overruledSection(overruled, earlier)}
 FINDINGS (P0/P1 or score > ${p.config.threshold}):
 ${JSON.stringify(accepted, null, 2)}`
 }

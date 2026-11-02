@@ -64,6 +64,7 @@ export const SCHEMAS: Record<ResultKind, JsonSchema> = {
     properties: {
       findings: { type: 'array', items: FINDING },
       summary: { type: 'string' },
+      clean: { type: 'boolean', description: 'only when asked to read a review that has no finding bullets: true if it is a finished review that clearly says the changes have no problems' },
     },
     required: ['findings'],
   },
@@ -90,6 +91,7 @@ export const SCHEMAS: Record<ResultKind, JsonSchema> = {
             score: { type: 'number' },
             reason: { type: 'string' },
             duplicateOf: { type: 'string', description: 'id of another finding in this list that reports the same problem; omit when there is none' },
+            repeatOf: { type: 'string', description: 'label of the earlier-round finding this one repeats, exactly as listed under EARLIER ROUNDS (e.g. r1/codex-F2); omit when it repeats none' },
           },
           required: ['id', 'score', 'reason'],
         },

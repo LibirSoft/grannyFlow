@@ -97,6 +97,8 @@ function fakeContext(behaviour: Behaviour = {}) {
           skipped = true
           return
         }
+        const dir = created.find(s => s.id === sessionID)?.location?.directory
+        if (name === 'granny_submit_implementation' && dir) git(dir, 'commit', '-q', '--allow-empty', '-m', `feat: ${title}`)
         await tools.get(name).execute(CANNED[name], { sessionID })
       },
       context: async ({ sessionID }: { sessionID: string }) => {
@@ -113,7 +115,7 @@ function fakeContext(behaviour: Behaviour = {}) {
   return { ctx, tools, created, prompts, interrupted }
 }
 
-const REVIEW_ONCE = `test -n {base} && if [ -e .granny/reviewed ]; then echo "No issues." > {out}; else touch .granny/reviewed; printf '%s\\n' '- [P2] Real issue — a.txt:1' '  detail' > {out}; fi`
+const REVIEW_ONCE = `test -n {base} && if [ -e .granny/reviewed ]; then echo "No findings." > {out}; else touch .granny/reviewed; printf '%s\\n' '- [P2] Real issue — a.txt:1' '  detail' > {out}; fi`
 
 async function startRun(repo: string, f: ReturnType<typeof fakeContext>, extra: Record<string, unknown> = {}) {
   writeFileSync(join(repo, 'granny.config.json'), JSON.stringify({ reviewers: [{ name: 'codex', engine: 'command', command: REVIEW_ONCE }], ...extra }))
@@ -306,6 +308,7 @@ describe('opencode plugin', () => {
       const done = f.prompts.find(p => p.sessionID === 'parent')!.text
       expect(done).toContain(`[granny] Run ${id} finished.`)
       expect(done).toContain('- plan review: clean, 2 review round(s)\n- one: clean')
+      expect(done).toContain('- final review: skipped, 0 review round(s) - one stage and no lane merge, so its stage review already covered the whole branch\n- final: gates green')
     })
 
     it('stops before stage 1 when the plan review hits the round cap, and says so', async () => {
@@ -366,7 +369,7 @@ describe('opencode plugin', () => {
           {
             name: 'codex',
             engine: 'command',
-            command: `test -n {base} && if [ -e .granny/reviewed ]; then echo "No issues." > {out}; else touch .granny/reviewed; printf '%s\\n' '- [P2] Real issue — a.txt:1' '  detail' > {out}; fi`,
+            command: `test -n {base} && if [ -e .granny/reviewed ]; then echo "No findings." > {out}; else touch .granny/reviewed; printf '%s\\n' '- [P2] Real issue — a.txt:1' '  detail' > {out}; fi`,
           },
         ],
       }),

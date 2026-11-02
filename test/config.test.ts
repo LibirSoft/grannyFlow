@@ -16,7 +16,7 @@ describe('resolveConfig', () => {
     expect(c.threshold).toBe(75)
     expect(c.roles.implementer).toEqual({ model: 'opus', effort: 'max' })
     expect(c.roles.judge).toEqual({ model: 'haiku' })
-    expect(c.reviewers).toEqual([{ name: 'codex', engine: 'auto' }])
+    expect(c.reviewers).toEqual([{ name: 'reviewer', engine: 'agent' }])
     expect(c.gates).toEqual(['bun test'])
     expect(c.rules).toEqual([])
     expect(DEFAULT_CONFIG.threshold).toBe(70)
@@ -58,8 +58,8 @@ describe('reviewers', () => {
   const reviewers = (list: unknown, host?: 'claude-code' | 'opencode') => () => resolveConfig([{ reviewers: list }], host)
   const one = (r: Record<string, unknown>, host?: 'claude-code' | 'opencode') => reviewers([r], host)
 
-  it('defaults to one Codex reviewer on engine auto', () => {
-    expect(DEFAULT_CONFIG.reviewers).toEqual([{ name: 'codex', engine: 'auto' }])
+  it('defaults to one agent reviewer on the host model, not Codex', () => {
+    expect(DEFAULT_CONFIG.reviewers).toEqual([{ name: 'reviewer', engine: 'agent' }])
     expect('reviewer' in DEFAULT_CONFIG.roles).toBe(false)
   })
 
@@ -198,6 +198,19 @@ describe('planReview', () => {
 
   it('rejects a planReview that is not a boolean', () => {
     expect(() => resolveConfig([{ planReview: 'yes' }])).toThrow('planReview must be a boolean')
+  })
+})
+
+describe('finalReview', () => {
+  it('is on by default and takes a boolean from any layer', () => {
+    expect(DEFAULT_CONFIG.finalReview).toBe(true)
+    expect(resolveConfig([]).finalReview).toBe(true)
+    expect(resolveConfig([{ finalReview: false }]).finalReview).toBe(false)
+    expect(resolveConfig([{ finalReview: false }, { finalReview: true }]).finalReview).toBe(true)
+  })
+
+  it('rejects a finalReview that is not a boolean', () => {
+    expect(() => resolveConfig([{ finalReview: 'no' }])).toThrow('finalReview must be a boolean')
   })
 })
 

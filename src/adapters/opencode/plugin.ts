@@ -147,6 +147,10 @@ function summarize(result: RunResult, worktree: boolean): string {
     const stopped = result.plan.outcome === 'round-cap' || result.plan.outcome === 'review-failed'
     lines.unshift(`${line(result.plan, 'plan review')}${stopped ? ' - stopped before stage 1, nothing was implemented' : ''}`)
   }
+  const reviewLine = (s: PlanResult, name: string) =>
+    `${line(s, name)}${s.outcome === 'skipped' || s.outcome === 'review-skipped' ? ` - ${s.note ?? 'not run'}` : s.outcome === 'round-cap' || s.outcome === 'review-failed' ? ' - the branch still has unresolved findings; the final check ran anyway' : ''}`
+  if (result.finalReview) lines.push(reviewLine(result.finalReview, 'final review'))
+  for (const r of result.repos?.slice(1) ?? []) if (r.finalReview) lines.push(reviewLine(r.finalReview, `final review ${r.repo}`))
   if (result.final) lines.push(`- final: gates ${result.final.gatesGreen ? 'green' : 'RED'}, PR body ${result.final.prBodyPath}${result.final.issues ? `, issues: ${result.final.issues}` : ''}`)
   for (const r of result.repos?.slice(1) ?? []) {
     lines.push(`- final ${r.repo}: ${r.final ? `gates ${r.final.gatesGreen ? 'green' : 'RED'}, PR body ${r.final.prBodyPath}${r.final.issues ? `, issues: ${r.final.issues}` : ''}` : 'returned nothing'}`)

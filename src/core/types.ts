@@ -48,6 +48,7 @@ export interface Finding {
   score?: number
   reason?: string
   duplicates?: string[]
+  repeatOf?: string
 }
 
 export interface StageSpec {
@@ -73,9 +74,10 @@ export interface RoundRecord {
   round: number
   score: number | null
   findings: Finding[]
+  deviations?: string
 }
 
-export type StageOutcome = 'clean' | 'residual-only' | 'round-cap' | 'review-failed' | 'review-skipped' | 'skipped'
+export type StageOutcome = 'clean' | 'residual-only' | 'round-cap' | 'review-failed' | 'review-skipped' | 'gates-red' | 'no-changes' | 'skipped'
 
 export interface StageResult {
   stage: string
@@ -116,6 +118,7 @@ export interface RepoResult {
   repo: string
   base: string
   worktree: string
+  finalReview?: PlanResult
   final: FinalReport | null
 }
 
@@ -127,6 +130,7 @@ export interface RunResult {
   draft?: PlanDraft
   plan?: PlanResult
   stages: StageResult[]
+  finalReview?: PlanResult
   final: FinalReport | null
   repos?: RepoResult[]
 }

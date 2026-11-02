@@ -9,17 +9,18 @@ import { agentPlanReviewPrompt, planReviewPrompt, type PromptContext } from '../
 import { parseCodexReview, reviewFailure } from '../src/core/review'
 import { planReviewScript, reviewStem } from '../src/core/reviewer'
 import type { CommandResult, HostName } from '../src/core/types'
-import { fakeHost, finding, review } from './fake-host'
+import { fakeHost, finding, review, withCodex } from './fake-host'
 
 const PLAN = '/plans/v1.md'
 
-const input = (extra: Partial<RunInput> = {}): RunInput => ({
+const input = (extra: Partial<RunInput> = {}): RunInput =>
+  withCodex({
   repo: '/work/repo',
   branch: 'feat/x',
   base: 'main',
   stages: [{ name: 'core', task: 'Do WP-01.' }],
   ...extra,
-})
+  })
 
 describe('the plan input', () => {
   it('takes one absolute path or a list of them', () => {
@@ -45,7 +46,7 @@ describe('the plan input', () => {
 
   it('puts the plan files in every agent prompt and the {prompt} of a command reviewer', async () => {
     const f = fakeHost({
-      reviews: [review(finding('P2', 'Off by one')), 'No issues.'],
+      reviews: [review(finding('P2', 'Off by one')), 'No findings.'],
       scores: [{ 'glm-F1': 90 }],
     })
     await runGranny(
@@ -170,7 +171,7 @@ describe('the plan review', () => {
     const f = fakeHost()
     const r = await runGranny(f.host, input({ plan: PLAN, stages: [{ name: 'a', task: 'A' }, { name: 'b', task: 'B' }], fromStage: 2, config: { planReview: true } }))
     expect(r.plan).toEqual({ outcome: 'skipped', rounds: 0, residual: [], unresolved: [], history: [] })
-    expect(f.phases).toEqual(['Worktree', 'Implement', 'Review', 'PR ready'])
+    expect(f.phases).toEqual(['Worktree', 'Implement', 'Review', 'Final review', 'PR ready'])
     expect(f.commands.some(planCommand)).toBe(false)
     expect(f.logs).toContain('plan review skipped - the run resumes from stage 2')
     expect(f.calls.find(c => c.kind === 'implementation')!.prompt).toContain(`Plan files - read them first: ${PLAN}`)

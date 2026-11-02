@@ -59,6 +59,10 @@ function toFinding(severity: string, paren: boolean, rest: string, n: number, re
   return finding
 }
 
+const NO_FINDINGS = /^no (?:material )?findings\.?$/i
+
+export const saysNoFindings = (text: string): boolean => text.split(/\r\n?|\n/).some(line => NO_FINDINGS.test(line.trim()))
+
 export function reviewFailure(text: string): string | undefined {
   return FAILED_RENDER.exec(text)?.[0]
 }
@@ -107,7 +111,7 @@ export function triage(findings: Finding[], threshold: number): { accepted: Find
   const accepted: Finding[] = []
   const residual: Finding[] = []
   for (const f of findings) {
-    if (isBlocker(f) || f.score === undefined || f.score > threshold) accepted.push(f)
+    if ((isBlocker(f) && f.repeatOf === undefined) || f.score === undefined || f.score > threshold) accepted.push(f)
     else residual.push(f)
   }
   return { accepted, residual }

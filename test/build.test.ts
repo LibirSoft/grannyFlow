@@ -2,7 +2,7 @@ import { describe, expect, it } from 'bun:test'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { buildClaudeCode, buildOpencode } from '../scripts/build'
-import { finding, review } from './fake-host'
+import { CODEX_REVIEWER, finding, review } from './fake-host'
 
 const root = join(import.meta.dir, '..')
 const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor
@@ -37,9 +37,11 @@ describe('claude-code workflow.js', () => {
       const kind = Object.keys(opts.schema.properties).join(',')
       if (opts.label === 'worktree') return { ran: true, exitCode: 0, output: "Preparing worktree (new branch 'feat/x')\n[granny] worktree: /r-worktrees/feat-x\n" }
       if (kind.startsWith('startSha')) return { startSha: 's1', headSha: 'h1', gatesGreen: true, gates: 'ok', commits: ['c'], untested: '' }
+      if (kind.startsWith('ran') && prompt.includes('git rev-parse --verify HEAD')) return { ran: true, exitCode: 0, output: 's1\n' }
+      if (kind.startsWith('ran') && prompt.includes('git rev-list --count')) return { ran: true, exitCode: 0, output: '1\n' }
       if (kind.startsWith('ran')) {
         reviews++
-        return { ran: true, exitCode: 0, output: reviews === 1 ? review(finding('P2', 'Off by one')) : 'No issues.' }
+        return { ran: true, exitCode: 0, output: reviews === 1 ? review(finding('P2', 'Off by one')) : 'No findings.' }
       }
       if (kind.startsWith('score')) return { score: 80, perFinding: [{ id: 'codex-F1', score: 85, reason: 'real' }], rationale: 'ok' }
       if (kind.startsWith('gatesGreen')) return { gatesGreen: true, gates: 'ok', commits: ['c'], prBodyPath: '.granny/PR-BODY.md', issues: '' }
@@ -50,7 +52,7 @@ describe('claude-code workflow.js', () => {
       repo: '/r',
       branch: 'feat/x',
       stages: [{ name: 'one', task: 'Do it.' }],
-      config: [{ roles: { implementer: { model: 'opus', effort: 'high' } } }, { threshold: 80 }],
+      config: [CODEX_REVIEWER, { roles: { implementer: { model: 'opus', effort: 'high' } } }, { threshold: 80 }],
     })
     expect(result.stages[0]).toMatchObject({ stage: 'one', outcome: 'clean', rounds: 2 })
     expect(result.base).toBe('main')
@@ -61,7 +63,9 @@ describe('claude-code workflow.js', () => {
     expect(setup.prompt.startsWith('READ-ONLY ROLE')).toBe(false)
     expect(setup.prompt).toContain('\ncd /r && ex="$(git rev-parse --git-common-dir)/info/exclude"')
     expect(setup.prompt).toContain('wt=/r-worktrees/feat-x;')
-    const impl = calls[1]!
+    expect(calls[1]!.opts).toMatchObject({ label: 'head one', phase: 'Implement' })
+    expect(calls[1]!.prompt).toContain('\ncd /r-worktrees/feat-x && git rev-parse --verify HEAD\n')
+    const impl = calls[2]!
     expect(impl.opts).toMatchObject({ label: 'implement one', phase: 'Implement', model: 'opus', effort: 'high' })
     expect(impl.prompt).toContain('Working repo: /r-worktrees/feat-x, branch `feat/x`')
     const runner = calls.find(c => c.opts.label === 'review one r1 codex')!
@@ -87,6 +91,8 @@ describe('claude-code workflow.js', () => {
       if (opts.label === 'worktree') return { ran: true, exitCode: 0, output: '[granny] worktree: /r-worktrees/feat-x\n' }
       if (kind.startsWith('files')) return { files: ['/plans/v1.md'], changes: 'codex-F1: added the migration step' }
       if (kind.startsWith('startSha')) return { startSha: 's1', headSha: 'h1', gatesGreen: true, gates: 'ok', commits: ['c'], untested: '' }
+      if (kind.startsWith('ran') && prompt.includes('git rev-parse --verify HEAD')) return { ran: true, exitCode: 0, output: 's1\n' }
+      if (kind.startsWith('ran') && prompt.includes('git rev-list --count')) return { ran: true, exitCode: 0, output: '1\n' }
       if (kind.startsWith('ran')) {
         reviews++
         return { ran: true, exitCode: 0, output: reviews === 1 ? review(finding('P1', 'Missing migration step', '/plans/v1.md', 4)) : 'No findings.' }
@@ -100,7 +106,7 @@ describe('claude-code workflow.js', () => {
       branch: 'feat/x',
       plan: '/plans/v1.md',
       stages: [{ name: 'one', task: 'Do it.' }],
-      config: { planReview: true },
+      config: [CODEX_REVIEWER, { planReview: true }],
     })
     expect(result.plan).toMatchObject({ outcome: 'clean', rounds: 2 })
     expect(result.stages[0]).toMatchObject({ stage: 'one', outcome: 'clean' })
