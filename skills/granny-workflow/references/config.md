@@ -21,6 +21,8 @@ Layers, later wins:
 | `threshold` | `70` | a finding is sent back to the implementer when it is P0/P1 (also `critical`/`high`; these skip the judge), when the judge gave it no score, or when its score is **strictly above** this. The overall review score gates nothing |
 | `maxRounds` | `4` | review rounds per stage, and for the plan review; the stage ends `round-cap` after the last one |
 | `planReview` | `false` | `true`: with a `plan` in the run's input, review the plan files before stage 1 - see [Plan review](#plan-review). It costs extra tokens; no effect without `plan` |
+| `parallel` | `true` | run independent stages at the same time - stages in different repos, and stages whose `after` frees them from the one before; a same-repo stage runs in its own worktree and is merged back - see [Parallel stages](#parallel-stages). `false`: one stage at a time, in list order |
+| `maxParallel` | `3` | the most stages running at once (each runs its own reviewers too) |
 | `base` | `"main"` | branch never to touch; the run's `base` argument overrides it |
 | `gates` | `"auto"` | `"auto"`: agents discover the project's test/lint/build/typecheck commands. Or a list, e.g. `["bun test", "bun run check", "bun run build"]` |
 | `workDir` | `".granny"` | repo-relative, git-excluded: PR body, review outputs, run journals |
@@ -73,9 +75,34 @@ With `worktree: false` the run works in `repo` itself, on the branch you checked
 
 ## Planning
 
-A run with `goal` instead of `stages` plans the work and stops; it implements nothing. `goal` says what to build, in the user's words plus whatever granny gathered; `context` works as in any run. In phase "Plan", after the worktree setup, the planner (role `planner`, write access, label `plan`) explores the repo in the worktree and writes the plan to `plan` - one absolute path or a list - or, without `plan`, to `<repo>/<workDir>/plans/<branch-slug>.md` in the main checkout (git-excluded, so never committed; `feat/login` → `feat-login.md`). An existing file there is revised, not replaced. The plan names the current state of the code, the approach, work orders `WP-01`, … with files, steps and testable acceptance criteria, the gates, risks and open questions. The planner returns `{ files, stages: [{ name, task }], summary, questions? }`; a planner that returns nothing, no absolute plan path or no stage with a task fails the run.
+A run with `goal` instead of `stages` plans the work and stops; it implements nothing. `goal` says what to build, in the user's words plus whatever granny gathered; `context` works as in any run. In phase "Plan", after the worktree setup, the planner (role `planner`, write access, label `plan`) explores the repo in the worktree and writes the plan to `plan` - one absolute path or a list - or, without `plan`, to `<repo>/<workDir>/plans/<branch-slug>.md` in the main checkout (git-excluded, so never committed; `feat/login` → `feat-login.md`). An existing file there is revised, not replaced. The plan names the current state of the code, the approach, work orders `WP-01`, … with files, steps and testable acceptance criteria, the gates, risks and open questions. The planner returns `{ files, stages: [{ name, task, after, repo? }], summary, questions? }`: it marks each stage's `after` (`[]` for one that can start right away) so independent work runs in parallel, and with `repos` in the input it explores those repos too and gives each repo its own stage; a planner that returns nothing, no absolute plan path or no stage with a task fails the run.
 
 The files it returned are then the run's plan: with `"planReview": true`, the plan review below runs on them as on any plan. Then the run ends with `draft` (the planner's result), `plan` (the plan review's outcome, `review-skipped` with `planReview` off), `stages: []` and `final: null`. Granny shows the user the plan, the proposed stages and the open questions, and waits. Once the user approves - after editing the plan or the stages if they want - granny launches a second run with `plan: draft.files` and the approved `stages`; with the plan review on, add the run override `"planReview": false` when the plan is unchanged since its review, so it is not reviewed twice. `goal` is exclusive with `stages` and `fromStage`.
+
+## Parallel stages
+
+A run can span several repos and run stages side by side. On by default (`"parallel": true`); `"parallel": false` runs one stage at a time in list order, as before.
+
+**Inputs.** `repos` lists the other repos the work touches, besides `repo` (the primary): absolute paths, or `{ "repo": "/abs", "base": "master" }` when a repo's base branch is not the run's. A stage names the repo it works in with `repo` (default: the primary). `after` lists the 1-based numbers of the earlier stages it waits for; `[]` starts it right away. A stage without `after` waits for the previous stage in the same repo, so a plain list of stages in one repo still runs in order, and stages in different repos start together.
+
+```jsonc
+{
+  "repo": "/work/web-a", "branch": "feat/new-logo",
+  "repos": ["/work/web-b", { "repo": "/work/api", "base": "master" }],
+  "stages": [
+    { "name": "logo web-a", "task": "WP-01" },
+    { "name": "logo web-b", "task": "WP-01", "repo": "/work/web-b" },
+    { "name": "resilience4j", "task": "WP-02", "repo": "/work/api" },
+    { "name": "retry config", "task": "WP-03", "repo": "/work/api", "after": [] }
+  ]
+}
+```
+
+**Scheduling.** A stage starts once every stage it waits for has finished (whatever its outcome), with at most `maxParallel` running. Stages before `fromStage` count as finished. When a stage throws (an implementer that returns nothing, a worktree that cannot be set up), nothing new starts, the stages already running finish, then the run fails with that error.
+
+**Several repos.** Each repo the stages use gets its own worktree on the run's branch, set up like the primary's ([Worktree](#worktree)); with a `worktreeDir`, other repos' worktrees are `<worktreeDir>/<repo name>-<branch-slug>` so they do not collide. Every prompt names the other repos' worktrees and forbids touching them. After the last stage, the final check runs in every repo (labels `pr-ready check` and `pr-ready check <repo name>`), and the result's `repos` lists `{ repo, base, worktree, final }` for each; `worktree` and `final` stay the primary's. Each stage in another repo carries `repo` in the result. Only the primary's `granny.config.json` is read: a `gates` list applies to every repo, so keep `"auto"` when the repos differ.
+
+**The same repo.** A stage whose repo is busy with another stage runs in its own worktree on the branch `<branch>--s<N>-<stage-slug>`, branched from the run's branch as it is when the stage starts (logged `<stage>: <branch> is busy in <repo> - running in parallel on <lane branch>`). It is implemented and reviewed there, and writes its PR-body notes to `<workDir>/PR-BODY-s<N>-<stage-slug>.md` in the run's worktree; the final check folds them into the PR body. Once its review loop ends, granny waits until no stage is working in the run's worktree, then runs `git merge --no-edit <lane branch>` there. On a conflict the implementer resolves it (label `resolve merge <stage>`) and concludes the merge; a merge it leaves unfinished fails the run. Then the lane worktree is removed and its branch deleted (only when the lane has no uncommitted change; otherwise both stay, and the stage's note says so). The stage's `note` records `ran in parallel on <lane branch>, merged`. Only stages with no shared files belong in parallel; the planner marks them with `after`.
 
 ## Plan review
 

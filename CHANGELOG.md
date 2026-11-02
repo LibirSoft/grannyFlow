@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.3.0
+
+### Added
+
+- **Parallel stages**, on by default (`"parallel": true`, at most `maxParallel` stages at once, default 3). A stage waits only for the stages in its new `after` list (1-based, earlier stages only); without `after` it waits for the previous stage in its repo, so existing stage lists run as before. `"parallel": false` runs one stage at a time in list order.
+- **Several repos in one run**: `repos` lists the other repos (paths, or `{ repo, base }`) and a stage names its repo with `repo`. Each repo gets its own worktree on the run's branch, every prompt names the other repos and forbids touching them, and the final check runs in every repo; the result has `repos: [{ repo, base, worktree, final }]` and each stage in another repo carries `repo`. On opencode the preflight checks every stage repo.
+- **Parallel stages in one repo**: a stage whose repo is busy runs in its own worktree on `<branch>--s<N>-<stage-slug>`, is implemented and reviewed there, then merged into the run's branch once no stage works there (`git merge --no-edit`). On a conflict the implementer resolves the merge; a merge left unfinished fails the run. The lane worktree and branch are removed after a clean merge. The lane's PR-body notes go to `<workDir>/PR-BODY-s<N>-<stage-slug>.md` in the run's worktree, and the final check folds them in.
+- The planner sets `after` on every stage so independent work runs in parallel, and with `repos` it explores those repos and gives each repo its own stage.
+- When a stage throws while others run, nothing new starts, the running stages finish, then the run fails with that error.
+
 ## 1.2.0
 
 ### Added

@@ -16,7 +16,7 @@ optional - given a plan and "planReview": true (default false):
   plan review ─► the same reviewers, routing and cap; the implementer fixes the plan in place (never committed)
      ├─ clean, residual-only, or plan review off ─► stage 1
      └─ round-cap or review-failed ─► stop and report; nothing is implemented
-for each stage:
+for each stage - independent stages at the same time (parallel, default on):
   implementer builds the stage ─► every reviewer reviews it, in parallel (base = stage start sha)
      ├─ a reviewer fails, then fails its one retry ─► stage review-failed
      ├─ no reviewer reports a finding ─────────────► stage clean
@@ -24,7 +24,8 @@ for each stage:
           ├─ any P0/P1, or score > threshold ─► implementer fixes those ─► review again
           └─ none ─► stage done; the rest are "residual" for you
      cap: maxRounds reviews per stage
-after the last stage: final check (gates, clean tree, no AI trailers, PR body) ─► report ─► wait
+     a stage in another repo works in that repo's worktree; one whose repo is busy works in its own worktree, merged back after
+after the last stage: final check in every repo (gates, clean tree, no AI trailers, PR body) ─► report ─► wait
 ```
 
 </details>
@@ -34,6 +35,7 @@ The loop is code, not a prompt: on Claude Code and opencode an engine drives eve
 - **Worktree** - the run works in the branch's own git worktree: the one that already has the branch checked out, or a new one next to the repo. Your main checkout stays as it is, and granny never removes the worktree.
 - **Planner** - no plan yet? Give granny the goal instead: a planner agent explores the repo, writes the plan to the git-excluded `.granny/plans/<branch>.md` and proposes the stages, and the run stops for your approval (with `"planReview": true`, after the plan review has cleaned the plan). Approve (or edit) and granny implements it in a second run.
 - **Plan review** (optional, `"planReview": true`) - given plan files, the reviewers check the plan against the actual repo before anything is built; the implementer fixes it in place until it is clean, and a plan review that cannot get there stops the run. It runs every reviewer, the judge and the implementer over the plan for up to `maxRounds` rounds before any code is written, so it costs extra tokens. Without it, the plan files still go to every agent.
+- **Parallel stages** (on by default, `"parallel": false` turns it off) - independent stages run at the same time. One run can span several repos (`repos`): the same logo change in two frontends, a Resilience4j config in every service - each repo gets its own worktree and its stages start together. Inside one repo, a stage that does not build on the one before (`after: []`, which the planner sets) runs in its own worktree and is merged back after its review loop; the implementer resolves a merge conflict. A stage without `after` waits for the previous stage in its repo, so a plain stage list runs in order as before.
 - **Reviewers** - as many as you configure, of any kind: Codex (the CLI or OpenAI's Codex plugin), a host model, or any CLI that answers a prompt. They all review every round at the same time; one that fails twice ends the stage `review-failed` instead of reading as clean.
 - **Judge** - P0/P1 findings skip it and go straight to the implementer. It scores every other finding 0-100 and merges duplicates across reviewers; findings above the threshold are fixed, the rest are left for you as residual.
 
@@ -120,6 +122,8 @@ Three layers, later wins: `~/.config/granny/config.json`, `<repo>/granny.config.
 | `threshold` | `70` | findings scoring strictly above it are fixed; P0/P1 always are, without the judge |
 | `maxRounds` | `4` | review rounds per stage, and for the plan review |
 | `planReview` | `false` | `true` reviews the plan files before stage 1 when the run has a `plan` (extra tokens); skipped when it resumes with `fromStage` |
+| `parallel` | `true` | run independent stages at the same time (other repos, or `after` in the same repo); `false`: one at a time, in order |
+| `maxParallel` | `3` | the most stages running at once |
 | `gates` | `auto` | agents discover test/lint/build/typecheck, or list them |
 | `worktree` | `true` | work in the branch's own git worktree; `false` works in `repo` on the branch you checked out |
 | `worktreeDir` | `<parent of repo>/<repo name>-worktrees` | where new worktrees go; absolute, or relative to the repo's parent |

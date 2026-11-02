@@ -1,7 +1,7 @@
 export const meta = {
   name: 'granny-workflow',
   description: 'Plan a goal (then stop for approval), or implement a plan stage by stage; after each stage loop review -> judge -> fix until clean; end PR-ready without pushing',
-  whenToUse: 'Launched by the granny-workflow skill with args {repo, branch, base, context, goal, plan, stages, config}',
+  whenToUse: 'Launched by the granny-workflow skill with args {repo, branch, base, repos, context, goal, plan, stages, config}',
   phases: [
     { title: 'Worktree' },
     { title: 'Plan' },
@@ -27,6 +27,8 @@ var DEFAULT_CONFIG = {
   workDir: ".granny",
   worktree: true,
   planReview: false,
+  parallel: true,
+  maxParallel: 3,
   language: "English",
   aiAttribution: false,
   rules: [
@@ -201,6 +203,10 @@ function validate(c) {
   }
   if (typeof c.planReview !== "boolean")
     errors.push("planReview must be a boolean");
+  if (typeof c.parallel !== "boolean")
+    errors.push("parallel must be a boolean");
+  if (!Number.isInteger(c.maxParallel) || c.maxParallel < 1)
+    errors.push("maxParallel must be an integer >= 1");
   if (typeof c.aiAttribution !== "boolean")
     errors.push("aiAttribution must be a boolean");
   if (!Array.isArray(c.rules) || !c.rules.every((r) => typeof r === "string"))
@@ -223,6 +229,7 @@ function shellQuote(value) {
 }
 
 var prBodyPath = (c) => `${c.workDir}/PR-BODY.md`;
+var prBodyOf = (p) => p.prBody ?? prBodyPath(p.config);
 function gatesLine(c) {
   if (c.gates === "auto") {
     return "Gates: discover the project's own test, lint/format check, build and typecheck commands (package.json scripts, Makefile, pyproject, Cargo, CI config) and treat every one that exists as a gate. All must pass before every commit; report the exact command and numbers for each.";
@@ -240,12 +247,18 @@ function common(p) {
     `Code, comments, commit messages and the PR body in ${c.language}.`,
     ...c.rules
   ];
+  if (p.others?.length) {
+    lines.push(`This run also changes other repos: ${p.others.join(", ")}. Other granny agents may be working in them right now: read them when you need to, but never edit, stage or commit anything there.`);
+  }
   if (p.context)
     lines.push("", "CONTEXT - read these before anything else and obey them:", p.context);
   return lines.join(`
 `);
 }
-function draftPrompt(p, goal, plans) {
+var repoAsk = (p, repos) => (repos.length ? `
+This goal spans several repos: ${p.repo} (the primary) and ${repos.join(", ")}. Explore each one the goal touches. A stage works in exactly one repo: set its repo to the absolute path of that repo (leave it out for the primary). When the same change goes to several repos, give each repo its own stage.` : "") + `
+Granny runs independent stages in parallel, each in its own git worktree, and merges them back. Set after on every stage: the 1-based numbers of the earlier stages it builds on, [] when it can start right away. Two stages are independent when neither needs the other's code and they do not edit the same files${repos.length ? " (the same change in several repos usually is)" : ""}; when in doubt, make the later one wait.`;
+function draftPrompt(p, goal, plans, repos = []) {
   return `${common(p)}
 
 You are the PLANNER. Nothing is implemented yet: write a plan, not code. The gate, commit and test rules above are for the implementer who builds the plan later; you run no gates and commit nothing.
@@ -254,12 +267,13 @@ ${goal}
 
 Explore the repo first - the code, configs, lockfiles, tests and docs the goal touches. Then write the plan to ${plans.join(", ")} (absolute paths; create the directories if missing). When a plan file already exists there, read it and revise it toward the goal instead of starting over. Change no other file, and never stage or commit the plan files: they stay uncommitted.
 Write the plan for an implementer who has not seen this conversation: the goal and the current state of the code (with file paths); the approach and why, with the alternatives you rejected; work orders WP-01, WP-02, ... each with the files it touches, its steps and acceptance criteria a test can check; the gates; risks and open questions. Name versions, APIs, flags and files as the repo has them, not from memory.
-Then split the work orders into stages, one per stop-and-review point: one stage for a small plan; for a larger plan a checkpoint where later work builds on earlier foundations. Each stage's task names exactly which work orders it does.
-Return files (the absolute paths you wrote), stages ([{ name, task }]), summary (a few lines for the user: the approach and the work orders) and questions (decisions only the user can make, each with the default the plan assumes; empty when none).`;
+Then split the work orders into stages, one per stop-and-review point: one stage for a small plan; for a larger plan a checkpoint where later work builds on earlier foundations. Each stage's task names exactly which work orders it does.${repoAsk(p, repos)}
+Return files (the absolute paths you wrote), stages ([{ name, task, after${repos.length ? ", repo" : ""} }]), summary (a few lines for the user: the approach and the work orders) and questions (decisions only the user can make, each with the default the plan assumes; empty when none).`;
 }
-function implementPrompt(p, stage, index, total, name) {
-  const pr = prBodyPath(p.config);
-  const earlier = index === 0 ? "" : `Earlier stages are done and reviewed - read \`git log --oneline ${shellQuote(p.base)}..HEAD\`, the code and ${pr} first.
+function implementPrompt(p, stage, index, total, name, builds = index > 0) {
+  const pr = prBodyOf(p);
+  const earlier = builds ? `${p.others?.length ? "Earlier stages in this repo are done and reviewed" : "Earlier stages are done and reviewed"} - read \`git log --oneline ${shellQuote(p.base)}..HEAD\`, the code and ${pr} first.
+` : index === 0 ? "" : `This stage does not build on the other stages: they run in parallel, elsewhere or later. Expect no commits from them on this branch.
 `;
   return `${common(p)}
 
@@ -274,7 +288,7 @@ function fixPrompt(p, name, round, accepted) {
   return `${common(p)}
 
 You are the IMPLEMENTER, fixing review round ${round} of stage "${name}".
-Apply the review findings on top of the current branch state (read \`git log --oneline ${shellQuote(p.base)}..HEAD\` and the code first). Fix every finding below, red-green where it changes behaviour, keep the gates green, commit (\`fix(...)\`), and add each finding id with what you did to the "Review fixes" section of ${prBodyPath(p.config)}. A finding you believe is wrong: do not fix it, explain why in deviations.
+Apply the review findings on top of the current branch state (read \`git log --oneline ${shellQuote(p.base)}..HEAD\` and the code first). Fix every finding below, red-green where it changes behaviour, keep the gates green, commit (\`fix(...)\`), and add each finding id with what you did to the "Review fixes" section of ${prBodyOf(p)}. A finding you believe is wrong: do not fix it, explain why in deviations.
 
 FINDINGS (P0/P1 or score > ${p.config.threshold}):
 ${JSON.stringify(accepted, null, 2)}`;
@@ -290,6 +304,15 @@ Set ran=true only if it exited 0, exitCode to its exit code, and output to every
 }
 function worktreeCommandPrompt(repo, branch, script) {
   return `You run one shell command that sets up the git worktree of branch \`${branch}\` for a granny run, and return its output. Run nothing else, and do not edit, stage or commit anything yourself.
+Repo ${repo}.
+
+Run exactly this:
+${script}
+
+Set ran=true only if it exited 0, exitCode to its exit code, and output to everything it printed, verbatim and complete. If it failed, set ran=false and explain in note. Never invent output.`;
+}
+function gitCommandPrompt(repo, step, script) {
+  return `You run one git command for the "${step}" step of a granny run, and return its output. Run nothing else, and do not edit, stage or commit anything yourself.
 Repo ${repo}.
 
 Run exactly this:
@@ -316,7 +339,7 @@ function commandReviewPrompt(p, name, reviewBase) {
   ].filter(Boolean).join(" ").replace(/\s*\n\s*/g, " ");
 }
 var planReviewAsks = (p, plans) => [
-  `Review the plan in ${plans.join(", ")} - a plan, not code changes - against the actual repo at ${p.repo} (branch \`${p.branch}\`): open the code, configs, lockfiles and docs the plan talks about before reporting anything.`,
+  `Review the plan in ${plans.join(", ")} - a plan, not code changes - against the actual repo at ${p.repo} (branch \`${p.branch}\`)${p.others?.length ? ` and the other repos it changes (${p.others.join(", ")})` : ""}: open the code, configs, lockfiles and docs the plan talks about before reporting anything.`,
   "Look for: wrong assumptions about the code or its dependencies, missing steps, risky ordering, acceptance criteria that cannot be tested, and version drift (versions, APIs, flags or files the plan names that differ from what the repo or its dependencies actually have).",
   "Report every finding as a bullet line in exactly this form: `- [P1] Title — /abs/path/of/plan.md:12` - severity P0 (critical), P1 (must fix before implementing), P2 (should fix) or P3 (nit), a short title, an em dash, then the absolute path of the plan file and the line in it the finding is about. Put the detail on the lines after it, indented by two spaces.",
   'Use that bullet form for findings only. With no findings, write "No findings." and nothing else.'
@@ -383,7 +406,15 @@ function finalPrompt(p) {
   const attribution = p.config.aiAttribution ? "" : ` \`git log ${shellQuote(p.base)}..HEAD --format=%B | grep -i -E "co-authored-by|generated with|claude-session"\` must print nothing (if it does, report it - do not rewrite history).`;
   return `${common(p)}
 
-You are GRANNY doing the FINAL CHECK - no push, no remote, no PR. Run every gate and record exact numbers. \`git status --short\` must be clean.${attribution} Make ${prBodyPath(p.config)} complete and accurate against the actual commits. Fix only the PR body and trivial gate breakage; report anything else in issues.`;
+You are GRANNY doing the FINAL CHECK - no push, no remote, no PR. Run every gate and record exact numbers. \`git status --short\` must be clean.${attribution} Make ${prBodyPath(p.config)} complete and accurate against the actual commits${p.config.parallel ? `; fold in the notes of stages that ran in their own worktree (${p.config.workDir}/PR-BODY-*.md, when any exist) and delete those files` : ""}. Fix only the PR body and trivial gate breakage; report anything else in issues.`;
+}
+function mergePrompt(p, name, lane, output) {
+  return `${common(p)}
+
+You are the IMPLEMENTER, finishing a merge. Stage "${name}" ran in parallel on branch \`${lane}\` and was reviewed there; \`git merge ${lane}\` into \`${p.branch}\` stopped on conflicts:
+${output.slice(-3000)}
+
+Resolve every conflict so both sides' intent survives (read \`git log --oneline ${shellQuote(p.base)}..HEAD\` and \`git log --oneline HEAD..${shellQuote(lane)}\` first), keep the gates green, and conclude the merge with \`git commit --no-edit\`. Never abort the merge, never rebase or reset. Return startSha = HEAD before the merge (\`git rev-parse HEAD\` before you commit).`;
 }
 
 var MARKER = /^\s*[-*]\s*\[(P[0-3]|[A-Za-z]+)\](.*)$/;
@@ -587,7 +618,9 @@ var SCHEMAS = {
           type: "object",
           properties: {
             name: { type: "string" },
-            task: { type: "string", description: "exactly which work orders or sections of the plan this stage does" }
+            task: { type: "string", description: "exactly which work orders or sections of the plan this stage does" },
+            repo: { type: "string", description: "absolute path of the repo this stage works in, when the run spans several repos; omit for the primary repo" },
+            after: { type: "array", items: { type: "number" }, description: "1-based numbers of the earlier stages this stage builds on; [] when it can start right away (independent stages run in parallel)" }
           },
           required: ["name", "task"]
         }
@@ -686,12 +719,14 @@ function normalize(path) {
   return `/${parts.join("/")}`;
 }
 var branchSlug = (branch) => branch.replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") || "branch";
-function worktreePath(repo, branch, worktreeDir) {
+function worktreePath(repo, branch, worktreeDir, shared = false) {
   const top = normalize(repo);
   const cut = top.lastIndexOf("/");
   const parent = top.slice(0, cut) || "/";
-  const dir = worktreeDir === undefined ? `${parent}/${top.slice(cut + 1)}-worktrees` : worktreeDir.startsWith("/") ? worktreeDir : `${parent}/${worktreeDir}`;
-  return normalize(`${dir}/${branchSlug(branch)}`);
+  const name = top.slice(cut + 1);
+  const dir = worktreeDir === undefined ? `${parent}/${name}-worktrees` : worktreeDir.startsWith("/") ? worktreeDir : `${parent}/${worktreeDir}`;
+  const prefix = shared && worktreeDir !== undefined ? `${name}-` : "";
+  return normalize(`${dir}/${prefix}${branchSlug(branch)}`);
 }
 function worktreeScript(c, branch, base, path) {
   const entry = shellQuote(`/${c.workDir}/`);
@@ -710,6 +745,9 @@ function reportedWorktree(output) {
 var PLAN_PHASE = "Plan review";
 var DRAFT_PHASE = "Plan";
 var slug = (s) => s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "stage";
+var trimPath = (s) => s.replace(/\/+$/, "") || "/";
+var repoPathOf = (r) => typeof r === "string" ? r : r && typeof r === "object" ? r.repo : undefined;
+var baseName = (path) => path.slice(path.lastIndexOf("/") + 1);
 function checkInput(input) {
   const errors = [];
   if (!input || typeof input !== "object")
@@ -718,6 +756,23 @@ function checkInput(input) {
     errors.push("repo must be an absolute path");
   if (typeof input.branch !== "string" || !input.branch)
     errors.push("branch is required");
+  const known = new Set(typeof input.repo === "string" ? [trimPath(input.repo)] : []);
+  if (input.repos !== undefined) {
+    if (!Array.isArray(input.repos))
+      errors.push("repos must be an array of absolute paths or { repo, base } objects");
+    else
+      input.repos.forEach((r, i) => {
+        const path = repoPathOf(r);
+        if (typeof path !== "string" || !path.startsWith("/"))
+          errors.push(`repos[${i}] must be an absolute path or { repo, base } with an absolute repo`);
+        else if (known.has(trimPath(path)))
+          errors.push(`repos[${i}] repeats ${path}${trimPath(path) === trimPath(input.repo) ? " (it is the primary repo)" : ""}`);
+        else
+          known.add(trimPath(path));
+        if (typeof r === "object" && r && r.base !== undefined && (typeof r.base !== "string" || !r.base))
+          errors.push(`repos[${i}].base must be a non-empty string`);
+      });
+  }
   if (input.goal !== undefined) {
     if (typeof input.goal !== "string" || !input.goal.trim())
       errors.push("goal must be a non-empty string");
@@ -728,14 +783,7 @@ function checkInput(input) {
   } else if (!Array.isArray(input.stages) || !input.stages.length)
     errors.push("stages must be a non-empty array (or pass goal to have the planner write the plan)");
   else
-    input.stages.forEach((s, i) => {
-      if (!s || typeof s !== "object")
-        errors.push(`stages[${i}] must be an object`);
-      else if (s.implement === false && s.review === false)
-        errors.push(`stages[${i}] has nothing to do (implement and review are both false)`);
-      else if (s.implement !== false && (typeof s.task !== "string" || !s.task.trim()))
-        errors.push(`stages[${i}].task is required`);
-    });
+    errors.push(...stageErrors(input.stages, known));
   if (input.goal === undefined && input.fromStage !== undefined && (!Number.isInteger(input.fromStage) || input.fromStage < 1 || input.fromStage > (input.stages?.length ?? 0))) {
     errors.push("fromStage must be a 1-based stage index");
   }
@@ -746,6 +794,24 @@ function checkInput(input) {
       errors.push(`plan must be an absolute path or a non-empty array of absolute paths${bad === undefined || bad === "" ? "" : ` (got ${JSON.stringify(bad)})`}`);
     }
   }
+  return errors;
+}
+function stageErrors(stages, known) {
+  const errors = [];
+  stages.forEach((s, i) => {
+    if (!s || typeof s !== "object")
+      return errors.push(`stages[${i}] must be an object`);
+    if (s.implement === false && s.review === false)
+      errors.push(`stages[${i}] has nothing to do (implement and review are both false)`);
+    else if (s.implement !== false && (typeof s.task !== "string" || !s.task.trim()))
+      errors.push(`stages[${i}].task is required`);
+    if (s.repo !== undefined && (typeof s.repo !== "string" || !known.has(trimPath(s.repo)))) {
+      errors.push(`stages[${i}].repo must be the repo or one of repos (got ${JSON.stringify(s.repo)})`);
+    }
+    if (s.after !== undefined && !(Array.isArray(s.after) && s.after.every((n) => Number.isInteger(n) && n >= 1 && n <= i))) {
+      errors.push(`stages[${i}].after must list 1-based numbers of earlier stages (1..${i})`);
+    }
+  });
   return errors;
 }
 var planFiles = (input) => input.plan === undefined ? [] : Array.isArray(input.plan) ? input.plan : [input.plan];
@@ -759,8 +825,12 @@ async function runGranny(host, input) {
   const config = resolveConfig(layers, host.name);
   const base = input.base ?? config.base;
   const fromStage = input.fromStage ?? 1;
-  let repo = input.repo;
-  const call = async (role, kind, label, phase, prompt, access, rc) => host.agent({
+  const primary = trimPath(input.repo);
+  const extra = (input.repos ?? []).map((r) => typeof r === "string" ? { repo: trimPath(r), base: config.base } : { repo: trimPath(r.repo), base: r.base ?? config.base });
+  const baseOf = (repo) => repo === primary ? base : extra.find((r) => r.repo === repo).base;
+  const specs = input.stages ?? [];
+  const repoOf = (st) => st.repo === undefined ? primary : trimPath(st.repo);
+  const call = async (role, kind, label, phase, prompt, access, rc, cwd) => host.agent({
     role,
     kind,
     label,
@@ -770,42 +840,50 @@ async function runGranny(host, input) {
     model: resolveModel(rc.model, host.name),
     effort: rc.effort,
     access,
-    cwd: repo
+    cwd
   });
-  const setUpWorktree = async () => {
-    const script = worktreeScript(config, input.branch, base, worktreePath(input.repo, input.branch, config.worktreeDir));
-    let ran;
-    let code;
-    let output;
+  const shell = async (label, phase, script, cwd) => {
     if (host.run) {
-      const r = await host.run(script, input.repo);
-      ran = r.code === 0;
-      code = r.code;
-      output = r.output;
-    } else {
-      const prompt = worktreeCommandPrompt(input.repo, input.branch, `cd ${shellQuote(input.repo)} && ${script}`);
-      const r = await call("granny", "command", "worktree", "Worktree", prompt, "write", config.roles.granny);
-      ran = Boolean(r?.ran);
-      code = r?.exitCode ?? (ran ? 0 : "?");
-      output = r ? `${String(r.output ?? "")}${r.note ? `
-${r.note}` : ""}` : "the worktree runner returned nothing";
+      const r = await host.run(script, cwd);
+      return { ran: r.code === 0, code: r.code, output: r.output };
     }
-    const path = ran ? reportedWorktree(output) : undefined;
+    const prompt = gitCommandPrompt(cwd, label, `cd ${shellQuote(cwd)} && ${script}`);
+    const r = await call("granny", "command", label, phase, prompt, "write", config.roles.granny, cwd);
+    const ran = Boolean(r?.ran);
+    return { ran, code: r?.exitCode ?? (ran ? 0 : "?"), output: r ? `${String(r.output ?? "")}${r.note ? `
+${r.note}` : ""}` : `the ${label} runner returned nothing` };
+  };
+  const setUpWorktree = async (repo, branch, from, label, shared) => {
+    const script = worktreeScript(config, branch, from, worktreePath(repo, branch, config.worktreeDir, shared));
+    let r;
+    if (host.run)
+      r = await shell(label, "Worktree", script, repo);
+    else {
+      const prompt = worktreeCommandPrompt(repo, branch, `cd ${shellQuote(repo)} && ${script}`);
+      const a = await call("granny", "command", label, "Worktree", prompt, "write", config.roles.granny, repo);
+      const ran = Boolean(a?.ran);
+      r = { ran, code: a?.exitCode ?? (ran ? 0 : "?"), output: a ? `${String(a.output ?? "")}${a.note ? `
+${a.note}` : ""}` : "the worktree runner returned nothing" };
+    }
+    const path = r.ran ? reportedWorktree(r.output) : undefined;
     if (!path)
-      throw new Error(`worktree setup failed (exit ${code}): ${output.slice(-2000)}`);
-    host.log(`worktree: ${path}`);
+      throw new Error(`worktree setup failed${repo === primary && branch === input.branch ? "" : ` for ${repo} ${branch}`} (exit ${r.code}): ${r.output.slice(-2000)}`);
+    host.log(`worktree${repo === primary && branch === input.branch ? "" : ` ${baseName(repo)} ${branch}`}: ${path}`);
     return path;
   };
+  const used = input.goal !== undefined ? [primary] : [primary, ...extra.map((r) => r.repo).filter((r) => specs.some((st) => repoOf(st) === r))];
+  const cwdOf = new Map(used.map((r) => [r, r]));
   if (config.worktree) {
     host.phase("Worktree");
-    repo = await setUpWorktree();
+    for (const r of used)
+      cwdOf.set(r, await setUpWorktree(r, input.branch, baseOf(r), r === primary ? "worktree" : `worktree ${baseName(r)}`, r !== primary));
   }
+  const worktree = cwdOf.get(primary);
   const draftPlan = async (goal) => {
     host.phase(DRAFT_PHASE);
-    const top = input.repo.replace(/\/+$/, "") || "/";
-    const targets = input.plan === undefined ? [`${top}/${config.workDir}/plans/${branchSlug(input.branch)}.md`] : planFiles(input);
-    const prompt = draftPrompt({ repo, branch: input.branch, base, context: input.context, config }, goal, targets);
-    const r = await call("planner", "draft", "plan", DRAFT_PHASE, prompt, "write", config.roles.planner);
+    const targets = input.plan === undefined ? [`${primary}/${config.workDir}/plans/${branchSlug(input.branch)}.md`] : planFiles(input);
+    const prompt = draftPrompt({ repo: worktree, branch: input.branch, base, context: input.context, config }, goal, targets, extra.map((r) => r.repo));
+    const r = await call("planner", "draft", "plan", DRAFT_PHASE, prompt, "write", config.roles.planner, worktree);
     if (!r)
       throw new Error("planner returned nothing");
     const files = (Array.isArray(r.files) ? r.files : []).filter((f) => typeof f === "string" && f.startsWith("/"));
@@ -814,9 +892,22 @@ ${r.note}` : ""}` : "the worktree runner returned nothing";
     const proposed = (Array.isArray(r.stages) ? r.stages : []).filter((st) => st && typeof st.task === "string" && st.task.trim());
     if (!proposed.length)
       throw new Error("planner proposed no stage with a task");
-    const draft = { files, stages: proposed.map((st) => ({ name: st.name, task: st.task })), summary: String(r.summary ?? "") };
+    const stages = proposed.map((st) => {
+      const out = { name: st.name, task: st.task };
+      if (typeof st.repo === "string" && st.repo && trimPath(st.repo) !== primary && trimPath(st.repo) !== trimPath(worktree))
+        out.repo = st.repo;
+      if (Array.isArray(st.after))
+        out.after = st.after;
+      return out;
+    });
+    const draft = { files, stages, summary: String(r.summary ?? "") };
     if (typeof r.questions === "string" && r.questions.trim())
       draft.questions = r.questions;
+    const problems = stageErrors(stages, new Set([primary, ...extra.map((e) => e.repo)]));
+    if (problems.length)
+      host.log(`plan: the proposed stages need fixing before a run accepts them:
+- ${problems.join(`
+- `)}`);
     host.log(`plan: ${files.join(", ")} - ${draft.stages.length} proposed stage(s)${draft.questions ? ", with open questions for the user" : ""}`);
     return draft;
   };
@@ -824,9 +915,23 @@ ${r.note}` : ""}` : "the worktree runner returned nothing";
   const plans = draft ? draft.files : planFiles(input);
   const context = [plans.length ? `Plan files - read them first: ${plans.join(", ")}` : "", input.context ?? ""].filter(Boolean).join(`
 `) || undefined;
-  const p = { repo, branch: input.branch, base, context, config };
-  const implement = async (label, prompt) => {
-    const r = await call("implementer", "implementation", label, "Implement", prompt, "write", config.roles.implementer);
+  const promptFor = (repo, cwd, branch, others, prBody) => ({
+    repo: cwd,
+    branch,
+    base: baseOf(repo),
+    context,
+    config,
+    ...others.length ? { others } : {},
+    ...prBody ? { prBody } : {}
+  });
+  const repoState = new Map(used.map((r) => {
+    const cwd = cwdOf.get(r);
+    const others = used.filter((o) => o !== r).map((o) => cwdOf.get(o));
+    return [r, { lane: { repo: r, base: baseOf(r), branch: input.branch, cwd, p: promptFor(r, cwd, input.branch, others) }, locked: false, waiters: [], setup: Promise.resolve() }];
+  }));
+  const primaryLane = repoState.get(primary).lane;
+  const implement = async (lane, label, prompt) => {
+    const r = await call("implementer", "implementation", label, "Implement", prompt, "write", config.roles.implementer, lane.cwd);
     if (!r)
       throw new Error(`${label}: implementer returned nothing`);
     host.log(`${label}: ${r.startSha.slice(0, 8)}..${r.headSha.slice(0, 8)}, gates ${r.gatesGreen ? "green" : "RED"} - ${r.gates}`);
@@ -834,38 +939,39 @@ ${r.note}` : ""}` : "the worktree runner returned nothing";
   };
   const attribute = (rv, findings) => findings.map((f, i) => ({ ...f, id: `${rv.name}-F${i + 1}`, reviewer: rv.name }));
   const fixPlan = async (label, prompt) => {
-    const r = await call("implementer", "planFix", label, PLAN_PHASE, prompt, "write", config.roles.implementer);
+    const r = await call("implementer", "planFix", label, PLAN_PHASE, prompt, "write", config.roles.implementer, worktree);
     if (!r)
       throw new Error(`${label}: implementer returned nothing`);
     host.log(`${label}: plan edited - ${Array.isArray(r.files) && r.files.length ? r.files.join(", ") : "no file reported"}`);
     return r;
   };
-  const review = async (rv, name, subject, round, attempt) => {
+  const review = async (lane, rv, name, subject, round, attempt) => {
+    const { p, cwd } = lane;
     const tag = `${name} r${round} ${rv.name}${attempt > 1 ? ` #${attempt}` : ""}`;
     const phase = subject.kind === "plan" ? PLAN_PHASE : "Review";
     if (rv.engine === "agent") {
       const prompt = subject.kind === "plan" ? agentPlanReviewPrompt(p, subject.files) : agentReviewPrompt(p, name, subject.base);
-      const r = await call("reviewer", "findings", `review ${tag}`, phase, prompt, "read-only", rv);
+      const r = await call("reviewer", "findings", `review ${tag}`, phase, prompt, "read-only", rv, cwd);
       if (!r)
         return { ran: false, findings: [], note: "reviewer agent returned nothing" };
       return { ran: true, findings: Array.isArray(r.findings) ? r.findings : [] };
     }
     const stem = reviewStem(config, slug(name), round, rv);
-    const plan = subject.kind === "plan" ? planReviewScript(rv, config, host.name, base, stem, planReviewPrompt(p, subject.files)) : reviewPlan(rv, config, host.name, subject.base, stem, commandReviewPrompt(p, name, subject.base));
+    const plan = subject.kind === "plan" ? planReviewScript(rv, config, host.name, lane.base, stem, planReviewPrompt(p, subject.files)) : reviewPlan(rv, config, host.name, subject.base, stem, commandReviewPrompt(p, name, subject.base));
     if (!plan)
       return { ran: false, findings: [], note: "this reviewer has no command for a plan review" };
     let ran;
     let output;
     let note;
     if (host.run) {
-      const r = await host.run(plan.script, repo);
+      const r = await host.run(plan.script, cwd);
       ran = r.code === 0;
       output = r.output;
       if (!ran)
         note = `review command exited ${r.code}: ${r.output.slice(-2000)}`;
     } else {
-      const script = `cd ${shellQuote(repo)} && ${plan.script}`;
-      const r = await call("granny", "command", `review ${tag}`, phase, reviewCommandPrompt(p, name, rv.name, script), "read-only", config.roles.granny);
+      const script = `cd ${shellQuote(cwd)} && ${plan.script}`;
+      const r = await call("granny", "command", `review ${tag}`, phase, reviewCommandPrompt(p, name, rv.name, script), "read-only", config.roles.granny, cwd);
       ran = Boolean(r?.ran);
       output = String(r?.output ?? "");
       if (!ran)
@@ -877,12 +983,12 @@ ${r.note}` : ""}` : "the worktree runner returned nothing";
     const failure = reviewFailure(output);
     if (failure)
       return { ran: false, findings: [], note: `reviewer returned no usable result (${failure}): ${output.slice(-2000)}` };
-    const parsed = parseCodexReview(output, subject.kind === "plan" ? undefined : repo);
+    const parsed = parseCodexReview(output, subject.kind === "plan" ? undefined : cwd);
     if (parsed.markers <= parsed.findings.length)
       return { ran, findings: parsed.findings };
     host.log(`${tag}: parser read ${parsed.findings.length}/${parsed.markers} findings - asking an agent to extract them`);
     const extract = async (label, prompt) => {
-      const r = await call("granny", "findings", label, phase, prompt, "read-only", config.roles.granny);
+      const r = await call("granny", "findings", label, phase, prompt, "read-only", config.roles.granny, cwd);
       return Array.isArray(r?.findings) ? r.findings : [];
     };
     const first = await extract(`extract ${tag}`, extractPrompt(name, output));
@@ -898,27 +1004,28 @@ ${r.note}` : ""}` : "the worktree runner returned nothing";
       note: `review reported ${parsed.markers} finding marker(s), parser read ${parsed.findings.length}; extraction recovered ${first.length}, then ${second.length} on a retry that named the count: ${output.slice(-2000)}`
     };
   };
-  const attempt = async (rv, name, subject, round, n) => {
+  const attempt = async (lane, rv, name, subject, round, n) => {
     try {
-      return await review(rv, name, subject, round, n);
+      return await review(lane, rv, name, subject, round, n);
     } catch (e) {
       return { ran: false, findings: [], note: `reviewer call failed: ${String(e?.message ?? e)}` };
     }
   };
-  const reviewAll = (reviewers, name, subject, round) => Promise.all(reviewers.map(async (reviewer) => {
-    let r = await attempt(reviewer, name, subject, round, 1);
+  const reviewAll = (lane, reviewers, name, subject, round) => Promise.all(reviewers.map(async (reviewer) => {
+    let r = await attempt(lane, reviewer, name, subject, round, 1);
     if (!r.ran) {
       host.log(`${name} r${round} ${reviewer.name}: did not run - retrying once. ${r.note ?? ""}`);
-      r = await attempt(reviewer, name, subject, round, 2);
+      r = await attempt(lane, reviewer, name, subject, round, 2);
     }
     return { reviewer, ...r, findings: attribute(reviewer, r.findings) };
   }));
-  const reviewLoop = async (name, subject, reviewers = config.reviewers) => {
+  const reviewLoop = async (lane, name, subject, reviewers = config.reviewers) => {
+    const { p } = lane;
     const phase = subject.kind === "plan" ? PLAN_PHASE : "Review";
     const history = [];
     let unmerged = [];
     for (let round = 1;round <= config.maxRounds; round++) {
-      const results = await reviewAll(reviewers, name, subject, round);
+      const results = await reviewAll(lane, reviewers, name, subject, round);
       const failed = results.filter((r) => !r.ran);
       const found = results.filter((r) => r.ran).flatMap((r) => r.findings);
       if (failed.length) {
@@ -944,7 +1051,7 @@ ${r.note}` : ""}` : "the worktree runner returned nothing";
       let score = null;
       if (judged.length) {
         const prompt = subject.kind === "plan" ? planJudgePrompt(p, subject.files, judged) : judgePrompt(p, subject.base, judged);
-        const scored = await call("judge", "score", `judge ${name} r${round}`, phase, prompt, "read-only", config.roles.judge);
+        const scored = await call("judge", "score", `judge ${name} r${round}`, phase, prompt, "read-only", config.roles.judge, lane.cwd);
         if (!scored)
           host.log(`${name} r${round}: judge returned nothing - all ${judged.length} finding(s) go to the implementer unscored`);
         const per = Array.isArray(scored?.perFinding) ? scored.perFinding : [];
@@ -975,7 +1082,7 @@ ${r.note}` : ""}` : "the worktree runner returned nothing";
         await fixPlan(`fix ${name} r${round}`, planFixPrompt(p, subject.files, round, accepted));
         continue;
       }
-      const fix = await implement(`fix ${name} r${round}`, fixPrompt(p, name, round, accepted));
+      const fix = await implement(lane, `fix ${name} r${round}`, fixPrompt(p, name, round, accepted));
       if (!fix.gatesGreen)
         host.log(`${name} r${round}: WARNING fixer left gates red - ${fix.gates}`);
     }
@@ -1004,44 +1111,187 @@ ${r.note}` : ""}` : "the worktree runner returned nothing";
       host.log(`${name}: ${note}`);
       return { outcome: "review-failed", rounds: 0, residual: [], unresolved: [], history: [], note };
     }
-    return reviewLoop(name, { kind: "plan", files: plans }, able);
+    return reviewLoop(primaryLane, name, { kind: "plan", files: plans }, able);
   };
   const planResult = await reviewThePlan();
   if (draft) {
     host.log(`plan written - the run stops here; launch again with plan and the approved stages to implement it`);
-    return { repo: input.repo, branch: input.branch, base, worktree: repo, draft, ...planResult ? { plan: planResult } : {}, stages: [], final: null };
+    return { repo: input.repo, branch: input.branch, base, worktree, draft, ...planResult ? { plan: planResult } : {}, stages: [], final: null };
   }
   if (planResult && (planResult.outcome === "round-cap" || planResult.outcome === "review-failed")) {
     host.log(`plan review ended ${planResult.outcome} - stopping before stage 1; nothing was implemented`);
-    return { repo: input.repo, branch: input.branch, base, worktree: repo, plan: planResult, stages: [], final: null };
+    return { repo: input.repo, branch: input.branch, base, worktree, plan: planResult, stages: [], final: null };
   }
-  const specs = input.stages ?? [];
-  const stages = [];
-  for (let i = 0;i < specs.length; i++) {
-    const st = specs[i];
-    const name = st.name || `stage ${i + 1}`;
-    if (i + 1 < fromStage) {
-      stages.push({ stage: name, outcome: "skipped", rounds: 0, residual: [], unresolved: [], history: [] });
-      continue;
-    }
+  const tryLock = (s) => s.locked ? false : s.locked = true;
+  const lock = (s) => new Promise((resolve) => tryLock(s) ? resolve() : s.waiters.push(resolve));
+  const unlock = (s) => {
+    const next = s.waiters.shift();
+    if (next)
+      next();
+    else
+      s.locked = false;
+  };
+  const runStage = async (lane, st, i, name) => {
     let impl;
     if (st.implement !== false) {
       host.phase("Implement");
-      impl = await implement(`implement ${name}`, implementPrompt(p, st, i, specs.length, name));
+      impl = await implement(lane, `implement ${name}`, implementPrompt(lane.p, st, i, specs.length, name, buildsOnEarlier(i)));
       if (!impl.gatesGreen)
         host.log(`${name}: implementer ended with RED gates - review will see it`);
     } else {
-      host.log(`${name}: review-only stage - reviewing ${base}...HEAD`);
+      host.log(`${name}: review-only stage - reviewing ${lane.base}...HEAD`);
     }
     host.phase("Review");
-    const loop = st.review === false ? { outcome: "review-skipped", rounds: 0, residual: [], unresolved: [], history: [] } : await reviewLoop(name, { kind: "diff", base: impl?.startSha || base });
-    stages.push({ stage: name, ...impl ? { implementation: impl } : {}, ...loop });
+    const loop = st.review === false ? { outcome: "review-skipped", rounds: 0, residual: [], unresolved: [], history: [] } : await reviewLoop(lane, name, { kind: "diff", base: impl?.startSha || lane.base });
+    return { stage: name, ...st.repo !== undefined && repoOf(st) !== primary ? { repo: repoOf(st) } : {}, ...impl ? { implementation: impl } : {}, ...loop };
+  };
+  const mergeLane = async (state, lane, name) => {
+    const main = state.lane;
+    const label = `merge ${name}`;
+    const merged = await shell(label, "Implement", `git merge --no-edit ${shellQuote(lane.branch)}`, main.cwd);
+    if (!merged.ran) {
+      host.log(`${label}: conflicts merging ${lane.branch} into ${main.branch} - the implementer resolves them`);
+      const fix = await implement(main, `resolve ${label}`, mergePrompt(main.p, name, lane.branch, merged.output));
+      if (!fix.gatesGreen)
+        host.log(`${label}: WARNING merge left gates red - ${fix.gates}`);
+      const open = await shell(`check ${label}`, "Implement", "if git rev-parse -q --verify MERGE_HEAD >/dev/null; then git status --short; exit 1; fi", main.cwd);
+      if (!open.ran)
+        throw new Error(`${label}: the merge of ${lane.branch} into ${main.branch} is still unfinished in ${main.cwd} - resolve it, then resume with fromStage: ${open.output.slice(-1000)}`);
+    } else
+      host.log(`${label}: ${lane.branch} merged into ${main.branch}`);
+    const cleanup = `[ -z "$(git -C ${shellQuote(lane.cwd)} status --porcelain)" ] && git worktree remove --force ${shellQuote(lane.cwd)} && git branch -d ${shellQuote(lane.branch)}`;
+    const cleaned = await shell(`cleanup ${name}`, "Implement", cleanup, main.cwd);
+    if (!cleaned.ran) {
+      host.log(`${label}: left ${lane.cwd} (${lane.branch}) in place - remove it yourself once you have checked it: ${cleaned.output.slice(-500)}`);
+      return `ran in parallel on ${lane.branch}; its worktree ${lane.cwd} was left in place`;
+    }
+    return merged.ran ? `ran in parallel on ${lane.branch}, merged` : `ran in parallel on ${lane.branch}, merged after the implementer resolved conflicts`;
+  };
+  const startStage = async (i) => {
+    const st = specs[i];
+    const name = st.name || `stage ${i + 1}`;
+    const state = repoState.get(repoOf(st));
+    if (tryLock(state)) {
+      try {
+        return await runStage(state.lane, st, i, name);
+      } finally {
+        unlock(state);
+      }
+    }
+    const branch = `${input.branch}--s${i + 1}-${slug(name)}`;
+    host.log(`${name}: ${state.lane.branch} is busy in ${baseName(state.lane.repo)} - running in parallel on ${branch}`);
+    const main = state.lane;
+    const setup = state.setup.then(() => setUpWorktree(main.repo, branch, input.branch, `worktree ${name}`, main.repo !== primary));
+    state.setup = setup.catch(() => {});
+    const cwd = await setup;
+    const others = [main.cwd, ...used.filter((o) => o !== main.repo).map((o) => cwdOf.get(o))];
+    const lane = { repo: main.repo, base: main.base, branch, cwd, p: promptFor(main.repo, cwd, branch, others, `${main.cwd}/${config.workDir}/PR-BODY-s${i + 1}-${slug(name)}.md`) };
+    const result = await runStage(lane, st, i, name);
+    await lock(state);
+    try {
+      const note = await mergeLane(state, lane, name);
+      return note ? { ...result, note: result.note ? `${result.note}
+${note}` : note } : result;
+    } finally {
+      unlock(state);
+    }
+  };
+  const deps = specs.map((st, i) => {
+    const d = new Set;
+    if (st.after !== undefined)
+      for (const n of st.after)
+        d.add(n - 1);
+    else {
+      for (let j = i - 1;j >= 0; j--) {
+        if (repoOf(specs[j]) === repoOf(st)) {
+          d.add(j);
+          break;
+        }
+      }
+    }
+    if (!config.parallel && i > 0)
+      d.add(i - 1);
+    return d;
+  });
+  const buildsOnEarlier = (i) => {
+    const seen = new Set;
+    const todo = [...deps[i]];
+    while (todo.length) {
+      const j = todo.pop();
+      if (seen.has(j))
+        continue;
+      seen.add(j);
+      if (repoOf(specs[j]) === repoOf(specs[i]))
+        return true;
+      todo.push(...deps[j]);
+    }
+    return false;
+  };
+  const limit = config.parallel ? config.maxParallel : 1;
+  const results = [];
+  const done = new Set;
+  const running = new Map;
+  let failure;
+  for (let i = 0;i < fromStage - 1; i++) {
+    results[i] = { stage: specs[i].name || `stage ${i + 1}`, outcome: "skipped", rounds: 0, residual: [], unresolved: [], history: [] };
+    done.add(i);
   }
+  for (;; ) {
+    if (!failure) {
+      for (let i = 0;i < specs.length && running.size < limit; i++) {
+        if (done.has(i) || running.has(i) || ![...deps[i]].every((d) => done.has(d)))
+          continue;
+        if (running.size)
+          host.log(`${specs[i].name || `stage ${i + 1}`}: starting in parallel with ${[...running.keys()].map((j) => specs[j].name || `stage ${j + 1}`).join(", ")}`);
+        running.set(i, startStage(i).then((r) => {
+          results[i] = r;
+          done.add(i);
+          running.delete(i);
+        }, (error) => {
+          failure ??= { error };
+          running.delete(i);
+        }));
+      }
+    }
+    if (!running.size)
+      break;
+    await Promise.race(running.values());
+  }
+  const nameOf = (i) => `${i + 1} (${specs[i].name || `stage ${i + 1}`})`;
+  const unfinished = specs.map((_, i) => i).filter((i) => !done.has(i));
+  if (failure) {
+    const finished = [...done].sort((a, b) => a - b).filter((i) => i >= fromStage - 1);
+    host.log(`a stage failed - waited for the stages already running. Finished: ${finished.map(nameOf).join(", ") || "none"}. Not finished: ${unfinished.map(nameOf).join(", ")}`);
+    throw failure.error;
+  }
+  if (unfinished.length)
+    throw new Error(`scheduler stopped with stages that never started: ${unfinished.map(nameOf).join(", ")}`);
   host.phase("PR ready");
-  const final = await call("granny", "final", "pr-ready check", "PR ready", finalPrompt(p), "write", config.roles.granny);
-  if (!final)
-    host.log("final check returned nothing");
-  return { repo: input.repo, branch: input.branch, base, worktree: repo, ...planResult ? { plan: planResult } : {}, stages, final };
+  const check = async (s) => {
+    const label = s.lane.repo === primary ? "pr-ready check" : `pr-ready check ${baseName(s.lane.repo)}`;
+    const final = await call("granny", "final", label, "PR ready", finalPrompt(s.lane.p), "write", config.roles.granny, s.lane.cwd);
+    if (!final)
+      host.log(s.lane.repo === primary ? "final check returned nothing" : `${label} returned nothing`);
+    return { repo: s.lane.repo, base: s.lane.base, worktree: s.lane.cwd, final };
+  };
+  const states = [...repoState.values()];
+  const finals = [];
+  if (config.parallel)
+    finals.push(...await Promise.all(states.map(check)));
+  else
+    for (const s of states)
+      finals.push(await check(s));
+  const final = finals[0].final;
+  return {
+    repo: input.repo,
+    branch: input.branch,
+    base,
+    worktree,
+    ...planResult ? { plan: planResult } : {},
+    stages: results,
+    final,
+    ...finals.length > 1 ? { repos: finals } : {}
+  };
 }
 
 function main(api) {

@@ -11,7 +11,7 @@ export interface FakeOptions {
   scores?: Array<Record<string, number | { score: number; duplicateOf?: string }> | null>
   override?: (req: AgentRequest) => unknown
   shell?: { env?: Record<string, string> }
-  worktree?: string | CommandResult | 'git'
+  worktree?: string | CommandResult | 'git' | ((command: string, cwd: string) => string)
 }
 
 export interface Setup {
@@ -58,6 +58,7 @@ export function fakeHost(opts: FakeOptions = {}) {
   const setUp = async (command: string, cwd: string, repo: string): Promise<CommandResult> => {
     const w = opts.worktree
     if (w === 'git') return bash(command, cwd, opts.shell?.env)
+    if (typeof w === 'function') return { code: 0, output: `[granny] worktree: ${w(command, cwd)}\n` }
     if (typeof w === 'object') return w
     return { code: 0, output: `[granny] worktree: ${w ?? repo}\n` }
   }
@@ -72,7 +73,7 @@ export function fakeHost(opts: FakeOptions = {}) {
   const host: Host = {
     name: opts.name ?? 'opencode',
     async agent(req) {
-      if (req.label === 'worktree') {
+      if (req.label === 'worktree' || (req.kind === 'command' && req.label.startsWith('worktree '))) {
         const line = /Run exactly this:\n(.+)\n/.exec(req.prompt)?.[1] ?? ''
         setups.push({ command: line, cwd: '/', request: req })
         const r = await setUp(line, '/', cdTarget(line))
@@ -99,7 +100,7 @@ export function fakeHost(opts: FakeOptions = {}) {
           return { score: 50, perFinding, rationale: 'r' }
         }
         case 'command': {
-          const script = /never cut it short\):\n(.+)\n/.exec(req.prompt)?.[1] ?? ''
+          const script = /never cut it short\):\n(.+)\n/.exec(req.prompt)?.[1] ?? /Run exactly this:\n(.+)\n/.exec(req.prompt)?.[1] ?? ''
           commands.push(script)
           const r = await nextReview(script, '/')
           return { ran: r.code === 0, exitCode: r.code, output: r.output }

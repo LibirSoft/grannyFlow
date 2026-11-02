@@ -16,12 +16,14 @@ function normalize(path: string): string {
 
 export const branchSlug = (branch: string) => branch.replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '') || 'branch'
 
-export function worktreePath(repo: string, branch: string, worktreeDir?: string): string {
+export function worktreePath(repo: string, branch: string, worktreeDir?: string, shared = false): string {
   const top = normalize(repo)
   const cut = top.lastIndexOf('/')
   const parent = top.slice(0, cut) || '/'
-  const dir = worktreeDir === undefined ? `${parent}/${top.slice(cut + 1)}-worktrees` : worktreeDir.startsWith('/') ? worktreeDir : `${parent}/${worktreeDir}`
-  return normalize(`${dir}/${branchSlug(branch)}`)
+  const name = top.slice(cut + 1)
+  const dir = worktreeDir === undefined ? `${parent}/${name}-worktrees` : worktreeDir.startsWith('/') ? worktreeDir : `${parent}/${worktreeDir}`
+  const prefix = shared && worktreeDir !== undefined ? `${name}-` : ''
+  return normalize(`${dir}/${prefix}${branchSlug(branch)}`)
 }
 
 export function worktreeScript(c: GrannyConfig, branch: string, base: string, path: string): string {
