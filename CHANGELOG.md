@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.2.0
+
+### Added
+
+- **Planner**: a run with `goal` instead of `stages` plans the work first. A new `planner` role (`roles.planner`, session model by default) explores the repo in the worktree, writes the plan - to `plan`, or by default to the main checkout's git-excluded `<workDir>/plans/<branch-slug>.md` - with work orders and acceptance criteria, and proposes the stages. With `"planReview": true` the plan review runs on it. The run stops with `draft` (`{ files, stages, summary, questions? }`) in its result and nothing implemented; after the user approves, a second run with `plan` and the approved `stages` implements it. A planner that returns no plan file or no stage fails the run. On opencode the planner answers through `granny_submit_plan`; on Cursor through the new `granny-planner` subagent.
+
+### Docs
+
+- opencode: install the plugin globally. With `worktree` on, a per-project install in `<project>/.opencode/plugins/` is missing in the worktree where the role sessions run, so they have no `granny_submit_*` tools and fail.
+
 ## 1.1.0
 
 - Plan review is opt-in: it runs only when the run has `plan` and the config sets `"planReview": true`; `planReview` defaults to `false`. It runs every reviewer, the judge and the implementer over the plan for up to `maxRounds` rounds before any code is written, so it costs extra tokens. Plan files given via `plan` reach every agent's context with the plan review on or off.

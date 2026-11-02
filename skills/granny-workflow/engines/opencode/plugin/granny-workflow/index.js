@@ -10,6 +10,7 @@ import { isAbsolute, join } from "path";
 var DEFAULT_CONFIG = {
   roles: {
     granny: {},
+    planner: {},
     implementer: {},
     judge: { model: { "claude-code": "sonnet" } }
   },
@@ -28,7 +29,7 @@ var DEFAULT_CONFIG = {
     "Code comments: default none; add one only when the reason cannot be recovered from the code."
   ]
 };
-var ROLES = ["granny", "implementer", "judge"];
+var ROLES = ["granny", "planner", "implementer", "judge"];
 var TOP_KEYS = new Set(["$schema", "roles", "worktreeDir", ...Object.keys(DEFAULT_CONFIG).filter((k) => k !== "roles")]);
 var ROLE_KEYS = new Set(["model", "effort"]);
 var REVIEWER_KEYS = new Set(["name", "engine", "model", "effort", "mode", "focus", "command"]);
@@ -240,6 +241,18 @@ function common(p) {
     lines.push("", "CONTEXT - read these before anything else and obey them:", p.context);
   return lines.join(`
 `);
+}
+function draftPrompt(p, goal, plans) {
+  return `${common(p)}
+
+You are the PLANNER. Nothing is implemented yet: write a plan, not code. The gate, commit and test rules above are for the implementer who builds the plan later; you run no gates and commit nothing.
+GOAL:
+${goal}
+
+Explore the repo first - the code, configs, lockfiles, tests and docs the goal touches. Then write the plan to ${plans.join(", ")} (absolute paths; create the directories if missing). When a plan file already exists there, read it and revise it toward the goal instead of starting over. Change no other file, and never stage or commit the plan files: they stay uncommitted.
+Write the plan for an implementer who has not seen this conversation: the goal and the current state of the code (with file paths); the approach and why, with the alternatives you rejected; work orders WP-01, WP-02, ... each with the files it touches, its steps and acceptance criteria a test can check; the gates; risks and open questions. Name versions, APIs, flags and files as the repo has them, not from memory.
+Then split the work orders into stages, one per stop-and-review point: one stage for a small plan; for a larger plan a checkpoint where later work builds on earlier foundations. Each stage's task names exactly which work orders it does.
+Return files (the absolute paths you wrote), stages ([{ name, task }]), summary (a few lines for the user: the approach and the work orders) and questions (decisions only the user can make, each with the default the plan assumes; empty when none).`;
 }
 function implementPrompt(p, stage, index, total, name) {
   const pr = prBodyPath(p.config);
@@ -563,6 +576,27 @@ var FINDING = {
   required: ["id", "severity", "file", "title", "detail"]
 };
 var SCHEMAS = {
+  draft: {
+    type: "object",
+    properties: {
+      files: { type: "array", items: { type: "string" }, description: "absolute paths of the plan files you wrote" },
+      stages: {
+        type: "array",
+        description: "proposed stages, one per stop-and-review point",
+        items: {
+          type: "object",
+          properties: {
+            name: { type: "string" },
+            task: { type: "string", description: "exactly which work orders or sections of the plan this stage does" }
+          },
+          required: ["name", "task"]
+        }
+      },
+      summary: { type: "string", description: "a few lines for the user: the approach and the work orders" },
+      questions: { type: "string", description: "decisions only the user can make, each with the default the plan assumes; empty when none" }
+    },
+    required: ["files", "stages", "summary"]
+  },
   implementation: {
     type: "object",
     properties: {
@@ -700,6 +734,7 @@ function reportedWorktree(output) {
 
 // src/core/engine.ts
 var PLAN_PHASE = "Plan review";
+var DRAFT_PHASE = "Plan";
 var slug = (s) => s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "stage";
 function checkInput(input) {
   const errors = [];
@@ -709,8 +744,15 @@ function checkInput(input) {
     errors.push("repo must be an absolute path");
   if (typeof input.branch !== "string" || !input.branch)
     errors.push("branch is required");
-  if (!Array.isArray(input.stages) || !input.stages.length)
-    errors.push("stages must be a non-empty array");
+  if (input.goal !== undefined) {
+    if (typeof input.goal !== "string" || !input.goal.trim())
+      errors.push("goal must be a non-empty string");
+    if (input.stages !== undefined)
+      errors.push("a run with goal plans the work and proposes the stages - drop stages, or drop goal and pass the plan");
+    if (input.fromStage !== undefined)
+      errors.push("fromStage has no stages to resume in a run with goal");
+  } else if (!Array.isArray(input.stages) || !input.stages.length)
+    errors.push("stages must be a non-empty array (or pass goal to have the planner write the plan)");
   else
     input.stages.forEach((s, i) => {
       if (!s || typeof s !== "object")
@@ -720,7 +762,7 @@ function checkInput(input) {
       else if (s.implement !== false && (typeof s.task !== "string" || !s.task.trim()))
         errors.push(`stages[${i}].task is required`);
     });
-  if (input.fromStage !== undefined && (!Number.isInteger(input.fromStage) || input.fromStage < 1 || input.fromStage > (input.stages?.length ?? 0))) {
+  if (input.goal === undefined && input.fromStage !== undefined && (!Number.isInteger(input.fromStage) || input.fromStage < 1 || input.fromStage > (input.stages?.length ?? 0))) {
     errors.push("fromStage must be a 1-based stage index");
   }
   if (input.plan !== undefined) {
@@ -784,7 +826,28 @@ ${r.note}` : ""}` : "the worktree runner returned nothing";
     host.phase("Worktree");
     repo = await setUpWorktree();
   }
-  const plans = planFiles(input);
+  const draftPlan = async (goal) => {
+    host.phase(DRAFT_PHASE);
+    const top = input.repo.replace(/\/+$/, "") || "/";
+    const targets = input.plan === undefined ? [`${top}/${config.workDir}/plans/${branchSlug(input.branch)}.md`] : planFiles(input);
+    const prompt = draftPrompt({ repo, branch: input.branch, base, context: input.context, config }, goal, targets);
+    const r = await call("planner", "draft", "plan", DRAFT_PHASE, prompt, "write", config.roles.planner);
+    if (!r)
+      throw new Error("planner returned nothing");
+    const files = (Array.isArray(r.files) ? r.files : []).filter((f) => typeof f === "string" && f.startsWith("/"));
+    if (!files.length)
+      throw new Error(`planner reported no plan file (expected ${targets.join(", ")})`);
+    const proposed = (Array.isArray(r.stages) ? r.stages : []).filter((st) => st && typeof st.task === "string" && st.task.trim());
+    if (!proposed.length)
+      throw new Error("planner proposed no stage with a task");
+    const draft = { files, stages: proposed.map((st) => ({ name: st.name, task: st.task })), summary: String(r.summary ?? "") };
+    if (typeof r.questions === "string" && r.questions.trim())
+      draft.questions = r.questions;
+    host.log(`plan: ${files.join(", ")} - ${draft.stages.length} proposed stage(s)${draft.questions ? ", with open questions for the user" : ""}`);
+    return draft;
+  };
+  const draft = input.goal !== undefined ? await draftPlan(input.goal) : undefined;
+  const plans = draft ? draft.files : planFiles(input);
   const context = [plans.length ? `Plan files - read them first: ${plans.join(", ")}` : "", input.context ?? ""].filter(Boolean).join(`
 `) || undefined;
   const p = { repo, branch: input.branch, base, context, config };
@@ -970,13 +1033,18 @@ ${r.note}` : ""}` : "the worktree runner returned nothing";
     return reviewLoop(name, { kind: "plan", files: plans }, able);
   };
   const planResult = await reviewThePlan();
+  if (draft) {
+    host.log(`plan written - the run stops here; launch again with plan and the approved stages to implement it`);
+    return { repo: input.repo, branch: input.branch, base, worktree: repo, draft, ...planResult ? { plan: planResult } : {}, stages: [], final: null };
+  }
   if (planResult && (planResult.outcome === "round-cap" || planResult.outcome === "review-failed")) {
     host.log(`plan review ended ${planResult.outcome} - stopping before stage 1; nothing was implemented`);
     return { repo: input.repo, branch: input.branch, base, worktree: repo, plan: planResult, stages: [], final: null };
   }
+  const specs = input.stages ?? [];
   const stages = [];
-  for (let i = 0;i < input.stages.length; i++) {
-    const st = input.stages[i];
+  for (let i = 0;i < specs.length; i++) {
+    const st = specs[i];
     const name = st.name || `stage ${i + 1}`;
     if (i + 1 < fromStage) {
       stages.push({ stage: name, outcome: "skipped", rounds: 0, residual: [], unresolved: [], history: [] });
@@ -985,7 +1053,7 @@ ${r.note}` : ""}` : "the worktree runner returned nothing";
     let impl;
     if (st.implement !== false) {
       host.phase("Implement");
-      impl = await implement(`implement ${name}`, implementPrompt(p, st, i, input.stages.length, name));
+      impl = await implement(`implement ${name}`, implementPrompt(p, st, i, specs.length, name));
       if (!impl.gatesGreen)
         host.log(`${name}: implementer ended with RED gates - review will see it`);
     } else {
@@ -1005,6 +1073,7 @@ ${r.note}` : ""}` : "the worktree runner returned nothing";
 // src/adapters/opencode/plugin.ts
 var SUBMIT = {
   implementation: "granny_submit_implementation",
+  draft: "granny_submit_plan",
   planFix: "granny_submit_plan_fix",
   findings: "granny_submit_findings",
   score: "granny_submit_score",
@@ -1108,7 +1177,12 @@ function summarize(result, worktree) {
     return `- ${name}: ${s.outcome}, ${s.rounds} review round(s)${extra ? ` (${extra})` : ""}`;
   };
   const lines = result.stages.map((s) => line(s, s.stage));
-  if (result.plan) {
+  if (result.draft) {
+    lines.push(`- plan written: ${result.draft.files.join(", ")} - ${result.draft.stages.length} proposed stage(s)${result.draft.questions ? ", open questions for the user" : ""}`);
+    if (result.plan)
+      lines.push(line(result.plan, "plan review"));
+    lines.push("- stopped after planning, nothing was implemented: show the user the plan, the stages and the questions, and wait for their approval");
+  } else if (result.plan) {
     const stopped = result.plan.outcome === "round-cap" || result.plan.outcome === "review-failed";
     lines.unshift(`${line(result.plan, "plan review")}${stopped ? " - stopped before stage 1, nothing was implemented" : ""}`);
   }
@@ -1128,15 +1202,19 @@ var RUN_INPUT_SCHEMA = {
       description: "Feature branch. With config worktree on (default) granny reuses its worktree or creates one - do not check it out yourself; with worktree off it must be checked out in repo"
     },
     base: { type: "string", description: "Branch never to touch; defaults to config.base" },
+    goal: {
+      type: "string",
+      description: "What to build, when there is no plan yet: the planner writes the plan (to plan, default <repo>/<workDir>/plans/<branch-slug>.md) and proposes stages, the plan review runs, and the run stops for the user to approve. Exclusive with stages and fromStage"
+    },
     context: { type: "string", description: "Files every agent reads first (work orders, notes) and override notes" },
     plan: {
       type: "array",
       items: { type: "string" },
-      description: "Absolute paths of the plan files. Every agent reads them; with config planReview on (off by default) the reviewers review them before stage 1 and the implementer fixes them in place, uncommitted"
+      description: "Absolute paths of the plan files (with goal: where the planner writes the plan). Every agent reads them; with config planReview on (off by default) the reviewers review them before stage 1 and the implementer fixes them in place, uncommitted"
     },
     stages: {
       type: "array",
-      description: "One entry per stop-and-review point",
+      description: "One entry per stop-and-review point; required unless goal is given",
       items: {
         type: "object",
         properties: {
@@ -1150,7 +1228,7 @@ var RUN_INPUT_SCHEMA = {
     fromStage: { type: "number", description: "1-based stage to resume from; earlier stages are skipped" },
     config: { type: "object", description: "Per-run overrides of granny.config.json (same shape)" }
   },
-  required: ["repo", "branch", "stages"]
+  required: ["repo", "branch"]
 };
 function providerError(messages) {
   const list = Array.isArray(messages) ? messages : Array.isArray(messages?.data) ? messages.data : [];
@@ -1359,7 +1437,7 @@ Call granny_status with runId "${id}" for the full result, verify load-bearing c
           await notify(`[granny] Run ${id} failed: ${String(error?.message ?? error)}
 Call granny_status with runId "${id}" and report to the user.`);
       });
-      return `granny run ${id} started on ${input.repo} (${input.branch}), ${input.stages.length} stage(s), threshold ${config.threshold}, maxRounds ${config.maxRounds}.
+      return `granny run ${id} started on ${input.repo} (${input.branch}), ${input.goal !== undefined ? "planning only" : `${input.stages?.length ?? 0} stage(s)`}, threshold ${config.threshold}, maxRounds ${config.maxRounds}.
 Journal: ${join(dir, "journal.jsonl")}
 You will receive a message when it finishes. Use granny_status { runId: "${id}" } to check progress and granny_cancel to stop it. Do not poll in a loop.`;
     };

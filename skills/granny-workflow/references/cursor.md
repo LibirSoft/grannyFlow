@@ -19,6 +19,10 @@ With `worktree` on (the default), set it up by hand before the first stage - als
 
 `<worktreeDir>` defaults to `<parent of repo>/<repo name>-worktrees`; `<branch-slug>` is the branch with every character other than letters, digits, `.`, `_` and `-` as `-` (`feat/login` → `feat-login`). The "Granny - worktree setup" command in [prompts.md](prompts.md) does all four steps in one go and prints `[granny] worktree: <path>`. From then on the worktree is `<repo>` in every prompt and every terminal command; name it in the report and never remove it. With `worktree: false`, work in `repo` on the branch checked out there.
 
+## Planning
+
+With a `goal` and no stages, after the worktree: delegate to `granny-planner` with the "Planner" prompt from [prompts.md](prompts.md), the plan path filled in (default `<repo>/<workDir>/plans/<branch-slug>.md`). Check with `git status --short` that it committed nothing. Then, with `planReview` on, run the plan review below on the files it returned; report the plan, the proposed stages and the questions, and stop - implement nothing until the user approves ([config.md](config.md#planning)).
+
 ## The plan review
 
 The plan review is optional and off by default; enable it with `"planReview": true`. It runs every reviewer, the judge and the implementer over the plan for up to `maxRounds` rounds before any code is written, so it costs extra tokens. With plan files and `planReview` on, review the plan after the worktree and before stage 1; skip it when you resume with `fromStage` above 1 ([config.md](config.md#plan-review)). It is the review loop below, steps 2-5, on the plan instead of a diff, with these differences:

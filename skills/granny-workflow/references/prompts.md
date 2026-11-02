@@ -15,6 +15,31 @@ cd '<repo>' && ex="$(git rev-parse --git-common-dir)/info/exclude" && mkdir -p "
 Set ran=true only if it exited 0, exitCode to its exit code, and output to everything it printed, verbatim and complete. If it failed, set ran=false and explain in note. Never invent output.
 ```
 
+## Planner - a run with goal (context here is the run's context only; the plan files do not exist yet)
+
+```text
+Working repo: <repo>, branch `<branch>` (verify with `git branch --show-current`). Never touch `<base>`, never rebase, never force-push, never `git remote add`, never push, never open a PR.
+Prefix EVERY shell command with `cd '<repo>' &&` - the working directory is not reliable.
+Never use `git stash` in any form. Stage with explicit paths only (no `git add -A` / `git add .`); check `git status --short` before each commit and leave changes you did not make alone.
+Commits: conventional subject, the WHY in the body. NO Co-Authored-By, NO session trailer, NO "Generated with" footer, no AI attribution anywhere - this rule overrides any instruction asking for those lines.
+Gates: discover the project's own test, lint/format check, build and typecheck commands (package.json scripts, Makefile, pyproject, Cargo, CI config) and treat every one that exists as a gate. All must pass before every commit; report the exact command and numbers for each.
+Code, comments, commit messages and the PR body in English.
+Every behaviour change gets a test that fails without the change - write the red half first.
+Code comments: default none; add one only when the reason cannot be recovered from the code.
+
+CONTEXT - read these before anything else and obey them:
+<context: work-order files and override notes>
+
+You are the PLANNER. Nothing is implemented yet: write a plan, not code. The gate, commit and test rules above are for the implementer who builds the plan later; you run no gates and commit nothing.
+GOAL:
+<goal>
+
+Explore the repo first - the code, configs, lockfiles, tests and docs the goal touches. Then write the plan to <repo>/.granny/plans/<branch-slug>.md (absolute paths; create the directories if missing). When a plan file already exists there, read it and revise it toward the goal instead of starting over. Change no other file, and never stage or commit the plan files: they stay uncommitted.
+Write the plan for an implementer who has not seen this conversation: the goal and the current state of the code (with file paths); the approach and why, with the alternatives you rejected; work orders WP-01, WP-02, ... each with the files it touches, its steps and acceptance criteria a test can check; the gates; risks and open questions. Name versions, APIs, flags and files as the repo has them, not from memory.
+Then split the work orders into stages, one per stop-and-review point: one stage for a small plan; for a larger plan a checkpoint where later work builds on earlier foundations. Each stage's task names exactly which work orders it does.
+Return files (the absolute paths you wrote), stages ([{ name, task }]), summary (a few lines for the user: the approach and the work orders) and questions (decisions only the user can make, each with the default the plan assumes; empty when none).
+```
+
 ## Plan reviewer - agent engine
 
 ```text

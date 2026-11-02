@@ -6,12 +6,13 @@ The engine is an opencode **v2** plugin (`engines/opencode/plugin/granny-workflo
 
 Requires opencode 2.x (`opencode --version`). V1 plugins and this plugin are not interchangeable.
 
-1. Copy the plugin directory - global, or per project:
+1. Copy the plugin directory into the global plugins directory:
 
    ```sh
    cp -r <skill-dir>/engines/opencode/plugin/granny-workflow ~/.config/opencode/plugins/
-   # or: cp -r <skill-dir>/engines/opencode/plugin/granny-workflow <project>/.opencode/plugins/
    ```
+
+   Install it globally. With `worktree` on (the default) every role session runs in the branch's worktree, and a plugin installed per project in `<project>/.opencode/plugins/` is missing there unless it is committed on the branch: those sessions then have no `granny_submit_*` tools and every role fails with `You stopped without calling granny_submit_...`. The opencode service also keeps a directory's first instance, so a worktree path that was first opened without the plugin keeps lacking it until `opencode service restart`.
 
 2. Optional: the `granny` primary agent, whose model is granny's model in opencode:
 
@@ -29,7 +30,10 @@ Run granny from the TUI, the desktop app or `opencode run` against the backgroun
 
 ```
 granny_run({ repo, branch, base, context, plan?, stages, fromStage?, config? })
+granny_run({ repo, branch, base, context, goal, plan?, config? })   // plan first, then stop
 ```
+
+With `goal` the planner writes the plan (to `plan`, default `<repo>/<workDir>/plans/<branch-slug>.md`) in a child session with write access on `roles.planner`'s model, the plan review runs when `"planReview": true`, and the run ends with `draft` in its result and nothing implemented ([config.md](config.md#planning)). Its session works in the worktree, so the default path is in the main checkout: check that your permissions let a session edit it.
 
 `plan` is a list of absolute plan file paths; every agent reads them. The plan review is optional: with `plan` and `"planReview": true` in the config, the run reviews the plan before stage 1 ([Plan review](#plan-review)). It runs every reviewer, the judge and the implementer over the plan for up to `maxRounds` rounds before any code is written, so it costs extra tokens.
 

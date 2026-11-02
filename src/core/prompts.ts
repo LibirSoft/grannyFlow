@@ -36,6 +36,19 @@ export function common(p: PromptContext): string {
   return lines.join('\n')
 }
 
+export function draftPrompt(p: PromptContext, goal: string, plans: string[]): string {
+  return `${common(p)}
+
+You are the PLANNER. Nothing is implemented yet: write a plan, not code. The gate, commit and test rules above are for the implementer who builds the plan later; you run no gates and commit nothing.
+GOAL:
+${goal}
+
+Explore the repo first - the code, configs, lockfiles, tests and docs the goal touches. Then write the plan to ${plans.join(', ')} (absolute paths; create the directories if missing). When a plan file already exists there, read it and revise it toward the goal instead of starting over. Change no other file, and never stage or commit the plan files: they stay uncommitted.
+Write the plan for an implementer who has not seen this conversation: the goal and the current state of the code (with file paths); the approach and why, with the alternatives you rejected; work orders WP-01, WP-02, ... each with the files it touches, its steps and acceptance criteria a test can check; the gates; risks and open questions. Name versions, APIs, flags and files as the repo has them, not from memory.
+Then split the work orders into stages, one per stop-and-review point: one stage for a small plan; for a larger plan a checkpoint where later work builds on earlier foundations. Each stage's task names exactly which work orders it does.
+Return files (the absolute paths you wrote), stages ([{ name, task }]), summary (a few lines for the user: the approach and the work orders) and questions (decisions only the user can make, each with the default the plan assumes; empty when none).`
+}
+
 export function implementPrompt(p: PromptContext, stage: StageSpec, index: number, total: number, name: string): string {
   const pr = prBodyPath(p.config)
   const earlier = index === 0 ? '' : `Earlier stages are done and reviewed - read \`git log --oneline ${shellQuote(p.base)}..HEAD\`, the code and ${pr} first.\n`

@@ -14,6 +14,27 @@ const FINDING = {
 }
 
 export const SCHEMAS: Record<ResultKind, JsonSchema> = {
+  draft: {
+    type: 'object',
+    properties: {
+      files: { type: 'array', items: { type: 'string' }, description: 'absolute paths of the plan files you wrote' },
+      stages: {
+        type: 'array',
+        description: 'proposed stages, one per stop-and-review point',
+        items: {
+          type: 'object',
+          properties: {
+            name: { type: 'string' },
+            task: { type: 'string', description: 'exactly which work orders or sections of the plan this stage does' },
+          },
+          required: ['name', 'task'],
+        },
+      },
+      summary: { type: 'string', description: 'a few lines for the user: the approach and the work orders' },
+      questions: { type: 'string', description: 'decisions only the user can make, each with the default the plan assumes; empty when none' },
+    },
+    required: ['files', 'stages', 'summary'],
+  },
   implementation: {
     type: 'object',
     properties: {

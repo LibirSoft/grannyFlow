@@ -173,16 +173,17 @@ function hosts(theme: Theme): string {
 
   c.box(24, 190, 290, 150, 'blue', 'Claude Code', ['Workflow script', 'every role is an agent() call', 'with its own model, effort, schema', 'reviewers run as concurrent calls'])
   c.box(355, 190, 290, 150, 'purple', 'opencode 2.x', ['server plugin', 'granny_run · granny_status · granny_cancel', 'every role is a child session', 'review CLIs run directly'])
-  c.box(686, 190, 290, 150, 'muted', 'Cursor and others', ['manual protocol in the skill', 'three subagents', 'same loop, not deterministic'], { dashed: true })
+  c.box(686, 190, 290, 150, 'muted', 'Cursor and others', ['manual protocol in the skill', 'four subagents', 'same loop, not deterministic'], { dashed: true })
 
   const roles: Array<[string, string, Tone]> = [
-    ['granny', 'talks to you, launches, reports', 'neutral'],
+    ['granny', 'launches and reports', 'neutral'],
+    ['planner', 'writes the plan', 'green'],
     ['implementer', 'builds and fixes', 'blue'],
     ['reviewers', 'find issues, in parallel', 'purple'],
     ['judge', 'scores and dedupes', 'amber'],
   ]
   c.text(24, 384, 'ROLES · EACH WITH ITS OWN MODEL AND EFFORT', { size: 11.5, weight: 700, fill: c.p.muted, spacing: 1.2 })
-  roles.forEach(([name, what, tone], i) => c.box(24 + i * 241, 398, 228, 58, tone, name, [what]))
+  roles.forEach(([name, what, tone], i) => c.box(24 + i * 193, 398, 180, 58, tone, name, [what]))
   return c.done()
 }
 

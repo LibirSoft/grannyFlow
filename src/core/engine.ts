@@ -3,6 +3,7 @@ import {
   agentPlanReviewPrompt,
   agentReviewPrompt,
   commandReviewPrompt,
+  draftPrompt,
   extractPrompt,
   finalPrompt,
   fixPrompt,
@@ -19,13 +20,14 @@ import { isBlocker, mergeDuplicates, parseCodexReview, reviewFailure, triage } f
 import { planReviewScript, reportedBackend, reviewPlan, reviewStem } from './reviewer'
 import { SCHEMAS } from './schemas'
 import { shellQuote } from './shell'
-import { reportedWorktree, worktreePath, worktreeScript } from './worktree'
+import { branchSlug, reportedWorktree, worktreePath, worktreeScript } from './worktree'
 import type {
   AgentRequest,
   FinalReport,
   Finding,
   Host,
   Implementation,
+  PlanDraft,
   PlanFix,
   PlanResult,
   ResultKind,
@@ -39,14 +41,16 @@ import type {
 type Subject = { kind: 'diff'; base: string } | { kind: 'plan'; files: string[] }
 
 const PLAN_PHASE = 'Plan review'
+const DRAFT_PHASE = 'Plan'
 
 export interface RunInput {
   repo: string
   branch: string
   base?: string
   context?: string
+  goal?: string
   plan?: string | string[]
-  stages: StageSpec[]
+  stages?: StageSpec[]
   fromStage?: number
   config?: unknown | unknown[]
 }
@@ -65,13 +69,17 @@ export function checkInput(input: RunInput): string[] {
   if (!input || typeof input !== 'object') return ['input must be an object']
   if (typeof input.repo !== 'string' || !input.repo.startsWith('/')) errors.push('repo must be an absolute path')
   if (typeof input.branch !== 'string' || !input.branch) errors.push('branch is required')
-  if (!Array.isArray(input.stages) || !input.stages.length) errors.push('stages must be a non-empty array')
+  if (input.goal !== undefined) {
+    if (typeof input.goal !== 'string' || !input.goal.trim()) errors.push('goal must be a non-empty string')
+    if (input.stages !== undefined) errors.push('a run with goal plans the work and proposes the stages - drop stages, or drop goal and pass the plan')
+    if (input.fromStage !== undefined) errors.push('fromStage has no stages to resume in a run with goal')
+  } else if (!Array.isArray(input.stages) || !input.stages.length) errors.push('stages must be a non-empty array (or pass goal to have the planner write the plan)')
   else input.stages.forEach((s, i) => {
     if (!s || typeof s !== 'object') errors.push(`stages[${i}] must be an object`)
     else if (s.implement === false && s.review === false) errors.push(`stages[${i}] has nothing to do (implement and review are both false)`)
     else if (s.implement !== false && (typeof s.task !== 'string' || !s.task.trim())) errors.push(`stages[${i}].task is required`)
   })
-  if (input.fromStage !== undefined && (!Number.isInteger(input.fromStage) || input.fromStage < 1 || input.fromStage > (input.stages?.length ?? 0))) {
+  if (input.goal === undefined && input.fromStage !== undefined && (!Number.isInteger(input.fromStage) || input.fromStage < 1 || input.fromStage > (input.stages?.length ?? 0))) {
     errors.push('fromStage must be a 1-based stage index')
   }
   if (input.plan !== undefined) {
@@ -137,7 +145,25 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
     host.phase('Worktree')
     repo = await setUpWorktree()
   }
-  const plans = planFiles(input)
+  const draftPlan = async (goal: string): Promise<PlanDraft> => {
+    host.phase(DRAFT_PHASE)
+    const top = input.repo.replace(/\/+$/, '') || '/'
+    const targets = input.plan === undefined ? [`${top}/${config.workDir}/plans/${branchSlug(input.branch)}.md`] : planFiles(input)
+    const prompt = draftPrompt({ repo, branch: input.branch, base, context: input.context, config }, goal, targets)
+    const r = (await call('planner', 'draft', 'plan', DRAFT_PHASE, prompt, 'write', config.roles.planner)) as PlanDraft | null
+    if (!r) throw new Error('planner returned nothing')
+    const files = (Array.isArray(r.files) ? r.files : []).filter(f => typeof f === 'string' && f.startsWith('/'))
+    if (!files.length) throw new Error(`planner reported no plan file (expected ${targets.join(', ')})`)
+    const proposed = (Array.isArray(r.stages) ? r.stages : []).filter(st => st && typeof st.task === 'string' && st.task.trim())
+    if (!proposed.length) throw new Error('planner proposed no stage with a task')
+    const draft: PlanDraft = { files, stages: proposed.map(st => ({ name: st.name, task: st.task })), summary: String(r.summary ?? '') }
+    if (typeof r.questions === 'string' && r.questions.trim()) draft.questions = r.questions
+    host.log(`plan: ${files.join(', ')} - ${draft.stages.length} proposed stage(s)${draft.questions ? ', with open questions for the user' : ''}`)
+    return draft
+  }
+
+  const draft = input.goal !== undefined ? await draftPlan(input.goal) : undefined
+  const plans = draft ? draft.files : planFiles(input)
   const context = [plans.length ? `Plan files - read them first: ${plans.join(', ')}` : '', input.context ?? ''].filter(Boolean).join('\n') || undefined
   const p: PromptContext = { repo, branch: input.branch, base, context, config }
 
@@ -331,14 +357,19 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
   }
 
   const planResult = await reviewThePlan()
+  if (draft) {
+    host.log(`plan written - the run stops here; launch again with plan and the approved stages to implement it`)
+    return { repo: input.repo, branch: input.branch, base, worktree: repo, draft, ...(planResult ? { plan: planResult } : {}), stages: [], final: null }
+  }
   if (planResult && (planResult.outcome === 'round-cap' || planResult.outcome === 'review-failed')) {
     host.log(`plan review ended ${planResult.outcome} - stopping before stage 1; nothing was implemented`)
     return { repo: input.repo, branch: input.branch, base, worktree: repo, plan: planResult, stages: [], final: null }
   }
 
+  const specs = input.stages ?? []
   const stages: StageResult[] = []
-  for (let i = 0; i < input.stages.length; i++) {
-    const st = input.stages[i]!
+  for (let i = 0; i < specs.length; i++) {
+    const st = specs[i]!
     const name = st.name || `stage ${i + 1}`
     if (i + 1 < fromStage) {
       stages.push({ stage: name, outcome: 'skipped', rounds: 0, residual: [], unresolved: [], history: [] })
@@ -347,7 +378,7 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
     let impl: Implementation | undefined
     if (st.implement !== false) {
       host.phase('Implement')
-      impl = await implement(`implement ${name}`, implementPrompt(p, st, i, input.stages.length, name))
+      impl = await implement(`implement ${name}`, implementPrompt(p, st, i, specs.length, name))
       if (!impl.gatesGreen) host.log(`${name}: implementer ended with RED gates - review will see it`)
     } else {
       host.log(`${name}: review-only stage - reviewing ${base}...HEAD`)

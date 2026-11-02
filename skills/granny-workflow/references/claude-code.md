@@ -13,6 +13,7 @@ Workflow({
   script: <contents of workflow.js>,              // or scriptPath: <scratchpad copy of workflow.js>
   args: {
     repo, branch, base, context, plan, stages,    // plan: absolute path or list; fromStage when resuming by stage
+    // or, to plan first: repo, branch, base, context, goal, plan?  (no stages)
     config: [<user config>, <project config>, <run overrides>]   // omit missing layers
   }
 })
@@ -29,6 +30,10 @@ Workflow({
 ## Worktree
 
 With `worktree` on (the default) the run starts with phase "Worktree": a granny helper agent (label `worktree`, write access, `roles.granny`'s model) runs the setup script from `repo` and returns what it printed; the engine reads the `[granny] worktree: <path>` line from it and stops the run when the script fails - a dirty reused worktree, for example - before any other agent starts. Pass the main checkout as `repo` and leave `branch` alone: the script reuses the worktree that has it checked out or creates one ([config.md](config.md#worktree)). `agent()` has no working-directory option, so every later prompt carries the worktree instead: `Working repo: <worktree>` and `cd <worktree> &&` before each command; the review runner `cd`s there too. The result's `worktree` is the path. On resume the cached setup call returns the same path; a relaunch with `fromStage` runs the setup again and reuses the worktree.
+
+## Planning
+
+With `goal` in args (and no `stages`), phase "Plan" runs after "Worktree": one `agent()` call, label `plan`, `roles.planner`'s model and effort, write access, schema `{ files, stages, summary, questions? }`. It writes the plan at the absolute path in its prompt - by default the main checkout's `<workDir>/plans/<branch-slug>.md`, which the session can write - then the plan review runs on it when `"planReview": true`, and the Workflow ends with `draft`, `plan`, `stages: []` and `final: null` ([config.md](config.md#planning)).
 
 ## Plan review
 
@@ -51,4 +56,4 @@ Same script, same args: `Workflow({ scriptPath, args, resumeFromRunId })`, where
 
 ## When it ends
 
-The result is `{ repo, branch, base, worktree, plan?, stages: [...], final }`; `plan` is there when args had a `plan`. If anything looks empty, read `<transcriptDir>/journal.jsonl`, which records every agent's return value, before drawing conclusions. Then report per SKILL.md section 5 and wait.
+The result is `{ repo, branch, base, worktree, draft?, plan?, stages: [...], final }`; `draft` is there in a planning run; `plan` is there when args had a `plan`. If anything looks empty, read `<transcriptDir>/journal.jsonl`, which records every agent's return value, before drawing conclusions. Then report per SKILL.md section 5 and wait.

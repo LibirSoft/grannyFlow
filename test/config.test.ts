@@ -38,7 +38,7 @@ describe('resolveConfig', () => {
     } catch (e) {
       const message = (e as Error).message
       for (const part of [
-        'unknown role "jduge" (expected granny, implementer, judge)',
+        'unknown role "jduge" (expected granny, planner, implementer, judge)',
         'threshold must be',
         'maxRounds must be',
         'gates must be',

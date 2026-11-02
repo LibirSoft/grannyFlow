@@ -77,7 +77,7 @@ describe('claude-code workflow.js', () => {
   it('declares the Plan review phase and reviews and fixes a plan through the Workflow agent() API', async () => {
     const script = await buildClaudeCode()
     const meta = script.slice(0, script.indexOf('\n}\n') + 2)
-    expect(meta).toContain("{ title: 'Worktree' },\n    { title: 'Plan review' },\n    { title: 'Implement' },")
+    expect(meta).toContain("{ title: 'Worktree' },\n    { title: 'Plan' },\n    { title: 'Plan review' },\n    { title: 'Implement' },")
     const calls: Array<{ prompt: string; opts: any }> = []
     const phases: string[] = []
     let reviews = 0
