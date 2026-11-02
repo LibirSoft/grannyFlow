@@ -31,7 +31,7 @@ Run granny from the TUI, the desktop app or `opencode run` against the backgroun
 granny_run({ repo, branch, base, context, plan?, stages, fromStage?, config? })
 ```
 
-`plan` is a list of absolute plan file paths; with it and config `planReview` on, the run reviews the plan before stage 1 ([Plan review](#plan-review)).
+`plan` is a list of absolute plan file paths; every agent reads them. The plan review is optional: with `plan` and `"planReview": true` in the config, the run reviews the plan before stage 1 ([Plan review](#plan-review)). It runs every reviewer, the judge and the implementer over the plan for up to `maxRounds` rounds before any code is written, so it costs extra tokens.
 
 The plugin reads `~/.config/granny/config.json` and `<repo>/granny.config.json` itself; `config` holds run overrides only. Before it starts it adds the work dir to the common git dir's `info/exclude` and checks `repo`:
 
