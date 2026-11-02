@@ -58,7 +58,7 @@ npx skills add LibirSoft/grannyFlow
 This puts `skills/granny-workflow/` where your agents look for skills. Then, per host:
 
 - **Claude Code** - nothing else. Optional: OpenAI's Codex plugin (`/plugin marketplace add openai/codex-plugin-cc`, then `/plugin install codex@openai-codex`); the default reviewer uses it when it is installed and `node` is on `PATH`.
-- **opencode** - install the plugin (and optionally the `granny` primary agent), then restart the service:
+- **opencode** - install the plugin globally (and optionally the `granny` primary agent), then restart the service. A per-project install breaks with worktrees on, since the role sessions run in the worktree, where the plugin is missing:
 
   ```sh
   cp -r <skill-dir>/engines/opencode/plugin/granny-workflow ~/.config/opencode/plugins/

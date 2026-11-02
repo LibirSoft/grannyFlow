@@ -6,12 +6,13 @@ The engine is an opencode **v2** plugin (`engines/opencode/plugin/granny-workflo
 
 Requires opencode 2.x (`opencode --version`). V1 plugins and this plugin are not interchangeable.
 
-1. Copy the plugin directory - global, or per project:
+1. Copy the plugin directory into the global plugins directory:
 
    ```sh
    cp -r <skill-dir>/engines/opencode/plugin/granny-workflow ~/.config/opencode/plugins/
-   # or: cp -r <skill-dir>/engines/opencode/plugin/granny-workflow <project>/.opencode/plugins/
    ```
+
+   Install it globally. With `worktree` on (the default) every role session runs in the branch's worktree, and a plugin installed per project in `<project>/.opencode/plugins/` is missing there unless it is committed on the branch: those sessions then have no `granny_submit_*` tools and every role fails with `You stopped without calling granny_submit_...`. The opencode service also keeps a directory's first instance, so a worktree path that was first opened without the plugin keeps lacking it until `opencode service restart`.
 
 2. Optional: the `granny` primary agent, whose model is granny's model in opencode:
 
