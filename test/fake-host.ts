@@ -14,6 +14,8 @@ export interface FakeOptions {
   worktree?: string | CommandResult | 'git' | ((command: string, cwd: string) => string)
   /** Commits the engine's base..HEAD probe sees after an implementer ran (default 1); 'git' runs the probes in a real shell. */
   commits?: number | 'git' | ((base: string) => number)
+  /** Answers a command before the reviews do; undefined passes it on. */
+  checks?: (command: string) => Review | undefined
 }
 
 export interface Setup {
@@ -77,6 +79,8 @@ export function fakeHost(opts: FakeOptions = {}) {
     return { code: 0, output: `[granny] worktree: ${w ?? repo}\n` }
   }
   const nextReview = async (command: string, cwd: string): Promise<CommandResult> => {
+    const checked = opts.checks?.(command)
+    if (checked !== undefined) return asResult(checked)
     if (opts.shell) return bash(command, cwd, opts.shell.env)
     if (typeof source === 'function') return asResult(await source(command))
     const list = Array.isArray(source) ? queue : perReviewer[reviewerOf(command) ?? ''] ?? []
