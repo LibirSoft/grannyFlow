@@ -221,7 +221,7 @@ describe('checks', () => {
   it('wrap a check with a timeout in timeout(1) and name a timeout in the note', async () => {
     const f = scripted({ 's slow': [{ code: 124, output: '' }] })
     const r = await runGranny(f.host, run({ maxRepairs: 0, checks: [{ name: 'slow', run: "echo it's slow", timeout: 30 }] }))
-    expect(f.commands[0]).toBe(`timeout 30 sh -c 'echo it'\\''s slow'`)
+    expect(f.commands[0]).toBe(`timeout 30 bash -c 'echo it'\\''s slow'`)
     expect(r.stages[0]!.checks?.[0]!.results[0]).toEqual({ name: 'slow', passed: false, code: 124, note: 'timed out after 30s' })
   })
 

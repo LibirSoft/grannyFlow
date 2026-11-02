@@ -132,7 +132,7 @@ The result's `finalReview` is the primary repo's `{ outcome, rounds, residual, u
 }
 ```
 
-A check is `{ name, run, maxRepairs?, timeout?, metric? }`: a unique `name`, the shell command `run`, its own repair budget (else the top-level `maxRepairs`), `timeout` in seconds - the command then runs as `timeout <s> sh -c '<run>'`, so the host needs coreutils `timeout`; exit 124 is reported as `timed out after <s>s` - and `metric: { pattern, min?, max? }`. A check passes when its command exits 0 and, with `metric`, the **last** match of `pattern` (a JavaScript regular expression, matched with the `g` and `m` flags) in the output has a first capture group that parses as a number within `[min, max]`. No match, or no number in it, fails with `metric not found in output`. `pattern` must compile and have a capture group, and `metric` needs `min`, `max` or both.
+A check is `{ name, run, maxRepairs?, timeout?, metric? }`: a unique `name`, the shell command `run`, its own repair budget (else the top-level `maxRepairs`), `timeout` in seconds - the command then runs as `timeout <s> bash -c '<run>'`, so the host needs coreutils `timeout`; exit 124 is reported as `timed out after <s>s` - and `metric: { pattern, min?, max? }`. A check passes when its command exits 0 and, with `metric`, the **last** match of `pattern` (a JavaScript regular expression, matched with the `g` and `m` flags) in the output has a first capture group that parses as a number within `[min, max]`. No match, or no number in it, fails with `metric not found in output`. `pattern` must compile and have a capture group, and `metric` needs `min`, `max` or both.
 
 **Where they run** - each place is one *check gate*, in phase "Checks":
 
