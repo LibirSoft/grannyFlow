@@ -20,7 +20,7 @@ export interface Setup {
   request?: AgentRequest
 }
 
-const CLEAN: CommandResult = { code: 0, output: 'No issues found.' }
+const CLEAN: CommandResult = { code: 0, output: 'No findings.' }
 const asResult = (r: Review): CommandResult => (typeof r === 'string' ? { code: 0, output: r } : r)
 
 export const reviewerOf = (command: string) => /review-.+?-r\d+-([a-z0-9-]+)\.md/.exec(command)?.[1]

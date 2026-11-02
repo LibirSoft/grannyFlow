@@ -18,7 +18,7 @@ import {
   worktreeCommandPrompt,
   type PromptContext,
 } from './prompts'
-import { isBlocker, mergeDuplicates, parseCodexReview, reviewFailure, triage } from './review'
+import { isBlocker, mergeDuplicates, parseCodexReview, reviewFailure, saysNoFindings, triage } from './review'
 import { planReviewScript, reportedBackend, reviewPlan, reviewStem } from './reviewer'
 import { SCHEMAS } from './schemas'
 import { shellQuote } from './shell'
@@ -304,13 +304,21 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
     if (failure) return { ran: false, findings: [], note: `reviewer returned no usable result (${failure}): ${output.slice(-2000)}` }
 
     const parsed = parseCodexReview(output, subject.kind === 'plan' ? undefined : cwd)
+    const extractions = async (label: string, prompt: string) => call('granny', 'findings', label, phase, prompt, 'read-only', config.roles.granny, cwd)
+    const extract = async (label: string, prompt: string): Promise<Finding[]> => {
+      const r = await extractions(label, prompt)
+      return Array.isArray(r?.findings) ? r.findings : []
+    }
+    if (parsed.markers === 0 && !saysNoFindings(output)) {
+      host.log(`${tag}: no finding in the expected form and no "No findings." - asking an agent to extract findings`)
+      const r = await extractions(`extract ${tag}`, extractPrompt(name, output, 'unmarked'))
+      const found: Finding[] = Array.isArray(r?.findings) ? r.findings : []
+      if (found.length || r?.clean === true) return { ran, findings: found }
+      return { ran: false, findings: [], note: `reviewer output had no findings in the expected form and did not say No findings, and an extraction found none in it: ${output.slice(-2000)}` }
+    }
     if (parsed.markers <= parsed.findings.length) return { ran, findings: parsed.findings }
 
     host.log(`${tag}: parser read ${parsed.findings.length}/${parsed.markers} findings - asking an agent to extract them`)
-    const extract = async (label: string, prompt: string): Promise<Finding[]> => {
-      const r = await call('granny', 'findings', label, phase, prompt, 'read-only', config.roles.granny, cwd)
-      return Array.isArray(r?.findings) ? r.findings : []
-    }
     const first = await extract(`extract ${tag}`, extractPrompt(name, output))
     if (first.length >= parsed.markers) return { ran, findings: first }
 

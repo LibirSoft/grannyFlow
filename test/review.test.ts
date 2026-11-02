@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'bun:test'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { isBlocker, parseCodexReview, reviewFailure, triage } from '../src/core/review'
+import { isBlocker, parseCodexReview, reviewFailure, saysNoFindings, triage } from '../src/core/review'
 import type { Finding } from '../src/core/types'
 
 const fixture = (name: string) => readFileSync(join(import.meta.dir, 'fixtures', name), 'utf8')
@@ -51,6 +51,15 @@ Some closing words.`
 
   it('reports clean output as zero markers and zero findings', () => {
     expect(parseCodexReview('I did not find any issues with this change.')).toEqual({ findings: [], markers: 0 })
+  })
+
+  it('recognises a review that says it has no findings, on a line of its own', () => {
+    for (const text of ['No findings.', 'no findings', '  No Findings.  \n', '# Codex Review\n\nTarget: x\nVerdict: approve\n\nFine.\n\nNo material findings.\n', '[granny] reviewer: codex CLI\nNo findings.']) {
+      expect(saysNoFindings(text)).toBe(true)
+    }
+    for (const text of ['', 'I did not find any issues with this change.', 'No findings. But the cache key is wrong.', 'Findings: none worth a fix']) {
+      expect(saysNoFindings(text)).toBe(false)
+    }
   })
 
   it('counts markers it cannot parse so the engine can fall back to extraction', () => {

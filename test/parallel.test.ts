@@ -139,7 +139,7 @@ describe('parallel stages', () => {
   it('has the implementer resolve a merge that stops on conflicts', async () => {
     const f = fakeHost({
       worktree: lanePath,
-      reviews: (command: string) => (command.startsWith('git merge') ? { code: 1, output: 'CONFLICT (content): Merge conflict in src/a.ts' } : 'No issues found.'),
+      reviews: (command: string) => (command.startsWith('git merge') ? { code: 1, output: 'CONFLICT (content): Merge conflict in src/a.ts' } : 'No findings.'),
       override: async req => (req.label === 'implement one' ? new Promise(r => setTimeout(() => r(undefined), 15)) : undefined),
     })
     const r = await runGranny(f.host, input({ repos: undefined, stages: [{ name: 'one', task: 'WP-01' }, { name: 'two', task: 'WP-02', after: [] }] }))
@@ -285,7 +285,7 @@ it('fails the run when the implementer leaves the merge unfinished', async () =>
   const f = fakeHost({
     worktree: (command: string, cwd: string) => /wt='?([^';]+)'?; git worktree add/.exec(command)?.[1] ?? cwd,
     reviews: (command: string) =>
-      command.startsWith('git merge') ? { code: 1, output: 'CONFLICT' } : command.includes('MERGE_HEAD') ? { code: 1, output: 'UU a.txt' } : 'No issues found.',
+      command.startsWith('git merge') ? { code: 1, output: 'CONFLICT' } : command.includes('MERGE_HEAD') ? { code: 1, output: 'UU a.txt' } : 'No findings.',
     override: async req => (req.label === 'implement one' ? new Promise(r => setTimeout(() => r(undefined), 15)) : undefined),
   })
   await expect(runGranny(f.host, { repo: A, branch: 'feat/x', stages: [{ name: 'one', task: 'a' }, { name: 'two', task: 'b', after: [] }] })).rejects.toThrow(

@@ -45,7 +45,7 @@ describe('the plan input', () => {
 
   it('puts the plan files in every agent prompt and the {prompt} of a command reviewer', async () => {
     const f = fakeHost({
-      reviews: [review(finding('P2', 'Off by one')), 'No issues.'],
+      reviews: [review(finding('P2', 'Off by one')), 'No findings.'],
       scores: [{ 'glm-F1': 90 }],
     })
     await runGranny(

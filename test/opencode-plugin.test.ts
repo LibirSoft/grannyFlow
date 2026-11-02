@@ -113,7 +113,7 @@ function fakeContext(behaviour: Behaviour = {}) {
   return { ctx, tools, created, prompts, interrupted }
 }
 
-const REVIEW_ONCE = `test -n {base} && if [ -e .granny/reviewed ]; then echo "No issues." > {out}; else touch .granny/reviewed; printf '%s\\n' '- [P2] Real issue — a.txt:1' '  detail' > {out}; fi`
+const REVIEW_ONCE = `test -n {base} && if [ -e .granny/reviewed ]; then echo "No findings." > {out}; else touch .granny/reviewed; printf '%s\\n' '- [P2] Real issue — a.txt:1' '  detail' > {out}; fi`
 
 async function startRun(repo: string, f: ReturnType<typeof fakeContext>, extra: Record<string, unknown> = {}) {
   writeFileSync(join(repo, 'granny.config.json'), JSON.stringify({ reviewers: [{ name: 'codex', engine: 'command', command: REVIEW_ONCE }], ...extra }))
@@ -366,7 +366,7 @@ describe('opencode plugin', () => {
           {
             name: 'codex',
             engine: 'command',
-            command: `test -n {base} && if [ -e .granny/reviewed ]; then echo "No issues." > {out}; else touch .granny/reviewed; printf '%s\\n' '- [P2] Real issue — a.txt:1' '  detail' > {out}; fi`,
+            command: `test -n {base} && if [ -e .granny/reviewed ]; then echo "No findings." > {out}; else touch .granny/reviewed; printf '%s\\n' '- [P2] Real issue — a.txt:1' '  detail' > {out}; fi`,
           },
         ],
       }),

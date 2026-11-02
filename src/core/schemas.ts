@@ -64,6 +64,7 @@ export const SCHEMAS: Record<ResultKind, JsonSchema> = {
     properties: {
       findings: { type: 'array', items: FINDING },
       summary: { type: 'string' },
+      clean: { type: 'boolean', description: 'only when asked to read a review that has no finding bullets: true if it is a finished review that clearly says the changes have no problems' },
     },
     required: ['findings'],
   },

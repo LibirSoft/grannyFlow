@@ -361,7 +361,7 @@ ${planReviewAsks(p, plans).slice(0, 2).join(`
 Return findings with id (F1, F2, ...), severity (P0 critical / P1 must fix before implementing / P2 should fix / P3 nit), file (the absolute path of the plan file), line (the line in the plan file), title and a concrete detail. Zero findings means the plan is clean.`;
 }
 function extractPrompt(name, output, short) {
-  const count = short ? `
+  const count = short === "unmarked" ? '\nThe output has no finding bullets (`- [P1] Title — path:line`) and does not say "No findings.", so read its prose: return each problem it reports as a finding. When it reports none, return no findings and set clean to true only if the output is a finished review that clearly says the changes have no problems - an error, a crash, a question, a refusal, a truncated or empty output, or anything else that is not a finished review is not clean.' : short ? `
 The output has ${short.markers} finding marker(s) (\`- [P0]\` ... \`- [P3]\` bullets); an earlier extraction returned ${short.got}. Return all ${short.markers}.` : "";
   return `Below is the raw output of an automated code review for stage "${name}". Do not run anything and do not judge the findings.
 Extract every finding it reports - each one, none merged, none dropped, none invented - with id (F1, F2, ...), severity exactly as written (e.g. P1), file, line, title and the full detail text.${count}
@@ -474,6 +474,8 @@ function toFinding(severity, paren, rest, n, repo) {
     finding.line = Number(loc[2]);
   return finding;
 }
+var NO_FINDINGS = /^no (?:material )?findings\.?$/i;
+var saysNoFindings = (text) => text.split(/\r\n?|\n/).some((line) => NO_FINDINGS.test(line.trim()));
 function reviewFailure(text) {
   return FAILED_RENDER.exec(text)?.[0];
 }
@@ -656,7 +658,8 @@ var SCHEMAS = {
     type: "object",
     properties: {
       findings: { type: "array", items: FINDING },
-      summary: { type: "string" }
+      summary: { type: "string" },
+      clean: { type: "boolean", description: "only when asked to read a review that has no finding bullets: true if it is a finished review that clearly says the changes have no problems" }
     },
     required: ["findings"]
   },
@@ -984,13 +987,22 @@ ${a.note}` : ""}` : "the worktree runner returned nothing" };
     if (failure)
       return { ran: false, findings: [], note: `reviewer returned no usable result (${failure}): ${output.slice(-2000)}` };
     const parsed = parseCodexReview(output, subject.kind === "plan" ? undefined : cwd);
+    const extractions = async (label, prompt) => call("granny", "findings", label, phase, prompt, "read-only", config.roles.granny, cwd);
+    const extract = async (label, prompt) => {
+      const r = await extractions(label, prompt);
+      return Array.isArray(r?.findings) ? r.findings : [];
+    };
+    if (parsed.markers === 0 && !saysNoFindings(output)) {
+      host.log(`${tag}: no finding in the expected form and no "No findings." - asking an agent to extract findings`);
+      const r = await extractions(`extract ${tag}`, extractPrompt(name, output, "unmarked"));
+      const found = Array.isArray(r?.findings) ? r.findings : [];
+      if (found.length || r?.clean === true)
+        return { ran, findings: found };
+      return { ran: false, findings: [], note: `reviewer output had no findings in the expected form and did not say No findings, and an extraction found none in it: ${output.slice(-2000)}` };
+    }
     if (parsed.markers <= parsed.findings.length)
       return { ran, findings: parsed.findings };
     host.log(`${tag}: parser read ${parsed.findings.length}/${parsed.markers} findings - asking an agent to extract them`);
-    const extract = async (label, prompt) => {
-      const r = await call("granny", "findings", label, phase, prompt, "read-only", config.roles.granny, cwd);
-      return Array.isArray(r?.findings) ? r.findings : [];
-    };
     const first = await extract(`extract ${tag}`, extractPrompt(name, output));
     if (first.length >= parsed.markers)
       return { ran, findings: first };
