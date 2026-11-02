@@ -21,7 +21,7 @@ With `worktree` on (the default), set it up by hand before the first stage - als
 
 ## The plan review
 
-With plan files and `planReview` on (the default), review the plan after the worktree and before stage 1; skip it when you resume with `fromStage` above 1 ([config.md](config.md#plan-review)). It is the review loop below, steps 2-5, on the plan instead of a diff, with these differences:
+The plan review is optional and off by default; enable it with `"planReview": true`. It runs every reviewer, the judge and the implementer over the plan for up to `maxRounds` rounds before any code is written, so it costs extra tokens. With plan files and `planReview` on, review the plan after the worktree and before stage 1; skip it when you resume with `fromStage` above 1 ([config.md](config.md#plan-review)). It is the review loop below, steps 2-5, on the plan instead of a diff, with these differences:
 
 - Reviewers, round N, output `<workDir>/review-plan-review-rN-<name>.md` / `.log`, run from the worktree:
   - engine `codex`, or `auto`: `codex exec --sandbox read-only -o <workDir>/review-plan-review-rN-<name>.md '<prompt>' </dev/null > <workDir>/review-plan-review-rN-<name>.log 2>&1`, with the "Plan reviewer - codex exec, the Codex plugin task and the {prompt} of a command engine" prompt from [prompts.md](prompts.md) as `<prompt>` (shell-quoted, one line).

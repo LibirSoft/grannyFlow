@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.1.0
+
+- Plan review is opt-in: it runs only when the run has `plan` and the config sets `"planReview": true`; `planReview` defaults to `false`. It runs every reviewer, the judge and the implementer over the plan for up to `maxRounds` rounds before any code is written, so it costs extra tokens. Plan files given via `plan` reach every agent's context with the plan review on or off.
+- The loop diagram and the text loop in the README and SKILL.md mark the plan review as optional.
+
 ## 1.0.0
 
 The first release of granny-workflow: an agent skill that takes a plan to a PR-ready branch through an implement → review → judge → fix loop, and stops without pushing.
