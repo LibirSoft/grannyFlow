@@ -255,6 +255,29 @@ describe('checks', () => {
     expect(f.logs.some(l => l.includes('not PR-ready'))).toBe(true)
   })
 
+  it('give the final gate no repairs when no final review follows to see them', async () => {
+    const one = scripted({ 'run-tests': [green(), red('integration broke')] })
+    const r1 = await runGranny(one.host, run({ checks: [TESTS] }))
+    expect(one.calls.some(c => c.label.startsWith('repair final review'))).toBe(false)
+    expect(r1.finalReview).toMatchObject({ outcome: 'checks-failed', rounds: 0 })
+    expect(r1.checks).toHaveLength(1)
+    expect(one.logs).toContain('final review: the final checks get no repairs - no final review follows to see one')
+
+    const off = scripted({ 'run-tests': [green(), green(), red()] })
+    const r2 = await runGranny(off.host, run({ finalReview: false, checks: [TESTS] }, { stages: [{ name: 'one', task: 'WP-01' }, { name: 'two', task: 'WP-02' }] }))
+    expect(off.calls.some(c => c.label.startsWith('repair final review'))).toBe(false)
+    expect(r2.finalReview?.outcome).toBe('checks-failed')
+  })
+
+  it('give the final gate no repairs in a repo where a stage already ended checks-failed', async () => {
+    const f = scripted({ 'run-tests': [red()] })
+    const r = await runGranny(f.host, run({ maxRepairs: 1, checks: [TESTS] }, { stages: [{ name: 'core', task: 'WP-01' }, { name: 'more', task: 'WP-02' }] }))
+    expect(r.stages[0]!.outcome).toBe('checks-failed')
+    expect(f.calls.filter(c => c.label.startsWith('repair')).map(c => c.label)).toEqual(['repair core implement #1'])
+    expect(r.finalReview?.outcome).toBe('checks-failed')
+    expect(f.logs).toContain('final review: the final checks get no repairs - 1 (core) already ended checks-failed')
+  })
+
   it('gate the fix rounds of the final review', async () => {
     let reviews = 0
     const f = scripted(

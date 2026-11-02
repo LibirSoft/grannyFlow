@@ -1614,9 +1614,14 @@ ${note}` : note } : result;
     const name = s.lane.repo === primary ? "final review" : `final review ${baseName(s.lane.repo)}`;
     const runs = [];
     const checks = finalChecksOf(s.lane.repo);
+    const reviewed = config.finalReview && (stages > 1 || s.merges > 0);
     if (checks.length) {
       finalRuns.set(s, runs);
-      const gate = await checkGate(s.lane, name, "final", checks, runs);
+      const red = specs.findIndex((st, i) => repoOf(st) === s.lane.repo && results[i]?.outcome === "checks-failed");
+      const noRepairs = !reviewed ? "no final review follows to see one" : red >= 0 ? `${nameOf(red)} already ended checks-failed` : undefined;
+      if (noRepairs)
+        host.log(`${name}: the final checks get no repairs - ${noRepairs}`);
+      const gate = await checkGate(s.lane, name, "final", noRepairs ? checks.map((c) => ({ ...c, maxRepairs: 0 })) : checks, runs);
       if (!gate.passed) {
         host.log(`${name} not run - the final checks failed, so the branch is not PR-ready; the final check still runs`);
         return { outcome: "checks-failed", rounds: 0, residual: [], unresolved: [], history: [], note: gate.note };
@@ -1629,7 +1634,7 @@ ${note}` : note } : result;
     if (!config.finalReview)
       return skipped("review-skipped", `${name} off (finalReview: false)`, "off (finalReview: false)");
     const why = "one stage and no lane merge, so its stage review already covered the whole branch";
-    if (stages === 1 && !s.merges)
+    if (!reviewed)
       return skipped("skipped", `${name} skipped - ${why}`, why);
     host.phase(FINAL_REVIEW_PHASE);
     host.log(`${name}: reviewing ${s.lane.base}...HEAD across ${stages} stage(s)${s.merges ? ` and ${s.merges} lane merge(s)` : ""}`);

@@ -138,7 +138,7 @@ A check is `{ name, run, maxRepairs?, timeout?, metric? }`: a unique `name`, the
 
 - `implement`: after the implementer finished a stage (and made a commit), before its review. Not for a review-only stage (`implement: false`).
 - `fix r<n>`: after every fix round of a stage review and of the final review, before the next review round. Not in the plan review.
-- `final`: once per repo that had stages, on the whole branch with the checks that repo's stages selected, after the last stage and the lane merges, before the final review - also with `finalReview` off or skipped.
+- `final`: once per repo that had stages, on the whole branch with the checks that repo's stages selected, after the last stage and the lane merges, before the final review - also with `finalReview` off or skipped. It gets repairs only when the final review follows (so a reviewer sees them) and no stage of that repo ended `checks-failed` (that stage already spent its budget on it); otherwise it runs once and only reports.
 
 A stage runs every check unless its spec lists `checks` by name (`"checks": ["tests"]`; `[]` runs none at its gates). A name the config does not have stops the run before any agent starts. The `final` gate of a repo runs every check one of its stages selected - all of them when a stage of it lists no `checks` - and none when every stage of it lists `[]`, so a repo can opt out of a check that does not fit its tooling.
 
