@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.5.0
+
+### Added
+
+- **Checks** (`"checks": [{ name, run, maxRepairs?, timeout?, metric? }]`, default `[]`): commands granny runs itself instead of trusting the implementer's `gatesGreen`. They run after the implementer finished a stage, after every fix round (stage reviews and the final review), and once per repo on the whole branch before the final review, all before any review sees the code. A check passes when it exits 0 and, with `metric: { pattern, min?, max? }`, the last match's first capture group is a number within the bounds; `timeout` runs it as `timeout <s> sh -c '<run>'`.
+- **Repair loop**: red checks go back to the implementer (`repair <stage> <gate> #<n>`) with their command, exit code, metric note and output tail, and the rule never to delete, skip or weaken a test, check, threshold, the granny config or a check script; then every check runs again. `maxRepairs` (default 2) caps the repairs per gate; a check's own `maxRepairs` overrides it. Repairs are not review rounds.
+- Stage outcome `checks-failed`: the checks stayed red, so the review did not run or stopped; the stages that build on it are not started. A red whole branch ends `finalReview` `checks-failed`, so the run is not PR-ready; the final check still runs. A stage whose checks ran is never `gates-red`.
+- `stages[].checks` selects checks by name (default all, `[]` none); an unknown name stops the run before any agent starts.
+- The result records every check run: `stages[].checks`, and `checks` (also per repo in `repos`) for the whole-branch gate, each `{ at, attempt, results }`.
+- On opencode the server executes the check commands; on Claude Code a granny helper agent runs each one and reports its exit code (phase "Checks").
+
 ## 1.4.0
 
 ### Changed
