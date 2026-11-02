@@ -317,20 +317,30 @@ ${script}
 
 Set ran=true only if it exited 0, exitCode to its exit code, and output to everything it printed, verbatim and complete. If it failed, set ran=false and explain in note. Never invent output.`;
 }
-function agentReviewPrompt(p, name, reviewBase) {
+var taskSection = (stage) => stage ? `Stage ${stage.number}/${stage.total} "${stage.name}" was asked to do this - its TASK:
+${stage.task}
+` : "";
+var reviewAsks = (stage) => [
+  "Look for correctness bugs, regressions, missing tests for changed behaviour, security problems and contract breaks. Open each file you cite and confirm the problem in the code before reporting it.",
+  ...stage ? ["Check the diff against the TASK: a part of the task the diff does not do is a finding, and so is a change outside it (scope creep, unrelated edits); work the task leaves to other stages is not a finding."] : [],
+  "Also report clean-code and design problems - duplication, unclear naming, needless abstraction, deviations from the design the plan or context lays out - as P2/P3 unless they break something."
+];
+function agentReviewPrompt(p, name, reviewBase, stage) {
   return `${common(p)}
 
 You are the REVIEWER. Do not edit, stage or commit anything.
-Review the changes of stage "${name}": \`cd ${shellQuote(p.repo)} && git diff ${shellQuote(reviewBase)}...HEAD\` plus \`git log --oneline ${shellQuote(reviewBase)}..HEAD\`.
-Look for correctness bugs, regressions, missing tests for changed behaviour, security problems and contract breaks. Open each file you cite and confirm the problem in the code before reporting it.
+${taskSection(stage)}Review the changes of stage "${name}": \`cd ${shellQuote(p.repo)} && git diff ${shellQuote(reviewBase)}...HEAD\` plus \`git log --oneline ${shellQuote(reviewBase)}..HEAD\`.
+${reviewAsks(stage).join(`
+`)}
 Return findings with id (F1, F2, ...), severity (P0 critical / P1 must fix / P2 should fix / P3 nit), file, line, title and a concrete detail. Zero findings means the stage is clean.`;
 }
-function commandReviewPrompt(p, name, reviewBase) {
+function commandReviewPrompt(p, name, reviewBase, stage) {
   return [
     "You are a code REVIEWER. Do not edit, stage or commit anything.",
     `Repo ${p.repo}, branch \`${p.branch}\`. Review the changes of stage "${name}": \`cd ${shellQuote(p.repo)} && git diff ${shellQuote(reviewBase)}...HEAD\` plus \`git log --oneline ${shellQuote(reviewBase)}..HEAD\`.`,
     p.context ? `Design context, read it first: ${p.context}` : "",
-    "Look for correctness bugs, regressions, missing tests for changed behaviour, security problems and contract breaks. Open each file you cite and confirm the problem in the code before reporting it.",
+    taskSection(stage),
+    ...reviewAsks(stage),
     "Report every finding as a bullet line in exactly this form: `- [P1] Title \u2014 path/to/file.ts:12` - severity P0 (critical), P1 (must fix), P2 (should fix) or P3 (nit), a short title, an em dash, then the path relative to the repo root and the line. Put the detail on the lines after it, indented by two spaces.",
     'Use that bullet form for findings only. With no findings, write "No findings." and nothing else.'
   ].filter(Boolean).join(" ").replace(/\s*\n\s*/g, " ");
@@ -366,13 +376,13 @@ Extract every finding it reports - each one, none merged, none dropped, none inv
 RAW REVIEW OUTPUT:
 ${output}`;
 }
-function judgePrompt(p, reviewBase, findings) {
+function judgePrompt(p, reviewBase, findings, stage) {
   return `You are the JUDGE scoring a code review. Repo ${p.repo}, branch ${p.branch}, stage diff \`${shellQuote(reviewBase)}...HEAD\`. Do not edit anything.
 ${p.context ? `Design context:
 ` + p.context + `
-` : ""}
+` : ""}${taskSection(stage)}
 The findings come from one or more reviewers; each names its reviewer. P0/P1 findings are not in this list: they go to the implementer without a score.
-For each finding below, open the cited code and judge whether it is real, correctly described and worth fixing; score it 0-100 (findings the code refutes score low). When a finding reports the same problem as another finding in this list, score it too and set its duplicateOf to the id of the finding to keep. Then score the whole review 0-100 (correctness + actionability; mostly wrong or trivial findings = low).
+For each finding below, open the cited code and judge whether it is real, correctly described and worth fixing; score it 0-100 (findings the code refutes score low).${stage ? " Score against the TASK: a finding about work another stage owns scores low; a missing part of this stage's task is worth fixing." : ""} When a finding reports the same problem as another finding in this list, score it too and set its duplicateOf to the id of the finding to keep. Then score the whole review 0-100 (correctness + actionability; mostly wrong or trivial findings = low).
 
 REVIEW:
 ${JSON.stringify(findings, null, 2)}`;
@@ -979,14 +989,14 @@ ${a.note}` : ""}` : "the worktree runner returned nothing" };
     const tag = `${name} r${round} ${rv.name}${attempt > 1 ? ` #${attempt}` : ""}`;
     const phase = subject.kind === "plan" ? PLAN_PHASE : "Review";
     if (rv.engine === "agent") {
-      const prompt = subject.kind === "plan" ? agentPlanReviewPrompt(p, subject.files) : agentReviewPrompt(p, name, subject.base);
+      const prompt = subject.kind === "plan" ? agentPlanReviewPrompt(p, subject.files) : agentReviewPrompt(p, name, subject.base, subject.stage);
       const r = await call("reviewer", "findings", `review ${tag}`, phase, prompt, "read-only", rv, cwd);
       if (!r)
         return { ran: false, findings: [], note: "reviewer agent returned nothing" };
       return { ran: true, findings: Array.isArray(r.findings) ? r.findings : [] };
     }
     const stem = reviewStem(config, slug(name), round, rv);
-    const plan = subject.kind === "plan" ? planReviewScript(rv, config, host.name, lane.base, stem, planReviewPrompt(p, subject.files)) : reviewPlan(rv, config, host.name, subject.base, stem, commandReviewPrompt(p, name, subject.base));
+    const plan = subject.kind === "plan" ? planReviewScript(rv, config, host.name, lane.base, stem, planReviewPrompt(p, subject.files)) : reviewPlan(rv, config, host.name, subject.base, stem, commandReviewPrompt(p, name, subject.base, subject.stage));
     if (!plan)
       return { ran: false, findings: [], note: "this reviewer has no command for a plan review" };
     let ran;
@@ -1088,7 +1098,7 @@ ${a.note}` : ""}` : "the worktree runner returned nothing" };
       unmerged = found;
       let score = null;
       if (judged.length) {
-        const prompt = subject.kind === "plan" ? planJudgePrompt(p, subject.files, judged) : judgePrompt(p, subject.base, judged);
+        const prompt = subject.kind === "plan" ? planJudgePrompt(p, subject.files, judged) : judgePrompt(p, subject.base, judged, subject.stage);
         const scored = await call("judge", "score", `judge ${name} r${round}`, phase, prompt, "read-only", config.roles.judge, lane.cwd);
         if (!scored)
           host.log(`${name} r${round}: judge returned nothing - all ${judged.length} finding(s) go to the implementer unscored`);
@@ -1203,7 +1213,7 @@ ${a.note}` : ""}` : "the worktree runner returned nothing" };
     }
     host.phase("Review");
     const gates = impl ? { green: impl.gatesGreen, text: impl.gates, by: "the implementer" } : undefined;
-    const loop = st.review === false ? { outcome: "review-skipped", rounds: 0, residual: [], unresolved: [], history: [] } : await reviewLoop(lane, name, { kind: "diff", base }, undefined, gates);
+    const loop = st.review === false ? { outcome: "review-skipped", rounds: 0, residual: [], unresolved: [], history: [] } : await reviewLoop(lane, name, { kind: "diff", base, ...st.task ? { stage: { number: i + 1, total: specs.length, name, task: st.task } } : {} }, undefined, gates);
     if (gates && !gates.green && (loop.outcome === "clean" || loop.outcome === "residual-only")) {
       loop.outcome = "gates-red";
       loop.note = `the review found nothing to fix, but ${gates.by} left the gates red: ${gates.text}`;
