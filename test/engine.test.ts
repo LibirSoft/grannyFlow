@@ -17,6 +17,7 @@ const input = (extra: Partial<RunInput> = {}): RunInput => ({
 })
 
 const GLM = { name: 'glm', engine: 'command', command: 'glm-review {prompt}' }
+const CORE_TASK = { number: 1, total: 1, name: 'core', task: 'Do WP-01.' }
 
 describe('runGranny', () => {
   it('ends a stage clean when the first review has no findings', async () => {
@@ -571,6 +572,7 @@ describe('several reviewers', () => {
       { repo: '/work/repo', branch: 'feat/x', base: 'main', context: 'Read plans/x.md first.\nThen plans/y.md.', config: resolveConfig([{ reviewers: [GLM] }]) },
       'core',
       'start1',
+      CORE_TASK,
     )
     expect(prompt).not.toContain('\n')
     expect(prompt).toContain('git diff start1...HEAD')
@@ -578,6 +580,53 @@ describe('several reviewers', () => {
     expect(prompt).toContain('Read plans/x.md first. Then plans/y.md.')
     expect(f.calls.find(c => c.kind === 'command')!.label).toBe('review core r1 glm')
     expect(f.commands[0]).toContain(`glm-review '${prompt.replaceAll("'", `'\\''`)}' > .granny/review-core-r1-glm.log 2>&1;`)
+  })
+
+  it('hands the stage task to an agent reviewer, a command reviewer and the judge', async () => {
+    const task = 'Do WP-02: add the cache layer.\nLeave the eviction policy to stage 3.'
+    const f = fakeHost({
+      name: 'claude-code',
+      direct: false,
+      reviews: { glm: ['No issues.', review(finding('P2', 'Meh')), 'No issues.'] },
+      scores: [{ 'glm-F1': 90 }],
+      override: req => (req.role === 'reviewer' ? { findings: [] } : undefined),
+    })
+    await runGranny(f.host, input({ stages: [{ name: 'one', task: 'Do WP-01.' }, { name: 'cache', task }], config: { reviewers: [{ name: 'opus', engine: 'agent' }, GLM] } }))
+    const agent = f.calls.find(c => c.label === 'review cache r1 opus')!.prompt
+    expect(agent).toContain('Stage 2/2 "cache"')
+    expect(agent).toContain(`TASK:\n${task}`)
+    expect(agent).toContain('work the task leaves to other stages is not a finding')
+    expect(agent).toContain('scope creep')
+    expect(agent).toContain('needless abstraction')
+    const glm = f.commands.find(c => c.includes('review-cache-r1-glm'))!
+    expect(glm).toContain('TASK: Do WP-02: add the cache layer. Leave the eviction policy to stage 3.')
+    expect(glm).toContain('work the task leaves to other stages is not a finding')
+    const judge = f.calls.find(c => c.label === 'judge cache r1')!.prompt
+    expect(judge).toContain('Stage 2/2 "cache"')
+    expect(judge).toContain(`TASK:\n${task}`)
+    expect(judge).toContain('another stage owns scores low')
+  })
+
+  it('passes the task of a review-only stage and leaves the task section out when a stage has none', async () => {
+    const agent = { name: 'opus', engine: 'agent' }
+    const withTask = fakeHost({ override: req => (req.role === 'reviewer' ? { findings: [] } : undefined) })
+    await runGranny(withTask.host, input({ stages: [{ name: 'audit', task: 'Audit the auth module.', implement: false }], config: { reviewers: [agent] } }))
+    expect(withTask.calls.find(c => c.role === 'reviewer')!.prompt).toContain('TASK:\nAudit the auth module.')
+
+    const bare = fakeHost({
+      name: 'claude-code',
+      direct: false,
+      reviews: { glm: [review(finding('P2', 'Meh'))] },
+      scores: [{ 'glm-F1': 10 }],
+      override: req => (req.role === 'reviewer' ? { findings: [] } : undefined),
+    })
+    await runGranny(bare.host, input({ stages: [{ name: 'audit', implement: false }], config: { reviewers: [agent, GLM] } }))
+    const prompts = [bare.calls.find(c => c.role === 'reviewer')!.prompt, bare.commands.find(c => c.includes('review-audit-r1-glm'))!, bare.calls.find(c => c.role === 'judge')!.prompt]
+    for (const prompt of prompts) {
+      expect(prompt).not.toContain('TASK')
+      expect(prompt).not.toContain('leaves to other stages')
+    }
+    expect(prompts[0]).toContain('needless abstraction')
   })
 
   it('prefixes finding ids with the reviewer and keeps the attribution through the judge, the fix and the residual', async () => {
@@ -1253,7 +1302,7 @@ describe('the review script in a real shell', () => {
       const glm = { name: 'glm', engine: 'command', command: 'fake-llm -m {model} {prompt}', model: 'opencode/glm-5.3-flash-free' }
       const f = fakeHost({ name: host, direct: host === 'opencode', shell: shell({ GRANNY_PROMPT_RECORD: promptFile }), scores: [{ 'glm-F1': 90 }] })
       const r = await runGranny(f.host, input({ repo, context, config: { maxRounds: 1, workDir, reviewers: [glm] } }))
-      const expected = commandReviewPrompt({ repo, branch: 'feat/x', base: 'main', context, config: resolveConfig([{ reviewers: [glm] }]) }, 'core', 'start1')
+      const expected = commandReviewPrompt({ repo, branch: 'feat/x', base: 'main', context, config: resolveConfig([{ reviewers: [glm] }]) }, 'core', 'start1', CORE_TASK)
       expect(readFileSync(promptFile, 'utf8')).toBe(expected)
       expect(expected).toContain("It's `important`: $HOME and $(id).")
       expect(r.stages[0]!.history[0]!.findings.map(x => [x.id, x.reviewer, x.title])).toEqual([['glm-F1', 'glm', 'Reviewed with opencode/glm-5.3-flash-free']])

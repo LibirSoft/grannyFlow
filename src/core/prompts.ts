@@ -120,21 +120,40 @@ ${script}
 Set ran=true only if it exited 0, exitCode to its exit code, and output to everything it printed, verbatim and complete. If it failed, set ran=false and explain in note. Never invent output.`
 }
 
-export function agentReviewPrompt(p: PromptContext, name: string, reviewBase: string): string {
+export interface StageTask {
+  number: number
+  total: number
+  name: string
+  task: string
+}
+
+const taskSection = (stage?: StageTask): string =>
+  stage ? `Stage ${stage.number}/${stage.total} "${stage.name}" was asked to do this - its TASK:\n${stage.task}\n` : ''
+
+const reviewAsks = (stage?: StageTask): string[] => [
+  'Look for correctness bugs, regressions, missing tests for changed behaviour, security problems and contract breaks. Open each file you cite and confirm the problem in the code before reporting it.',
+  ...(stage
+    ? ['Check the diff against the TASK: a part of the task the diff does not do is a finding, and so is a change outside it (scope creep, unrelated edits); work the task leaves to other stages is not a finding.']
+    : []),
+  'Also report clean-code and design problems - duplication, unclear naming, needless abstraction, deviations from the design the plan or context lays out - as P2/P3 unless they break something.',
+]
+
+export function agentReviewPrompt(p: PromptContext, name: string, reviewBase: string, stage?: StageTask): string {
   return `${common(p)}
 
 You are the REVIEWER. Do not edit, stage or commit anything.
-Review the changes of stage "${name}": \`cd ${shellQuote(p.repo)} && git diff ${shellQuote(reviewBase)}...HEAD\` plus \`git log --oneline ${shellQuote(reviewBase)}..HEAD\`.
-Look for correctness bugs, regressions, missing tests for changed behaviour, security problems and contract breaks. Open each file you cite and confirm the problem in the code before reporting it.
+${taskSection(stage)}Review the changes of stage "${name}": \`cd ${shellQuote(p.repo)} && git diff ${shellQuote(reviewBase)}...HEAD\` plus \`git log --oneline ${shellQuote(reviewBase)}..HEAD\`.
+${reviewAsks(stage).join('\n')}
 Return findings with id (F1, F2, ...), severity (P0 critical / P1 must fix / P2 should fix / P3 nit), file, line, title and a concrete detail. Zero findings means the stage is clean.`
 }
 
-export function commandReviewPrompt(p: PromptContext, name: string, reviewBase: string): string {
+export function commandReviewPrompt(p: PromptContext, name: string, reviewBase: string, stage?: StageTask): string {
   return [
     'You are a code REVIEWER. Do not edit, stage or commit anything.',
     `Repo ${p.repo}, branch \`${p.branch}\`. Review the changes of stage "${name}": \`cd ${shellQuote(p.repo)} && git diff ${shellQuote(reviewBase)}...HEAD\` plus \`git log --oneline ${shellQuote(reviewBase)}..HEAD\`.`,
     p.context ? `Design context, read it first: ${p.context}` : '',
-    'Look for correctness bugs, regressions, missing tests for changed behaviour, security problems and contract breaks. Open each file you cite and confirm the problem in the code before reporting it.',
+    taskSection(stage),
+    ...reviewAsks(stage),
     'Report every finding as a bullet line in exactly this form: `- [P1] Title — path/to/file.ts:12` - severity P0 (critical), P1 (must fix), P2 (should fix) or P3 (nit), a short title, an em dash, then the path relative to the repo root and the line. Put the detail on the lines after it, indented by two spaces.',
     'Use that bullet form for findings only. With no findings, write "No findings." and nothing else.',
   ]
@@ -181,11 +200,11 @@ RAW REVIEW OUTPUT:
 ${output}`
 }
 
-export function judgePrompt(p: PromptContext, reviewBase: string, findings: Finding[]): string {
+export function judgePrompt(p: PromptContext, reviewBase: string, findings: Finding[], stage?: StageTask): string {
   return `You are the JUDGE scoring a code review. Repo ${p.repo}, branch ${p.branch}, stage diff \`${shellQuote(reviewBase)}...HEAD\`. Do not edit anything.
-${p.context ? 'Design context:\n' + p.context + '\n' : ''}
+${p.context ? 'Design context:\n' + p.context + '\n' : ''}${taskSection(stage)}
 The findings come from one or more reviewers; each names its reviewer. P0/P1 findings are not in this list: they go to the implementer without a score.
-For each finding below, open the cited code and judge whether it is real, correctly described and worth fixing; score it 0-100 (findings the code refutes score low). When a finding reports the same problem as another finding in this list, score it too and set its duplicateOf to the id of the finding to keep. Then score the whole review 0-100 (correctness + actionability; mostly wrong or trivial findings = low).
+For each finding below, open the cited code and judge whether it is real, correctly described and worth fixing; score it 0-100 (findings the code refutes score low).${stage ? ' Score against the TASK: a finding about work another stage owns scores low; a missing part of this stage\'s task is worth fixing.' : ''} When a finding reports the same problem as another finding in this list, score it too and set its duplicateOf to the id of the finding to keep. Then score the whole review 0-100 (correctness + actionability; mostly wrong or trivial findings = low).
 
 REVIEW:
 ${JSON.stringify(findings, null, 2)}`

@@ -17,6 +17,7 @@ import {
   gitCommandPrompt,
   worktreeCommandPrompt,
   type PromptContext,
+  type StageTask,
 } from './prompts'
 import { isBlocker, mergeDuplicates, parseCodexReview, reviewFailure, triage } from './review'
 import { planReviewScript, reportedBackend, reviewPlan, reviewStem } from './reviewer'
@@ -41,7 +42,7 @@ import type {
   StageSpec,
 } from './types'
 
-type Subject = { kind: 'diff'; base: string } | { kind: 'plan'; files: string[] }
+type Subject = { kind: 'diff'; base: string; stage?: StageTask } | { kind: 'plan'; files: string[] }
 
 const PLAN_PHASE = 'Plan review'
 const DRAFT_PHASE = 'Plan'
@@ -271,7 +272,7 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
     const tag = `${name} r${round} ${rv.name}${attempt > 1 ? ` #${attempt}` : ''}`
     const phase = subject.kind === 'plan' ? PLAN_PHASE : 'Review'
     if (rv.engine === 'agent') {
-      const prompt = subject.kind === 'plan' ? agentPlanReviewPrompt(p, subject.files) : agentReviewPrompt(p, name, subject.base)
+      const prompt = subject.kind === 'plan' ? agentPlanReviewPrompt(p, subject.files) : agentReviewPrompt(p, name, subject.base, subject.stage)
       const r = await call('reviewer', 'findings', `review ${tag}`, phase, prompt, 'read-only', rv, cwd)
       if (!r) return { ran: false, findings: [], note: 'reviewer agent returned nothing' }
       return { ran: true, findings: Array.isArray(r.findings) ? r.findings : [] }
@@ -281,7 +282,7 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
     const plan =
       subject.kind === 'plan'
         ? planReviewScript(rv, config, host.name, lane.base, stem, planReviewPrompt(p, subject.files))
-        : reviewPlan(rv, config, host.name, subject.base, stem, commandReviewPrompt(p, name, subject.base))
+        : reviewPlan(rv, config, host.name, subject.base, stem, commandReviewPrompt(p, name, subject.base, subject.stage))
     if (!plan) return { ran: false, findings: [], note: 'this reviewer has no command for a plan review' }
     let ran: boolean
     let output: string
@@ -377,7 +378,7 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
       unmerged = found
       let score: number | null = null
       if (judged.length) {
-        const prompt = subject.kind === 'plan' ? planJudgePrompt(p, subject.files, judged) : judgePrompt(p, subject.base, judged)
+        const prompt = subject.kind === 'plan' ? planJudgePrompt(p, subject.files, judged) : judgePrompt(p, subject.base, judged, subject.stage)
         const scored = await call('judge', 'score', `judge ${name} r${round}`, phase, prompt, 'read-only', config.roles.judge, lane.cwd)
         if (!scored) host.log(`${name} r${round}: judge returned nothing - all ${judged.length} finding(s) go to the implementer unscored`)
         const per: Array<{ id: string; score: number; reason: string; duplicateOf?: string }> = Array.isArray(scored?.perFinding) ? scored.perFinding : []
@@ -471,7 +472,11 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
     host.phase('Review')
     const loop = st.review === false
       ? { outcome: 'review-skipped' as const, rounds: 0, residual: [], unresolved: [], history: [] }
-      : await reviewLoop(lane, name, { kind: 'diff', base: impl?.startSha || lane.base })
+      : await reviewLoop(lane, name, {
+          kind: 'diff',
+          base: impl?.startSha || lane.base,
+          ...(st.task ? { stage: { number: i + 1, total: specs.length, name, task: st.task } } : {}),
+        })
     return { stage: name, ...(st.repo !== undefined && repoOf(st) !== primary ? { repo: repoOf(st) } : {}), ...(impl ? { implementation: impl } : {}), ...loop }
   }
 
