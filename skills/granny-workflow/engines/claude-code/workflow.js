@@ -1582,7 +1582,7 @@ ${note}` : note } : result;
         const red = repoState.get(repoOf(specs[i])).red;
         if (blocker !== undefined || red !== undefined) {
           const ended = blocker !== undefined ? results[blocker].outcome : undefined;
-          const note = blocker !== undefined ? `not started: it builds on ${nameOf(blocker)}, which ${ended === "no-changes" || ended === "checks-failed" ? `ended ${ended}` : "was not started"}` : `not started: ${nameOf(red)} ended checks-failed and left its red commits on ${input.branch} in this repo`;
+          const note = blocker !== undefined ? `not started: it builds on ${nameOf(blocker)}, which ${ended === "no-changes" || ended === "checks-failed" ? `ended ${ended}` : "was not started"}` : results[red]?.note?.includes("check runner failed") ? `not started: ${nameOf(red)} ended checks-failed because its check runner failed, so the state of ${input.branch} in this repo is unknown` : `not started: ${nameOf(red)} ended checks-failed and left its red commits on ${input.branch} in this repo`;
           host.log(`${specs[i].name || `stage ${i + 1}`}: ${note}`);
           results[i] = { stage: specs[i].name || `stage ${i + 1}`, outcome: "skipped", rounds: 0, residual: [], unresolved: [], history: [], note };
           done.add(i);
@@ -1626,7 +1626,21 @@ ${note}` : note } : result;
     const runs = [];
     const checks = finalChecksOf(s.lane.repo);
     const reviewed = config.finalReview && (stages > 1 || s.merges > 0);
-    if (checks.length) {
+    const single = stages === 1 && !s.merges ? specs.findIndex((st) => repoOf(st) === s.lane.repo) : -1;
+    const last = single >= 0 ? results[single]?.checks?.at(-1) : undefined;
+    const known = last && !last.results.some((r) => r.note === "check runner failed");
+    if (checks.length && last && known && last.results.map((r) => r.name).join(`
+`) === checks.map((c) => c.name).join(`
+`)) {
+      const failed = last.results.filter((r) => !r.passed);
+      if (!failed.length)
+        host.log(`${name}: final checks not rerun - ${nameOf(single)} ran them green last on this HEAD, and nothing changed since`);
+      else {
+        const note = `checks failed at final: ${nameOf(single)} ended with ${failed.map((r) => r.name).join(", ")} red on this HEAD, and nothing changed since`;
+        host.log(`${name} not run - ${note}; the branch is not PR-ready, the final check still runs`);
+        return { outcome: "checks-failed", rounds: 0, residual: [], unresolved: [], history: [], note };
+      }
+    } else if (checks.length) {
       finalRuns.set(s, runs);
       const red = specs.findIndex((st, i) => repoOf(st) === s.lane.repo && results[i]?.outcome === "checks-failed");
       const noRepairs = !reviewed ? "no final review follows to see one" : red >= 0 ? `${nameOf(red)} already ended checks-failed` : undefined;

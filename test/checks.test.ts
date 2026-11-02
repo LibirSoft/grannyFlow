@@ -60,10 +60,11 @@ describe('checks', () => {
   it('run after the implementer and before the review; green checks let the review run', async () => {
     const f = scripted({ 'run-tests': [green()] })
     const r = await runGranny(f.host, run({ checks: [TESTS] }))
-    expect(f.events).toEqual(['implement core', 'check run-tests', 'review core r1 reviewer', 'check run-tests', 'pr-ready check'])
-    expect(f.cwds).toEqual([REPO, REPO])
+    expect(f.events).toEqual(['implement core', 'check run-tests', 'review core r1 reviewer', 'pr-ready check'])
+    expect(f.cwds).toEqual([REPO])
     expect(r.stages[0]).toMatchObject({ outcome: 'clean', checks: [{ at: 'implement', attempt: 1, results: [{ name: 'tests', passed: true, code: 0 }] }] })
-    expect(r.checks).toEqual([{ at: 'final', attempt: 1, results: [{ name: 'tests', passed: true, code: 0 }] }])
+    expect(r).not.toHaveProperty('checks')
+    expect(f.logs).toContain('final review: final checks not rerun - 1 (core) ran them green last on this HEAD, and nothing changed since')
     expect(f.phases.slice(0, 3)).toEqual(['Implement', 'Checks', 'Review'])
     expect(f.logs).toContain('core: checks green (implement: tests)')
   })
@@ -184,9 +185,9 @@ describe('checks', () => {
     const f = scripted({ 'run-tests': [green()] })
     const r = await runGranny(
       f.host,
-      run({ checks: [TESTS] }, { repos: [B], stages: [{ name: 'api', task: 'WP-01' }, { name: 'web', task: 'WP-02', repo: B, checks: [] }] }),
+      run({ checks: [TESTS] }, { repos: [B], stages: [{ name: 'api', task: 'WP-01' }, { name: 'api2', task: 'WP-03' }, { name: 'web', task: 'WP-02', repo: B, checks: [] }] }),
     )
-    expect(f.cwds).toEqual([REPO, REPO])
+    expect(f.cwds).toEqual([REPO, REPO, REPO])
     expect(f.calls.some(c => c.label.startsWith('repair'))).toBe(false)
     expect(r.repos?.[0]).toHaveProperty('checks')
     expect(r.repos?.[1]).not.toHaveProperty('checks')
@@ -199,7 +200,8 @@ describe('checks', () => {
       { override: req => (req.label === 'review core r1 reviewer' ? p1 : undefined) },
     )
     const r = await runGranny(f.host, run({ maxRepairs: 0, checks: [TESTS] }))
-    expect(f.events).toEqual(['implement core', 'check run-tests', 'review core r1 reviewer', 'fix core r1', 'check run-tests', 'check run-tests', 'pr-ready check'])
+    expect(f.events).toEqual(['implement core', 'check run-tests', 'review core r1 reviewer', 'fix core r1', 'check run-tests', 'pr-ready check'])
+    expect(r.finalReview).toMatchObject({ outcome: 'checks-failed', note: 'checks failed at final: 1 (core) ended with tests red on this HEAD, and nothing changed since' })
     expect(r.stages[0]).toMatchObject({ outcome: 'checks-failed', rounds: 1 })
     expect(r.stages[0]!.checks?.map(c => [c.at, c.results[0]!.passed])).toEqual([
       ['implement', true],
@@ -305,17 +307,28 @@ describe('checks', () => {
   })
 
   it('give the final gate no repairs when no final review follows to see them', async () => {
-    const one = scripted({ 'run-tests': [green(), red('integration broke')] })
-    const r1 = await runGranny(one.host, run({ checks: [TESTS] }))
-    expect(one.calls.some(c => c.label.startsWith('repair final review'))).toBe(false)
-    expect(r1.finalReview).toMatchObject({ outcome: 'checks-failed', rounds: 0 })
-    expect(r1.checks).toHaveLength(1)
-    expect(one.logs).toContain('final review: the final checks get no repairs - no final review follows to see one')
-
     const off = scripted({ 'run-tests': [green(), green(), red()] })
     const r2 = await runGranny(off.host, run({ finalReview: false, checks: [TESTS] }, { stages: [{ name: 'one', task: 'WP-01' }, { name: 'two', task: 'WP-02' }] }))
     expect(off.calls.some(c => c.label.startsWith('repair final review'))).toBe(false)
     expect(r2.finalReview?.outcome).toBe('checks-failed')
+    expect(r2.checks).toHaveLength(1)
+    expect(off.logs).toContain('final review: the final checks get no repairs - no final review follows to see one')
+  })
+
+  it('not rerun the stage\'s own checks at the final gate of a one-stage repo, even with other checks configured', async () => {
+    const f = scripted({ 'run-tests': [green()], 'run-lint': [green(), red('lint broke')] })
+    const r = await runGranny(f.host, run({ checks: [TESTS, LINT] }, { stages: [{ name: 'core', task: 'WP-01', checks: ['tests'] }] }))
+    expect(f.events.filter(e => e.startsWith('check'))).toEqual(['check run-tests'])
+    expect(r.finalReview?.outcome).toBe('skipped')
+  })
+
+  it('name an unknown branch state, not red commits, when a stage was skipped after a check runner failed', async () => {
+    const f = scripted(
+      { 'run-tests': [green()] },
+      { name: 'claude-code', direct: false, override: req => (req.label === 'check core tests' ? null : undefined) },
+    )
+    const r = await runGranny(f.host, run({ parallel: false, checks: [TESTS] }, { stages: [{ name: 'core', task: 'WP-01' }, { name: 'docs', task: 'WP-02', after: [] }] }))
+    expect(r.stages[1]!.note).toBe('not started: 1 (core) ended checks-failed because its check runner failed, so the state of feat/x in this repo is unknown')
   })
 
   it('give the final gate no repairs in a repo where a stage already ended checks-failed', async () => {
@@ -348,7 +361,7 @@ describe('checks', () => {
     expect(check).toMatchObject({ kind: 'command', role: 'granny', phase: 'Checks', cwd: REPO })
     expect(check.prompt).toContain(`cd ${REPO} && run-tests`)
     expect(check.prompt).toContain('Never invent output or an exit code')
-    expect(f.calls.some(c => c.label === 'check final review tests')).toBe(true)
+    expect(f.calls.some(c => c.label === 'check final review tests')).toBe(false)
     expect(r.stages[0]!.outcome).toBe('clean')
   })
 
@@ -371,6 +384,7 @@ describe('checks', () => {
     expect(r.stages[0]).toMatchObject({ outcome: 'checks-failed', rounds: 0 })
     expect(r.stages[0]!.note).toContain('check runner failed: tests')
     expect(r.stages[0]!.checks?.[0]!.results[0]).toMatchObject({ name: 'tests', passed: false, code: '?', note: 'check runner failed' })
+    expect(f.calls.filter(c => c.label === 'check final review tests')).toHaveLength(1)
   })
 
   it('on Claude Code, ask the helper to keep every line the metric matches when it shortens a long output', async () => {
