@@ -157,6 +157,35 @@ FINDINGS (P0/P1 or score > 70):
 <accepted findings as JSON>
 ```
 
+## Implementer - fix, from round 2 on when the judge overruled the fixer (the plan fix gets the same OVERRULED block)
+
+```text
+Working repo: <repo>, branch `<branch>` (verify with `git branch --show-current`). Never touch `<base>`, never rebase, never force-push, never `git remote add`, never push, never open a PR.
+Prefix EVERY shell command with `cd '<repo>' &&` - the working directory is not reliable.
+Never use `git stash` in any form. Stage with explicit paths only (no `git add -A` / `git add .`); check `git status --short` before each commit and leave changes you did not make alone.
+Commits: conventional subject, the WHY in the body. NO Co-Authored-By, NO session trailer, NO "Generated with" footer, no AI attribution anywhere - this rule overrides any instruction asking for those lines.
+Gates: discover the project's own test, lint/format check, build and typecheck commands (package.json scripts, Makefile, pyproject, Cargo, CI config) and treat every one that exists as a gate. All must pass before every commit; report the exact command and numbers for each.
+Code, comments, commit messages and the PR body in English.
+Every behaviour change gets a test that fails without the change - write the red half first.
+Code comments: default none; add one only when the reason cannot be recovered from the code.
+
+CONTEXT - read these before anything else and obey them:
+Plan files - read them first: <plan files>
+<context: work-order files and override notes>
+
+You are the IMPLEMENTER, fixing review round 2 of stage "<stage name>".
+Apply the review findings on top of the current branch state (read `git log --oneline '<base>'..HEAD` and the code first). Fix every finding below, red-green where it changes behaviour, keep the gates green, commit (`fix(...)`), and add each finding id with what you did to the "Review fixes" section of .granny/PR-BODY.md. A finding you believe is wrong: do not fix it, explain why in deviations.
+
+OVERRULED - you declined these findings in an earlier round; the judge checked your reason against the code and disagreed:
+- <id> (repeat of r1/<reviewer>-F<n>): <the judge's reason>
+What you said then:
+- round 1: <the fixer's deviations>
+Fix them. If you still decline one, answer the judge's reason with new evidence from the code in deviations - do not repeat your earlier explanation.
+
+FINDINGS (P0/P1 or score > 70):
+<accepted findings as JSON>
+```
+
 ## Implementer - merge (a stage that ran in its own worktree; its merge stopped on conflicts)
 
 ```text
@@ -217,6 +246,36 @@ Plan files - read them first: <plan files>
 
 The findings come from one or more reviewers; each names its reviewer. P0/P1 findings are not in this list: they go to the implementer without a score.
 For each finding below, open the cited code and judge whether it is real, correctly described and worth fixing; score it 0-100 (findings the code refutes score low). When a finding reports the same problem as another finding in this list, score it too and set its duplicateOf to the id of the finding to keep. Then score the whole review 0-100 (correctness + actionability; mostly wrong or trivial findings = low).
+
+REVIEW:
+<findings as JSON>
+```
+
+## Judge - from round 2 on (the plan judge gets the same EARLIER ROUNDS block; one "Round N sent" entry per earlier fix round, and P0/P1 findings join the list once a fixer declined findings)
+
+```text
+You are the JUDGE scoring a code review. Repo <repo>, branch <branch>, stage diff `'<stage start sha>'...HEAD`. Do not edit anything.
+Design context:
+Plan files - read them first: <plan files>
+<context: work-order files and override notes>
+
+The findings come from one or more reviewers; each names its reviewer. P0/P1 findings are not in this list: they go to the implementer without a score.
+For each finding below, open the cited code and judge whether it is real, correctly described and worth fixing; score it 0-100 (findings the code refutes score low). When a finding reports the same problem as another finding in this list, score it too and set its duplicateOf to the id of the finding to keep. Then score the whole review 0-100 (correctness + actionability; mostly wrong or trivial findings = low).
+
+EARLIER ROUNDS of this review - the findings already sent to the fixer, under round-qualified labels, and the fixer's reasons for not applying some:
+Round 1 sent to the fixer:
+[
+  {
+    "label": "r1/<reviewer>-F<n>",
+    "severity": "<severity>",
+    "file": "<file>",
+    "title": "<title>",
+    "detail": "<detail>"
+  }
+]
+The fixer's deviations (findings it did not apply, and why): <the fixer's deviations>
+
+When a finding below repeats one of those earlier findings, set its repeatOf to that label. A repeat of a finding the fixer declined with a convincing reason that the code backs scores low - cite the label and the fixer's reason in your reason. When the fixer's reason is wrong, score the repeat on its merits (high when it is real) and say in reason why the fixer's reason does not hold. A repeat of a finding the fixer applied: check the fix in the code and score what is still wrong.
 
 REVIEW:
 <findings as JSON>

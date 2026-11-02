@@ -16,6 +16,7 @@ import {
   planJudgePrompt,
   planReviewPrompt,
   worktreeCommandPrompt,
+  type EarlierRound,
 } from '../src/core/prompts'
 import { worktreeScript } from '../src/core/worktree'
 
@@ -64,6 +65,10 @@ export function renderPrompts(): string {
     config: resolveConfig([]),
   }
   const plans = ['<plan files>']
+  const earlier: EarlierRound[] = [
+    { round: 1, sent: [{ id: '<reviewer>-F<n>', severity: '<severity>', file: '<file>', title: '<title>', detail: '<detail>' }], deviations: "<the fixer's deviations>" },
+  ]
+  const overruled = [{ id: '<id>', repeatOf: 'r1/<reviewer>-F<n>', round: 1, reason: "<the judge's reason>" }]
   const setup = `cd '<repo>' && ${worktreeScript(p.config, '<branch>', '<base>', '<worktreeDir>/<branch-slug>')}`
   const sections: Array<[string, string]> = [
     ['Granny - worktree setup, the helper agent on Claude Code (on Cursor, run the command yourself)', worktreeCommandPrompt('<repo>', '<branch>', setup)],
@@ -74,10 +79,18 @@ export function renderPrompts(): string {
     ['Implementer - plan fix (round 1; later rounds extend the newest rN deltas section)', planFixPrompt(p, plans, 1, []).replace(/\[\]$/, '<accepted findings as JSON>')],
     ['Implementer - stage', implementPrompt(p, { task: '<stage task>' }, 1, 2, '<stage name>')],
     ['Implementer - fix', fixPrompt(p, '<stage name>', 1, []).replace(/\[\]$/, '<accepted findings as JSON>')],
+    [
+      'Implementer - fix, from round 2 on when the judge overruled the fixer (the plan fix gets the same OVERRULED block)',
+      fixPrompt(p, '<stage name>', 2, [], overruled, earlier).replace(/\[\]$/, '<accepted findings as JSON>'),
+    ],
     ['Implementer - merge (a stage that ran in its own worktree; its merge stopped on conflicts)', mergePrompt(p, '<stage name>', '<lane branch>', '<git merge output>')],
     ['Reviewer - agent engine', agentReviewPrompt(p, '<stage name>', '<stage start sha>')],
     ['Reviewer - command engine, the text {prompt} is filled with', commandReviewPrompt(p, '<stage name>', '<stage start sha>')],
     ['Judge', judgePrompt(p, '<stage start sha>', []).replace(/\[\]$/, '<findings as JSON>')],
+    [
+      'Judge - from round 2 on (the plan judge gets the same EARLIER ROUNDS block; one "Round N sent" entry per earlier fix round, and P0/P1 findings join the list once a fixer declined findings)',
+      judgePrompt(p, '<stage start sha>', [], earlier).replace(/\[\]$/, '<findings as JSON>'),
+    ],
     ['Extraction fallback', extractPrompt('<stage name>', '<raw review output>')],
     ['Granny - final check', finalPrompt(p)],
   ]

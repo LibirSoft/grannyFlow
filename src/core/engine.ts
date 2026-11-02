@@ -16,6 +16,9 @@ import {
   reviewCommandPrompt,
   gitCommandPrompt,
   worktreeCommandPrompt,
+  roundLabel,
+  type EarlierRound,
+  type Overruled,
   type PromptContext,
 } from './prompts'
 import { isBlocker, mergeDuplicates, parseCodexReview, reviewFailure, triage } from './review'
@@ -348,6 +351,7 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
     const { p } = lane
     const phase = subject.kind === 'plan' ? PLAN_PHASE : 'Review'
     const history: RoundRecord[] = []
+    const earlier: EarlierRound[] = []
     let unmerged: Finding[] = []
     for (let round = 1; round <= config.maxRounds; round++) {
       const results = await reviewAll(lane, reviewers, name, subject, round)
@@ -368,26 +372,36 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
         return { outcome: 'clean', rounds: round, residual: [], unresolved: [], history }
       }
 
+      const declined = earlier.filter(e => e.deviations?.trim())
+      const labels = new Map(earlier.flatMap(e => e.sent.map(f => [roundLabel(e.round, f), e] as const)))
       const blockers = found.filter(isBlocker)
-      const judged = found.filter(f => !isBlocker(f))
-      if (blockers.length) {
+      const judged = declined.length ? found : found.filter(f => !isBlocker(f))
+      if (blockers.length && declined.length) {
+        host.log(`${name} r${round}: ${blockers.length} P0/P1 finding(s) go to the judge too - the fixer declined findings before, so a repeat of one can be scored down: ${blockers.map(f => f.id).join(', ')}`)
+      } else if (blockers.length) {
         host.log(`${name} r${round}: ${blockers.length} P0/P1 finding(s) go to the implementer without the judge: ${blockers.map(f => f.id).join(', ')}`)
       }
       let findings = found
       unmerged = found
       let score: number | null = null
       if (judged.length) {
-        const prompt = subject.kind === 'plan' ? planJudgePrompt(p, subject.files, judged) : judgePrompt(p, subject.base, judged)
+        const prompt = subject.kind === 'plan' ? planJudgePrompt(p, subject.files, judged, earlier) : judgePrompt(p, subject.base, judged, earlier)
         const scored = await call('judge', 'score', `judge ${name} r${round}`, phase, prompt, 'read-only', config.roles.judge, lane.cwd)
         if (!scored) host.log(`${name} r${round}: judge returned nothing - all ${judged.length} finding(s) go to the implementer unscored`)
-        const per: Array<{ id: string; score: number; reason: string; duplicateOf?: string }> = Array.isArray(scored?.perFinding) ? scored.perFinding : []
+        const per: Array<{ id: string; score: number; reason: string; duplicateOf?: string; repeatOf?: string }> = Array.isArray(scored?.perFinding) ? scored.perFinding : []
         const judgedIds = new Set(judged.map(f => f.id))
+        const blockerIds = new Set(blockers.map(f => f.id))
         const duplicateOf = new Map(
-          per.filter(x => judgedIds.has(x.id) && typeof x.duplicateOf === 'string' && judgedIds.has(x.duplicateOf)).map(x => [x.id, x.duplicateOf!]),
+          per
+            .filter(x => judgedIds.has(x.id) && typeof x.duplicateOf === 'string' && judgedIds.has(x.duplicateOf))
+            .filter(x => !blockerIds.has(x.id) || blockerIds.has(x.duplicateOf!))
+            .map(x => [x.id, x.duplicateOf!]),
         )
         const withScores = found.map(f => {
           const s = judgedIds.has(f.id) ? per.find(x => x.id === f.id) : undefined
-          return s ? { ...f, score: s.score, reason: s.reason } : { ...f }
+          if (!s) return { ...f }
+          const repeat = typeof s.repeatOf === 'string' && labels.has(s.repeatOf) ? { repeatOf: s.repeatOf } : {}
+          return { ...f, score: s.score, reason: s.reason, ...repeat }
         })
         const merge = mergeDuplicates(withScores, duplicateOf)
         for (const m of merge.merged) host.log(`${name} r${round}: judge merged ${m.id} into ${m.into} (duplicate)`)
@@ -399,20 +413,34 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
       host.log(`${name} r${round}: ${findings.length} finding(s), review score ${score} (informational)`)
 
       const { accepted, residual } = triage(findings, config.threshold)
+      const declinedBefore = (f: Finding) => (f.repeatOf ? labels.get(f.repeatOf)?.deviations?.trim() : undefined)
+      for (const f of residual.filter(declinedBefore)) {
+        host.log(`${name} r${round}: ${f.id} dropped as a repeat of ${f.repeatOf}, which the fixer declined (score ${f.score}) - kept as residual`)
+      }
       if (residual.length) {
-        host.log(`${name} r${round}: ${residual.length} finding(s) <= ${config.threshold} and not P0/P1, not sent: ${residual.map(f => `${f.id}(${f.score})`).join(', ')}`)
+        host.log(`${name} r${round}: ${residual.length} finding(s) <= ${config.threshold} and not ${residual.some(isBlocker) ? 'first-time ' : ''}P0/P1, not sent: ${residual.map(f => `${f.id}(${f.score})`).join(', ')}`)
       }
       if (!accepted.length) {
         host.log(`${name} r${round}: nothing actionable left - stage done with ${residual.length} residual finding(s) for the user`)
         return { outcome: 'residual-only', rounds: round, residual, unresolved: [], history }
       }
 
-      if (subject.kind === 'plan') {
-        await fixPlan(`fix ${name} r${round}`, planFixPrompt(p, subject.files, round, accepted))
-        continue
+      const overruled: Overruled[] = accepted.filter(declinedBefore).map(f => ({ id: f.id, repeatOf: f.repeatOf!, round: labels.get(f.repeatOf!)!.round, reason: f.reason }))
+      for (const o of overruled) {
+        host.log(`${name} r${round}: the judge overruled the fixer on ${o.id} (repeat of ${o.repeatOf}, score ${accepted.find(f => f.id === o.id)!.score})`)
       }
-      const fix = await implement(lane, `fix ${name} r${round}`, fixPrompt(p, name, round, accepted))
-      if (!fix.gatesGreen) host.log(`${name} r${round}: WARNING fixer left gates red - ${fix.gates}`)
+
+      let deviations: string | undefined
+      if (subject.kind === 'plan') {
+        deviations = (await fixPlan(`fix ${name} r${round}`, planFixPrompt(p, subject.files, round, accepted, overruled, earlier))).deviations
+      } else {
+        const fix = await implement(lane, `fix ${name} r${round}`, fixPrompt(p, name, round, accepted, overruled, earlier))
+        if (!fix.gatesGreen) host.log(`${name} r${round}: WARNING fixer left gates red - ${fix.gates}`)
+        deviations = fix.deviations
+      }
+      const said = typeof deviations === 'string' && deviations.trim() ? deviations : undefined
+      if (said) history.at(-1)!.deviations = said
+      earlier.push({ round, sent: accepted, ...(said ? { deviations: said } : {}) })
     }
     host.log(`${name}: hit the ${config.maxRounds}-round cap without a clean review`)
     return { outcome: 'round-cap', rounds: config.maxRounds, residual: [], unresolved: history.at(-1)?.findings ?? [], history }

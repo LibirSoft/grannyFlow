@@ -107,7 +107,7 @@ export function triage(findings: Finding[], threshold: number): { accepted: Find
   const accepted: Finding[] = []
   const residual: Finding[] = []
   for (const f of findings) {
-    if (isBlocker(f) || f.score === undefined || f.score > threshold) accepted.push(f)
+    if ((isBlocker(f) && f.repeatOf === undefined) || f.score === undefined || f.score > threshold) accepted.push(f)
     else residual.push(f)
   }
   return { accepted, residual }
