@@ -26,7 +26,7 @@ var DEFAULT_CONFIG = {
   gates: "auto",
   workDir: ".granny",
   worktree: true,
-  planReview: true,
+  planReview: false,
   language: "English",
   aiAttribution: false,
   rules: [

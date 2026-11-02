@@ -49,7 +49,7 @@ export const DEFAULT_CONFIG: GrannyConfig = {
   gates: 'auto',
   workDir: '.granny',
   worktree: true,
-  planReview: true,
+  planReview: false,
   language: 'English',
   aiAttribution: false,
   rules: [

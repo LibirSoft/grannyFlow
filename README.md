@@ -4,7 +4,7 @@ An agent skill that takes a plan to a PR-ready branch: an **implementer** builds
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/loop-dark.svg">
-  <img src="docs/images/loop-light.svg" alt="The granny loop: plan review, then for each stage the implementer builds, reviewers review in parallel, P0/P1 go straight back, the judge scores the rest, and a final check ends with a PR-ready branch that is not pushed">
+  <img src="docs/images/loop-light.svg" alt="The granny loop: an optional plan review (planReview: true), then for each stage the implementer builds, reviewers review in parallel, P0/P1 go straight back, the judge scores the rest, and a final check ends with a PR-ready branch that is not pushed">
 </picture>
 
 <details>
@@ -12,8 +12,9 @@ An agent skill that takes a plan to a PR-ready branch: an **implementer** builds
 
 ```
 before the first stage: reuse the branch's worktree or create one; everything below runs there
-given a plan: plan review ─► the same reviewers, routing and cap; the implementer fixes the plan in place (never committed)
-     ├─ clean or residual-only ─► stage 1
+optional - given a plan and "planReview": true (default false):
+  plan review ─► the same reviewers, routing and cap; the implementer fixes the plan in place (never committed)
+     ├─ clean, residual-only, or plan review off ─► stage 1
      └─ round-cap or review-failed ─► stop and report; nothing is implemented
 for each stage:
   implementer builds the stage ─► every reviewer reviews it, in parallel (base = stage start sha)
@@ -31,8 +32,8 @@ after the last stage: final check (gates, clean tree, no AI trailers, PR body) �
 The loop is code, not a prompt: on Claude Code and opencode an engine drives every step, so the threshold, round cap and stop conditions hold every time.
 
 - **Worktree** - the run works in the branch's own git worktree: the one that already has the branch checked out, or a new one next to the repo. Your main checkout stays as it is, and granny never removes the worktree.
-- **Planner** - no plan yet? Give granny the goal instead: a planner agent explores the repo, writes the plan to the git-excluded `.granny/plans/<branch>.md` and proposes the stages, the plan review cleans it, and the run stops for your approval. Approve (or edit) and granny implements it in a second run.
-- **Plan review** - given plan files, the reviewers check the plan against the actual repo before anything is built; the implementer fixes it in place until it is clean, and a plan review that cannot get there stops the run.
+- **Planner** - no plan yet? Give granny the goal instead: a planner agent explores the repo, writes the plan to the git-excluded `.granny/plans/<branch>.md` and proposes the stages, and the run stops for your approval (with `"planReview": true`, after the plan review has cleaned the plan). Approve (or edit) and granny implements it in a second run.
+- **Plan review** (optional, `"planReview": true`) - given plan files, the reviewers check the plan against the actual repo before anything is built; the implementer fixes it in place until it is clean, and a plan review that cannot get there stops the run. It runs every reviewer, the judge and the implementer over the plan for up to `maxRounds` rounds before any code is written, so it costs extra tokens. Without it, the plan files still go to every agent.
 - **Reviewers** - as many as you configure, of any kind: Codex (the CLI or OpenAI's Codex plugin), a host model, or any CLI that answers a prompt. They all review every round at the same time; one that fails twice ends the stage `review-failed` instead of reading as clean.
 - **Judge** - P0/P1 findings skip it and go straight to the implementer. It scores every other finding 0-100 and merges duplicates across reviewers; findings above the threshold are fixed, the rest are left for you as residual.
 
@@ -84,9 +85,9 @@ No plan yet? Ask granny to plan it first:
 
 > plan OAuth login with granny on feat/oauth
 
-The planner writes `.granny/plans/feat-oauth.md` with work orders and proposed stages, the reviewers review it, and the run stops: you get the plan, the stages and the planner's open questions. Once you approve, granny launches the implementation run with that plan and those stages.
+The planner writes `.granny/plans/feat-oauth.md` with work orders and proposed stages - the reviewers review it too with `"planReview": true` - and the run stops: you get the plan, the stages and the planner's open questions. Once you approve, granny launches the implementation run with that plan and those stages.
 
-Granny gathers the inputs (repo, branch, base, plan files, context files, stages), runs the preflight (reviewers ready, git-excluded work dir), launches the run and tells you the run id. Given plan files, the run reviews the plan first: the reviewers check it against the actual repo (wrong assumptions, missing steps, risky ordering, untestable acceptance criteria, version drift), the implementer fixes the accepted findings in the plan files in place - with a dated `rN deltas` section at the top, never committed - and the plan is reviewed again until it is clean. If the plan review hits the round cap or a reviewer fails, the run stops before implementing anything and reports. The run works in the branch's own git worktree: the one that already has the branch checked out, or a new one at `<parent of repo>/<repo name>-worktrees/<branch-slug>`, created for the branch or from `base`; your main checkout stays as it is. When it ends you get the worktree path and, per stage: commits, gate numbers, review rounds, outcome and the findings left for you; plus the final check and the PR body at `.granny/PR-BODY.md` in the worktree. Review and push from the worktree; granny never removes it.
+Granny gathers the inputs (repo, branch, base, plan files, context files, stages), runs the preflight (reviewers ready, git-excluded work dir), launches the run and tells you the run id. Every agent reads the plan files. With `"planReview": true` in the config, the run reviews the plan first: the reviewers check it against the actual repo (wrong assumptions, missing steps, risky ordering, untestable acceptance criteria, version drift), the implementer fixes the accepted findings in the plan files in place - with a dated `rN deltas` section at the top, never committed - and the plan is reviewed again until it is clean. If the plan review hits the round cap or a reviewer fails, the run stops before implementing anything and reports. The run works in the branch's own git worktree: the one that already has the branch checked out, or a new one at `<parent of repo>/<repo name>-worktrees/<branch-slug>`, created for the branch or from `base`; your main checkout stays as it is. When it ends you get the worktree path and, per stage: commits, gate numbers, review rounds, outcome and the findings left for you; plus the final check and the PR body at `.granny/PR-BODY.md` in the worktree. Review and push from the worktree; granny never removes it.
 
 ## Configure
 
@@ -118,7 +119,7 @@ Three layers, later wins: `~/.config/granny/config.json`, `<repo>/granny.config.
 | `reviewers[].mode` | `review` | `adversarial-review` runs the Codex plugin's adversarial review, optionally steered by `focus` |
 | `threshold` | `70` | findings scoring strictly above it are fixed; P0/P1 always are, without the judge |
 | `maxRounds` | `4` | review rounds per stage, and for the plan review |
-| `planReview` | `true` | review the plan files before stage 1 when the run has a `plan`; skipped when it resumes with `fromStage` |
+| `planReview` | `false` | `true` reviews the plan files before stage 1 when the run has a `plan` (extra tokens); skipped when it resumes with `fromStage` |
 | `gates` | `auto` | agents discover test/lint/build/typecheck, or list them |
 | `worktree` | `true` | work in the branch's own git worktree; `false` works in `repo` on the branch you checked out |
 | `worktreeDir` | `<parent of repo>/<repo name>-worktrees` | where new worktrees go; absolute, or relative to the repo's parent |

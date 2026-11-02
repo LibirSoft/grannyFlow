@@ -100,6 +100,7 @@ describe('claude-code workflow.js', () => {
       branch: 'feat/x',
       plan: '/plans/v1.md',
       stages: [{ name: 'one', task: 'Do it.' }],
+      config: { planReview: true },
     })
     expect(result.plan).toMatchObject({ outcome: 'clean', rounds: 2 })
     expect(result.stages[0]).toMatchObject({ stage: 'one', outcome: 'clean' })

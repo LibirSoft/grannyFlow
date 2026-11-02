@@ -189,11 +189,11 @@ describe('worktree', () => {
 })
 
 describe('planReview', () => {
-  it('is on by default and takes a boolean from any layer', () => {
-    expect(DEFAULT_CONFIG.planReview).toBe(true)
-    expect(resolveConfig([]).planReview).toBe(true)
-    expect(resolveConfig([{ planReview: false }]).planReview).toBe(false)
-    expect(resolveConfig([{ planReview: false }, { planReview: true }]).planReview).toBe(true)
+  it('is off by default and takes a boolean from any layer', () => {
+    expect(DEFAULT_CONFIG.planReview).toBe(false)
+    expect(resolveConfig([]).planReview).toBe(false)
+    expect(resolveConfig([{ planReview: true }]).planReview).toBe(true)
+    expect(resolveConfig([{ planReview: true }, { planReview: false }]).planReview).toBe(false)
   })
 
   it('rejects a planReview that is not a boolean', () => {

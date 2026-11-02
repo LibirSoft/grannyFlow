@@ -95,7 +95,7 @@ describe('skill docs', () => {
 
   it('documents the plan review in the config keys, SKILL.md, the host references and the Cursor protocol', () => {
     const config = read('references/config.md')
-    expect(config).toMatch(/^\| `planReview` \| `true` \|/m)
+    expect(config).toMatch(/^\| `planReview` \| `false` \|/m)
     expect(config).toContain('## Plan review')
     expect(config).toContain('"planReview": true')
     const skill = read('SKILL.md')
@@ -104,12 +104,12 @@ describe('skill docs', () => {
     expect(read('references/claude-code.md')).toContain('repo, branch, base, context, plan, stages')
     expect(read('references/opencode.md')).toContain('granny_run({ repo, branch, base, context, plan?, stages')
     expect(read('references/cursor.md')).toContain('## The plan review')
-    expect(readRoot('README.md')).toMatch(/^\| `planReview` \| `true` \|/m)
+    expect(readRoot('README.md')).toMatch(/^\| `planReview` \| `false` \|/m)
   })
 
-  it('releases 1.1.0 with a CHANGELOG entry for the package version', () => {
+  it('releases 1.2.0 with a CHANGELOG entry for the package version', () => {
     const { version } = JSON.parse(readRoot('package.json'))
-    expect(version).toBe('1.1.0')
+    expect(version).toBe('1.2.0')
     const changelog = readRoot('CHANGELOG.md')
     expect(changelog.match(/^## (\S+)/m)?.[1]).toBe(version)
     expect(changelog).not.toMatch(/used to|previously|no longer|migrat|upgrad|replaces/i)

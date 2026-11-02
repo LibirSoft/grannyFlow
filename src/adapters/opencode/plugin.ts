@@ -163,7 +163,7 @@ const RUN_INPUT_SCHEMA = {
     plan: {
       type: 'array',
       items: { type: 'string' },
-      description: 'Absolute paths of the plan files (with goal: where the planner writes the plan). Every agent reads them; with config planReview on (default) the reviewers review them before stage 1 and the implementer fixes them in place, uncommitted',
+      description: 'Absolute paths of the plan files (with goal: where the planner writes the plan). Every agent reads them; with config planReview on (off by default) the reviewers review them before stage 1 and the implementer fixes them in place, uncommitted',
     },
     stages: {
       type: 'array',

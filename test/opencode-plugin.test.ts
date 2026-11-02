@@ -288,7 +288,7 @@ describe('opencode plugin', () => {
 
     it('reviews the plan, has a plan-fix session submit through granny_submit_plan_fix, then implements', async () => {
       const f = fakeContext()
-      const { id, dir, plan } = await runWithPlan(f, { reviewers: [planReviewer(false)] })
+      const { id, dir, plan } = await runWithPlan(f, { planReview: true, reviewers: [planReviewer(false)] })
       const result = await finished(dir)
       delete process.env.PLAN_FILE
       expect(result.plan).toMatchObject({ outcome: 'clean', rounds: 2 })
@@ -310,7 +310,7 @@ describe('opencode plugin', () => {
 
     it('stops before stage 1 when the plan review hits the round cap, and says so', async () => {
       const f = fakeContext()
-      const { id, dir } = await runWithPlan(f, { maxRounds: 1, reviewers: [planReviewer(true)] })
+      const { id, dir } = await runWithPlan(f, { planReview: true, maxRounds: 1, reviewers: [planReviewer(true)] })
       const result = await finished(dir)
       delete process.env.PLAN_FILE
       expect(result.plan).toMatchObject({ outcome: 'round-cap', rounds: 1 })

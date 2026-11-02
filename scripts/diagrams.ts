@@ -98,12 +98,12 @@ function canvas(theme: Theme, width: number, height: number, title: string) {
 }
 
 function loop(theme: Theme): string {
-  const c = canvas(theme, 1000, 790, 'granny-workflow: plan review, then implement, review, judge and fix for every stage')
+  const c = canvas(theme, 1000, 790, 'granny-workflow: an optional plan review, then implement, review, judge and fix for every stage')
 
-  c.text(24, 34, 'BEFORE STAGE 1 · GIVEN A PLAN', { size: 11.5, weight: 700, fill: c.p.muted, spacing: 1.2 })
+  c.text(24, 34, 'OPTIONAL · "planReview": true · BEFORE STAGE 1', { size: 11.5, weight: 700, fill: c.p.muted, spacing: 1.2 })
   c.box(24, 52, 150, 70, 'neutral', 'Plan files', ['your plan'])
   c.path('M174,87 L222,87', 'neutral')
-  c.box(224, 52, 230, 70, 'purple', 'Plan review', ['reviewers check it', 'against the real repo'])
+  c.box(224, 52, 230, 70, 'purple', 'Plan review', ['reviewers check it', 'against the real repo'], { dashed: true })
   c.path('M454,74 L540,74', 'purple')
   c.label(497, 66, 'findings', 'purple')
   c.box(542, 52, 230, 70, 'blue', 'Implementer fixes plan', ['in place, never committed'])
@@ -114,7 +114,7 @@ function loop(theme: Theme): string {
   c.box(832, 52, 144, 70, 'red', 'Stop', ['nothing is built'])
 
   c.path('M339,122 L339,152 L135,152 L135,226', 'green')
-  c.label(345, 145, 'clean or residual-only', 'green', 'start')
+  c.label(345, 145, 'clean, residual-only, or plan review off', 'green', 'start')
 
   c.frame(12, 186, 976, 404, 'FOR EACH STAGE · IN THE BRANCH’S OWN GIT WORKTREE')
 

@@ -27,7 +27,7 @@ describe('the goal input', () => {
 describe('a planning run', () => {
   it('writes the plan with the planner, reviews it, and stops before implementing', async () => {
     const f = fakeHost({ reviews: [review(finding('P1', 'Missing step', '/work/repo/.granny/plans/feat-x.md', 4)), 'No issues.'] })
-    const result = await runGranny(f.host, goal({ config: { roles: { planner: { model: 'opus', effort: 'high' } } } }))
+    const result = await runGranny(f.host, goal({ config: { planReview: true, roles: { planner: { model: 'opus', effort: 'high' } } } }))
 
     expect(f.phases).toEqual(['Worktree', 'Plan', 'Plan review'])
     expect(f.calls.map(c => c.label)).toEqual(['plan', 'fix plan review r1'])
