@@ -157,22 +157,36 @@ describe('checks', () => {
     expect(one.logs).toContain('core: check tests failed (exit 1) - repair 1/1')
   })
 
-  it('run only the checks a stage selects; the final gate runs them all', async () => {
+  it('run only the checks a stage selects; the final gate runs the ones its repo\'s stages selected', async () => {
     const f = scripted({ 'run-tests': [green()], 'run-lint': [green()] })
     const r = await runGranny(
       f.host,
       run({ checks: [TESTS, LINT] }, { stages: [{ name: 'core', task: 'WP-01', checks: ['lint'] }, { name: 'docs', task: 'WP-02', checks: [] }] }),
     )
-    expect(f.events.filter(e => e.startsWith('check') || e.startsWith('implement'))).toEqual([
-      'implement core',
-      'check run-lint',
-      'implement docs',
-      'check run-tests',
-      'check run-lint',
-    ])
+    expect(f.events.filter(e => e.startsWith('check') || e.startsWith('implement'))).toEqual(['implement core', 'check run-lint', 'implement docs', 'check run-lint'])
     expect(r.stages[0]!.checks?.[0]!.results.map(x => x.name)).toEqual(['lint'])
     expect(r.stages[1]).not.toHaveProperty('checks')
+    expect(r.checks?.[0]!.results.map(x => x.name)).toEqual(['lint'])
+  })
+
+  it('run every check at the final gate when a stage of the repo selects none by name', async () => {
+    const f = scripted({ 'run-tests': [green()], 'run-lint': [green()] })
+    const r = await runGranny(f.host, run({ checks: [TESTS, LINT] }, { stages: [{ name: 'core', task: 'WP-01', checks: ['lint'] }, { name: 'docs', task: 'WP-02' }] }))
     expect(r.checks?.[0]!.results.map(x => x.name)).toEqual(['tests', 'lint'])
+  })
+
+  it('skip the final gate in a repo whose stages opted out of every check', async () => {
+    const B = '/work/b'
+    const f = scripted({ 'run-tests': [green()] })
+    const r = await runGranny(
+      f.host,
+      run({ checks: [TESTS] }, { repos: [B], stages: [{ name: 'api', task: 'WP-01' }, { name: 'web', task: 'WP-02', repo: B, checks: [] }] }),
+    )
+    expect(f.cwds).toEqual([REPO, REPO])
+    expect(f.calls.some(c => c.label.startsWith('repair'))).toBe(false)
+    expect(r.repos?.[0]).toHaveProperty('checks')
+    expect(r.repos?.[1]).not.toHaveProperty('checks')
+    expect(r.repos?.[1]!.finalReview?.outcome).not.toBe('checks-failed')
   })
 
   it('run after every fix round and stop the loop before the next review when they fail', async () => {
@@ -226,11 +240,8 @@ describe('checks', () => {
   })
 
   it('surface a failed final gate at run level: no final review, the final check still runs', async () => {
-    const f = scripted({ 'run-tests': [red('integration broke')] })
-    const r = await runGranny(
-      f.host,
-      run({ maxRepairs: 1, checks: [TESTS] }, { stages: [{ name: 'one', task: 'WP-01', checks: [] }, { name: 'two', task: 'WP-02', checks: [] }] }),
-    )
+    const f = scripted({ 'run-tests': [green(), green(), red('integration broke')] })
+    const r = await runGranny(f.host, run({ maxRepairs: 1, checks: [TESTS] }, { stages: [{ name: 'one', task: 'WP-01' }, { name: 'two', task: 'WP-02' }] }))
     expect(r.stages.map(s => s.outcome)).toEqual(['clean', 'clean'])
     expect(f.calls.some(c => c.label.startsWith('review final review'))).toBe(false)
     expect(f.calls.map(c => c.label)).toContain('repair final review final #1')
@@ -247,10 +258,10 @@ describe('checks', () => {
   it('gate the fix rounds of the final review', async () => {
     let reviews = 0
     const f = scripted(
-      { 'run-tests': [green(), red()] },
+      { 'run-tests': [green(), green(), green(), red()] },
       { override: req => (req.label.startsWith('review final review') && reviews++ === 0 ? p1 : undefined) },
     )
-    const r = await runGranny(f.host, run({ maxRepairs: 0, checks: [TESTS] }, { stages: [{ name: 'one', task: 'WP-01', checks: [] }, { name: 'two', task: 'WP-02', checks: [] }] }))
+    const r = await runGranny(f.host, run({ maxRepairs: 0, checks: [TESTS] }, { stages: [{ name: 'one', task: 'WP-01' }, { name: 'two', task: 'WP-02' }] }))
     expect(r.finalReview).toMatchObject({ outcome: 'checks-failed', rounds: 1 })
     expect(r.checks?.map(c => [c.at, c.results[0]!.passed])).toEqual([
       ['final', true],

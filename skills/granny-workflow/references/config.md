@@ -138,9 +138,9 @@ A check is `{ name, run, maxRepairs?, timeout?, metric? }`: a unique `name`, the
 
 - `implement`: after the implementer finished a stage (and made a commit), before its review. Not for a review-only stage (`implement: false`).
 - `fix r<n>`: after every fix round of a stage review and of the final review, before the next review round. Not in the plan review.
-- `final`: once per repo that had stages, on the whole branch with all checks, after the last stage and the lane merges, before the final review - also with `finalReview` off or skipped.
+- `final`: once per repo that had stages, on the whole branch with the checks that repo's stages selected, after the last stage and the lane merges, before the final review - also with `finalReview` off or skipped.
 
-A stage runs every check unless its spec lists `checks` by name (`"checks": ["tests"]`; `[]` runs none at its gates). A name the config does not have stops the run before any agent starts. The `final` gate always runs them all.
+A stage runs every check unless its spec lists `checks` by name (`"checks": ["tests"]`; `[]` runs none at its gates). A name the config does not have stops the run before any agent starts. The `final` gate of a repo runs every check one of its stages selected - all of them when a stage of it lists no `checks` - and none when every stage of it lists `[]`, so a repo can opt out of a check that does not fit its tooling.
 
 **A gate** runs its checks one after another in the stage's worktree. All green: on to the review. Otherwise, when a red check has used its repair budget at this gate, the gate fails; else the implementer gets a repair (label `repair <stage> <gate> #<n>`) with each red check's name, command, exit code, metric note and the last 3000 characters of its output, told to fix the code and never delete, skip or weaken a test, check, threshold, the granny config or a check script - and to explain in `deviations` when it cannot pass without that. Then every check of the gate runs again. Each gate has its own repair count; repairs are not review rounds.
 

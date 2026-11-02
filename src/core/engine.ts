@@ -188,6 +188,10 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
   const unknownChecks = stageCheckErrors(specs, config.checks)
   if (unknownChecks.length) throw new Error(`Invalid granny input:\n- ${unknownChecks.join('\n- ')}`)
   const checksOf = (st: StageSpec): CheckConfig[] => (st.checks === undefined ? config.checks : config.checks.filter(c => st.checks!.includes(c.name)))
+  const finalChecksOf = (repo: string): CheckConfig[] => {
+    const theirs = specs.filter(st => repoOf(st) === repo).map(checksOf)
+    return config.checks.filter(c => theirs.some(list => list.includes(c)))
+  }
 
   const call = async (role: Role, kind: ResultKind, label: string, phase: string, prompt: string, access: AgentRequest['access'], rc: RoleConfig, cwd: string) =>
     host.agent({
@@ -772,9 +776,10 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
     if (!stages) return undefined
     const name = s.lane.repo === primary ? 'final review' : `final review ${baseName(s.lane.repo)}`
     const runs: CheckRun[] = []
-    if (config.checks.length) {
+    const checks = finalChecksOf(s.lane.repo)
+    if (checks.length) {
       finalRuns.set(s, runs)
-      const gate = await checkGate(s.lane, name, 'final', config.checks, runs)
+      const gate = await checkGate(s.lane, name, 'final', checks, runs)
       if (!gate.passed) {
         host.log(`${name} not run - the final checks failed, so the branch is not PR-ready; the final check still runs`)
         return { outcome: 'checks-failed', rounds: 0, residual: [], unresolved: [], history: [], note: gate.note }
@@ -789,7 +794,7 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
     if (stages === 1 && !s.merges) return skipped('skipped', `${name} skipped - ${why}`, why)
     host.phase(FINAL_REVIEW_PHASE)
     host.log(`${name}: reviewing ${s.lane.base}...HEAD across ${stages} stage(s)${s.merges ? ` and ${s.merges} lane merge(s)` : ''}`)
-    const r = await reviewLoop(s.lane, name, { kind: 'diff', base: s.lane.base, note: WHOLE_BRANCH_NOTE }, undefined, { checks: config.checks, runs })
+    const r = await reviewLoop(s.lane, name, { kind: 'diff', base: s.lane.base, note: WHOLE_BRANCH_NOTE }, undefined, { checks, runs })
     if (r.outcome === 'checks-failed') host.log(`${name} ended checks-failed - the final check still runs, but the branch is not PR-ready`)
     if (r.outcome === 'round-cap' || r.outcome === 'review-failed') {
       host.log(`${name} ended ${r.outcome} - the final check still runs, but the branch has ${r.unresolved.length} unresolved finding(s)`)
