@@ -100,6 +100,7 @@ interface RepoState {
   waiters: Array<() => void>
   setup: Promise<unknown>
   merges: number
+  red?: number
 }
 
 const saidSomething = (d: unknown): string | undefined =>
@@ -664,7 +665,9 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
     const state = repoState.get(repoOf(st))!
     if (tryLock(state)) {
       try {
-        return await runStage(state.lane, st, i, name)
+        const result = await runStage(state.lane, st, i, name)
+        if (result.outcome === 'checks-failed') state.red ??= i
+        return result
       } finally {
         unlock(state)
       }
@@ -735,9 +738,13 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
       for (let i = 0; i < specs.length && running.size < limit; i++) {
         if (done.has(i) || running.has(i) || ![...deps[i]!].every(d => done.has(d))) continue
         const blocker = [...builds[i]!].find(d => undelivered.has(d))
-        if (blocker !== undefined) {
-          const ended = results[blocker]!.outcome
-          const note = `not started: it builds on ${nameOf(blocker)}, which ${ended === 'no-changes' || ended === 'checks-failed' ? `ended ${ended}` : 'was not started'}`
+        const red = repoState.get(repoOf(specs[i]!))!.red
+        if (blocker !== undefined || red !== undefined) {
+          const ended = blocker !== undefined ? results[blocker]!.outcome : undefined
+          const note =
+            blocker !== undefined
+              ? `not started: it builds on ${nameOf(blocker)}, which ${ended === 'no-changes' || ended === 'checks-failed' ? `ended ${ended}` : 'was not started'}`
+              : `not started: ${nameOf(red!)} ended checks-failed and left its red commits on ${input.branch} in this repo`
           host.log(`${specs[i]!.name || `stage ${i + 1}`}: ${note}`)
           results[i] = { stage: specs[i]!.name || `stage ${i + 1}`, outcome: 'skipped', rounds: 0, residual: [], unresolved: [], history: [], note }
           done.add(i)

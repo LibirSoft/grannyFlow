@@ -223,6 +223,28 @@ describe('checks', () => {
     expect(r.stages[0]).toMatchObject({ outcome: 'clean', rounds: 2 })
   })
 
+  it('not start a later stage on a branch a checks-failed stage left red, even one that does not build on it', async () => {
+    const f = scripted({ 'run-tests': [red()] })
+    const r = await runGranny(
+      f.host,
+      run({ parallel: false, maxRepairs: 0, checks: [TESTS] }, { stages: [{ name: 'core', task: 'WP-01' }, { name: 'docs', task: 'WP-02', after: [] }] }),
+    )
+    expect(r.stages[0]!.outcome).toBe('checks-failed')
+    expect(r.stages[1]).toMatchObject({ stage: 'docs', outcome: 'skipped' })
+    expect(r.stages[1]!.note).toBe('not started: 1 (core) ended checks-failed and left its red commits on feat/x in this repo')
+    expect(f.calls.some(c => c.label === 'implement docs')).toBe(false)
+  })
+
+  it('still start a later stage in another repo after a checks-failed stage', async () => {
+    const B = '/work/b'
+    const f = scripted({ 'run-tests': [red()] })
+    const r = await runGranny(
+      f.host,
+      run({ parallel: false, maxRepairs: 0, checks: [TESTS] }, { repos: [B], stages: [{ name: 'core', task: 'WP-01' }, { name: 'web', task: 'WP-02', repo: B, after: [], checks: [] }] }),
+    )
+    expect(r.stages.map(x => x.outcome)).toEqual(['checks-failed', 'clean'])
+  })
+
   it('leave a parallel lane that ended checks-failed unmerged, with its worktree in place', async () => {
     const lanePath = (command: string, cwd: string) => /wt='?([^';]+)'?; git worktree add/.exec(command)?.[1] ?? cwd
     const slow = async (req: AgentRequest) => {

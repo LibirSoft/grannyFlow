@@ -28,7 +28,7 @@ for each stage - independent stages at the same time (parallel, default on):
   granny reads HEAD, the implementer builds the stage
      ├─ no commit since that HEAD ─► stage no-changes, not reviewed; the stages that build on it are skipped
   checks (config checks, default none): granny runs them itself; red ones go back to the implementer for a repair, up to maxRepairs
-     ├─ still red ─► stage checks-failed, not reviewed; the stages that build on it are skipped
+     ├─ still red ─► stage checks-failed, not reviewed; the stages that build on it, and the later ones in its repo, are skipped
   every reviewer reviews it, in parallel (base = the HEAD granny read)
      ├─ a reviewer fails, then fails its one retry ─► stage review-failed
      ├─ no reviewer reports a finding ─────────────► stage clean (without checks: gates-red when the last implementer or fix left gates red)
