@@ -2,15 +2,16 @@ import { describe, expect, it } from 'bun:test'
 import { checkInput, runGranny, type RunInput } from '../src/core/engine'
 import { resolveConfig } from '../src/core/config'
 import { draftPrompt } from '../src/core/prompts'
-import { fakeHost, finding, review } from './fake-host'
+import { fakeHost, finding, review, withCodex } from './fake-host'
 
-const goal = (extra: Partial<RunInput> = {}): RunInput => ({
-  repo: '/work/repo',
-  branch: 'feat/x',
-  base: 'main',
-  goal: 'Add login with OAuth.',
-  ...extra,
-})
+const goal = (extra: Partial<RunInput> = {}): RunInput =>
+  withCodex({
+    repo: '/work/repo',
+    branch: 'feat/x',
+    base: 'main',
+    goal: 'Add login with OAuth.',
+    ...extra,
+  })
 
 describe('the goal input', () => {
   it('replaces stages and is exclusive with them and with fromStage', () => {

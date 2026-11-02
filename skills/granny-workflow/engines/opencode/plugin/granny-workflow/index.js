@@ -14,7 +14,7 @@ var DEFAULT_CONFIG = {
     implementer: {},
     judge: { model: { "claude-code": "sonnet" } }
   },
-  reviewers: [{ name: "codex", engine: "auto" }],
+  reviewers: [{ name: "reviewer", engine: "agent" }],
   threshold: 70,
   maxRounds: 4,
   base: "main",

@@ -1,5 +1,22 @@
 # Changelog
 
+## 1.4.0
+
+### Changed
+
+- **The default reviewer is the host's model**: without `reviewers` in the config, one `agent` reviewer named `reviewer` runs on the model selected in the host (pin one with `model` on the entry). Codex is an opt-in entry (`"engine": "auto"`, `"codex"` or `"codex-plugin"`); an entry that names no engine still means `auto`.
+- Reviewers get the stage's task (`Stage N/M "name" ... its TASK`). They check the diff against it - a missing part is a finding, and so is a change outside it; work the task leaves to other stages is not - and report clean-code and design problems (duplication, naming, needless abstraction, deviations from the plan) as P2/P3. The judge scores findings against the task. Codex's built-in review takes no prompt, so only agent and command reviewers and the judge see the task.
+
+### Added
+
+- **Final review** (`"finalReview": true` by default): after every stage finished, each repo's whole branch (`base...HEAD`) goes through the review loop once more, before the final check, looking for cross-stage duplication and inconsistencies and checking merge commits and their conflict resolutions. Fixes land on the run's branch. A repo with one stage and no lane merge skips it; the result has `finalReview`, and each entry of `repos` its own. After `round-cap` or `review-failed` the final check still runs and the result says the branch has unresolved findings.
+- **Declined findings stop coming back**: from round 2 on the judge sees the findings already sent to the fixer and the fixer's `deviations`. It marks a finding that repeats one with `repeatOf`; a repeat the fixer declined with a convincing reason scores low and stays residual for the user, a wrong reason is overruled and the fixer is told why. A first-time P0/P1 still goes to the implementer without the judge; once a fixer declined something, P0/P1 findings go through the judge too. A `deviations` text of "None" or "N/A" is not a decline.
+- Stage outcomes `no-changes` (the implementer made no commit; nothing is reviewed and the stages that build on it end `skipped`) and `gates-red` (the review found nothing to fix but the gates were left red).
+
+### Fixed
+
+- A stage is `clean` only when a review looked at real changes. Granny reads HEAD itself before the implementer runs and reviews from there, not from the `startSha` the implementer reports. Reviewer output with no finding bullets is clean only when it says "No findings." (or the Codex plugin's "No material findings."); anything else goes to the extraction agent, which must find the findings or confirm a clean review, otherwise the reviewer did not run.
+
 ## 1.3.0
 
 ### Added

@@ -151,3 +151,11 @@ export const finding = (severity: string, title: string, file = 'src/a.ts', line
   `- [${severity}] ${title} — ${file}:${line}-${line}\n  ${title} detail.`
 
 export const review = (...items: string[]) => `Review comments:\n\n${items.join('\n')}\n`
+
+export const CODEX_REVIEWER = { reviewers: [{ name: 'codex', engine: 'auto' }] }
+
+/** Most engine tests drive the Codex reviewer path; the default reviewer is an agent. */
+export const withCodex = <T extends { config?: unknown }>(i: T): T => ({
+  ...i,
+  config: [CODEX_REVIEWER, ...(Array.isArray(i.config) ? i.config : i.config === undefined ? [] : [i.config])],
+})

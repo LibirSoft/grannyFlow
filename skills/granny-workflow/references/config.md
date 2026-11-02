@@ -17,7 +17,7 @@ Layers, later wins:
 | `roles.planner` | `{}` | writes the plan and proposes the stages in a run with `goal` ([Planning](#planning)) |
 | `roles.implementer` | `{}` | builds each stage and fixes accepted findings; fixes the plan in the plan review |
 | `roles.judge` | `{ "model": { "claude-code": "sonnet" } }` | scores each finding that is not P0/P1 0-100 and marks duplicates |
-| `reviewers` | `[{ "name": "codex", "engine": "auto" }]` | the reviewers; every one of them reviews every round, all at the same time - see [Reviewers](#reviewers) |
+| `reviewers` | `[{ "name": "reviewer", "engine": "agent" }]` | the reviewers; every one of them reviews every round, all at the same time - see [Reviewers](#reviewers) |
 | `threshold` | `70` | a finding is sent back to the implementer when it is P0/P1 (also `critical`/`high`; these skip the judge), when the judge gave it no score, or when its score is **strictly above** this. The overall review score gates nothing |
 | `maxRounds` | `4` | review rounds per stage, for the plan review and for the final review; the stage ends `round-cap` after the last one |
 | `planReview` | `false` | `true`: with a `plan` in the run's input, review the plan files before stage 1 - see [Plan review](#plan-review). It costs extra tokens; no effect without `plan` |
@@ -139,7 +139,7 @@ The fix step is the implementer with write access (label `fix plan review r<n>`)
 
 ## Reviewers
 
-`reviewers` is a list, one entry per reviewer. Every round all of them review the stage in parallel: on Claude Code as concurrent `agent()` calls, on opencode as concurrent child sessions and commands.
+`reviewers` is a list, one entry per reviewer. Without it, one `agent` reviewer named `reviewer` runs on the host's model - the model you selected, or `model` on the entry to pin one; Codex and other CLIs are opt-in entries. Every round all of them review the stage in parallel: on Claude Code as concurrent `agent()` calls, on opencode as concurrent child sessions and commands.
 
 | key | values | |
 |---|---|---|

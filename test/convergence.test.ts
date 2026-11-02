@@ -1,15 +1,16 @@
 import { describe, expect, it } from 'bun:test'
 import { runGranny, type RunInput } from '../src/core/engine'
 import type { AgentRequest } from '../src/core/types'
-import { fakeHost, finding, review } from './fake-host'
+import { fakeHost, finding, review, withCodex } from './fake-host'
 
-const input = (extra: Partial<RunInput> = {}): RunInput => ({
+const input = (extra: Partial<RunInput> = {}): RunInput =>
+  withCodex({
   repo: '/work/repo',
   branch: 'feat/x',
   base: 'main',
   stages: [{ name: 'core', task: 'Do WP-01.' }],
   ...extra,
-})
+  })
 
 const DECLINE = 'codex-F1 not applied: the null check already happens in parse() at src/a.ts:1, so the reported crash cannot occur.'
 

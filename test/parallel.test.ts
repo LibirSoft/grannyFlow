@@ -1,13 +1,14 @@
 import { describe, expect, it } from 'bun:test'
 import { checkInput, runGranny, type RunInput } from '../src/core/engine'
 import type { AgentRequest } from '../src/core/types'
-import { fakeHost } from './fake-host'
+import { fakeHost, withCodex } from './fake-host'
 
 const A = '/work/a'
 const B = '/work/b'
 const C = '/work/c'
 
-const input = (extra: Partial<RunInput> = {}): RunInput => ({
+const input = (extra: Partial<RunInput> = {}): RunInput =>
+  withCodex({
   repo: A,
   branch: 'feat/x',
   base: 'main',
@@ -18,7 +19,7 @@ const input = (extra: Partial<RunInput> = {}): RunInput => ({
     { name: 'logo c', task: 'Logo in C.', repo: C },
   ],
   ...extra,
-})
+  })
 
 const lanePath = (command: string, cwd: string) => /wt='?([^';]+)'?; git worktree add/.exec(command)?.[1] ?? cwd
 

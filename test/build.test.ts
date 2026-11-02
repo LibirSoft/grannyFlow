@@ -2,7 +2,7 @@ import { describe, expect, it } from 'bun:test'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { buildClaudeCode, buildOpencode } from '../scripts/build'
-import { finding, review } from './fake-host'
+import { CODEX_REVIEWER, finding, review } from './fake-host'
 
 const root = join(import.meta.dir, '..')
 const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor
@@ -52,7 +52,7 @@ describe('claude-code workflow.js', () => {
       repo: '/r',
       branch: 'feat/x',
       stages: [{ name: 'one', task: 'Do it.' }],
-      config: [{ roles: { implementer: { model: 'opus', effort: 'high' } } }, { threshold: 80 }],
+      config: [CODEX_REVIEWER, { roles: { implementer: { model: 'opus', effort: 'high' } } }, { threshold: 80 }],
     })
     expect(result.stages[0]).toMatchObject({ stage: 'one', outcome: 'clean', rounds: 2 })
     expect(result.base).toBe('main')
@@ -106,7 +106,7 @@ describe('claude-code workflow.js', () => {
       branch: 'feat/x',
       plan: '/plans/v1.md',
       stages: [{ name: 'one', task: 'Do it.' }],
-      config: { planReview: true },
+      config: [CODEX_REVIEWER, { planReview: true }],
     })
     expect(result.plan).toMatchObject({ outcome: 'clean', rounds: 2 })
     expect(result.stages[0]).toMatchObject({ stage: 'one', outcome: 'clean' })

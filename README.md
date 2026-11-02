@@ -64,7 +64,7 @@ npx skills add LibirSoft/grannyFlow
 
 This puts `skills/granny-workflow/` where your agents look for skills. Then, per host:
 
-- **Claude Code** - nothing else. Optional: OpenAI's Codex plugin (`/plugin marketplace add openai/codex-plugin-cc`, then `/plugin install codex@openai-codex`); the default reviewer uses it when it is installed and `node` is on `PATH`.
+- **Claude Code** - nothing else. Optional: OpenAI's Codex plugin (`/plugin marketplace add openai/codex-plugin-cc`, then `/plugin install codex@openai-codex`); a reviewer with engine `auto` or `codex-plugin` uses it when it is installed and `node` is on `PATH`.
 - **opencode** - install the plugin globally (and optionally the `granny` primary agent), then restart the service. A per-project install breaks with worktrees on, since the role sessions run in the worktree, where the plugin is missing:
 
   ```sh
@@ -79,7 +79,7 @@ This puts `skills/granny-workflow/` where your agents look for skills. Then, per
   cp <skill-dir>/engines/cursor/agents/*.md ~/.cursor/agents/
   ```
 
-The default is one reviewer, [Codex](https://github.com/openai/codex); install it and log in, or configure other reviewers: a host model (`"engine": "agent"`) or any CLI that answers a prompt (`"engine": "command"`, e.g. `"opencode run -m <provider/model> {prompt}"`). With the default engine `auto`, Claude Code runs the Codex review through OpenAI's [Codex plugin for Claude Code](https://github.com/openai/codex-plugin-cc) when it is installed and `node` is on `PATH`, and through the Codex CLI (`codex exec review`) otherwise; opencode always uses the CLI unless you set `"engine": "codex-plugin"`. The run log says which one ran.
+The default is one reviewer on the model you selected in the host (`"engine": "agent"`). Add others as you like: [Codex](https://github.com/openai/codex) (`"engine": "auto"`; install it and log in) or any CLI that answers a prompt (`"engine": "command"`, e.g. `"opencode run -m <provider/model> {prompt}"`). With engine `auto`, Claude Code runs the Codex review through OpenAI's [Codex plugin for Claude Code](https://github.com/openai/codex-plugin-cc) when it is installed and `node` is on `PATH`, and through the Codex CLI (`codex exec review`) otherwise; opencode always uses the CLI unless you set `"engine": "codex-plugin"`. The run log says which one ran.
 
 ## Use
 
@@ -120,7 +120,7 @@ Three layers, later wins: `~/.config/granny/config.json`, `<repo>/granny.config.
 |---|---|---|
 | `roles.<role>.model` | session model; judge `sonnet` on Claude Code | one string for every host, or `{ "claude-code": …, "opencode": … }` |
 | `roles.<role>.effort` | inherit | Claude Code only; on opencode use a `#variant` model suffix |
-| `reviewers` | `[{ "name": "codex", "engine": "auto" }]` | all review every round, in parallel; each has a unique `name`, an `engine` and its own `model`/`effort` |
+| `reviewers` | `[{ "name": "reviewer", "engine": "agent" }]` | all review every round, in parallel; each has a unique `name`, an `engine` and its own `model`/`effort` |
 | `reviewers[].engine` | `auto` | `auto`: the Codex plugin when installed and `node` is on `PATH` (Claude Code only), else the Codex CLI; `codex-plugin`: the plugin, required; `codex`: the CLI; `agent`: a host model (Claude models only on Claude Code); `command`: any CLI, with `{base}`, `{out}`, `{model}` and `{prompt}` placeholders |
 | `reviewers[].mode` | `review` | `adversarial-review` runs the Codex plugin's adversarial review, optionally steered by `focus` |
 | `threshold` | `70` | findings scoring strictly above it are fixed; P0/P1 always are, without the judge - except a repeat of a finding the fixer declined, which the judge scores like the rest |

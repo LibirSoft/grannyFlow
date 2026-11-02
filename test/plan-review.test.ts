@@ -9,17 +9,18 @@ import { agentPlanReviewPrompt, planReviewPrompt, type PromptContext } from '../
 import { parseCodexReview, reviewFailure } from '../src/core/review'
 import { planReviewScript, reviewStem } from '../src/core/reviewer'
 import type { CommandResult, HostName } from '../src/core/types'
-import { fakeHost, finding, review } from './fake-host'
+import { fakeHost, finding, review, withCodex } from './fake-host'
 
 const PLAN = '/plans/v1.md'
 
-const input = (extra: Partial<RunInput> = {}): RunInput => ({
+const input = (extra: Partial<RunInput> = {}): RunInput =>
+  withCodex({
   repo: '/work/repo',
   branch: 'feat/x',
   base: 'main',
   stages: [{ name: 'core', task: 'Do WP-01.' }],
   ...extra,
-})
+  })
 
 describe('the plan input', () => {
   it('takes one absolute path or a list of them', () => {

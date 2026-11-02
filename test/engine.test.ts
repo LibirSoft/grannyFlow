@@ -6,15 +6,16 @@ import { resolveConfig } from '../src/core/config'
 import { runGranny, type RunInput } from '../src/core/engine'
 import { commandReviewPrompt } from '../src/core/prompts'
 import { alive, brokerCompanion, records, sessionEndHook, until } from './fake-companion'
-import { fakeHost, finding, review, reviewerOf, type FakeOptions } from './fake-host'
+import { fakeHost, finding, review, reviewerOf, type FakeOptions, withCodex } from './fake-host'
 
-const input = (extra: Partial<RunInput> = {}): RunInput => ({
+const input = (extra: Partial<RunInput> = {}): RunInput =>
+  withCodex({
   repo: '/work/repo',
   branch: 'feat/x',
   base: 'main',
   stages: [{ name: 'core', task: 'Do WP-01.' }],
   ...extra,
-})
+  })
 
 const GLM = { name: 'glm', engine: 'command', command: 'glm-review {prompt}' }
 const CORE_TASK = { number: 1, total: 1, name: 'core', task: 'Do WP-01.' }
@@ -1501,5 +1502,20 @@ describe('the review script in a real shell', () => {
     expect(r.stages[0]!.history[0]!.findings.map(x => x.title)).toEqual(['Fresh'])
     expect(existsSync(join(repo, '.granny/review-core-r1-mine.md'))).toBe(false)
     expect(readFileSync(join(repo, '.granny/review-core-r1-mine.log'), 'utf8')).not.toContain('stale log')
+  })
+})
+
+describe('the default reviewer', () => {
+  it('is one agent reviewer on the host model that gets the stage task, and no Codex command runs', async () => {
+    for (const name of ['claude-code', 'opencode'] as const) {
+      const f = fakeHost({ name, direct: name === 'opencode' })
+      const r = await runGranny(f.host, { repo: '/work/repo', branch: 'feat/x', base: 'main', stages: [{ name: 'core', task: 'Do WP-01.' }] })
+      expect(r.stages[0]).toMatchObject({ outcome: 'clean', rounds: 1 })
+      const rv = f.calls.find(c => c.label === 'review core r1 reviewer')!
+      expect(rv).toMatchObject({ role: 'reviewer', kind: 'findings', access: 'read-only' })
+      expect(rv.model).toBeUndefined()
+      expect(rv.prompt).toContain('TASK:\nDo WP-01.')
+      expect(f.commands.some(c => c.includes('codex'))).toBe(false)
+    }
   })
 })
