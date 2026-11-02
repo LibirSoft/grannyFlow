@@ -56,14 +56,14 @@ For each stage, from `fromStage` on:
    A reviewer that exits non-zero, prints that Codex got no usable result, (agent) returns no JSON block, or whose run or subagent call fails with an error did not run: let the other reviewers finish, then run that reviewer once more. If it fails again, the stage ends `review-failed`; name the failed reviewer(s) and keep the findings of the reviewers that ran as unresolved, plus the failed reviewer's findings from the round before - also one that the judge merged into another reviewer's finding.
 
    No reviewer reported a finding → stage `clean`.
-3. **Route.** Every P0/P1 finding (also critical/high) goes to the implementer as it is - do not give it to the judge.
-4. **Judge** - only when there are other findings. Delegate to `granny-judge` with the "Judge" prompt and only those findings. A finding it marks `duplicateOf: <id>` (an id in that same list, not itself, not a cycle) is merged into that finding: report it once, list the merged ids on it, and give it the highest score of the group.
-5. **Triage**, exactly: a finding is sent back when its severity is P0/P1 (or critical/high), when the judge gave it no score, or when its score is **strictly greater** than `threshold` (default 70). Everything else is residual for the user.
+3. **Route.** Every P0/P1 finding (also critical/high) goes to the implementer as it is - do not give it to the judge - unless a fixer in this loop already returned non-empty `deviations`: then P0/P1 findings go to the judge with the rest.
+4. **Judge** - only when there are findings for it. Delegate to `granny-judge` with the "Judge" prompt and only those findings; from round 2 on use "Judge - from round 2 on", listing every finding sent to the fixer so far as `r<N>/<id>` with each round's deviations. Keep a `repeatOf` it sets only when it names one of those labels. A finding it marks `duplicateOf: <id>` (an id in that same list, not itself, not a cycle) is merged into that finding: report it once, list the merged ids on it, and give it the highest score of the group.
+5. **Triage**, exactly: a finding is sent back when its severity is P0/P1 (or critical/high) and it has no `repeatOf`, when the judge gave it no score, or when its score is **strictly greater** than `threshold` (default 70). Everything else is residual for the user - a repeat of a declined finding too; say so.
    - Nothing to send → stage `residual-only`.
-   - Otherwise delegate to `granny-implementer` with the "Implementer - fix" prompt and only the findings to send, then go to step 2 with N+1.
+   - Otherwise delegate to `granny-implementer` with the "Implementer - fix" prompt and only the findings to send - when some of them repeat a finding the fixer declined, with the OVERRULED block of "Implementer - fix, from round 2 on" - keep its deviations for the next judge, then go to step 2 with N+1.
    - After `maxRounds` (default 4) reviews without reaching `clean` or `residual-only` → stage `round-cap`; the last round's findings are unresolved.
 
-Dedupe happens only among the findings that are not P0/P1, so a P2 that repeats a P1 is judged on its own; and a reviewer that labels everything P0/P1 never reaches the judge.
+Dedupe happens only among the findings that are not P0/P1, so a P2 that repeats a P1 is judged on its own; and a reviewer that labels everything P0/P1 reaches the judge only after a fixer declined findings.
 
 After the last stage, do the "Granny - final check" yourself - in every repo the stages worked in - then report per SKILL.md section 5 and wait.
 

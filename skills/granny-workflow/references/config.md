@@ -184,14 +184,16 @@ A reviewer did not run when its command exits non-zero, when the Codex plugin sa
 
 ### Judge routing
 
-1. P0/P1 findings (also `critical`/`high`) go straight to the implementer. They are never sent to the judge and have no score.
-2. The judge is called only when there are other findings. It scores each of them 0-100 and may mark one `duplicateOf: <id>` when it reports the same problem as another finding in its list. The duplicate is merged into the finding it points at, which is reported once, lists the merged ids in `duplicates` and takes the highest score of the group (none when any of them is unscored), so a merge never drops a finding that would have been fixed. The log says `<stage> r<n>: judge merged <id> into <id> (duplicate)`. A `duplicateOf` that points at itself, at an id not in the list, or back in a cycle is ignored.
-3. A finding above `threshold`, or one the judge gave no score (also when the judge returned nothing), goes to the implementer; the rest are residual for the user.
+1. P0/P1 findings (also `critical`/`high`) go straight to the implementer, unscored - until a fixer declines findings (non-empty `deviations` in its result). From the next round of that review loop on, P0/P1 findings go to the judge with the rest (log: `<stage> r<n>: <k> P0/P1 finding(s) go to the judge too - ...`).
+2. The judge is called only when there are findings for it. It scores each of them 0-100 and may mark one `duplicateOf: <id>` when it reports the same problem as another finding in its list. The duplicate is merged into the finding it points at, which is reported once, lists the merged ids in `duplicates` and takes the highest score of the group (none when any of them is unscored), so a merge never drops a finding that would have been fixed. The log says `<stage> r<n>: judge merged <id> into <id> (duplicate)`. A `duplicateOf` that points at itself, at an id not in the list, or back in a cycle is ignored.
+3. From round 2 on, the judge prompt has an EARLIER ROUNDS block: every finding already sent to the fixer under a round-qualified label (`r1/codex-F2` - ids restart every round), and each round's `deviations`. The judge sets `repeatOf: <label>` on a finding that repeats one of them; a `repeatOf` naming no listed label is ignored. A repeat of a finding the fixer declined with a reason the code backs scores low; one whose reason is wrong scores on its merits, with the reason saying why.
+4. A finding above `threshold`, or one the judge gave no score (also when the judge returned nothing), goes to the implementer; so does a P0/P1 without `repeatOf`, whatever its score. The rest are residual for the user - a repeated P0/P1 at or below `threshold` too. A residual repeat of a declined finding is logged `<stage> r<n>: <id> dropped as a repeat of <label>, which the fixer declined (score <s>) - kept as residual`, so a disagreement the judge settles for the fixer ends `residual-only` instead of running to `round-cap`.
+5. A repeat of a declined finding that goes back to the implementer is logged `<stage> r<n>: the judge overruled the fixer on <id> (repeat of <label>, score <s>)`, and the fix prompt gets an OVERRULED block: those findings, the judge's reasons and what the fixer said before, so it fixes them or answers the reason instead of repeating itself. Each round's `deviations` are also kept on its `history` entry.
 
 Two consequences:
 
-- Dedupe happens only among the findings that are not P0/P1. A P2 that duplicates a P1 is scored on its own, and may reach the implementer next to the P1.
-- A reviewer that labels everything P0/P1 bypasses the judge: every finding it reports goes to the implementer.
+- Dedupe happens only among the findings that are not P0/P1 (once P0/P1 findings go to the judge, one may be merged into another P0/P1, never into a P2/P3). A P2 that duplicates a P1 is scored on its own, and may reach the implementer next to the P1.
+- A reviewer that labels everything P0/P1 bypasses the judge until a fixer declines one of its findings.
 
 ### The Codex plugin
 
