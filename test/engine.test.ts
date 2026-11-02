@@ -520,6 +520,40 @@ describe('the base a stage review diffs against', () => {
   })
 })
 
+describe('red gates', () => {
+  const gates = (red: string[]) => (req: { kind: string; label: string }) =>
+    req.kind === 'implementation'
+      ? { startSha: 'start1', headSha: 'h', gatesGreen: !red.includes(req.label), gates: red.includes(req.label) ? `${req.label}: 3 tests fail` : 'all green', commits: ['c'], untested: '' }
+      : undefined
+
+  it('end a stage gates-red, not clean, when the review finds nothing after an implementer left them red', async () => {
+    const f = fakeHost({ override: gates(['implement core']) })
+    const r = await runGranny(f.host, input())
+    expect(r.stages[0]).toMatchObject({ outcome: 'gates-red', rounds: 1, residual: [], unresolved: [] })
+    expect(r.stages[0]!.note).toBe('the review found nothing to fix, but the implementer left the gates red: implement core: 3 tests fail')
+    expect(f.logs).toContain('core: gates-red - the review found nothing to fix, but the implementer left the gates red: implement core: 3 tests fail')
+  })
+
+  it('end it gates-red when the last fix left them red, keeping the residual findings', async () => {
+    const f = fakeHost({
+      reviews: [review(finding('P2', 'Real'), finding('P3', 'Nit')), review(finding('P3', 'Nit'))],
+      scores: [{ 'codex-F1': 90, 'codex-F2': 10 }, { 'codex-F1': 10 }],
+      override: gates(['fix core r1']),
+    })
+    const r = await runGranny(f.host, input())
+    expect(r.stages[0]).toMatchObject({ outcome: 'gates-red', rounds: 2 })
+    expect(r.stages[0]!.residual.map(x => x.title)).toEqual(['Nit'])
+    expect(r.stages[0]!.note).toBe('the review found nothing to fix, but the last fix (fix core r1) left the gates red: fix core r1: 3 tests fail')
+  })
+
+  it('do not count once a later fix turned them green', async () => {
+    const f = fakeHost({ reviews: [review(finding('P1', 'Broken')), 'No findings.'], override: gates(['implement core']) })
+    const r = await runGranny(f.host, input())
+    expect(r.stages[0]).toMatchObject({ outcome: 'clean', rounds: 2 })
+    expect(r.stages[0]!.note).toBeUndefined()
+  })
+})
+
 describe('the worktree', () => {
   const WT = '/work/repo-worktrees/feat-x'
   const opus = { name: 'opus', engine: 'agent', model: 'opus' }

@@ -55,11 +55,11 @@ For each stage, from `fromStage` on:
 
    A reviewer that exits non-zero, prints that Codex got no usable result, (agent) returns no JSON block, or whose run or subagent call fails with an error did not run: let the other reviewers finish, then run that reviewer once more. If it fails again, the stage ends `review-failed`; name the failed reviewer(s) and keep the findings of the reviewers that ran as unresolved, plus the failed reviewer's findings from the round before - also one that the judge merged into another reviewer's finding.
 
-   No reviewer reported a finding → stage `clean`.
+   No reviewer reported a finding → stage `clean` - unless the implementer, or the last fix, reported red gates: then the stage ends `gates-red`, with the gates in its note.
 3. **Route.** Every P0/P1 finding (also critical/high) goes to the implementer as it is - do not give it to the judge.
 4. **Judge** - only when there are other findings. Delegate to `granny-judge` with the "Judge" prompt and only those findings. A finding it marks `duplicateOf: <id>` (an id in that same list, not itself, not a cycle) is merged into that finding: report it once, list the merged ids on it, and give it the highest score of the group.
 5. **Triage**, exactly: a finding is sent back when its severity is P0/P1 (or critical/high), when the judge gave it no score, or when its score is **strictly greater** than `threshold` (default 70). Everything else is residual for the user.
-   - Nothing to send → stage `residual-only`.
+   - Nothing to send → stage `residual-only` (`gates-red` when the gates are red, as above, keeping the residual findings).
    - Otherwise delegate to `granny-implementer` with the "Implementer - fix" prompt and only the findings to send, then go to step 2 with N+1.
    - After `maxRounds` (default 4) reviews without reaching `clean` or `residual-only` → stage `round-cap`; the last round's findings are unresolved.
 

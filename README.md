@@ -21,7 +21,7 @@ for each stage - independent stages at the same time (parallel, default on):
      ├─ no commit since that HEAD ─► stage no-changes, not reviewed; the stages that build on it are skipped
   every reviewer reviews it, in parallel (base = the HEAD granny read)
      ├─ a reviewer fails, then fails its one retry ─► stage review-failed
-     ├─ no reviewer reports a finding ─────────────► stage clean
+     ├─ no reviewer reports a finding ─────────────► stage clean (gates-red when the last implementer or fix left gates red)
      └─ P0/P1 findings go straight to the implementer; the judge scores the rest 0-100 and merges duplicates
           ├─ any P0/P1, or score > threshold ─► implementer fixes those ─► review again
           └─ none ─► stage done; the rest are "residual" for you

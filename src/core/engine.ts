@@ -68,6 +68,12 @@ interface ReviewerRound {
   note?: string
 }
 
+interface Gates {
+  green: boolean
+  text: string
+  by: string
+}
+
 interface Lane {
   repo: string
   base: string
@@ -352,7 +358,7 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
       }),
     )
 
-  const reviewLoop = async (lane: Lane, name: string, subject: Subject, reviewers = config.reviewers): Promise<PlanResult> => {
+  const reviewLoop = async (lane: Lane, name: string, subject: Subject, reviewers = config.reviewers, gates?: Gates): Promise<PlanResult> => {
     const { p } = lane
     const phase = subject.kind === 'plan' ? PLAN_PHASE : 'Review'
     const history: RoundRecord[] = []
@@ -420,6 +426,7 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
         continue
       }
       const fix = await implement(lane, `fix ${name} r${round}`, fixPrompt(p, name, round, accepted))
+      if (gates) Object.assign(gates, { green: fix.gatesGreen, text: fix.gates, by: `the last fix (fix ${name} r${round})` })
       if (!fix.gatesGreen) host.log(`${name} r${round}: WARNING fixer left gates red - ${fix.gates}`)
     }
     host.log(`${name}: hit the ${config.maxRounds}-round cap without a clean review`)
@@ -493,9 +500,15 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
     }
 
     host.phase('Review')
-    const loop = st.review === false
+    const gates: Gates | undefined = impl ? { green: impl.gatesGreen, text: impl.gates, by: 'the implementer' } : undefined
+    const loop: PlanResult = st.review === false
       ? { outcome: 'review-skipped' as const, rounds: 0, residual: [], unresolved: [], history: [] }
-      : await reviewLoop(lane, name, { kind: 'diff', base })
+      : await reviewLoop(lane, name, { kind: 'diff', base }, undefined, gates)
+    if (gates && !gates.green && (loop.outcome === 'clean' || loop.outcome === 'residual-only')) {
+      loop.outcome = 'gates-red'
+      loop.note = `the review found nothing to fix, but ${gates.by} left the gates red: ${gates.text}`
+      host.log(`${name}: gates-red - ${loop.note}`)
+    }
     return { stage: name, ...where, ...(impl ? { implementation: impl } : {}), ...loop }
   }
 

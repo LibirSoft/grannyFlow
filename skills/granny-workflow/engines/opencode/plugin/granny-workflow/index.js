@@ -1057,7 +1057,7 @@ ${a.note}` : ""}` : "the worktree runner returned nothing" };
     }
     return { reviewer, ...r, findings: attribute(reviewer, r.findings) };
   }));
-  const reviewLoop = async (lane, name, subject, reviewers = config.reviewers) => {
+  const reviewLoop = async (lane, name, subject, reviewers = config.reviewers, gates) => {
     const { p } = lane;
     const phase = subject.kind === "plan" ? PLAN_PHASE : "Review";
     const history = [];
@@ -1121,6 +1121,8 @@ ${a.note}` : ""}` : "the worktree runner returned nothing" };
         continue;
       }
       const fix = await implement(lane, `fix ${name} r${round}`, fixPrompt(p, name, round, accepted));
+      if (gates)
+        Object.assign(gates, { green: fix.gatesGreen, text: fix.gates, by: `the last fix (fix ${name} r${round})` });
       if (!fix.gatesGreen)
         host.log(`${name} r${round}: WARNING fixer left gates red - ${fix.gates}`);
     }
@@ -1200,7 +1202,13 @@ ${a.note}` : ""}` : "the worktree runner returned nothing" };
       host.log(`${name}: review-only stage - reviewing ${lane.base}...HEAD`);
     }
     host.phase("Review");
-    const loop = st.review === false ? { outcome: "review-skipped", rounds: 0, residual: [], unresolved: [], history: [] } : await reviewLoop(lane, name, { kind: "diff", base });
+    const gates = impl ? { green: impl.gatesGreen, text: impl.gates, by: "the implementer" } : undefined;
+    const loop = st.review === false ? { outcome: "review-skipped", rounds: 0, residual: [], unresolved: [], history: [] } : await reviewLoop(lane, name, { kind: "diff", base }, undefined, gates);
+    if (gates && !gates.green && (loop.outcome === "clean" || loop.outcome === "residual-only")) {
+      loop.outcome = "gates-red";
+      loop.note = `the review found nothing to fix, but ${gates.by} left the gates red: ${gates.text}`;
+      host.log(`${name}: gates-red - ${loop.note}`);
+    }
     return { stage: name, ...where, ...impl ? { implementation: impl } : {}, ...loop };
   };
   const mergeLane = async (state, lane, name) => {
