@@ -68,7 +68,7 @@ describe('runGranny', () => {
     expect(r.stages[0]).toMatchObject({ outcome: 'round-cap', rounds: 2 })
     expect(r.stages[0]!.unresolved.map(x => x.title)).toEqual(['Still broken'])
     expect(f.calls.filter(c => c.label.startsWith('fix')).length).toBe(2)
-    expect(f.logs.at(-1)).toContain('2-round cap')
+    expect(f.logs).toContainEqual(expect.stringContaining('2-round cap'))
   })
 
   it('stops the loop when the review command fails twice instead of inventing findings', async () => {

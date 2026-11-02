@@ -30,6 +30,7 @@ export interface GrannyConfig {
   worktree: boolean
   worktreeDir?: string
   planReview: boolean
+  finalReview: boolean
   parallel: boolean
   maxParallel: number
   language: string
@@ -52,6 +53,7 @@ export const DEFAULT_CONFIG: GrannyConfig = {
   workDir: '.granny',
   worktree: true,
   planReview: false,
+  finalReview: true,
   parallel: true,
   maxParallel: 3,
   language: 'English',
@@ -211,6 +213,7 @@ function validate(c: GrannyConfig): string[] {
     else if (c.worktreeDir.startsWith('~')) errors.push('worktreeDir is not expanded by a shell - write the absolute path instead of ~')
   }
   if (typeof c.planReview !== 'boolean') errors.push('planReview must be a boolean')
+  if (typeof c.finalReview !== 'boolean') errors.push('finalReview must be a boolean')
   if (typeof c.parallel !== 'boolean') errors.push('parallel must be a boolean')
   if (!Number.isInteger(c.maxParallel) || c.maxParallel < 1) errors.push('maxParallel must be an integer >= 1')
   if (typeof c.aiAttribution !== 'boolean') errors.push('aiAttribution must be a boolean')

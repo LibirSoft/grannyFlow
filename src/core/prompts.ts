@@ -120,19 +120,23 @@ ${script}
 Set ran=true only if it exited 0, exitCode to its exit code, and output to everything it printed, verbatim and complete. If it failed, set ran=false and explain in note. Never invent output.`
 }
 
-export function agentReviewPrompt(p: PromptContext, name: string, reviewBase: string): string {
+export const WHOLE_BRANCH_NOTE =
+  'This is the whole-branch review: every stage was already reviewed on its own, so look across them - duplicated code or helpers that several stages added, inconsistencies between stages (naming, contracts, config, docs, tests) - and check the merge commits and their conflict resolutions especially (`git log --merges` and `git show <merge>`): both sides\' intent must survive.'
+
+export function agentReviewPrompt(p: PromptContext, name: string, reviewBase: string, note?: string): string {
   return `${common(p)}
 
 You are the REVIEWER. Do not edit, stage or commit anything.
-Review the changes of stage "${name}": \`cd ${shellQuote(p.repo)} && git diff ${shellQuote(reviewBase)}...HEAD\` plus \`git log --oneline ${shellQuote(reviewBase)}..HEAD\`.
+Review the changes of stage "${name}": \`cd ${shellQuote(p.repo)} && git diff ${shellQuote(reviewBase)}...HEAD\` plus \`git log --oneline ${shellQuote(reviewBase)}..HEAD\`.${note ? `\n${note}` : ''}
 Look for correctness bugs, regressions, missing tests for changed behaviour, security problems and contract breaks. Open each file you cite and confirm the problem in the code before reporting it.
 Return findings with id (F1, F2, ...), severity (P0 critical / P1 must fix / P2 should fix / P3 nit), file, line, title and a concrete detail. Zero findings means the stage is clean.`
 }
 
-export function commandReviewPrompt(p: PromptContext, name: string, reviewBase: string): string {
+export function commandReviewPrompt(p: PromptContext, name: string, reviewBase: string, note?: string): string {
   return [
     'You are a code REVIEWER. Do not edit, stage or commit anything.',
     `Repo ${p.repo}, branch \`${p.branch}\`. Review the changes of stage "${name}": \`cd ${shellQuote(p.repo)} && git diff ${shellQuote(reviewBase)}...HEAD\` plus \`git log --oneline ${shellQuote(reviewBase)}..HEAD\`.`,
+    note ?? '',
     p.context ? `Design context, read it first: ${p.context}` : '',
     'Look for correctness bugs, regressions, missing tests for changed behaviour, security problems and contract breaks. Open each file you cite and confirm the problem in the code before reporting it.',
     'Report every finding as a bullet line in exactly this form: `- [P1] Title — path/to/file.ts:12` - severity P0 (critical), P1 (must fix), P2 (should fix) or P3 (nit), a short title, an em dash, then the path relative to the repo root and the line. Put the detail on the lines after it, indented by two spaces.',
@@ -181,9 +185,9 @@ RAW REVIEW OUTPUT:
 ${output}`
 }
 
-export function judgePrompt(p: PromptContext, reviewBase: string, findings: Finding[]): string {
+export function judgePrompt(p: PromptContext, reviewBase: string, findings: Finding[], note?: string): string {
   return `You are the JUDGE scoring a code review. Repo ${p.repo}, branch ${p.branch}, stage diff \`${shellQuote(reviewBase)}...HEAD\`. Do not edit anything.
-${p.context ? 'Design context:\n' + p.context + '\n' : ''}
+${note ? note + '\n' : ''}${p.context ? 'Design context:\n' + p.context + '\n' : ''}
 The findings come from one or more reviewers; each names its reviewer. P0/P1 findings are not in this list: they go to the implementer without a score.
 For each finding below, open the cited code and judge whether it is real, correctly described and worth fixing; score it 0-100 (findings the code refutes score low). When a finding reports the same problem as another finding in this list, score it too and set its duplicateOf to the id of the finding to keep. Then score the whole review 0-100 (correctness + actionability; mostly wrong or trivial findings = low).
 

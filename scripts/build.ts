@@ -16,6 +16,7 @@ import {
   planJudgePrompt,
   planReviewPrompt,
   worktreeCommandPrompt,
+  WHOLE_BRANCH_NOTE,
 } from '../src/core/prompts'
 import { worktreeScript } from '../src/core/worktree'
 
@@ -78,6 +79,7 @@ export function renderPrompts(): string {
     ['Reviewer - agent engine', agentReviewPrompt(p, '<stage name>', '<stage start sha>')],
     ['Reviewer - command engine, the text {prompt} is filled with', commandReviewPrompt(p, '<stage name>', '<stage start sha>')],
     ['Judge', judgePrompt(p, '<stage start sha>', []).replace(/\[\]$/, '<findings as JSON>')],
+    ['Final review - the note every reviewer prompt (after its first line naming the diff) and the judge prompt (after its first line) carry, with name `final review` and diff base `<base>`', WHOLE_BRANCH_NOTE],
     ['Extraction fallback', extractPrompt('<stage name>', '<raw review output>')],
     ['Granny - final check', finalPrompt(p)],
   ]

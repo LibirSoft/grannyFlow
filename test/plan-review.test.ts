@@ -170,7 +170,7 @@ describe('the plan review', () => {
     const f = fakeHost()
     const r = await runGranny(f.host, input({ plan: PLAN, stages: [{ name: 'a', task: 'A' }, { name: 'b', task: 'B' }], fromStage: 2, config: { planReview: true } }))
     expect(r.plan).toEqual({ outcome: 'skipped', rounds: 0, residual: [], unresolved: [], history: [] })
-    expect(f.phases).toEqual(['Worktree', 'Implement', 'Review', 'PR ready'])
+    expect(f.phases).toEqual(['Worktree', 'Implement', 'Review', 'Final review', 'PR ready'])
     expect(f.commands.some(planCommand)).toBe(false)
     expect(f.logs).toContain('plan review skipped - the run resumes from stage 2')
     expect(f.calls.find(c => c.kind === 'implementation')!.prompt).toContain(`Plan files - read them first: ${PLAN}`)

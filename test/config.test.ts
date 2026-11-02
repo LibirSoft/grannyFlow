@@ -201,6 +201,19 @@ describe('planReview', () => {
   })
 })
 
+describe('finalReview', () => {
+  it('is on by default and takes a boolean from any layer', () => {
+    expect(DEFAULT_CONFIG.finalReview).toBe(true)
+    expect(resolveConfig([]).finalReview).toBe(true)
+    expect(resolveConfig([{ finalReview: false }]).finalReview).toBe(false)
+    expect(resolveConfig([{ finalReview: false }, { finalReview: true }]).finalReview).toBe(true)
+  })
+
+  it('rejects a finalReview that is not a boolean', () => {
+    expect(() => resolveConfig([{ finalReview: 'no' }])).toThrow('finalReview must be a boolean')
+  })
+})
+
 describe('resolveModel', () => {
   it('uses a plain string on every host and picks the host key from an object', () => {
     expect(resolveModel('sonnet', 'claude-code')).toBe('sonnet')
