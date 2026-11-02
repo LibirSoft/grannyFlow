@@ -1,6 +1,56 @@
 import type { GrannyConfig } from './config'
+import { isBlocker } from './review'
 import { shellQuote } from './shell'
 import type { Finding, StageSpec } from './types'
+
+export interface EarlierRound {
+  round: number
+  sent: Finding[]
+  deviations?: string
+}
+
+export interface Overruled {
+  id: string
+  repeatOf: string
+  round: number
+  reason?: string
+}
+
+export const roundLabel = (round: number, f: Pick<Finding, 'id'>) => `r${round}/${f.id}`
+
+const judgeRouting = (p: PromptContext, findings: Finding[]): string =>
+  findings.some(isBlocker)
+    ? `P0/P1 findings are in this list only because a fixer declined findings in an earlier round: score them like the rest. A P0/P1 without repeatOf goes to the implementer whatever its score; a repeated one scored ${p.config.threshold} or lower does not.`
+    : 'P0/P1 findings are not in this list: they go to the implementer without a score.'
+
+function judgeHistory(earlier: EarlierRound[]): string {
+  if (!earlier.length) return ''
+  const rounds = earlier.map(e => {
+    const sent = e.sent.map(f => ({ label: roundLabel(e.round, f), severity: f.severity, file: f.file, line: f.line, title: f.title, detail: f.detail }))
+    return `Round ${e.round} sent to the fixer:
+${JSON.stringify(sent, null, 2)}
+The fixer's deviations (findings it did not apply, and why): ${e.deviations?.trim() || 'none - it applied all of them'}`
+  })
+  return `
+EARLIER ROUNDS of this review - the findings already sent to the fixer, under round-qualified labels, and the fixer's reasons for not applying some:
+${rounds.join('\n\n')}
+
+When a finding below repeats one of those earlier findings, set its repeatOf to that label. A repeat of a finding the fixer declined with a convincing reason that the code backs scores low - cite the label and the fixer's reason in your reason. When the fixer's reason is wrong, score the repeat on its merits (high when it is real) and say in reason why the fixer's reason does not hold. A repeat of a finding the fixer applied: check the fix in the code and score what is still wrong.
+`
+}
+
+function overruledSection(overruled: Overruled[], earlier: EarlierRound[]): string {
+  if (!overruled.length) return ''
+  const rounds = new Set(overruled.map(o => o.round))
+  const said = earlier.filter(e => rounds.has(e.round) && e.deviations?.trim())
+  return `
+OVERRULED - you declined these findings in an earlier round; the judge checked your reason against the code and disagreed:
+${overruled.map(o => `- ${o.id} (repeat of ${o.repeatOf}): ${o.reason ?? 'no reason given'}`).join('\n')}
+What you said then:
+${said.map(e => `- round ${e.round}: ${e.deviations!.trim()}`).join('\n')}
+Fix them. If you still decline one, answer the judge's reason with new evidence from the code in deviations - do not repeat your earlier explanation.
+`
+}
 
 export interface PromptContext {
   repo: string
@@ -80,12 +130,12 @@ ${stage.task ?? ''}
 Commit per logical step. Keep ${pr} (git-excluded; create the directory if missing) current with sections: Title, Summary, Changes (table), Test plan (real numbers), Revised in stage N, Review fixes, Untested. Return startSha = HEAD before your first change.`
 }
 
-export function fixPrompt(p: PromptContext, name: string, round: number, accepted: Finding[]): string {
+export function fixPrompt(p: PromptContext, name: string, round: number, accepted: Finding[], overruled: Overruled[] = [], earlier: EarlierRound[] = []): string {
   return `${common(p)}
 
 You are the IMPLEMENTER, fixing review round ${round} of stage "${name}".
 Apply the review findings on top of the current branch state (read \`git log --oneline ${shellQuote(p.base)}..HEAD\` and the code first). Fix every finding below, red-green where it changes behaviour, keep the gates green, commit (\`fix(...)\`), and add each finding id with what you did to the "Review fixes" section of ${prBodyOf(p)}. A finding you believe is wrong: do not fix it, explain why in deviations.
-
+${overruledSection(overruled, earlier)}
 FINDINGS (P0/P1 or score > ${p.config.threshold}):
 ${JSON.stringify(accepted, null, 2)}`
 }
@@ -203,27 +253,27 @@ RAW REVIEW OUTPUT:
 ${output}`
 }
 
-export function judgePrompt(p: PromptContext, reviewBase: string, findings: Finding[], stage?: StageTask): string {
+export function judgePrompt(p: PromptContext, reviewBase: string, findings: Finding[], earlier: EarlierRound[] = [], stage?: StageTask): string {
   return `You are the JUDGE scoring a code review. Repo ${p.repo}, branch ${p.branch}, stage diff \`${shellQuote(reviewBase)}...HEAD\`. Do not edit anything.
 ${p.context ? 'Design context:\n' + p.context + '\n' : ''}${taskSection(stage)}
-The findings come from one or more reviewers; each names its reviewer. P0/P1 findings are not in this list: they go to the implementer without a score.
+The findings come from one or more reviewers; each names its reviewer. ${judgeRouting(p, findings)}
 For each finding below, open the cited code and judge whether it is real, correctly described and worth fixing; score it 0-100 (findings the code refutes score low).${stage ? ' Score against the TASK: a finding about work another stage owns scores low; a missing part of this stage\'s task is worth fixing.' : ''} When a finding reports the same problem as another finding in this list, score it too and set its duplicateOf to the id of the finding to keep. Then score the whole review 0-100 (correctness + actionability; mostly wrong or trivial findings = low).
-
+${judgeHistory(earlier)}
 REVIEW:
 ${JSON.stringify(findings, null, 2)}`
 }
 
-export function planJudgePrompt(p: PromptContext, plans: string[], findings: Finding[]): string {
+export function planJudgePrompt(p: PromptContext, plans: string[], findings: Finding[], earlier: EarlierRound[] = []): string {
   return `You are the JUDGE scoring a plan review. Repo ${p.repo}, branch ${p.branch}, plan ${plans.join(', ')}. Implementation has not started. Do not edit anything.
 ${p.context ? 'Design context:\n' + p.context + '\n' : ''}
-The findings come from one or more reviewers; each names its reviewer. P0/P1 findings are not in this list: they go to the implementer without a score.
+The findings come from one or more reviewers; each names its reviewer. ${judgeRouting(p, findings)}
 For each finding below, open the cited plan line and the code, config or dependency it talks about, and judge whether it is real, correctly described and worth fixing in the plan before implementation starts; score it 0-100 (findings the repo refutes score low). When a finding reports the same problem as another finding in this list, score it too and set its duplicateOf to the id of the finding to keep. Then score the whole review 0-100 (correctness + actionability; mostly wrong or trivial findings = low).
-
+${judgeHistory(earlier)}
 REVIEW:
 ${JSON.stringify(findings, null, 2)}`
 }
 
-export function planFixPrompt(p: PromptContext, plans: string[], round: number, accepted: Finding[]): string {
+export function planFixPrompt(p: PromptContext, plans: string[], round: number, accepted: Finding[], overruled: Overruled[] = [], earlier: EarlierRound[] = []): string {
   return `${common(p)}
 
 You are the IMPLEMENTER, fixing the plan after plan review round ${round}. Implementation has not started: change only the plan.
@@ -234,7 +284,7 @@ ${
       : 'At the top of each plan file you change, extend the newest `## rN deltas (<date>)` section - an earlier round of this plan review added it - with each finding id and what you changed for it; add one (N one higher than the highest in that file, r1 when there is none) where it is missing.'
   } Take the date from \`date +%F\` in your shell.
 Fix every finding below. A finding you believe is wrong: leave the plan as it is for it and explain why in deviations.
-
+${overruledSection(overruled, earlier)}
 FINDINGS (P0/P1 or score > ${p.config.threshold}):
 ${JSON.stringify(accepted, null, 2)}`
 }

@@ -8,7 +8,7 @@ export interface FakeOptions {
   name?: HostName
   direct?: boolean
   reviews?: Reviews
-  scores?: Array<Record<string, number | { score: number; duplicateOf?: string }> | null>
+  scores?: Array<Record<string, number | { score: number; duplicateOf?: string; repeatOf?: string }> | null>
   override?: (req: AgentRequest) => unknown
   shell?: { env?: Record<string, string> }
   worktree?: string | CommandResult | 'git' | ((command: string, cwd: string) => string)
@@ -112,8 +112,8 @@ export function fakeHost(opts: FakeOptions = {}) {
           const s = scores.length ? scores.shift() : {}
           if (s === null) return null
           const perFinding = Object.entries(s ?? {}).map(([id, v]) => {
-            const { score, duplicateOf } = typeof v === 'number' ? { score: v, duplicateOf: undefined } : v
-            return { id, score, reason: `reason ${id}`, ...(duplicateOf ? { duplicateOf } : {}) }
+            const { score, duplicateOf, repeatOf } = typeof v === 'number' ? { score: v, duplicateOf: undefined, repeatOf: undefined } : v
+            return { id, score, reason: `reason ${id}`, ...(duplicateOf ? { duplicateOf } : {}), ...(repeatOf ? { repeatOf } : {}) }
           })
           return { score: 50, perFinding, rationale: 'r' }
         }
