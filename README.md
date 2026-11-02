@@ -1,6 +1,14 @@
 # granny-workflow
 
-An agent skill that takes a plan to a PR-ready branch: an **implementer** builds it stage by stage, any number of **reviewers** - Codex, a host model, any CLI - review every stage in parallel, P0/P1 findings go straight back to the implementer, a **judge** scores the rest and merges duplicates, and the findings that matter go back to the implementer until the review is clean. **Granny** - the agent you talk to - prepares the run, launches it, and reports. Nothing is pushed; you decide what happens next.
+## Why granny
+
+GrannyFlow is not for designing a project from scratch and building it. It takes work that is already planned and gets it to a PR-ready branch, running independent work in parallel, so that the PR needs as little human review as possible.
+
+What it sets out to improve is the review load: less work for the human reviewer, and better code reaching them. To get there it does not lean on skill files alone. A deterministic workflow generator builds the loop as code for Claude Code and opencode, so the limits the agents work within - stages, review rounds, thresholds, stop conditions - hold on every run instead of depending on how a prompt is read.
+
+## What it does
+
+An agent skill that takes a plan to a PR-ready branch: an **implementer** builds it stage by stage, any number of **reviewers** - the host model by default, Codex, any CLI - review every stage in parallel, P0/P1 findings go straight back to the implementer, a **judge** scores the rest and merges duplicates, and the findings that matter go back to the implementer until the review is clean. **Granny** - the agent you talk to - prepares the run, launches it, and reports. Nothing is pushed; you decide what happens next.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/loop-dark.svg">
