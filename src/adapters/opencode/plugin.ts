@@ -3,7 +3,7 @@ import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, write
 import { homedir } from 'node:os'
 import { isAbsolute, join } from 'node:path'
 import { resolveConfig } from '../../core/config'
-import { checkInput, runGranny, type RunInput } from '../../core/engine'
+import { checkInput, runGranny, stageCheckErrors, type RunInput } from '../../core/engine'
 import { checkShape, SCHEMAS } from '../../core/schemas'
 import type { AgentRequest, CommandResult, Host, PlanResult, ResultKind, RunResult } from '../../core/types'
 
@@ -138,7 +138,10 @@ function summarize(result: RunResult, worktree: boolean): string {
     ].filter(Boolean).join(', ')
     return `- ${name}: ${s.outcome}, ${s.rounds} review round(s)${extra ? ` (${extra})` : ''}`
   }
-  const lines = result.stages.map(s => `${line(s, s.repo ? `${s.stage} (${s.repo})` : s.stage)}${s.note && s.note.includes('in parallel on') ? ` - ${s.note.split('\n').at(-1)}` : ''}`)
+  const lines = result.stages.map(
+    s =>
+      `${line(s, s.repo ? `${s.stage} (${s.repo})` : s.stage)}${s.outcome === 'checks-failed' && s.note ? ` - ${s.note.split('\n')[0]}` : ''}${s.note && s.note.includes('in parallel on') ? ` - ${s.note.split('\n').at(-1)}` : ''}`,
+  )
   if (result.draft) {
     lines.push(`- plan written: ${result.draft.files.join(', ')} - ${result.draft.stages.length} proposed stage(s)${result.draft.questions ? ', open questions for the user' : ''}`)
     if (result.plan) lines.push(line(result.plan, 'plan review'))
@@ -148,7 +151,7 @@ function summarize(result: RunResult, worktree: boolean): string {
     lines.unshift(`${line(result.plan, 'plan review')}${stopped ? ' - stopped before stage 1, nothing was implemented' : ''}`)
   }
   const reviewLine = (s: PlanResult, name: string) =>
-    `${line(s, name)}${s.outcome === 'skipped' || s.outcome === 'review-skipped' ? ` - ${s.note ?? 'not run'}` : s.outcome === 'round-cap' || s.outcome === 'review-failed' ? ' - the branch still has unresolved findings; the final check ran anyway' : ''}`
+    `${line(s, name)}${s.outcome === 'skipped' || s.outcome === 'review-skipped' ? ` - ${s.note ?? 'not run'}` : s.outcome === 'round-cap' || s.outcome === 'review-failed' ? ' - the branch still has unresolved findings; the final check ran anyway' : s.outcome === 'checks-failed' ? ` - NOT PR-ready, the checks fail: ${s.note ?? ''}; the final check ran anyway` : ''}`
   if (result.finalReview) lines.push(reviewLine(result.finalReview, 'final review'))
   for (const r of result.repos?.slice(1) ?? []) if (r.finalReview) lines.push(reviewLine(r.finalReview, `final review ${r.repo}`))
   if (result.final) lines.push(`- final: gates ${result.final.gatesGreen ? 'green' : 'RED'}, PR body ${result.final.prBodyPath}${result.final.issues ? `, issues: ${result.final.issues}` : ''}`)
@@ -198,6 +201,11 @@ const RUN_INPUT_SCHEMA = {
           implement: { type: 'boolean', description: 'false makes a review-only stage: review base...HEAD, then fix' },
           review: { type: 'boolean', description: 'false skips the review loop for this stage' },
           repo: { type: 'string', description: 'Absolute path of the repo this stage works in: repo (default) or one of repos' },
+          checks: {
+            type: 'array',
+            items: { type: 'string' },
+            description: 'Names of the config checks this stage runs before its review and after each fix; omitted: all of them, []: none',
+          },
           after: {
             type: 'array',
             items: { type: 'number' },
@@ -304,6 +312,8 @@ export const createGrannyPlugin = ({ delays = DEFAULT_DELAYS, sleep = pause, kil
 
       const layers = [readJson(globalConfigPath()), readJson(join(input.repo, 'granny.config.json')), input.config]
       const config = resolveConfig(layers, 'opencode')
+      const unknownChecks = stageCheckErrors(input.stages, config.checks)
+      if (unknownChecks.length) return `granny_run refused:\n- ${unknownChecks.join('\n- ')}`
       const blockers = preflight(input.repo, input.branch, config.workDir, config.worktree)
       for (const repo of stageRepos(input)) blockers.push(...preflight(repo, input.branch, config.workDir, config.worktree).map(b => `${repo}: ${b}`))
       if (blockers.length) return `granny_run refused:\n- ${blockers.join('\n- ')}`

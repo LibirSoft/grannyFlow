@@ -12,7 +12,7 @@ An agent skill that takes a plan to a PR-ready branch: an **implementer** builds
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/loop-dark.svg">
-  <img src="docs/images/loop-light.svg" alt="The granny loop: an optional plan review (planReview: true), then for each stage the implementer builds, reviewers review in parallel, P0/P1 go straight back, the judge scores the rest, and a final check ends with a PR-ready branch that is not pushed">
+  <img src="docs/images/loop-light.svg" alt="The granny loop: an optional plan review (planReview: true), then for each stage the implementer builds, optional checks run (red ones go back for a repair), reviewers review in parallel, P0/P1 go straight back, the judge scores the rest, and a final check ends with a PR-ready branch that is not pushed">
 </picture>
 
 <details>
@@ -27,15 +27,18 @@ optional - given a plan and "planReview": true (default false):
 for each stage - independent stages at the same time (parallel, default on):
   granny reads HEAD, the implementer builds the stage
      ├─ no commit since that HEAD ─► stage no-changes, not reviewed; the stages that build on it are skipped
+  checks (config checks, default none): granny runs them itself; red ones go back to the implementer for a repair, up to maxRepairs
+     ├─ still red ─► stage checks-failed, not reviewed; the stages that build on it, and the later ones in its repo, are skipped
   every reviewer reviews it, in parallel (base = the HEAD granny read)
      ├─ a reviewer fails, then fails its one retry ─► stage review-failed
-     ├─ no reviewer reports a finding ─────────────► stage clean (gates-red when the last implementer or fix left gates red)
+     ├─ no reviewer reports a finding ─────────────► stage clean (without checks: gates-red when the last implementer or fix left gates red)
      └─ P0/P1 findings go straight to the implementer; the judge scores the rest 0-100 and merges duplicates
-          ├─ any P0/P1, or score > threshold ─► implementer fixes those ─► review again
+          ├─ any P0/P1, or score > threshold ─► implementer fixes those ─► checks again ─► review again
           └─ none ─► stage done; the rest are "residual" for you
      cap: maxRounds reviews per stage
      a stage in another repo works in that repo's worktree; one whose repo is busy works in its own worktree, merged back after
-after the last stage (none threw): final review in every repo with more than one stage or a lane merge (finalReview, default on)
+after the last stage (none threw): the checks its stages selected on every repo's whole branch (repaired only when a final review follows; red: not PR-ready, no final review),
+     then the final review in every repo with more than one stage or a lane merge (finalReview, default on)
      ─► the same loop on the whole branch (base...HEAD): cross-stage duplication, inconsistencies, merge resolutions
 then: final check in every repo (gates, clean tree, no AI trailers, PR body) ─► report ─► wait
 ```
@@ -48,6 +51,7 @@ The loop is code, not a prompt: on Claude Code and opencode an engine drives eve
 - **Planner** - no plan yet? Give granny the goal instead: a planner agent explores the repo, writes the plan to the git-excluded `.granny/plans/<branch>.md` and proposes the stages, and the run stops for your approval (with `"planReview": true`, after the plan review has cleaned the plan). Approve (or edit) and granny implements it in a second run.
 - **Plan review** (optional, `"planReview": true`) - given plan files, the reviewers check the plan against the actual repo before anything is built; the implementer fixes it in place until it is clean, and a plan review that cannot get there stops the run. It runs every reviewer, the judge and the implementer over the plan for up to `maxRounds` rounds before any code is written, so it costs extra tokens. Without it, the plan files still go to every agent.
 - **Parallel stages** (on by default, `"parallel": false` turns it off) - independent stages run at the same time. One run can span several repos (`repos`): the same logo change in two frontends, a Resilience4j config in every service - each repo gets its own worktree and its stages start together. Inside one repo, a stage that does not build on the one before (`after: []`, which the planner sets) runs in its own worktree and is merged back after its review loop; the implementer resolves a merge conflict. A stage without `after` waits for the previous stage in its repo, so a plain stage list runs in order as before.
+- **Checks** (optional, `checks`) - commands granny runs itself, not the agents: after the implementer, after every fix and on the whole branch before the final review. A red check - a failing exit code, or a metric such as coverage outside its bounds - goes back to the implementer for a repair, at most `maxRepairs` times; a stage that stays red is never reviewed. On opencode granny executes the command directly; on Claude Code a helper agent runs it and reports the exit code.
 - **Reviewers** - as many as you configure, of any kind: Codex (the CLI or OpenAI's Codex plugin), a host model, or any CLI that answers a prompt. They all review every round at the same time; one that fails twice ends the stage `review-failed` instead of reading as clean.
 - **Judge** - P0/P1 findings skip it and go straight to the implementer. It scores every other finding 0-100 and merges duplicates across reviewers; findings above the threshold are fixed, the rest are left for you as residual.
 
@@ -132,12 +136,14 @@ Three layers, later wins: `~/.config/granny/config.json`, `<repo>/granny.config.
 | `reviewers[].engine` | `auto` | `auto`: the Codex plugin when installed and `node` is on `PATH` (Claude Code only), else the Codex CLI; `codex-plugin`: the plugin, required; `codex`: the CLI; `agent`: a host model (Claude models only on Claude Code); `command`: any CLI, with `{base}`, `{out}`, `{model}` and `{prompt}` placeholders |
 | `reviewers[].mode` | `review` | `adversarial-review` runs the Codex plugin's adversarial review, optionally steered by `focus` |
 | `threshold` | `70` | findings scoring strictly above it are fixed; P0/P1 always are, without the judge - except a repeat of a finding the fixer declined, which the judge scores like the rest |
-| `maxRounds` | `4` | review rounds per stage, and for the plan review |
+| `maxRounds` | `4` | review rounds per stage, and for the plan review; check repairs do not count |
 | `planReview` | `false` | `true` reviews the plan files before stage 1 when the run has a `plan` (extra tokens); skipped when it resumes with `fromStage` |
 | `finalReview` | `true` | after the last stage, review each repo's whole branch for cross-stage duplication, inconsistencies and merge resolutions; skipped for a repo with one stage and no lane merge |
 | `parallel` | `true` | run independent stages at the same time (other repos, or `after` in the same repo); `false`: one at a time, in order |
 | `maxParallel` | `3` | the most stages running at once |
 | `gates` | `auto` | agents discover test/lint/build/typecheck, or list them |
+| `checks` | `[]` | `[{ name, run, maxRepairs?, timeout?, metric? }]` granny runs itself before every review and the final review; a stage selects some with `checks: [names]` |
+| `maxRepairs` | `2` | repairs per check gate before the stage ends `checks-failed` |
 | `worktree` | `true` | work in the branch's own git worktree; `false` works in `repo` on the branch you checked out |
 | `worktreeDir` | `<parent of repo>/<repo name>-worktrees` | where new worktrees go; absolute, or relative to the repo's parent |
 | `aiAttribution` | `false` | forbid Co-Authored-By / "Generated with" lines |

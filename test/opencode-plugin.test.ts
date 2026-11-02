@@ -342,6 +342,11 @@ describe('opencode plugin', () => {
     await plugin.setup(f.ctx)
     const run = f.tools.get('granny_run')
     expect((await run.execute({ repo: repo, branch: 'feat/x', stages: [] }, { sessionID: 'parent' })).content).toContain('stages must be')
+    const unknownCheck = await run.execute(
+      { repo, branch: 'feat/x', stages: [{ task: 't', checks: ['lint'] }], config: { checks: [{ name: 'tests', run: 'bun test' }] } },
+      { sessionID: 'parent' },
+    )
+    expect(unknownCheck.content).toContain('granny_run refused:\n- stages[0].checks names "lint", which is not in config checks (tests)')
     writeFileSync(join(repo, 'granny.config.json'), '{"treshold": 1}')
     git(repo, 'add', 'granny.config.json')
     git(repo, 'commit', '-qm', 'cfg')

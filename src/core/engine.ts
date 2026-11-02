@@ -1,7 +1,8 @@
-import { resolveConfig, resolveModel, type GrannyConfig, type ReviewerConfig, type RoleConfig } from './config'
+import { resolveConfig, resolveModel, type CheckConfig, type GrannyConfig, type ReviewerConfig, type RoleConfig } from './config'
 import {
   agentPlanReviewPrompt,
   agentReviewPrompt,
+  checkCommandPrompt,
   commandReviewPrompt,
   draftPrompt,
   extractPrompt,
@@ -13,11 +14,13 @@ import {
   planFixPrompt,
   planJudgePrompt,
   planReviewPrompt,
+  repairPrompt,
   reviewCommandPrompt,
   gitCommandPrompt,
   worktreeCommandPrompt,
   roundLabel,
   type EarlierRound,
+  type FailedCheck,
   type Overruled,
   type PromptContext,
   type StageTask,
@@ -30,6 +33,8 @@ import { shellQuote } from './shell'
 import { branchSlug, reportedWorktree, worktreePath, worktreeScript } from './worktree'
 import type {
   AgentRequest,
+  CheckResult,
+  CheckRun,
   FinalReport,
   Finding,
   Host,
@@ -51,6 +56,7 @@ type Subject = { kind: 'diff'; base: string; stage?: StageTask; note?: string } 
 const PLAN_PHASE = 'Plan review'
 const DRAFT_PHASE = 'Plan'
 const FINAL_REVIEW_PHASE = 'Final review'
+const CHECKS_PHASE = 'Checks'
 
 export type RepoInput = string | { repo: string; base?: string }
 
@@ -94,8 +100,12 @@ interface RepoState {
   waiters: Array<() => void>
   setup: Promise<unknown>
   merges: number
+  red?: number
+  started?: Promise<string | undefined>
 }
 
+const saidSomething = (d: unknown): string | undefined =>
+  typeof d === 'string' && d.trim() && !/^\s*(none|n\/a|-|no deviations)?\.?\s*$/i.test(d) ? d : undefined
 const slug = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'stage'
 const trimPath = (s: string) => s.replace(/\/+$/, '') || '/'
 const repoPathOf = (r: RepoInput): unknown => (typeof r === 'string' ? r : r && typeof r === 'object' ? r.repo : undefined)
@@ -148,8 +158,18 @@ function stageErrors(stages: StageSpec[], known: Set<string>): string[] {
     if (s.after !== undefined && !(Array.isArray(s.after) && s.after.every(n => Number.isInteger(n) && n >= 1 && n <= i))) {
       errors.push(`stages[${i}].after must list 1-based numbers of earlier stages (1..${i})`)
     }
+    if (s.checks !== undefined && !(Array.isArray(s.checks) && s.checks.every(c => typeof c === 'string' && c.trim()))) {
+      errors.push(`stages[${i}].checks must be an array of check names`)
+    }
   })
   return errors
+}
+
+export function stageCheckErrors(stages: StageSpec[] | undefined, checks: CheckConfig[]): string[] {
+  const names = new Set(checks.map(c => c.name))
+  return (stages ?? []).flatMap((st, i) =>
+    (Array.isArray(st?.checks) ? st.checks : []).filter(n => !names.has(n)).map(n => `stages[${i}].checks names "${n}", which is not in config checks (${[...names].join(', ') || 'none configured'})`),
+  )
 }
 
 const planFiles = (input: RunInput): string[] => (input.plan === undefined ? [] : Array.isArray(input.plan) ? input.plan : [input.plan])
@@ -167,6 +187,13 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
   const baseOf = (repo: string) => (repo === primary ? base : extra.find(r => r.repo === repo)!.base)
   const specs = input.stages ?? []
   const repoOf = (st: StageSpec) => (st.repo === undefined ? primary : trimPath(st.repo))
+  const unknownChecks = stageCheckErrors(specs, config.checks)
+  if (unknownChecks.length) throw new Error(`Invalid granny input:\n- ${unknownChecks.join('\n- ')}`)
+  const checksOf = (st: StageSpec): CheckConfig[] => (st.checks === undefined ? config.checks : config.checks.filter(c => st.checks!.includes(c.name)))
+  const finalChecksOf = (repo: string): CheckConfig[] => {
+    const theirs = specs.filter(st => repoOf(st) === repo).map(checksOf)
+    return config.checks.filter(c => theirs.some(list => list.includes(c)))
+  }
 
   const call = async (role: Role, kind: ResultKind, label: string, phase: string, prompt: string, access: AgentRequest['access'], rc: RoleConfig, cwd: string) =>
     host.agent({
@@ -182,12 +209,12 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
       cwd,
     })
 
-  const shell = async (label: string, phase: string, script: string, cwd: string): Promise<{ ran: boolean; code: number | string; output: string }> => {
+  const shell = async (label: string, phase: string, script: string, cwd: string, ask = gitCommandPrompt): Promise<{ ran: boolean; code: number | string; output: string }> => {
     if (host.run) {
       const r = await host.run(script, cwd)
       return { ran: r.code === 0, code: r.code, output: r.output }
     }
-    const prompt = gitCommandPrompt(cwd, label, `cd ${shellQuote(cwd)} && ${script}`)
+    const prompt = ask(cwd, label, `cd ${shellQuote(cwd)} && ${script}`)
     const r = await call('granny', 'command', label, phase, prompt, 'write', config.roles.granny, cwd)
     const ran = Boolean(r?.ran)
     return { ran, code: r?.exitCode ?? (ran ? 0 : '?'), output: r ? `${String(r.output ?? '')}${r.note ? `\n${r.note}` : ''}` : `the ${label} runner returned nothing` }
@@ -267,6 +294,65 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
     if (!r) throw new Error(`${label}: implementer returned nothing`)
     host.log(`${label}: ${r.startSha.slice(0, 8)}..${r.headSha.slice(0, 8)}, gates ${r.gatesGreen ? 'green' : 'RED'} - ${r.gates}`)
     return r
+  }
+
+  const runCheck = async (lane: Lane, name: string, check: CheckConfig): Promise<CheckResult & { output: string; broken?: true }> => {
+    const script = check.timeout ? `timeout ${check.timeout} bash -c ${shellQuote(check.run)}` : check.run
+    const ask = (repo: string, label: string, run: string) => checkCommandPrompt(repo, label, run, check.metric?.pattern)
+    const once = () => shell(`check ${name} ${check.name}`, CHECKS_PHASE, script, lane.cwd, ask)
+    let r = await once()
+    if (typeof r.code !== 'number') {
+      host.log(`${name}: the check ${check.name} runner failed (exit ${r.code}) - running it once more`)
+      r = await once()
+    }
+    const base = { name: check.name, code: r.code, output: r.output }
+    if (typeof r.code !== 'number') return { ...base, passed: false, note: 'check runner failed', broken: true }
+    if (!r.ran || r.code !== 0) {
+      const timedOut = check.timeout && r.code === 124 ? { note: `timed out after ${check.timeout}s` } : {}
+      return { ...base, passed: false, ...timedOut }
+    }
+    if (!check.metric) return { ...base, passed: true }
+    const { pattern, min, max } = check.metric
+    const value = Number.parseFloat([...r.output.matchAll(new RegExp(pattern, 'gm'))].at(-1)?.[1] ?? '')
+    if (!Number.isFinite(value)) return { ...base, passed: false, note: 'metric not found in output' }
+    const metric = { metric: value }
+    if (min !== undefined && value < min) return { ...base, ...metric, passed: false, note: `metric ${value} is below min ${min}` }
+    if (max !== undefined && value > max) return { ...base, ...metric, passed: false, note: `metric ${value} is above max ${max}` }
+    return { ...base, ...metric, passed: true }
+  }
+
+  const detail = (r: CheckResult) => r.note ?? `exit ${r.code}`
+
+  const checkGate = async (lane: Lane, name: string, at: string, checks: CheckConfig[], runs: CheckRun[], stage?: StageTask): Promise<{ passed: boolean; note?: string }> => {
+    host.phase(CHECKS_PHASE)
+    const budget = (c: CheckConfig) => c.maxRepairs ?? config.maxRepairs
+    let deviations: string | undefined
+    for (let repairs = 0; ; repairs++) {
+      const results: Array<CheckResult & { output: string; broken?: true }> = []
+      for (const check of checks) results.push(await runCheck(lane, name, check))
+      runs.push({ at, attempt: repairs + 1, results: results.map(({ output, broken, ...r }) => r) })
+      const failed = results.filter(r => !r.passed)
+      if (!failed.length) {
+        host.log(`${name}: checks green${repairs ? ` after ${repairs} repair${repairs > 1 ? 's' : ''}` : ''} (${at}: ${checks.map(c => c.name).join(', ')})`)
+        return { passed: true }
+      }
+      const broken = failed.filter(r => r.broken)
+      if (broken.length) {
+        const note = `checks failed at ${at}: check runner failed: ${broken.map(r => `${r.name} (${r.output.slice(-300)})`).join(', ')} - the command's own result is unknown, so no repair was spent on it`
+        host.log(`${name}: checks-failed - ${note}`)
+        return { passed: false, note }
+      }
+      const configOf = (r: CheckResult) => checks.find(c => c.name === r.name)!
+      const spent = failed.filter(r => repairs >= budget(configOf(r)))
+      if (spent.length) {
+        const note = `checks failed at ${at} after ${repairs} repair(s): ${failed.map(r => `${r.name} (${detail(r)})`).join(', ')}; out of repairs: ${spent.map(r => `${r.name} (${budget(configOf(r))})`).join(', ')}${deviations ? `\nthe last repair's deviations: ${deviations}` : ''}`
+        host.log(`${name}: checks-failed - ${note}`)
+        return { passed: false, note }
+      }
+      for (const r of failed) host.log(`${name}: check ${r.name} failed (${detail(r)}) - repair ${repairs + 1}/${budget(configOf(r))}`)
+      const sent: FailedCheck[] = failed.map(r => ({ ...r, run: configOf(r).run }))
+      deviations = saidSomething((await implement(lane, `repair ${name} ${at} #${repairs + 1}`, repairPrompt(lane.p, name, at, repairs + 1, sent, stage))).deviations)
+    }
   }
 
   const attribute = (rv: ReviewerConfig, findings: Finding[]): Finding[] =>
@@ -367,7 +453,8 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
       }),
     )
 
-  const reviewLoop = async (lane: Lane, name: string, subject: Subject, reviewers = config.reviewers, gates?: Gates): Promise<PlanResult> => {
+  const reviewLoop = async (lane: Lane, name: string, subject: Subject, reviewers = config.reviewers, opts: { gates?: Gates; checks?: CheckConfig[]; runs?: CheckRun[] } = {}): Promise<PlanResult> => {
+    const { gates, checks = [], runs = [] } = opts
     const { p } = lane
     const phase = phaseOf(subject)
     const history: RoundRecord[] = []
@@ -459,9 +546,14 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
         if (!fix.gatesGreen) host.log(`${name} r${round}: WARNING fixer left gates red - ${fix.gates}`)
         deviations = fix.deviations
       }
-      const said = typeof deviations === 'string' && deviations.trim() && !/^\s*(none|n\/a|-|no deviations)?\.?\s*$/i.test(deviations) ? deviations : undefined
+      const said = saidSomething(deviations)
       if (said) history.at(-1)!.deviations = said
       earlier.push({ round, sent: accepted, ...(said ? { deviations: said } : {}) })
+      if (subject.kind === 'diff' && checks.length) {
+        const gate = await checkGate(lane, name, `fix r${round}`, checks, runs, subject.stage)
+        if (!gate.passed) return { outcome: 'checks-failed', rounds: round, residual, unresolved: [], history, note: gate.note }
+        host.phase(phase)
+      }
     }
     host.log(`${name}: hit the ${config.maxRounds}-round cap without a clean review`)
     return { outcome: 'round-cap', rounds: config.maxRounds, residual: [], unresolved: history.at(-1)?.findings ?? [], history }
@@ -507,15 +599,20 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
     else s.locked = false
   }
 
-  const runStage = async (lane: Lane, st: StageSpec, i: number, name: string): Promise<StageResult> => {
+  const runStage = async (lane: Lane, st: StageSpec, i: number, name: string, began?: (start?: string) => void): Promise<StageResult> => {
     let impl: Implementation | undefined
     let base = lane.base
     const lastLine = (output: string) => output.trim().split('\n').at(-1)?.trim() ?? ''
     const where = st.repo !== undefined && repoOf(st) !== primary ? { repo: repoOf(st) } : {}
+    const task: StageTask | undefined = st.task ? { number: i + 1, total: specs.length, name, task: st.task } : undefined
+    const checks = checksOf(st)
+    const runs: CheckRun[] = []
+    const ran = () => (runs.length ? { checks: runs } : {})
     if (st.implement !== false) {
       host.phase('Implement')
       const head = await shell(`head ${name}`, 'Implement', 'git rev-parse --verify HEAD', lane.cwd)
       const start = head.ran && /^[0-9A-Za-z]+$/.test(lastLine(head.output)) ? lastLine(head.output) : undefined
+      began?.(start)
       if (start) base = start
       else host.log(`${name}: could not read HEAD before the implementer ran - reviewing ${lane.base}...HEAD instead (exit ${head.code}): ${head.output.slice(-500)}`)
       impl = await implement(lane, `implement ${name}`, implementPrompt(lane.p, st, i, specs.length, name, buildsOnEarlier(i)))
@@ -529,27 +626,32 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
         host.log(`${name}: no-changes - ${note}`)
         return { stage: name, ...where, implementation: impl, outcome: 'no-changes', rounds: 0, residual: [], unresolved: [], history: [], note }
       }
+      if (checks.length) {
+        const gate = await checkGate(lane, name, 'implement', checks, runs, task)
+        if (!gate.passed) return { stage: name, ...where, implementation: impl, outcome: 'checks-failed', rounds: 0, residual: [], unresolved: [], history: [], note: gate.note, ...ran() }
+      }
     } else {
+      began?.()
       host.log(`${name}: review-only stage - reviewing ${lane.base}...HEAD`)
     }
 
     host.phase('Review')
-    const gates: Gates | undefined = impl ? { green: impl.gatesGreen, text: impl.gates, by: 'the implementer' } : undefined
+    const gates: Gates | undefined = impl && !runs.length ? { green: impl.gatesGreen, text: impl.gates, by: 'the implementer' } : undefined
     const loop: PlanResult = st.review === false
       ? { outcome: 'review-skipped' as const, rounds: 0, residual: [], unresolved: [], history: [] }
       : await reviewLoop(
           lane,
           name,
-          { kind: 'diff', base, ...(st.task ? { stage: { number: i + 1, total: specs.length, name, task: st.task } } : {}) },
+          { kind: 'diff', base, ...(task ? { stage: task } : {}) },
           undefined,
-          gates,
+          { gates, checks, runs },
         )
     if (gates && !gates.green && (loop.outcome === 'clean' || loop.outcome === 'residual-only')) {
       loop.outcome = 'gates-red'
       loop.note = `the review found nothing to fix, but ${gates.by} left the gates red: ${gates.text}`
       host.log(`${name}: gates-red - ${loop.note}`)
     }
-    return { stage: name, ...where, ...(impl ? { implementation: impl } : {}), ...loop }
+    return { stage: name, ...where, ...(impl ? { implementation: impl } : {}), ...loop, ...ran() }
   }
 
   const mergeLane = async (state: RepoState, lane: Lane, name: string): Promise<string | undefined> => {
@@ -577,21 +679,38 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
     const name = st.name || `stage ${i + 1}`
     const state = repoState.get(repoOf(st))!
     if (tryLock(state)) {
+      let began: (start?: string) => void = () => {}
+      state.started = new Promise(resolve => (began = resolve))
       try {
-        return await runStage(state.lane, st, i, name)
+        const result = await runStage(state.lane, st, i, name, began)
+        if (result.outcome === 'checks-failed') state.red ??= i
+        return result
       } finally {
+        began()
+        state.started = undefined
         unlock(state)
       }
     }
     const branch = `${input.branch}--s${i + 1}-${slug(name)}`
     host.log(`${name}: ${state.lane.branch} is busy in ${baseName(state.lane.repo)} - running in parallel on ${branch}`)
     const main = state.lane
-    const setup = state.setup.then(() => setUpWorktree(main.repo, branch, input.branch, `worktree ${name}`, main.repo !== primary))
+    const started = state.started
+    const from = async () => {
+      const start = await started
+      if (start) host.log(`${name}: branching ${branch} from ${start.slice(0, 8)}, where the stage still running on ${main.branch} started, not from its unfinished commits`)
+      return start ?? input.branch
+    }
+    const setup = state.setup.then(async () => setUpWorktree(main.repo, branch, await from(), `worktree ${name}`, main.repo !== primary))
     state.setup = setup.catch(() => {})
     const cwd = await setup
     const others = [main.cwd, ...used.filter(o => o !== main.repo).map(o => cwdOf.get(o)!)]
     const lane: Lane = { repo: main.repo, base: main.base, branch, cwd, p: promptFor(main.repo, cwd, branch, others, `${main.cwd}/${config.workDir}/PR-BODY-s${i + 1}-${slug(name)}.md`) }
     const result = await runStage(lane, st, i, name)
+    if (result.outcome === 'checks-failed') {
+      const note = `ran in parallel on ${branch}; its checks stayed red, so it was not merged - its worktree ${cwd} is left in place`
+      host.log(`${name}: ${note}`)
+      return { ...result, note: result.note ? `${result.note}\n${note}` : note }
+    }
     await lock(state)
     try {
       const note = await mergeLane(state, lane, name)
@@ -644,8 +763,15 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
       for (let i = 0; i < specs.length && running.size < limit; i++) {
         if (done.has(i) || running.has(i) || ![...deps[i]!].every(d => done.has(d))) continue
         const blocker = [...builds[i]!].find(d => undelivered.has(d))
-        if (blocker !== undefined) {
-          const note = `not started: it builds on ${nameOf(blocker)}, which ${results[blocker]!.outcome === 'no-changes' ? 'ended no-changes' : 'was not started'}`
+        const red = repoState.get(repoOf(specs[i]!))!.red
+        if (blocker !== undefined || red !== undefined) {
+          const ended = blocker !== undefined ? results[blocker]!.outcome : undefined
+          const note =
+            blocker !== undefined
+              ? `not started: it builds on ${nameOf(blocker)}, which ${ended === 'no-changes' || ended === 'checks-failed' ? `ended ${ended}` : 'was not started'}`
+              : results[red!]?.note?.includes('check runner failed')
+                ? `not started: ${nameOf(red!)} ended checks-failed because its check runner failed, so the state of ${input.branch} in this repo is unknown`
+                : `not started: ${nameOf(red!)} ended checks-failed and left its red commits on ${input.branch} in this repo`
           host.log(`${specs[i]!.name || `stage ${i + 1}`}: ${note}`)
           results[i] = { stage: specs[i]!.name || `stage ${i + 1}`, outcome: 'skipped', rounds: 0, residual: [], unresolved: [], history: [], note }
           done.add(i)
@@ -658,7 +784,7 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
           startStage(i).then(
             r => {
               results[i] = r
-              if (r.outcome === 'no-changes') undelivered.add(i)
+              if (r.outcome === 'no-changes' || r.outcome === 'checks-failed') undelivered.add(i)
               done.add(i)
               running.delete(i)
             },
@@ -683,20 +809,47 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
 
   const states = [...repoState.values()]
   const stageCount = (s: RepoState) => specs.filter(st => repoOf(st) === s.lane.repo).length
+  const finalRuns = new Map<RepoState, CheckRun[]>()
   const finalReview = async (s: RepoState): Promise<PlanResult | undefined> => {
     const stages = stageCount(s)
     if (!stages) return undefined
     const name = s.lane.repo === primary ? 'final review' : `final review ${baseName(s.lane.repo)}`
+    const runs: CheckRun[] = []
+    const checks = finalChecksOf(s.lane.repo)
+    const reviewed = config.finalReview && (stages > 1 || s.merges > 0)
+    const single = stages === 1 && !s.merges ? specs.findIndex(st => repoOf(st) === s.lane.repo) : -1
+    const last = single >= 0 ? results[single]?.checks?.at(-1) : undefined
+    const known = last && !last.results.some(r => r.note === 'check runner failed')
+    if (checks.length && last && known && last.results.map(r => r.name).join('\n') === checks.map(c => c.name).join('\n')) {
+      const failed = last.results.filter(r => !r.passed)
+      if (!failed.length) host.log(`${name}: final checks not rerun - ${nameOf(single)} ran them green last on this HEAD, and nothing changed since`)
+      else {
+        const note = `checks failed at final: ${nameOf(single)} ended with ${failed.map(r => r.name).join(', ')} red on this HEAD, and nothing changed since`
+        host.log(`${name} not run - ${note}; the branch is not PR-ready, the final check still runs`)
+        return { outcome: 'checks-failed', rounds: 0, residual: [], unresolved: [], history: [], note }
+      }
+    } else if (checks.length) {
+      finalRuns.set(s, runs)
+      const red = specs.findIndex((st, i) => repoOf(st) === s.lane.repo && results[i]?.outcome === 'checks-failed')
+      const noRepairs = !reviewed ? 'no final review follows to see one' : red >= 0 ? `${nameOf(red)} already ended checks-failed` : undefined
+      if (noRepairs) host.log(`${name}: the final checks get no repairs - ${noRepairs}`)
+      const gate = await checkGate(s.lane, name, 'final', noRepairs ? checks.map(c => ({ ...c, maxRepairs: 0 })) : checks, runs)
+      if (!gate.passed) {
+        host.log(`${name} not run - the final checks failed, so the branch is not PR-ready; the final check still runs`)
+        return { outcome: 'checks-failed', rounds: 0, residual: [], unresolved: [], history: [], note: gate.note }
+      }
+    }
     const skipped = (outcome: 'skipped' | 'review-skipped', log: string, note: string): PlanResult => {
       host.log(log)
       return { outcome, rounds: 0, residual: [], unresolved: [], history: [], note }
     }
     if (!config.finalReview) return skipped('review-skipped', `${name} off (finalReview: false)`, 'off (finalReview: false)')
     const why = 'one stage and no lane merge, so its stage review already covered the whole branch'
-    if (stages === 1 && !s.merges) return skipped('skipped', `${name} skipped - ${why}`, why)
+    if (!reviewed) return skipped('skipped', `${name} skipped - ${why}`, why)
     host.phase(FINAL_REVIEW_PHASE)
     host.log(`${name}: reviewing ${s.lane.base}...HEAD across ${stages} stage(s)${s.merges ? ` and ${s.merges} lane merge(s)` : ''}`)
-    const r = await reviewLoop(s.lane, name, { kind: 'diff', base: s.lane.base, note: WHOLE_BRANCH_NOTE })
+    const r = await reviewLoop(s.lane, name, { kind: 'diff', base: s.lane.base, note: WHOLE_BRANCH_NOTE }, undefined, { checks, runs })
+    if (r.outcome === 'checks-failed') host.log(`${name} ended checks-failed - the final check still runs, but the branch is not PR-ready`)
     if (r.outcome === 'round-cap' || r.outcome === 'review-failed') {
       host.log(`${name} ended ${r.outcome} - the final check still runs, but the branch has ${r.unresolved.length} unresolved finding(s)`)
     }
@@ -712,7 +865,8 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
     const final = (await call('granny', 'final', label, 'PR ready', finalPrompt(s.lane.p), 'write', config.roles.granny, s.lane.cwd)) as FinalReport | null
     if (!final) host.log(s.lane.repo === primary ? 'final check returned nothing' : `${label} returned nothing`)
     const review = reviews.get(s)
-    return { repo: s.lane.repo, base: s.lane.base, worktree: s.lane.cwd, ...(review ? { finalReview: review } : {}), final }
+    const runs = finalRuns.get(s)
+    return { repo: s.lane.repo, base: s.lane.base, worktree: s.lane.cwd, ...(review ? { finalReview: review } : {}), ...(runs ? { checks: runs } : {}), final }
   }
   const finals: RepoResult[] = []
   if (config.parallel) finals.push(...(await Promise.all(states.map(check))))
@@ -720,6 +874,7 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
 
   const final = finals[0]!.final
   const primaryReview = finals[0]!.finalReview
+  const primaryChecks = finals[0]!.checks
   return {
     repo: input.repo,
     branch: input.branch,
@@ -728,6 +883,7 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
     ...(planResult ? { plan: planResult } : {}),
     stages: results,
     ...(primaryReview ? { finalReview: primaryReview } : {}),
+    ...(primaryChecks ? { checks: primaryChecks } : {}),
     final,
     ...(finals.length > 1 ? { repos: finals } : {}),
   }

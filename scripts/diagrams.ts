@@ -98,7 +98,7 @@ function canvas(theme: Theme, width: number, height: number, title: string) {
 }
 
 function loop(theme: Theme): string {
-  const c = canvas(theme, 1000, 790, 'granny-workflow: an optional plan review, then implement, review, judge and fix for every stage, then a whole-branch review')
+  const c = canvas(theme, 1000, 790, 'granny-workflow: an optional plan review, then implement, checks, review, judge and fix for every stage, then whole-branch checks and review')
 
   c.text(24, 34, 'OPTIONAL · "planReview": true · BEFORE STAGE 1', { size: 11.5, weight: 700, fill: c.p.muted, spacing: 1.2 })
   c.box(24, 52, 150, 70, 'neutral', 'Plan files', ['your plan'])
@@ -120,6 +120,9 @@ function loop(theme: Theme): string {
 
   c.box(40, 228, 190, 82, 'blue', 'Implementer', ['builds the stage', 'and commits'])
   c.path('M230,269 L278,269', 'blue')
+  c.path('M135,310 L135,344', 'amber')
+  c.box(40, 346, 190, 104, 'amber', 'Checks', ['optional · "checks"', 'granny runs them itself', 'red → repair · maxRepairs', 'still red → checks-failed'], { dashed: true })
+  c.path('M230,398 L278,398', 'amber')
 
   c.box(280, 222, 230, 238, 'purple', '', [])
   c.text(395, 248, 'Reviewers', { size: 15, weight: 600, anchor: 'middle' })
@@ -144,15 +147,15 @@ function loop(theme: Theme): string {
   c.label(827, 322, '≤ 70', 'muted')
   c.box(854, 304, 122, 52, 'muted', 'Residual', ['reported to you'])
 
-  c.path('M510,412 L560,412 L560,530 L135,530 L135,312', 'red')
+  c.path('M510,412 L560,412 L560,530 L26,530 L26,290 L38,290', 'red')
   c.label(566, 430, 'P0 / P1: skip the judge', 'red', 'start')
   c.path('M722,380 L722,530 L560,530', 'amber', { head: false })
   c.label(730, 410, '> 70', 'amber', 'start')
-  c.text(340, 555, 'implementer fixes them → every reviewer reviews again · cap: maxRounds', { size: 12.5, fill: c.p.muted, anchor: 'middle' })
+  c.text(300, 555, 'implementer fixes them → checks again → every reviewer reviews again · cap: maxRounds', { size: 12.5, fill: c.p.muted, anchor: 'middle' })
 
   c.path('M185,590 L185,632', 'neutral')
   c.label(195, 616, 'after the last stage', 'neutral', 'start')
-  c.box(40, 634, 290, 80, 'purple', 'Final review', ['the whole branch and its merges', 'same loop · "finalReview": true'])
+  c.box(40, 634, 290, 80, 'purple', 'Final review', ['checks on the whole branch, then', 'the same loop on it and its merges'])
   c.path('M330,674 L358,674', 'neutral')
   c.box(360, 634, 290, 80, 'neutral', 'Final check', ['gates · clean tree', 'no AI trailers · PR body'])
   c.path('M650,674 L678,674', 'green')

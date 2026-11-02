@@ -7,6 +7,7 @@ export const meta = {
     { title: 'Plan' },
     { title: 'Plan review' },
     { title: 'Implement' },
+    { title: 'Checks' },
     { title: 'Review' },
     { title: 'PR ready' },
   ],

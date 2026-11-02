@@ -19,6 +19,20 @@ export interface ReviewerConfig extends RoleConfig {
   command?: string
 }
 
+export interface CheckMetric {
+  pattern: string
+  min?: number
+  max?: number
+}
+
+export interface CheckConfig {
+  name: string
+  run: string
+  maxRepairs?: number
+  timeout?: number
+  metric?: CheckMetric
+}
+
 export interface GrannyConfig {
   roles: Record<ConfigRole, RoleConfig>
   reviewers: ReviewerConfig[]
@@ -36,6 +50,8 @@ export interface GrannyConfig {
   language: string
   aiAttribution: boolean
   rules: string[]
+  checks: CheckConfig[]
+  maxRepairs: number
 }
 
 export const DEFAULT_CONFIG: GrannyConfig = {
@@ -62,12 +78,16 @@ export const DEFAULT_CONFIG: GrannyConfig = {
     'Every behaviour change gets a test that fails without the change - write the red half first.',
     'Code comments: default none; add one only when the reason cannot be recovered from the code.',
   ],
+  checks: [],
+  maxRepairs: 2,
 }
 
 const ROLES: ConfigRole[] = ['granny', 'planner', 'implementer', 'judge']
 const TOP_KEYS = new Set(['$schema', 'roles', 'worktreeDir', ...Object.keys(DEFAULT_CONFIG).filter(k => k !== 'roles')])
 const ROLE_KEYS = new Set(['model', 'effort'])
 const REVIEWER_KEYS = new Set(['name', 'engine', 'model', 'effort', 'mode', 'focus', 'command'])
+const CHECK_KEYS = new Set(['name', 'run', 'maxRepairs', 'timeout', 'metric'])
+const METRIC_KEYS = new Set(['pattern', 'min', 'max'])
 const EFFORTS = new Set(['low', 'medium', 'high', 'xhigh', 'max'])
 const ENGINES: ReviewerEngine[] = ['auto', 'codex', 'codex-plugin', 'agent', 'command']
 const PLUGIN_ENGINES: ReviewerEngine[] = ['auto', 'codex-plugin']
@@ -218,10 +238,55 @@ function validate(c: GrannyConfig): string[] {
   if (!Number.isInteger(c.maxParallel) || c.maxParallel < 1) errors.push('maxParallel must be an integer >= 1')
   if (typeof c.aiAttribution !== 'boolean') errors.push('aiAttribution must be a boolean')
   if (!Array.isArray(c.rules) || !c.rules.every(r => typeof r === 'string')) errors.push('rules must be an array of strings')
+  if (!isRepairs(c.maxRepairs)) errors.push('maxRepairs must be an integer >= 0')
+  errors.push(...checkErrors(c.checks))
 
   for (const role of ROLES) {
     errors.push(...modelErrors(`roles.${role}.model`, c.roles[role].model), ...effortErrors(`roles.${role}.effort`, c.roles[role].effort))
   }
+  return errors
+}
+
+const isRepairs = (v: unknown) => Number.isInteger(v) && (v as number) >= 0
+const isNumber = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v)
+
+function checkErrors(list: unknown): string[] {
+  if (!Array.isArray(list)) return ['checks must be an array of { name, run } objects']
+  const errors: string[] = []
+  const named = new Map<string, number>()
+  list.forEach((entry, i) => {
+    const at = `checks[${i}]`
+    if (!isObject(entry)) return errors.push(`${at} must be an object`)
+    for (const k of Object.keys(entry)) {
+      if (!CHECK_KEYS.has(k)) errors.push(`unknown key "${at}.${k}"`)
+    }
+    if (typeof entry.name !== 'string' || !entry.name.trim()) errors.push(`${at}.name must be a non-empty string`)
+    else if (named.has(entry.name)) errors.push(`${at}.name "${entry.name}" is already used by checks[${named.get(entry.name)}]`)
+    else named.set(entry.name, i)
+    if (typeof entry.run !== 'string' || !entry.run.trim()) errors.push(`${at}.run must be a non-empty command string`)
+    if (entry.maxRepairs !== undefined && !isRepairs(entry.maxRepairs)) errors.push(`${at}.maxRepairs must be an integer >= 0`)
+    if (entry.timeout !== undefined && !(isNumber(entry.timeout) && entry.timeout > 0)) errors.push(`${at}.timeout must be a number of seconds > 0`)
+    if (entry.metric !== undefined) errors.push(...metricErrors(`${at}.metric`, entry.metric))
+  })
+  return errors
+}
+
+function metricErrors(at: string, m: unknown): string[] {
+  if (!isObject(m)) return [`${at} must be an object { pattern, min?, max? }`]
+  const errors = Object.keys(m).filter(k => !METRIC_KEYS.has(k)).map(k => `unknown key "${at}.${k}"`)
+  if (typeof m.pattern !== 'string' || !m.pattern) errors.push(`${at}.pattern must be a non-empty regular expression`)
+  else {
+    try {
+      if (new RegExp(`${m.pattern}|`).exec('')!.length < 2) errors.push(`${at}.pattern needs a capture group around the number, e.g. "coverage: ([0-9.]+)%"`)
+    } catch (e) {
+      errors.push(`${at}.pattern is not a valid regular expression: ${(e as Error).message}`)
+    }
+  }
+  for (const k of ['min', 'max'] as const) {
+    if (m[k] !== undefined && !isNumber(m[k])) errors.push(`${at}.${k} must be a number`)
+  }
+  if (m.min === undefined && m.max === undefined) errors.push(`${at} needs min, max or both`)
+  else if (isNumber(m.min) && isNumber(m.max) && m.min > m.max) errors.push(`${at}.min must not be above max`)
   return errors
 }
 

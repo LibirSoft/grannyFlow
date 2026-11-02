@@ -58,6 +58,7 @@ export interface StageSpec {
   review?: boolean
   repo?: string
   after?: number[]
+  checks?: string[]
 }
 
 export interface Implementation {
@@ -77,7 +78,21 @@ export interface RoundRecord {
   deviations?: string
 }
 
-export type StageOutcome = 'clean' | 'residual-only' | 'round-cap' | 'review-failed' | 'review-skipped' | 'gates-red' | 'no-changes' | 'skipped'
+export type StageOutcome = 'clean' | 'residual-only' | 'round-cap' | 'review-failed' | 'review-skipped' | 'gates-red' | 'no-changes' | 'checks-failed' | 'skipped'
+
+export interface CheckResult {
+  name: string
+  passed: boolean
+  code: number | string
+  metric?: number
+  note?: string
+}
+
+export interface CheckRun {
+  at: string
+  attempt: number
+  results: CheckResult[]
+}
 
 export interface StageResult {
   stage: string
@@ -89,6 +104,7 @@ export interface StageResult {
   unresolved: Finding[]
   history: RoundRecord[]
   note?: string
+  checks?: CheckRun[]
 }
 
 export interface PlanFix {
@@ -119,6 +135,7 @@ export interface RepoResult {
   base: string
   worktree: string
   finalReview?: PlanResult
+  checks?: CheckRun[]
   final: FinalReport | null
 }
 
@@ -131,6 +148,7 @@ export interface RunResult {
   plan?: PlanResult
   stages: StageResult[]
   finalReview?: PlanResult
+  checks?: CheckRun[]
   final: FinalReport | null
   repos?: RepoResult[]
 }
