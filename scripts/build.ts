@@ -4,6 +4,7 @@ import { resolveConfig } from '../src/core/config'
 import {
   agentPlanReviewPrompt,
   agentReviewPrompt,
+  checkCommandPrompt,
   commandReviewPrompt,
   draftPrompt,
   extractPrompt,
@@ -15,6 +16,7 @@ import {
   planFixPrompt,
   planJudgePrompt,
   planReviewPrompt,
+  repairPrompt,
   worktreeCommandPrompt,
   type EarlierRound,
   WHOLE_BRANCH_NOTE,
@@ -84,6 +86,11 @@ export function renderPrompts(): string {
     [
       'Implementer - fix, from round 2 on when the judge overruled the fixer (the plan fix gets the same OVERRULED block)',
       fixPrompt(p, '<stage name>', 2, [], overruled, earlier).replace(/\[\]$/, '<accepted findings as JSON>'),
+    ],
+    ['Granny - a check command, the helper agent on Claude Code (on opencode granny runs it itself; a check with timeout runs as `timeout <s> sh -c \'<run>\'`)', checkCommandPrompt('<repo>', 'check <stage name> <check name>', "cd '<repo>' && <check run>")],
+    [
+      'Implementer - repair (checks failed at `implement`, `fix r<n>` or `final`; one block per failed check)',
+      repairPrompt(p, '<stage name>', 'implement', 1, [{ name: '<check name>', run: '<check run>', code: '<exit code>', note: '<metric note>', output: '<last 3000 characters of the output>' }], stage),
     ],
     ['Implementer - merge (a stage that ran in its own worktree; its merge stopped on conflicts)', mergePrompt(p, '<stage name>', '<lane branch>', '<git merge output>')],
     ['Reviewer - agent engine', agentReviewPrompt(p, '<stage name>', '<stage start sha>', stage)],

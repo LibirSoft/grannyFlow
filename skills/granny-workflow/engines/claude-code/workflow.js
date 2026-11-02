@@ -7,6 +7,7 @@ export const meta = {
     { title: 'Plan' },
     { title: 'Plan review' },
     { title: 'Implement' },
+    { title: 'Checks' },
     { title: 'Review' },
     { title: 'PR ready' },
   ],
@@ -35,12 +36,16 @@ var DEFAULT_CONFIG = {
   rules: [
     "Every behaviour change gets a test that fails without the change - write the red half first.",
     "Code comments: default none; add one only when the reason cannot be recovered from the code."
-  ]
+  ],
+  checks: [],
+  maxRepairs: 2
 };
 var ROLES = ["granny", "planner", "implementer", "judge"];
 var TOP_KEYS = new Set(["$schema", "roles", "worktreeDir", ...Object.keys(DEFAULT_CONFIG).filter((k) => k !== "roles")]);
 var ROLE_KEYS = new Set(["model", "effort"]);
 var REVIEWER_KEYS = new Set(["name", "engine", "model", "effort", "mode", "focus", "command"]);
+var CHECK_KEYS = new Set(["name", "run", "maxRepairs", "timeout", "metric"]);
+var METRIC_KEYS = new Set(["pattern", "min", "max"]);
 var EFFORTS = new Set(["low", "medium", "high", "xhigh", "max"]);
 var ENGINES = ["auto", "codex", "codex-plugin", "agent", "command"];
 var PLUGIN_ENGINES = ["auto", "codex-plugin"];
@@ -214,9 +219,68 @@ function validate(c) {
     errors.push("aiAttribution must be a boolean");
   if (!Array.isArray(c.rules) || !c.rules.every((r) => typeof r === "string"))
     errors.push("rules must be an array of strings");
+  if (!isRepairs(c.maxRepairs))
+    errors.push("maxRepairs must be an integer >= 0");
+  errors.push(...checkErrors(c.checks));
   for (const role of ROLES) {
     errors.push(...modelErrors(`roles.${role}.model`, c.roles[role].model), ...effortErrors(`roles.${role}.effort`, c.roles[role].effort));
   }
+  return errors;
+}
+var isRepairs = (v) => Number.isInteger(v) && v >= 0;
+var isNumber = (v) => typeof v === "number" && Number.isFinite(v);
+function checkErrors(list) {
+  if (!Array.isArray(list))
+    return ["checks must be an array of { name, run } objects"];
+  const errors = [];
+  const named = new Map;
+  list.forEach((entry, i) => {
+    const at = `checks[${i}]`;
+    if (!isObject(entry))
+      return errors.push(`${at} must be an object`);
+    for (const k of Object.keys(entry)) {
+      if (!CHECK_KEYS.has(k))
+        errors.push(`unknown key "${at}.${k}"`);
+    }
+    if (typeof entry.name !== "string" || !entry.name.trim())
+      errors.push(`${at}.name must be a non-empty string`);
+    else if (named.has(entry.name))
+      errors.push(`${at}.name "${entry.name}" is already used by checks[${named.get(entry.name)}]`);
+    else
+      named.set(entry.name, i);
+    if (typeof entry.run !== "string" || !entry.run.trim())
+      errors.push(`${at}.run must be a non-empty command string`);
+    if (entry.maxRepairs !== undefined && !isRepairs(entry.maxRepairs))
+      errors.push(`${at}.maxRepairs must be an integer >= 0`);
+    if (entry.timeout !== undefined && !(isNumber(entry.timeout) && entry.timeout > 0))
+      errors.push(`${at}.timeout must be a number of seconds > 0`);
+    if (entry.metric !== undefined)
+      errors.push(...metricErrors(`${at}.metric`, entry.metric));
+  });
+  return errors;
+}
+function metricErrors(at, m) {
+  if (!isObject(m))
+    return [`${at} must be an object { pattern, min?, max? }`];
+  const errors = Object.keys(m).filter((k) => !METRIC_KEYS.has(k)).map((k) => `unknown key "${at}.${k}"`);
+  if (typeof m.pattern !== "string" || !m.pattern)
+    errors.push(`${at}.pattern must be a non-empty regular expression`);
+  else {
+    try {
+      if (new RegExp(`${m.pattern}|`).exec("").length < 2)
+        errors.push(`${at}.pattern needs a capture group around the number, e.g. "coverage: ([0-9.]+)%"`);
+    } catch (e) {
+      errors.push(`${at}.pattern is not a valid regular expression: ${e.message}`);
+    }
+  }
+  for (const k of ["min", "max"]) {
+    if (m[k] !== undefined && !isNumber(m[k]))
+      errors.push(`${at}.${k} must be a number`);
+  }
+  if (m.min === undefined && m.max === undefined)
+    errors.push(`${at} needs min, max or both`);
+  else if (isNumber(m.min) && isNumber(m.max) && m.min > m.max)
+    errors.push(`${at}.min must not be above max`);
   return errors;
 }
 function resolveModel(spec, host) {
@@ -470,6 +534,37 @@ Run exactly this:
 ${script}
 
 Set ran=true only if it exited 0, exitCode to its exit code, and output to everything it printed, verbatim and complete. If it failed, set ran=false and explain in note. Never invent output.`;
+}
+function checkCommandPrompt(repo, check, script) {
+  return `You run one check command for the "${check}" step of a granny run, and return its output and exit code. Run nothing else, do not fix anything, and do not edit, stage or commit anything yourself.
+Repo ${repo}.
+
+Run exactly this (it can take a while - wait for it to finish; never cut it short):
+${script}
+
+Set exitCode to its exit code, ran=true only if it exited 0, and output to everything it printed, verbatim and complete (when it is very long, the last 3000 characters are enough). Never invent output or an exit code.`;
+}
+function repairPrompt(p, name, at, attempt, failed, stage) {
+  const list = failed.map((f) => [
+    `### ${f.name}`,
+    `Command: \`${f.run}\``,
+    `Exit code: ${f.code}${f.note ? ` - ${f.note}` : ""}`,
+    "Output (tail):",
+    "```",
+    f.output.slice(-3000),
+    "```"
+  ].join(`
+`));
+  return `${common(p)}
+
+You are the IMPLEMENTER, repairing failed checks of stage "${name}" (${at}, repair ${attempt}). Granny ran the configured checks itself on the current branch state and they failed; review does not start until they pass.
+${taskSection(stage)}Read \`git log --oneline ${shellQuote(p.base)}..HEAD\` and the code, find why each check below fails, and make it pass by fixing the code. Rerun the checks yourself, commit (\`fix(...)\`), and note what you changed in the "Review fixes" section of ${prBodyOf(p)}.
+NEVER delete, skip, disable or weaken a test, a check, a threshold, the granny config or a check script to get green - granny reruns the same commands and the reviewers see the diff. If a check cannot pass without that, leave it failing and explain why in deviations.
+
+FAILED CHECKS:
+${list.join(`
+
+`)}`;
 }
 var WHOLE_BRANCH_NOTE = "This is the whole-branch review: every stage was already reviewed on its own, so look across them - duplicated code or helpers that several stages added, inconsistencies between stages (naming, contracts, config, docs, tests) - and check the merge commits and their conflict resolutions especially (`git log --merges` and `git show <merge>`): both sides' intent must survive.";
 var taskSection = (stage) => stage ? `Stage ${stage.number}/${stage.total} "${stage.name}" was asked to do this - its TASK:
@@ -801,6 +896,7 @@ function reportedWorktree(output) {
 var PLAN_PHASE = "Plan review";
 var DRAFT_PHASE = "Plan";
 var FINAL_REVIEW_PHASE = "Final review";
+var CHECKS_PHASE = "Checks";
 var slug = (s) => s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "stage";
 var trimPath = (s) => s.replace(/\/+$/, "") || "/";
 var repoPathOf = (r) => typeof r === "string" ? r : r && typeof r === "object" ? r.repo : undefined;
@@ -868,6 +964,9 @@ function stageErrors(stages, known) {
     if (s.after !== undefined && !(Array.isArray(s.after) && s.after.every((n) => Number.isInteger(n) && n >= 1 && n <= i))) {
       errors.push(`stages[${i}].after must list 1-based numbers of earlier stages (1..${i})`);
     }
+    if (s.checks !== undefined && !(Array.isArray(s.checks) && s.checks.every((c) => typeof c === "string" && c.trim()))) {
+      errors.push(`stages[${i}].checks must be an array of check names`);
+    }
   });
   return errors;
 }
@@ -887,6 +986,13 @@ async function runGranny(host, input) {
   const baseOf = (repo) => repo === primary ? base : extra.find((r) => r.repo === repo).base;
   const specs = input.stages ?? [];
   const repoOf = (st) => st.repo === undefined ? primary : trimPath(st.repo);
+  const checkNames = new Set(config.checks.map((c) => c.name));
+  const unknownChecks = specs.flatMap((st, i) => (st.checks ?? []).filter((n) => !checkNames.has(n)).map((n) => `stages[${i}].checks names "${n}", which is not in config checks (${[...checkNames].join(", ") || "none configured"})`));
+  if (unknownChecks.length)
+    throw new Error(`Invalid granny input:
+- ${unknownChecks.join(`
+- `)}`);
+  const checksOf = (st) => st.checks === undefined ? config.checks : config.checks.filter((c) => st.checks.includes(c.name));
   const call = async (role, kind, label, phase, prompt, access, rc, cwd) => host.agent({
     role,
     kind,
@@ -899,12 +1005,12 @@ async function runGranny(host, input) {
     access,
     cwd
   });
-  const shell = async (label, phase, script, cwd) => {
+  const shell = async (label, phase, script, cwd, ask = gitCommandPrompt) => {
     if (host.run) {
       const r = await host.run(script, cwd);
       return { ran: r.code === 0, code: r.code, output: r.output };
     }
-    const prompt = gitCommandPrompt(cwd, label, `cd ${shellQuote(cwd)} && ${script}`);
+    const prompt = ask(cwd, label, `cd ${shellQuote(cwd)} && ${script}`);
     const r = await call("granny", "command", label, phase, prompt, "write", config.roles.granny, cwd);
     const ran = Boolean(r?.ran);
     return { ran, code: r?.exitCode ?? (ran ? 0 : "?"), output: r ? `${String(r.output ?? "")}${r.note ? `
@@ -993,6 +1099,54 @@ ${a.note}` : ""}` : "the worktree runner returned nothing" };
       throw new Error(`${label}: implementer returned nothing`);
     host.log(`${label}: ${r.startSha.slice(0, 8)}..${r.headSha.slice(0, 8)}, gates ${r.gatesGreen ? "green" : "RED"} - ${r.gates}`);
     return r;
+  };
+  const runCheck = async (lane, name, check) => {
+    const script = check.timeout ? `timeout ${check.timeout} sh -c ${shellQuote(check.run)}` : check.run;
+    const r = await shell(`check ${name} ${check.name}`, CHECKS_PHASE, script, lane.cwd, checkCommandPrompt);
+    const base = { name: check.name, code: r.code, output: r.output };
+    if (!r.ran || r.code !== 0) {
+      const timedOut = check.timeout && r.code === 124 ? { note: `timed out after ${check.timeout}s` } : {};
+      return { ...base, passed: false, ...timedOut };
+    }
+    if (!check.metric)
+      return { ...base, passed: true };
+    const { pattern, min, max } = check.metric;
+    const value = Number.parseFloat([...r.output.matchAll(new RegExp(pattern, "gm"))].at(-1)?.[1] ?? "");
+    if (!Number.isFinite(value))
+      return { ...base, passed: false, note: "metric not found in output" };
+    const metric = { metric: value };
+    if (min !== undefined && value < min)
+      return { ...base, ...metric, passed: false, note: `metric ${value} is below min ${min}` };
+    if (max !== undefined && value > max)
+      return { ...base, ...metric, passed: false, note: `metric ${value} is above max ${max}` };
+    return { ...base, ...metric, passed: true };
+  };
+  const detail = (r) => r.note ?? `exit ${r.code}`;
+  const checkGate = async (lane, name, at, checks, runs, stage) => {
+    host.phase(CHECKS_PHASE);
+    const budget = (c) => c.maxRepairs ?? config.maxRepairs;
+    for (let repairs = 0;; repairs++) {
+      const results = [];
+      for (const check of checks)
+        results.push(await runCheck(lane, name, check));
+      runs.push({ at, attempt: repairs + 1, results: results.map(({ output, ...r }) => r) });
+      const failed = results.filter((r) => !r.passed);
+      if (!failed.length) {
+        host.log(`${name}: checks green${repairs ? ` after ${repairs} repair${repairs > 1 ? "s" : ""}` : ""} (${at}: ${checks.map((c) => c.name).join(", ")})`);
+        return { passed: true };
+      }
+      const configOf = (r) => checks.find((c) => c.name === r.name);
+      const spent = failed.filter((r) => repairs >= budget(configOf(r)));
+      if (spent.length) {
+        const note = `checks failed at ${at} after ${repairs} repair(s): ${failed.map((r) => `${r.name} (${detail(r)})`).join(", ")}; out of repairs: ${spent.map((r) => `${r.name} (${budget(configOf(r))})`).join(", ")}`;
+        host.log(`${name}: checks-failed - ${note}`);
+        return { passed: false, note };
+      }
+      for (const r of failed)
+        host.log(`${name}: check ${r.name} failed (${detail(r)}) - repair ${repairs + 1}/${budget(configOf(r))}`);
+      const sent = failed.map((r) => ({ ...r, run: configOf(r).run }));
+      await implement(lane, `repair ${name} ${at} #${repairs + 1}`, repairPrompt(lane.p, name, at, repairs + 1, sent, stage));
+    }
   };
   const attribute = (rv, findings) => findings.map((f, i) => ({ ...f, id: `${rv.name}-F${i + 1}`, reviewer: rv.name }));
   const fixPlan = async (label, prompt) => {
@@ -1086,7 +1240,8 @@ ${a.note}` : ""}` : "the worktree runner returned nothing" };
     }
     return { reviewer, ...r, findings: attribute(reviewer, r.findings) };
   }));
-  const reviewLoop = async (lane, name, subject, reviewers = config.reviewers, gates) => {
+  const reviewLoop = async (lane, name, subject, reviewers = config.reviewers, opts = {}) => {
+    const { gates, checks = [], runs = [] } = opts;
     const { p } = lane;
     const phase = phaseOf(subject);
     const history = [];
@@ -1177,6 +1332,12 @@ ${a.note}` : ""}` : "the worktree runner returned nothing" };
       if (said)
         history.at(-1).deviations = said;
       earlier.push({ round, sent: accepted, ...said ? { deviations: said } : {} });
+      if (subject.kind === "diff" && checks.length) {
+        const gate = await checkGate(lane, name, `fix r${round}`, checks, runs, subject.stage);
+        if (!gate.passed)
+          return { outcome: "checks-failed", rounds: round, residual, unresolved: [], history, note: gate.note };
+        host.phase(phase);
+      }
     }
     host.log(`${name}: hit the ${config.maxRounds}-round cap without a clean review`);
     return { outcome: "round-cap", rounds: config.maxRounds, residual: [], unresolved: history.at(-1)?.findings ?? [], history };
@@ -1229,6 +1390,10 @@ ${a.note}` : ""}` : "the worktree runner returned nothing" };
     const lastLine = (output) => output.trim().split(`
 `).at(-1)?.trim() ?? "";
     const where = st.repo !== undefined && repoOf(st) !== primary ? { repo: repoOf(st) } : {};
+    const task = st.task ? { number: i + 1, total: specs.length, name, task: st.task } : undefined;
+    const checks = checksOf(st);
+    const runs = [];
+    const ran = () => runs.length ? { checks: runs } : {};
     if (st.implement !== false) {
       host.phase("Implement");
       const head = await shell(`head ${name}`, "Implement", "git rev-parse --verify HEAD", lane.cwd);
@@ -1250,18 +1415,23 @@ ${a.note}` : ""}` : "the worktree runner returned nothing" };
         host.log(`${name}: no-changes - ${note}`);
         return { stage: name, ...where, implementation: impl, outcome: "no-changes", rounds: 0, residual: [], unresolved: [], history: [], note };
       }
+      if (checks.length) {
+        const gate = await checkGate(lane, name, "implement", checks, runs, task);
+        if (!gate.passed)
+          return { stage: name, ...where, implementation: impl, outcome: "checks-failed", rounds: 0, residual: [], unresolved: [], history: [], note: gate.note, ...ran() };
+      }
     } else {
       host.log(`${name}: review-only stage - reviewing ${lane.base}...HEAD`);
     }
     host.phase("Review");
-    const gates = impl ? { green: impl.gatesGreen, text: impl.gates, by: "the implementer" } : undefined;
-    const loop = st.review === false ? { outcome: "review-skipped", rounds: 0, residual: [], unresolved: [], history: [] } : await reviewLoop(lane, name, { kind: "diff", base, ...st.task ? { stage: { number: i + 1, total: specs.length, name, task: st.task } } : {} }, undefined, gates);
+    const gates = impl && !runs.length ? { green: impl.gatesGreen, text: impl.gates, by: "the implementer" } : undefined;
+    const loop = st.review === false ? { outcome: "review-skipped", rounds: 0, residual: [], unresolved: [], history: [] } : await reviewLoop(lane, name, { kind: "diff", base, ...task ? { stage: task } : {} }, undefined, { gates, checks, runs });
     if (gates && !gates.green && (loop.outcome === "clean" || loop.outcome === "residual-only")) {
       loop.outcome = "gates-red";
       loop.note = `the review found nothing to fix, but ${gates.by} left the gates red: ${gates.text}`;
       host.log(`${name}: gates-red - ${loop.note}`);
     }
-    return { stage: name, ...where, ...impl ? { implementation: impl } : {}, ...loop };
+    return { stage: name, ...where, ...impl ? { implementation: impl } : {}, ...loop, ...ran() };
   };
   const mergeLane = async (state, lane, name) => {
     const main = state.lane;
@@ -1363,7 +1533,8 @@ ${note}` : note } : result;
           continue;
         const blocker = [...builds[i]].find((d) => undelivered.has(d));
         if (blocker !== undefined) {
-          const note = `not started: it builds on ${nameOf(blocker)}, which ${results[blocker].outcome === "no-changes" ? "ended no-changes" : "was not started"}`;
+          const ended = results[blocker].outcome;
+          const note = `not started: it builds on ${nameOf(blocker)}, which ${ended === "no-changes" || ended === "checks-failed" ? `ended ${ended}` : "was not started"}`;
           host.log(`${specs[i].name || `stage ${i + 1}`}: ${note}`);
           results[i] = { stage: specs[i].name || `stage ${i + 1}`, outcome: "skipped", rounds: 0, residual: [], unresolved: [], history: [], note };
           done.add(i);
@@ -1374,7 +1545,7 @@ ${note}` : note } : result;
           host.log(`${specs[i].name || `stage ${i + 1}`}: starting in parallel with ${[...running.keys()].map((j) => specs[j].name || `stage ${j + 1}`).join(", ")}`);
         running.set(i, startStage(i).then((r) => {
           results[i] = r;
-          if (r.outcome === "no-changes")
+          if (r.outcome === "no-changes" || r.outcome === "checks-failed")
             undelivered.add(i);
           done.add(i);
           running.delete(i);
@@ -1398,11 +1569,21 @@ ${note}` : note } : result;
     throw new Error(`scheduler stopped with stages that never started: ${unfinished.map(nameOf).join(", ")}`);
   const states = [...repoState.values()];
   const stageCount = (s) => specs.filter((st) => repoOf(st) === s.lane.repo).length;
+  const finalRuns = new Map;
   const finalReview = async (s) => {
     const stages = stageCount(s);
     if (!stages)
       return;
     const name = s.lane.repo === primary ? "final review" : `final review ${baseName(s.lane.repo)}`;
+    const runs = [];
+    if (config.checks.length) {
+      finalRuns.set(s, runs);
+      const gate = await checkGate(s.lane, s.lane.repo === primary ? "branch" : `branch ${baseName(s.lane.repo)}`, "final", config.checks, runs);
+      if (!gate.passed) {
+        host.log(`${name} not run - the final checks failed, so the branch is not PR-ready; the final check still runs`);
+        return { outcome: "checks-failed", rounds: 0, residual: [], unresolved: [], history: [], note: gate.note };
+      }
+    }
     const skipped = (outcome, log, note) => {
       host.log(log);
       return { outcome, rounds: 0, residual: [], unresolved: [], history: [], note };
@@ -1414,7 +1595,9 @@ ${note}` : note } : result;
       return skipped("skipped", `${name} skipped - ${why}`, why);
     host.phase(FINAL_REVIEW_PHASE);
     host.log(`${name}: reviewing ${s.lane.base}...HEAD across ${stages} stage(s)${s.merges ? ` and ${s.merges} lane merge(s)` : ""}`);
-    const r = await reviewLoop(s.lane, name, { kind: "diff", base: s.lane.base, note: WHOLE_BRANCH_NOTE });
+    const r = await reviewLoop(s.lane, name, { kind: "diff", base: s.lane.base, note: WHOLE_BRANCH_NOTE }, undefined, { checks: config.checks, runs });
+    if (r.outcome === "checks-failed")
+      host.log(`${name} ended checks-failed - the final check still runs, but the branch is not PR-ready`);
     if (r.outcome === "round-cap" || r.outcome === "review-failed") {
       host.log(`${name} ended ${r.outcome} - the final check still runs, but the branch has ${r.unresolved.length} unresolved finding(s)`);
     }
@@ -1433,7 +1616,8 @@ ${note}` : note } : result;
     if (!final)
       host.log(s.lane.repo === primary ? "final check returned nothing" : `${label} returned nothing`);
     const review = reviews.get(s);
-    return { repo: s.lane.repo, base: s.lane.base, worktree: s.lane.cwd, ...review ? { finalReview: review } : {}, final };
+    const runs = finalRuns.get(s);
+    return { repo: s.lane.repo, base: s.lane.base, worktree: s.lane.cwd, ...review ? { finalReview: review } : {}, ...runs ? { checks: runs } : {}, final };
   };
   const finals = [];
   if (config.parallel)
@@ -1443,6 +1627,7 @@ ${note}` : note } : result;
       finals.push(await check(s));
   const final = finals[0].final;
   const primaryReview = finals[0].finalReview;
+  const primaryChecks = finals[0].checks;
   return {
     repo: input.repo,
     branch: input.branch,
@@ -1451,6 +1636,7 @@ ${note}` : note } : result;
     ...planResult ? { plan: planResult } : {},
     stages: results,
     ...primaryReview ? { finalReview: primaryReview } : {},
+    ...primaryChecks ? { checks: primaryChecks } : {},
     final,
     ...finals.length > 1 ? { repos: finals } : {}
   };

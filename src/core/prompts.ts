@@ -170,6 +170,46 @@ ${script}
 Set ran=true only if it exited 0, exitCode to its exit code, and output to everything it printed, verbatim and complete. If it failed, set ran=false and explain in note. Never invent output.`
 }
 
+export function checkCommandPrompt(repo: string, check: string, script: string): string {
+  return `You run one check command for the "${check}" step of a granny run, and return its output and exit code. Run nothing else, do not fix anything, and do not edit, stage or commit anything yourself.
+Repo ${repo}.
+
+Run exactly this (it can take a while - wait for it to finish; never cut it short):
+${script}
+
+Set exitCode to its exit code, ran=true only if it exited 0, and output to everything it printed, verbatim and complete (when it is very long, the last 3000 characters are enough). Never invent output or an exit code.`
+}
+
+export interface FailedCheck {
+  name: string
+  run: string
+  code: number | string
+  output: string
+  note?: string
+}
+
+export function repairPrompt(p: PromptContext, name: string, at: string, attempt: number, failed: FailedCheck[], stage?: StageTask): string {
+  const list = failed.map(f =>
+    [
+      `### ${f.name}`,
+      `Command: \`${f.run}\``,
+      `Exit code: ${f.code}${f.note ? ` - ${f.note}` : ''}`,
+      'Output (tail):',
+      '```',
+      f.output.slice(-3000),
+      '```',
+    ].join('\n'),
+  )
+  return `${common(p)}
+
+You are the IMPLEMENTER, repairing failed checks of stage "${name}" (${at}, repair ${attempt}). Granny ran the configured checks itself on the current branch state and they failed; review does not start until they pass.
+${taskSection(stage)}Read \`git log --oneline ${shellQuote(p.base)}..HEAD\` and the code, find why each check below fails, and make it pass by fixing the code. Rerun the checks yourself, commit (\`fix(...)\`), and note what you changed in the "Review fixes" section of ${prBodyOf(p)}.
+NEVER delete, skip, disable or weaken a test, a check, a threshold, the granny config or a check script to get green - granny reruns the same commands and the reviewers see the diff. If a check cannot pass without that, leave it failing and explain why in deviations.
+
+FAILED CHECKS:
+${list.join('\n\n')}`
+}
+
 export const WHOLE_BRANCH_NOTE =
   'This is the whole-branch review: every stage was already reviewed on its own, so look across them - duplicated code or helpers that several stages added, inconsistencies between stages (naming, contracts, config, docs, tests) - and check the merge commits and their conflict resolutions especially (`git log --merges` and `git show <merge>`): both sides\' intent must survive.'
 
