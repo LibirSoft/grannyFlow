@@ -564,7 +564,7 @@ ${list.join(`
 
 `)}`;
 }
-function commitPrompt(p, name, at, status, stage) {
+function commitPrompt(p, name, at, status, plans, stage) {
   return `${common(p)}
 
 You are the IMPLEMENTER, finishing stage "${name}" (${at}). The working tree has uncommitted changes. Granny runs the checks and the reviewers on what is committed, so it never checks or reviews uncommitted work.
@@ -572,7 +572,7 @@ ${taskSection(stage)}\`git status --porcelain\` printed:
 \`\`\`
 ${status.slice(-3000)}
 \`\`\`
-Read \`git diff\`, \`git log --oneline ${shellQuote(p.base)}..HEAD\` and the files above. Commit the work that belongs to the stage with explicit paths, gates green, and delete only stray files you created that do not belong in the repo (scratch files, build output). Do not hide changes to get a clean tree: never \`git stash\`, \`git reset\`, \`git checkout -- <path>\` or \`git clean\`. When you are done, \`git status --porcelain\` prints nothing (${p.config.workDir}/ is git-excluded and does not count); explain a change you cannot commit in deviations. Return startSha = HEAD before your first commit.`;
+Read \`git diff\`, \`git log --oneline ${shellQuote(p.base)}..HEAD\` and the files above. Commit the work that belongs to the stage with explicit paths, gates green, and delete only stray files you created that do not belong in the repo (scratch files, build output). Do not hide changes to get a clean tree: never \`git stash\`, \`git reset\`, \`git checkout -- <path>\` or \`git clean\`.${plans.length ? ` Leave the plan files ${plans.join(", ")} as they are: never stage or commit them - they stay uncommitted, and granny left them out of the status above.` : ""} When you are done, \`git status --porcelain\` prints nothing (${p.config.workDir}/ is git-excluded and does not count${plans.length ? ", nor do the plan files" : ""}); explain a change you cannot commit in deviations. Return startSha = HEAD before your first commit.`;
 }
 var WHOLE_BRANCH_NOTE = "This is the whole-branch review: every stage was already reviewed on its own, so look across them - duplicated code or helpers that several stages added, inconsistencies between stages (naming, contracts, config, docs, tests) - and check the merge commits and their conflict resolutions especially (`git log --merges` and `git show <merge>`): both sides' intent must survive.";
 var taskSection = (stage) => stage ? `Stage ${stage.number}/${stage.total} "${stage.name}" was asked to do this - its TASK:
@@ -1070,13 +1070,15 @@ ${r.note}` : ""}` : `the ${label} runner returned nothing` };
     const sha = r.ran && /^[0-9A-Za-z]+$/.test(lastLine(r.output)) ? lastLine(r.output) : undefined;
     return { sha, code: r.code, output: r.output };
   };
+  const work = config.workDir.replace(/\/+$/, "");
+  const plansIn = (cwd) => plans.filter((f) => f.startsWith(`${trimPath(cwd)}/`) && !f.slice(trimPath(cwd).length + 1).startsWith(`${work}/`));
   const uncommitted = async (label, phase, cwd) => {
-    const r = await shell(label, phase, "git status --porcelain", cwd);
+    const keep = plansIn(cwd).map((f) => shellQuote(`:(exclude,literal)${f.slice(trimPath(cwd).length + 1)}`));
+    const r = await shell(label, phase, `git status --porcelain${keep.length ? ` -- ':(top)' ${keep.join(" ")}` : ""}`, cwd);
     if (!r.ran) {
       host.log(`${label}: could not read the working tree status - going on without it (exit ${r.code}): ${r.output.slice(-500)}`);
       return [];
     }
-    const work = config.workDir.replace(/\/+$/, "");
     return r.output.split(`
 `).filter((l) => STATUS_LINE.test(l) && !`${l.trim().replace(/^\S+\s+/, "")}/`.startsWith(`${work}/`));
   };
@@ -1201,7 +1203,7 @@ ${a.note}` : ""}` : "the worktree runner returned nothing" };
     host.log(`${name}: uncommitted changes after ${at} - asking the implementer to commit them: ${listed(dirty)}`);
     const label = `commit ${name} ${at}`;
     const impl = await implement(lane, label, commitPrompt(lane.p, name, at, dirty.join(`
-`), stage));
+`), plansIn(lane.cwd), stage));
     const left = await uncommitted(`status ${name} ${at} after commit`, "Implement", lane.cwd);
     return { impl, by: `the commit step (${label})`, ...left.length ? { left } : {} };
   };
@@ -1228,7 +1230,7 @@ the last repair's deviations: ${deviations}` : ""}`;
       if (dirty.length) {
         host.log(`${name}: uncommitted changes before the checks at ${at} - repair ${repairs + 1}/${most}: ${listed(dirty)}`);
         deviations = saidSomething((await implement(lane, `commit ${name} ${at} #${repairs + 1}`, commitPrompt(lane.p, name, at, dirty.join(`
-`), stage))).deviations);
+`), plansIn(lane.cwd), stage))).deviations);
         continue;
       }
       const results = [];

@@ -713,6 +713,64 @@ describe('uncommitted work, in a real git repo', () => {
   })
 })
 
+describe('plan files inside the repo, in a real git repo', () => {
+  const GOOD = { name: 'tests', run: 'grep -qx good f.txt' }
+  const runWithPlans = async (implement: (repo: string) => void, onAsk: (req: AgentRequest, repo: string) => void = () => {}) => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), 'granny-plan-files-')))
+    const repo = join(root, 'r')
+    init(repo)
+    commit(repo, 'plan.md', '# plan\n')
+    git(repo, 'checkout', '-qb', 'feat/x')
+    writeFileSync(join(repo, 'plan.md'), '# plan\n\n## r1 deltas\n')
+    mkdirSync(join(repo, 'plans'))
+    writeFileSync(join(repo, 'plans', "it's two.md"), '# two\n')
+    const f = fakeHost({
+      commits: 'git',
+      shell: {},
+      override: req => {
+        if (req.kind !== 'implementation') return undefined
+        const start = git(repo, 'rev-parse', 'HEAD')
+        if (req.label === 'implement core') implement(repo)
+        else onAsk(req, repo)
+        return done(repo, start)
+      },
+    })
+    try {
+      const plan = [join(repo, 'plan.md'), join(repo, 'plans', "it's two.md")]
+      const r = await runGranny(f.host, { repo, branch: 'feat/x', base: 'main', plan, stages: [{ name: 'core', task: 'WP-01' }], config: { worktree: false, checks: [GOOD] } })
+      return { f, r, status: git(repo, 'status', '--porcelain'), asked: f.calls.filter(c => c.kind === 'implementation').map(c => c.label) }
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  }
+
+  it('does not count the uncommitted plan files as uncommitted work', async () => {
+    const { r, status, asked } = await runWithPlans(repo => commit(repo, 'f.txt', 'good\n'))
+    expect(asked).toEqual(['implement core'])
+    expect(r.stages[0]).toMatchObject({ outcome: 'clean', checks: [{ at: 'implement', attempt: 1, results: [{ name: 'tests', passed: true }] }] })
+    expect(r.stages[0]).not.toHaveProperty('note')
+    expect(status).toBe('M plan.md\n?? plans/')
+  })
+
+  it('leaves the plan files out of the commit prompt and tells the implementer not to commit them', async () => {
+    const { f, r, status, asked } = await runWithPlans(
+      repo => writeFileSync(join(repo, 'f.txt'), 'good\n'),
+      (_, repo) => {
+        git(repo, 'add', 'f.txt')
+        git(repo, 'commit', '-qm', 'feat: f.txt')
+      },
+    )
+    expect(asked).toEqual(['implement core', 'commit core implement'])
+    const prompt = f.calls.find(c => c.label === 'commit core implement')!.prompt
+    expect(prompt).toContain('?? f.txt')
+    expect(prompt).not.toContain('M plan.md')
+    expect(prompt).not.toContain('?? plans/')
+    expect(prompt).toContain('Leave the plan files')
+    expect(r.stages[0]!.outcome).toBe('clean')
+    expect(status).toBe('M plan.md\n?? plans/')
+  })
+})
+
 describe('a stage whose implementer only left uncommitted work, in a real git repo', () => {
   const GOOD = { name: 'tests', run: 'grep -qx good f.txt' }
   const writeOnly = (repo: string) => writeFileSync(join(repo, 'f.txt'), 'good\n')

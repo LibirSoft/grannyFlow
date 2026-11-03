@@ -213,7 +213,7 @@ FAILED CHECKS:
 ${list.join('\n\n')}`
 }
 
-export function commitPrompt(p: PromptContext, name: string, at: string, status: string, stage?: StageTask): string {
+export function commitPrompt(p: PromptContext, name: string, at: string, status: string, plans: string[], stage?: StageTask): string {
   return `${common(p)}
 
 You are the IMPLEMENTER, finishing stage "${name}" (${at}). The working tree has uncommitted changes. Granny runs the checks and the reviewers on what is committed, so it never checks or reviews uncommitted work.
@@ -221,7 +221,7 @@ ${taskSection(stage)}\`git status --porcelain\` printed:
 \`\`\`
 ${status.slice(-3000)}
 \`\`\`
-Read \`git diff\`, \`git log --oneline ${shellQuote(p.base)}..HEAD\` and the files above. Commit the work that belongs to the stage with explicit paths, gates green, and delete only stray files you created that do not belong in the repo (scratch files, build output). Do not hide changes to get a clean tree: never \`git stash\`, \`git reset\`, \`git checkout -- <path>\` or \`git clean\`. When you are done, \`git status --porcelain\` prints nothing (${p.config.workDir}/ is git-excluded and does not count); explain a change you cannot commit in deviations. Return startSha = HEAD before your first commit.`
+Read \`git diff\`, \`git log --oneline ${shellQuote(p.base)}..HEAD\` and the files above. Commit the work that belongs to the stage with explicit paths, gates green, and delete only stray files you created that do not belong in the repo (scratch files, build output). Do not hide changes to get a clean tree: never \`git stash\`, \`git reset\`, \`git checkout -- <path>\` or \`git clean\`.${plans.length ? ` Leave the plan files ${plans.join(', ')} as they are: never stage or commit them - they stay uncommitted, and granny left them out of the status above.` : ''} When you are done, \`git status --porcelain\` prints nothing (${p.config.workDir}/ is git-excluded and does not count${plans.length ? ', nor do the plan files' : ''}); explain a change you cannot commit in deviations. Return startSha = HEAD before your first commit.`
 }
 
 export const WHOLE_BRANCH_NOTE =

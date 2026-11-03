@@ -94,8 +94,8 @@ export function renderPrompts(): string {
       repairPrompt(p, '<stage name>', 'implement', 1, [{ name: '<check name>', run: '<check run>', code: '<exit code>', note: '<metric note>', output: '<last 3000 characters of the output>' }], stage),
     ],
     [
-      'Implementer - commit (`git status --porcelain` listed uncommitted changes before a check gate - label `commit <stage> <gate> #<n>`, a repair - or, with no checks or no commit at all, after the implementer, and with no checks after a fix - label `commit <stage> implement` or `commit <stage> fix r<n>`)',
-      commitPrompt(p, '<stage name>', 'implement', ' M <file>\n?? <file>', stage),
+      'Implementer - commit (`git status --porcelain` listed uncommitted changes before a check gate - label `commit <stage> <gate> #<n>`, a repair - or, with no checks or no commit at all, after the implementer, and with no checks after a fix - label `commit <stage> implement` or `commit <stage> fix r<n>`; the plan-file parts only when a plan file sits inside the repo, outside the work dir)',
+      commitPrompt(p, '<stage name>', 'implement', ' M <file>\n?? <file>', ['<plan files inside the repo>'], stage),
     ],
     ['Implementer - merge (a stage that ran in its own worktree; its merge stopped on conflicts)', mergePrompt(p, '<stage name>', '<lane branch>', '<git merge output>')],
     ['Reviewer - agent engine', agentReviewPrompt(p, '<stage name>', '<stage start sha>', stage)],

@@ -230,7 +230,7 @@ Output (tail):
 ```
 ```
 
-## Implementer - commit (`git status --porcelain` listed uncommitted changes before a check gate - label `commit <stage> <gate> #<n>`, a repair - or, with no checks or no commit at all, after the implementer, and with no checks after a fix - label `commit <stage> implement` or `commit <stage> fix r<n>`)
+## Implementer - commit (`git status --porcelain` listed uncommitted changes before a check gate - label `commit <stage> <gate> #<n>`, a repair - or, with no checks or no commit at all, after the implementer, and with no checks after a fix - label `commit <stage> implement` or `commit <stage> fix r<n>`; the plan-file parts only when a plan file sits inside the repo, outside the work dir)
 
 ```text
 Working repo: <repo>, branch `<branch>` (verify with `git branch --show-current`). Never touch `<base>`, never rebase, never force-push, never `git remote add`, never push, never open a PR.
@@ -254,7 +254,7 @@ Stage 2/2 "<stage name>" was asked to do this - its TASK:
  M <file>
 ?? <file>
 ```
-Read `git diff`, `git log --oneline '<base>'..HEAD` and the files above. Commit the work that belongs to the stage with explicit paths, gates green, and delete only stray files you created that do not belong in the repo (scratch files, build output). Do not hide changes to get a clean tree: never `git stash`, `git reset`, `git checkout -- <path>` or `git clean`. When you are done, `git status --porcelain` prints nothing (.granny/ is git-excluded and does not count); explain a change you cannot commit in deviations. Return startSha = HEAD before your first commit.
+Read `git diff`, `git log --oneline '<base>'..HEAD` and the files above. Commit the work that belongs to the stage with explicit paths, gates green, and delete only stray files you created that do not belong in the repo (scratch files, build output). Do not hide changes to get a clean tree: never `git stash`, `git reset`, `git checkout -- <path>` or `git clean`. Leave the plan files <plan files inside the repo> as they are: never stage or commit them - they stay uncommitted, and granny left them out of the status above. When you are done, `git status --porcelain` prints nothing (.granny/ is git-excluded and does not count, nor do the plan files); explain a change you cannot commit in deviations. Return startSha = HEAD before your first commit.
 ```
 
 ## Implementer - merge (a stage that ran in its own worktree; its merge stopped on conflicts)

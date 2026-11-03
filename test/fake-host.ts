@@ -34,7 +34,7 @@ export const reviewerOf = (command: string) => /review-.+?-r\d+-([a-z0-9-]+)\.md
 const isWorktreeSetup = (command: string) => command.includes('git worktree list --porcelain')
 const HEAD_PROBE = 'git rev-parse --verify HEAD'
 const COMMITS_PROBE = /git rev-list --count (\S+)\.\.HEAD/
-const STATUS_PROBE = /(^|&& )git status --porcelain$/m
+const STATUS_PROBE = /(^|&& )git status --porcelain( -- .*)?$/m
 const isProbe = (command: string) => command.includes(HEAD_PROBE) || COMMITS_PROBE.test(command) || STATUS_PROBE.test(command)
 
 const cdTarget = (line: string) => {

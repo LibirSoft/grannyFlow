@@ -232,13 +232,16 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
     return { sha, code: r.code, output: r.output }
   }
 
+  const work = config.workDir.replace(/\/+$/, '')
+  const plansIn = (cwd: string): string[] => plans.filter(f => f.startsWith(`${trimPath(cwd)}/`) && !f.slice(trimPath(cwd).length + 1).startsWith(`${work}/`))
+
   const uncommitted = async (label: string, phase: string, cwd: string): Promise<string[]> => {
-    const r = await shell(label, phase, 'git status --porcelain', cwd)
+    const keep = plansIn(cwd).map(f => shellQuote(`:(exclude,literal)${f.slice(trimPath(cwd).length + 1)}`))
+    const r = await shell(label, phase, `git status --porcelain${keep.length ? ` -- ':(top)' ${keep.join(' ')}` : ''}`, cwd)
     if (!r.ran) {
       host.log(`${label}: could not read the working tree status - going on without it (exit ${r.code}): ${r.output.slice(-500)}`)
       return []
     }
-    const work = config.workDir.replace(/\/+$/, '')
     return r.output.split('\n').filter(l => STATUS_LINE.test(l) && !`${l.trim().replace(/^\S+\s+/, '')}/`.startsWith(`${work}/`))
   }
 
@@ -350,7 +353,7 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
     if (!dirty.length) return {}
     host.log(`${name}: uncommitted changes after ${at} - asking the implementer to commit them: ${listed(dirty)}`)
     const label = `commit ${name} ${at}`
-    const impl = await implement(lane, label, commitPrompt(lane.p, name, at, dirty.join('\n'), stage))
+    const impl = await implement(lane, label, commitPrompt(lane.p, name, at, dirty.join('\n'), plansIn(lane.cwd), stage))
     const left = await uncommitted(`status ${name} ${at} after commit`, 'Implement', lane.cwd)
     return { impl, by: `the commit step (${label})`, ...(left.length ? { left } : {}) }
   }
@@ -376,7 +379,7 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
       }
       if (dirty.length) {
         host.log(`${name}: uncommitted changes before the checks at ${at} - repair ${repairs + 1}/${most}: ${listed(dirty)}`)
-        deviations = saidSomething((await implement(lane, `commit ${name} ${at} #${repairs + 1}`, commitPrompt(lane.p, name, at, dirty.join('\n'), stage))).deviations)
+        deviations = saidSomething((await implement(lane, `commit ${name} ${at} #${repairs + 1}`, commitPrompt(lane.p, name, at, dirty.join('\n'), plansIn(lane.cwd), stage))).deviations)
         continue
       }
       const results: Array<CheckResult & { output: string; broken?: true }> = []
