@@ -24,7 +24,8 @@ for each stage - independent stages at the same time (config parallel, default o
      │  not reviewed; the stages that build on it are skipped
   checks (config checks, default none): granny runs them itself; red ones go back to the implementer for a repair, up to maxRepairs
      (on Claude Code a granny helper agent runs each command and reports the exit code; on opencode granny runs it directly)
-     never on uncommitted work: git status --porcelain first (the plan files do not count); dirty ─► the implementer commits it, which spends a repair
+     never on uncommitted work: git status --porcelain first (the plan files do not count); dirty ─► the implementer commits it, which spends a repair;
+     unreadable, also on one more read ─► the gate fails
      (without checks: one commit prompt after the implementer and after each fix; still dirty ─► said in the stage note)
      ├─ still red ─► stage checks-failed, not reviewed; the stages that build on it are skipped, and so are the later ones
      │   in its repo when it ran on the run's branch (a red parallel lane is not merged, so it blocks only its dependents)
