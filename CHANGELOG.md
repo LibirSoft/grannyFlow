@@ -5,6 +5,7 @@
 ### Fixed
 
 - Checks: every check run records the HEAD it ran on (`checks[].head`). The final gate of a one-stage repo reuses the stage's last result only when HEAD is still that commit, and its log names the SHA; when a reviewer or the judge committed after the last gate, or HEAD could not be read, the checks run again. When the final check moves HEAD, the checks run once more without repairs (gate `pr-ready`); a red result sets `recheck: { passed: false, note }` and the branch is not PR-ready.
+- Checks: granny never runs the checks on, or reviews over, uncommitted work. Every check gate reads `git status --porcelain` first; a dirty tree goes to the implementer as a commit prompt (`commit <stage> <gate> #<n>`) that spends a repair, and a tree still dirty when the budget is spent ends the gate `checks-failed` with `checks not run at <gate> - uncommitted changes: ...`. Without checks, a dirty tree after the implementer or a fix gets one commit prompt, and what stays uncommitted is named in the stage's or final review's note. After the `pr-ready` checks pass, a tree they left dirty sets `recheck: { passed: false }`; opencode's finish summary names both.
 
 ## 1.5.0
 
