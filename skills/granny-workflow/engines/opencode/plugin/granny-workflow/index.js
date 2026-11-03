@@ -1953,7 +1953,9 @@ function summarize(result, worktree) {
       s.residual.length ? `${s.residual.length} residual` : "",
       s.unresolved.length ? `${s.unresolved.length} unresolved` : ""
     ].filter(Boolean).join(", ");
-    return `- ${name}: ${s.outcome}, ${s.rounds} review round(s)${extra ? ` (${extra})` : ""}`;
+    const left = s.note?.split(`
+`).find((l) => l.startsWith("uncommitted changes after"));
+    return `- ${name}: ${s.outcome}, ${s.rounds} review round(s)${extra ? ` (${extra})` : ""}${left ? ` - ${left}` : ""}`;
   };
   const lines = result.stages.map((s) => `${line(s, s.repo ? `${s.stage} (${s.repo})` : s.stage)}${s.outcome === "checks-failed" && s.note ? ` - ${s.note.split(`
 `)[0]}` : ""}${s.note && s.note.includes("in parallel on") ? ` - ${s.note.split(`
@@ -1973,7 +1975,7 @@ function summarize(result, worktree) {
   for (const r of result.repos?.slice(1) ?? [])
     if (r.finalReview)
       lines.push(reviewLine(r.finalReview, `final review ${r.repo}`));
-  const recheckLine = (r, name) => `- ${name}: ${r.passed ? "green on the HEAD the pr-ready check left" : `RED - NOT PR-ready, the pr-ready check moved HEAD and the checks fail: ${r.note ?? ""}`}`;
+  const recheckLine = (r, name) => `- ${name}: ${r.passed ? "green on the HEAD the pr-ready check left" : `RED - NOT PR-ready after the pr-ready check moved HEAD: ${r.note ?? ""}`}`;
   if (result.final)
     lines.push(`- final: gates ${result.final.gatesGreen ? "green" : "RED"}, PR body ${result.final.prBodyPath}${result.final.issues ? `, issues: ${result.final.issues}` : ""}`);
   if (result.recheck)
