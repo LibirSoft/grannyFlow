@@ -72,7 +72,7 @@ export function fakeHost(opts: FakeOptions = {}) {
     const c = opts.commits ?? 1
     if (c === 'git') return bash(command, cwd, opts.shell?.env)
     if (STATUS_PROBE.test(command)) return { code: 0, output: (statuses.length > 1 ? statuses.shift() : statuses[0]) ?? '' }
-    if (command.includes(HEAD_PROBE)) return { code: 0, output: `start${impl + 1}\n` }
+    if (command.includes(HEAD_PROBE)) return { code: 0, output: `deadbee${impl + 1}\n` }
     const base = COMMITS_PROBE.exec(command)![1]!
     return { code: 0, output: `${typeof c === 'function' ? c(base) : c}\n` }
   }
@@ -112,7 +112,7 @@ export function fakeHost(opts: FakeOptions = {}) {
       switch (req.kind) {
         case 'implementation':
           impl++
-          return { startSha: `start${impl}`, headSha: `head${impl}`, gatesGreen: true, gates: 'all green', commits: [`commit ${impl}`], untested: '' }
+          return { startSha: `deadbee${impl}`, headSha: `head${impl}`, gatesGreen: true, gates: 'all green', commits: [`commit ${impl}`], untested: '' }
         case 'draft':
           return { files: ['/work/repo/.granny/plans/feat-x.md'], stages: [{ name: 'core', task: 'WP-01' }], summary: 'one stage' }
         case 'planFix':

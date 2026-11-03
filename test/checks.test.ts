@@ -64,7 +64,7 @@ describe('checks', () => {
     expect(f.cwds).toEqual([REPO])
     expect(r.stages[0]).toMatchObject({ outcome: 'clean', checks: [{ at: 'implement', attempt: 1, results: [{ name: 'tests', passed: true, code: 0 }] }] })
     expect(r).not.toHaveProperty('checks')
-    expect(f.logs).toContain('final review: final checks not rerun - 1 (core) ran them green last on start2, HEAD unchanged')
+    expect(f.logs).toContain('final review: final checks not rerun - 1 (core) ran them green last on deadbee2, HEAD unchanged')
     expect(f.phases.slice(0, 3)).toEqual(['Implement', 'Checks', 'Review'])
     expect(f.logs).toContain('core: checks green (implement: tests)')
   })
@@ -201,7 +201,7 @@ describe('checks', () => {
     )
     const r = await runGranny(f.host, run({ maxRepairs: 0, checks: [TESTS] }))
     expect(f.events).toEqual(['implement core', 'check run-tests', 'review core r1 reviewer', 'fix core r1', 'check run-tests', 'pr-ready check'])
-    expect(r.finalReview).toMatchObject({ outcome: 'checks-failed', note: 'checks failed at final: 1 (core) ended with tests red on start3, HEAD unchanged' })
+    expect(r.finalReview).toMatchObject({ outcome: 'checks-failed', note: 'checks failed at final: 1 (core) ended with tests red on deadbee3, HEAD unchanged' })
     expect(r.stages[0]).toMatchObject({ outcome: 'checks-failed', rounds: 1 })
     expect(r.stages[0]!.checks?.map(c => [c.at, c.results[0]!.passed])).toEqual([
       ['implement', true],
@@ -276,7 +276,7 @@ describe('checks', () => {
 
   it('take over from the self-reported gates: green checks keep a red-gates stage clean', async () => {
     const redGates = (req: AgentRequest) =>
-      req.kind === 'implementation' ? { startSha: 'start1', headSha: 'h', gatesGreen: false, gates: '1 failing', commits: ['c'], untested: '' } : undefined
+      req.kind === 'implementation' ? { startSha: 'deadbee1', headSha: 'h', gatesGreen: false, gates: '1 failing', commits: ['c'], untested: '' } : undefined
     const checked = scripted({ 'run-tests': [green()] }, { override: redGates })
     expect((await runGranny(checked.host, run({ checks: [TESTS] }))).stages[0]!.outcome).toBe('clean')
     const unchecked = scripted({}, { override: redGates })

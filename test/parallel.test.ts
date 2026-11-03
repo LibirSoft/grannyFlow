@@ -124,7 +124,7 @@ describe('parallel stages', () => {
     expect(t.peak()).toBe(2)
     const lane = '/work/a-worktrees/feat-x--s2-circuit-breaker'
     expect(f.setups.map(s => s.command)).toEqual([expect.stringContaining('= feat/x ]'), expect.stringContaining('= feat/x--s2-circuit-breaker ]')])
-    expect(f.setups[1]!.command).toContain(`git worktree add -b feat/x--s2-circuit-breaker "$wt" start1`)
+    expect(f.setups[1]!.command).toContain(`git worktree add -b feat/x--s2-circuit-breaker "$wt" deadbee1`)
     const second = f.calls.find(c => c.label === 'implement circuit breaker')!
     expect(second.cwd).toBe(lane)
     expect(second.prompt).toContain('branch `feat/x--s2-circuit-breaker`')
