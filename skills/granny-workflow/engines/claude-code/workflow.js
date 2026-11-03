@@ -567,6 +567,16 @@ ${list.join(`
 
 `)}`;
 }
+function commitPrompt(p, name, at, status, stage) {
+  return `${common(p)}
+
+You are the IMPLEMENTER, finishing stage "${name}" (${at}). The working tree has uncommitted changes. Granny runs the checks and the reviewers on what is committed, so it never checks or reviews uncommitted work.
+${taskSection(stage)}\`git status --porcelain\` printed:
+\`\`\`
+${status.slice(-3000)}
+\`\`\`
+Read \`git diff\`, \`git log --oneline ${shellQuote(p.base)}..HEAD\` and the files above. Commit the work that belongs to the stage with explicit paths, gates green, and delete only stray files you created that do not belong in the repo (scratch files, build output). Do not hide changes to get a clean tree: never \`git stash\`, \`git reset\`, \`git checkout -- <path>\` or \`git clean\`. When you are done, \`git status --porcelain\` prints nothing (${p.config.workDir}/ is git-excluded and does not count); explain a change you cannot commit in deviations. Return startSha = HEAD before your first commit.`;
+}
 var WHOLE_BRANCH_NOTE = "This is the whole-branch review: every stage was already reviewed on its own, so look across them - duplicated code or helpers that several stages added, inconsistencies between stages (naming, contracts, config, docs, tests) - and check the merge commits and their conflict resolutions especially (`git log --merges` and `git show <merge>`): both sides' intent must survive.";
 var taskSection = (stage) => stage ? `Stage ${stage.number}/${stage.total} "${stage.name}" was asked to do this - its TASK:
 ${stage.task}
@@ -906,6 +916,8 @@ var baseName = (path) => path.slice(path.lastIndexOf("/") + 1);
 var lastLine = (output) => output.trim().split(`
 `).at(-1)?.trim() ?? "";
 var short = (sha) => sha.slice(0, 8);
+var STATUS_LINE = /^\s*[MADRCUT?!]{1,2}\s+\S/;
+var listed = (status) => status.map((l) => l.trim()).join(", ");
 function checkInput(input) {
   const errors = [];
   if (!input || typeof input !== "object")
@@ -1033,6 +1045,16 @@ ${r.note}` : ""}` : `the ${label} runner returned nothing` };
     const sha = r.ran && /^[0-9A-Za-z]+$/.test(lastLine(r.output)) ? lastLine(r.output) : undefined;
     return { sha, code: r.code, output: r.output };
   };
+  const uncommitted = async (label, phase, cwd) => {
+    const r = await shell(label, phase, "git status --porcelain", cwd);
+    if (!r.ran) {
+      host.log(`${label}: could not read the working tree status - going on without it (exit ${r.code}): ${r.output.slice(-500)}`);
+      return [];
+    }
+    const work = config.workDir.replace(/\/+$/, "");
+    return r.output.split(`
+`).filter((l) => STATUS_LINE.test(l) && !`${l.trim().replace(/^\S+\s+/, "")}/`.startsWith(`${work}/`));
+  };
   const setUpWorktree = async (repo, branch, from, label, shared) => {
     const script = worktreeScript(config, branch, from, worktreePath(repo, branch, config.worktreeDir, shared));
     let r;
@@ -1147,11 +1169,40 @@ ${a.note}` : ""}` : "the worktree runner returned nothing" };
     return { ...base, ...metric, passed: true };
   };
   const detail = (r) => r.note ?? `exit ${r.code}`;
+  const commitWork = async (lane, name, at, stage) => {
+    const dirty = await uncommitted(`status ${name} ${at}`, "Implement", lane.cwd);
+    if (!dirty.length)
+      return {};
+    host.log(`${name}: uncommitted changes after ${at} - asking the implementer to commit them: ${listed(dirty)}`);
+    const label = `commit ${name} ${at}`;
+    const impl = await implement(lane, label, commitPrompt(lane.p, name, at, dirty.join(`
+`), stage));
+    const left = await uncommitted(`status ${name} ${at} after commit`, "Implement", lane.cwd);
+    if (!left.length)
+      return { impl, by: `the commit step (${label})` };
+    const note = `uncommitted changes after ${at}: ${listed(left)} - the review saw HEAD without them`;
+    host.log(`${name}: ${note}`);
+    return { impl, by: `the commit step (${label})`, note };
+  };
   const checkGate = async (lane, name, at, checks, runs, stage) => {
     host.phase(CHECKS_PHASE);
     const budget = (c) => c.maxRepairs ?? config.maxRepairs;
+    const most = Math.max(0, ...checks.map(budget));
     let deviations;
     for (let repairs = 0;; repairs++) {
+      const dirty = await uncommitted(`status ${name} ${at}`, CHECKS_PHASE, lane.cwd);
+      if (dirty.length && repairs >= most) {
+        const note = `checks not run at ${at} - uncommitted changes: ${listed(dirty)}${repairs ? ` (still there after ${repairs} repair(s))` : ""}${deviations ? `
+the last repair's deviations: ${deviations}` : ""}`;
+        host.log(`${name}: checks-failed - ${note}`);
+        return { passed: false, note };
+      }
+      if (dirty.length) {
+        host.log(`${name}: uncommitted changes before the checks at ${at} - repair ${repairs + 1}/${most}: ${listed(dirty)}`);
+        deviations = saidSomething((await implement(lane, `commit ${name} ${at} #${repairs + 1}`, commitPrompt(lane.p, name, at, dirty.join(`
+`), stage))).deviations);
+        continue;
+      }
       const results = [];
       for (const check of checks)
         results.push(await runCheck(lane, name, check));
@@ -1275,7 +1326,7 @@ the last repair's deviations: ${deviations}` : ""}`;
     return { reviewer, ...r, findings: attribute(reviewer, r.findings) };
   }));
   const reviewLoop = async (lane, name, subject, reviewers = config.reviewers, opts = {}) => {
-    const { gates, checks = [], runs = [] } = opts;
+    const { gates, checks = [], runs = [], notes = [] } = opts;
     const { p } = lane;
     const phase = phaseOf(subject);
     const history = [];
@@ -1371,6 +1422,12 @@ the last repair's deviations: ${deviations}` : ""}`;
         if (!gate.passed)
           return { outcome: "checks-failed", rounds: round, residual, unresolved: [], history, note: gate.note };
         host.phase(phase);
+      } else if (subject.kind === "diff") {
+        const left = await commitWork(lane, name, `fix r${round}`, subject.stage);
+        if (left.impl && gates)
+          Object.assign(gates, { green: left.impl.gatesGreen, text: left.impl.gates, by: left.by });
+        if (left.note)
+          notes.push(left.note);
       }
     }
     host.log(`${name}: hit the ${config.maxRounds}-round cap without a clean review`);
@@ -1426,6 +1483,8 @@ the last repair's deviations: ${deviations}` : ""}`;
     const checks = checksOf(st);
     const runs = [];
     const ran = () => runs.length ? { checks: runs } : {};
+    const notes = [];
+    let committed = {};
     if (st.implement !== false) {
       host.phase("Implement");
       const head = await readHead(`head ${name}`, "Implement", lane.cwd);
@@ -1452,20 +1511,28 @@ the last repair's deviations: ${deviations}` : ""}`;
         const gate = await checkGate(lane, name, "implement", checks, runs, task);
         if (!gate.passed)
           return { stage: name, ...where, implementation: impl, outcome: "checks-failed", rounds: 0, residual: [], unresolved: [], history: [], note: gate.note, ...ran() };
+      } else {
+        const left = await commitWork(lane, name, "implement", task);
+        committed = left;
+        if (left.note)
+          notes.push(left.note);
       }
     } else {
       began?.();
       host.log(`${name}: review-only stage - reviewing ${lane.base}...HEAD`);
     }
     host.phase("Review");
-    const gates = impl && !runs.length ? { green: impl.gatesGreen, text: impl.gates, by: "the implementer" } : undefined;
-    const loop = st.review === false ? { outcome: "review-skipped", rounds: 0, residual: [], unresolved: [], history: [] } : await reviewLoop(lane, name, { kind: "diff", base, ...task ? { stage: task } : {} }, undefined, { gates, checks, runs });
+    const last = committed.impl ?? impl;
+    const gates = last && !runs.length ? { green: last.gatesGreen, text: last.gates, by: committed.by ?? "the implementer" } : undefined;
+    const loop = st.review === false ? { outcome: "review-skipped", rounds: 0, residual: [], unresolved: [], history: [] } : await reviewLoop(lane, name, { kind: "diff", base, ...task ? { stage: task } : {} }, undefined, { gates, checks, runs, notes });
     if (gates && !gates.green && (loop.outcome === "clean" || loop.outcome === "residual-only")) {
       loop.outcome = "gates-red";
       loop.note = `the review found nothing to fix, but ${gates.by} left the gates red: ${gates.text}`;
       host.log(`${name}: gates-red - ${loop.note}`);
     }
-    return { stage: name, ...where, ...impl ? { implementation: impl } : {}, ...loop, ...ran() };
+    const note = [loop.note, ...notes].filter(Boolean).join(`
+`);
+    return { stage: name, ...where, ...impl ? { implementation: impl } : {}, ...loop, ...note ? { note } : {}, ...ran() };
   };
   const mergeLane = async (state, lane, name) => {
     const main = state.lane;
@@ -1678,7 +1745,11 @@ ${note}` : note } : result;
       return skipped("skipped", `${name} skipped - ${why}`, why);
     host.phase(FINAL_REVIEW_PHASE);
     host.log(`${name}: reviewing ${s.lane.base}...HEAD across ${stages} stage(s)${s.merges ? ` and ${s.merges} lane merge(s)` : ""}`);
-    const r = await reviewLoop(s.lane, name, { kind: "diff", base: s.lane.base, note: WHOLE_BRANCH_NOTE }, undefined, { checks, runs });
+    const notes = [];
+    const looped = await reviewLoop(s.lane, name, { kind: "diff", base: s.lane.base, note: WHOLE_BRANCH_NOTE }, undefined, { checks, runs, notes });
+    const note = [looped.note, ...notes].filter(Boolean).join(`
+`);
+    const r = note ? { ...looped, note } : looped;
     if (r.outcome === "checks-failed")
       host.log(`${name} ended checks-failed - the final check still runs, but the branch is not PR-ready`);
     if (r.outcome === "round-cap" || r.outcome === "review-failed") {
@@ -1703,10 +1774,15 @@ ${note}` : note } : result;
       return;
     host.log(`${label}: ${gated && now ? `HEAD moved from ${short(gated)} to ${short(now)} after the final checks` : "could not read HEAD after the pr-ready check or at the final checks"} - running them once more, without repairs`);
     const gate = await checkGate(s.lane, label, "pr-ready", checks.map((c) => ({ ...c, maxRepairs: 0 })), runs);
-    if (gate.passed)
+    if (!gate.passed) {
+      host.log(`${label}: the checks are red after the pr-ready check - the branch is not PR-ready`);
+      return { passed: false, note: gate.note };
+    }
+    const left = await uncommitted(`status ${label} after the checks`, "PR ready", s.lane.cwd);
+    if (!left.length)
       return { passed: true };
-    host.log(`${label}: the checks are red after the pr-ready check - the branch is not PR-ready`);
-    return { passed: false, note: gate.note };
+    host.log(`${label}: the checks left uncommitted changes after the pr-ready check - the branch is not PR-ready: ${listed(left)}`);
+    return { passed: false, note: `uncommitted changes after the checks at pr-ready: ${listed(left)}` };
   };
   const check = async (s) => {
     const label = s.lane.repo === primary ? "pr-ready check" : `pr-ready check ${baseName(s.lane.repo)}`;

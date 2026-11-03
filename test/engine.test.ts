@@ -476,7 +476,7 @@ describe('the base a stage review diffs against', () => {
   it('reads HEAD through a granny helper agent on hosts without a shell', async () => {
     const f = fakeHost({ name: 'claude-code', direct: false, override: lying })
     await runGranny(f.host, input())
-    expect(f.probes).toEqual([`cd /work/repo && git rev-parse --verify HEAD`, `cd /work/repo && git rev-list --count start1..HEAD`])
+    expect(f.probes).toEqual([`cd /work/repo && git rev-parse --verify HEAD`, `cd /work/repo && git rev-list --count start1..HEAD`, `cd /work/repo && git status --porcelain`])
     expect(f.calls.find(c => c.label === 'review core r1 codex')!.prompt).toContain('--base start1')
   })
 
@@ -487,7 +487,7 @@ describe('the base a stage review diffs against', () => {
     const r = await runGranny(f.host, input())
     expect(f.logs.some(l => l.startsWith('core: could not read HEAD before the implementer ran - reviewing main...HEAD instead (exit 128): fatal: not a git repository'))).toBe(true)
     expect(f.commands[0]).toContain('codex exec review --base main -o')
-    expect(f.probes).toEqual(['git rev-list --count main..HEAD'])
+    expect(f.probes).toEqual(['git rev-list --count main..HEAD', 'git status --porcelain'])
     expect(r.stages[0]).toMatchObject({ outcome: 'clean' })
   })
 
