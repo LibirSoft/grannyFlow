@@ -6,6 +6,7 @@ import type { Finding, StageSpec } from './types'
 export interface EarlierRound {
   round: number
   sent: Finding[]
+  residual?: Finding[]
   deviations?: string
 }
 
@@ -25,17 +26,19 @@ const judgeRouting = (p: PromptContext, findings: Finding[]): string =>
 
 function judgeHistory(earlier: EarlierRound[]): string {
   if (!earlier.length) return ''
+  const labelled = (round: number, findings: Finding[]) =>
+    JSON.stringify(findings.map(f => ({ label: roundLabel(round, f), severity: f.severity, file: f.file, line: f.line, title: f.title, detail: f.detail })), null, 2)
   const rounds = earlier.map(e => {
-    const sent = e.sent.map(f => ({ label: roundLabel(e.round, f), severity: f.severity, file: f.file, line: f.line, title: f.title, detail: f.detail }))
+    const kept = e.residual?.length ? `\nRound ${e.round} kept as residual (not sent to the fixer):\n${labelled(e.round, e.residual)}` : ''
     return `Round ${e.round} sent to the fixer:
-${JSON.stringify(sent, null, 2)}
-The fixer's deviations (findings it did not apply, and why): ${e.deviations?.trim() || 'none - it applied all of them'}`
+${labelled(e.round, e.sent)}
+The fixer's deviations (findings it did not apply, and why): ${e.deviations?.trim() || 'none - it applied all of them'}${kept}`
   })
   return `
-EARLIER ROUNDS of this review - the findings already sent to the fixer, under round-qualified labels, and the fixer's reasons for not applying some:
+EARLIER ROUNDS of this review - the findings already sent to the fixer, under round-qualified labels, the fixer's reasons for not applying some, and the findings kept as residual for the user:
 ${rounds.join('\n\n')}
 
-When a finding below repeats one of those earlier findings, set its repeatOf to that label. A repeat of a finding the fixer declined with a convincing reason that the code backs scores low - cite the label and the fixer's reason in your reason. When the fixer's reason is wrong, score the repeat on its merits (high when it is real) and say in reason why the fixer's reason does not hold. A repeat of a finding the fixer applied: check the fix in the code and score what is still wrong.
+When a finding below repeats one of those earlier findings, set its repeatOf to that label. A repeat of a finding the fixer declined with a convincing reason that the code backs scores low - cite the label and the fixer's reason in your reason. When the fixer's reason is wrong, score the repeat on its merits (high when it is real) and say in reason why the fixer's reason does not hold. A repeat of a finding the fixer applied: check the fix in the code and score what is still wrong. A repeat of a residual finding: the fixer never saw it - score it on its merits.
 `
 }
 

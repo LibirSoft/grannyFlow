@@ -341,7 +341,7 @@ Stage 2/2 "<stage name>" was asked to do this - its TASK:
 The findings come from one or more reviewers; each names its reviewer. P0/P1 findings are not in this list: they go to the implementer without a score.
 For each finding below, open the cited code and judge whether it is real, correctly described and worth fixing; score it 0-100 (findings the code refutes score low). Score against the TASK: a finding about work another stage owns scores low; a missing part of this stage's task is worth fixing. When a finding reports the same problem as another finding in this list, score it too and set its duplicateOf to the id of the finding to keep. Then score the whole review 0-100 (correctness + actionability; mostly wrong or trivial findings = low).
 
-EARLIER ROUNDS of this review - the findings already sent to the fixer, under round-qualified labels, and the fixer's reasons for not applying some:
+EARLIER ROUNDS of this review - the findings already sent to the fixer, under round-qualified labels, the fixer's reasons for not applying some, and the findings kept as residual for the user:
 Round 1 sent to the fixer:
 [
   {
@@ -354,7 +354,7 @@ Round 1 sent to the fixer:
 ]
 The fixer's deviations (findings it did not apply, and why): <the fixer's deviations>
 
-When a finding below repeats one of those earlier findings, set its repeatOf to that label. A repeat of a finding the fixer declined with a convincing reason that the code backs scores low - cite the label and the fixer's reason in your reason. When the fixer's reason is wrong, score the repeat on its merits (high when it is real) and say in reason why the fixer's reason does not hold. A repeat of a finding the fixer applied: check the fix in the code and score what is still wrong.
+When a finding below repeats one of those earlier findings, set its repeatOf to that label. A repeat of a finding the fixer declined with a convincing reason that the code backs scores low - cite the label and the fixer's reason in your reason. When the fixer's reason is wrong, score the repeat on its merits (high when it is real) and say in reason why the fixer's reason does not hold. A repeat of a finding the fixer applied: check the fix in the code and score what is still wrong. A repeat of a residual finding: the fixer never saw it - score it on its merits.
 
 REVIEW:
 <findings as JSON>
