@@ -907,6 +907,21 @@ describe('a working tree status that cannot be read', () => {
     expect(r.stages[0]).toMatchObject({ outcome: 'clean', note: `working tree status unreadable after implement (${WHY}) - the review saw HEAD and may have missed uncommitted work` })
   })
 
+  it('says so in the stage note when the status cannot be read after the commit step', async () => {
+    const f = scripted({}, { status: ['?? f.txt\n', UNREADABLE] })
+    const r = await runGranny(f.host, run())
+    expect(f.calls.map(c => c.label)).toEqual(['implement core', 'commit core implement', 'review core r1 reviewer', 'pr-ready check'])
+    expect(f.logs).toContain('status core implement after commit: could not read the working tree status (exit 128) - reading it once more')
+    expect(r.stages[0]).toMatchObject({ outcome: 'clean', note: `working tree status unreadable after implement (${WHY}) - the review saw HEAD and may have missed uncommitted work` })
+  })
+
+  it('says so in the stage note when the status cannot be read after a fix round', async () => {
+    const f = scripted({}, { status: ['', ' M src/a.ts\n', UNREADABLE], override: req => (req.label === 'review core r1 reviewer' ? p1 : undefined) })
+    const r = await runGranny(f.host, run())
+    expect(f.calls.map(c => c.label)).toEqual(['implement core', 'review core r1 reviewer', 'fix core r1', 'commit core fix r1', 'review core r2 reviewer', 'pr-ready check'])
+    expect(r.stages[0]).toMatchObject({ outcome: 'clean', note: `working tree status unreadable after fix r1 (${WHY}) - the review saw HEAD and may have missed uncommitted work` })
+  })
+
   it('ends an empty stage no-changes and says the status could not be read', async () => {
     const f = scripted({}, { commits: 0, status: [UNREADABLE] })
     const r = await runGranny(f.host, run())
