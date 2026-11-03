@@ -16,8 +16,8 @@ export interface FakeOptions {
   commits?: number | 'git' | ((base: string) => number)
   /** Answers a command before the reviews do; undefined passes it on. */
   checks?: (command: string) => Review | undefined
-  /** What the engine's `git status --porcelain` probe prints, in order (the last one repeats; default clean); 'git' with commits runs it in a real shell. */
-  status?: string[]
+  /** What the engine's `git status --porcelain` probe prints, or a failed read, in order (the last one repeats; default clean); 'git' with commits runs it in a real shell. */
+  status?: Array<string | CommandResult>
   /** A note the Claude Code helper adds to every command it reports (the worktree setup, the probes, checks and reviews). */
   note?: string | ((command: string) => string | undefined)
 }
@@ -77,7 +77,7 @@ export function fakeHost(opts: FakeOptions = {}) {
     probes.push(command)
     const c = opts.commits ?? 1
     if (c === 'git') return bash(command, cwd, opts.shell?.env)
-    if (STATUS_PROBE.test(command)) return { code: 0, output: (statuses.length > 1 ? statuses.shift() : statuses[0]) ?? '' }
+    if (STATUS_PROBE.test(command)) return asResult((statuses.length > 1 ? statuses.shift() : statuses[0]) ?? '')
     if (command.includes(HEAD_PROBE)) return { code: 0, output: `deadbee${impl + 1}\n` }
     const base = COMMITS_PROBE.exec(command)![1]!
     return { code: 0, output: `${typeof c === 'function' ? c(base) : c}\n` }

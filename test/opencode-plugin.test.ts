@@ -186,6 +186,14 @@ describe('opencode plugin helpers', () => {
     expect(text).toContain('- checks after the final check: RED - NOT PR-ready after the pr-ready check moved HEAD: uncommitted changes after the checks at pr-ready: ?? out.txt')
   })
 
+  it('names a working tree status that could not be read in the finish summary', () => {
+    const final = { gatesGreen: true, gates: 'ok', commits: [], prBodyPath: '.granny/PR-BODY.md', issues: '' }
+    const unread = 'working tree status unreadable after implement (exit 128: fatal: index file corrupt) - the review saw HEAD and may have missed uncommitted work'
+    const stage = { stage: 'one', outcome: 'clean' as const, rounds: 1, residual: [], unresolved: [], history: [], note: unread }
+    const text = summarize({ repo: '/r', branch: 'feat/x', base: 'main', worktree: '/r', stages: [stage], final }, false)
+    expect(text).toContain(`- one: clean, 1 review round(s) - ${unread}`)
+  })
+
   it('names the work a no-changes stage left uncommitted in the finish summary', () => {
     const final = { gatesGreen: true, gates: 'ok', commits: [], prBodyPath: '.granny/PR-BODY.md', issues: '' }
     const note = 'the implementer made no commit: the work it left is uncommitted (?? f.txt), so there was nothing to review'

@@ -136,7 +136,7 @@ export function summarize(result: RunResult, worktree: boolean): string {
       s.residual.length ? `${s.residual.length} residual` : '',
       s.unresolved.length ? `${s.unresolved.length} unresolved` : '',
     ].filter(Boolean).join(', ')
-    const left = s.note?.split('\n').find(l => l.startsWith('uncommitted changes after'))
+    const left = s.note?.split('\n').find(l => l.startsWith('uncommitted changes after') || l.startsWith('working tree status unreadable after'))
     return `- ${name}: ${s.outcome}, ${s.rounds} review round(s)${extra ? ` (${extra})` : ''}${left ? ` - ${left}` : ''}`
   }
   const lines = result.stages.map(
