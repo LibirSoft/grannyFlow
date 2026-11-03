@@ -112,7 +112,9 @@ const slug = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(
 const trimPath = (s: string) => s.replace(/\/+$/, '') || '/'
 const repoPathOf = (r: RepoInput): unknown => (typeof r === 'string' ? r : r && typeof r === 'object' ? r.repo : undefined)
 const baseName = (path: string) => path.slice(path.lastIndexOf('/') + 1)
-const lastLine = (output: string) => output.trim().split('\n').at(-1)?.trim() ?? ''
+const lineShaped = (output: string, shape: RegExp) => output.split('\n').map(l => l.trim()).find(l => shape.test(l))
+const SHA = /^[0-9a-f]{7,64}$/i
+const COUNT = /^\d+$/
 const short = (sha: string) => sha.slice(0, 8)
 const STATUS_LINE = /^\s*[MADRCUT?!]{1,2}\s+\S/
 const listed = (status: string[]) => status.map(l => l.trim()).join(', ')
@@ -221,14 +223,19 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
       return { ran: r.code === 0, code: r.code, output: r.output }
     }
     const prompt = ask(cwd, label, `cd ${shellQuote(cwd)} && ${script}`)
-    const r = await call('granny', 'command', label, phase, prompt, 'write', config.roles.granny, cwd)
+    return helped(label, await call('granny', 'command', label, phase, prompt, 'write', config.roles.granny, cwd), `the ${label} runner returned nothing`)
+  }
+
+  const helped = (label: string, r: any, missing: string): { ran: boolean; code: number | string; output: string } => {
     const ran = Boolean(r?.ran)
-    return { ran, code: r?.exitCode ?? (ran ? 0 : '?'), output: r ? `${String(r.output ?? '')}${r.note ? `\n${r.note}` : ''}` : `the ${label} runner returned nothing` }
+    const note = typeof r?.note === 'string' && r.note.trim() ? r.note : undefined
+    if (ran && note) host.log(`${label}: the helper's note, kept out of the command's output: ${note}`)
+    return { ran, code: r?.exitCode ?? (ran ? 0 : '?'), output: r ? `${String(r.output ?? '')}${!ran && note ? `\n${note}` : ''}` : missing }
   }
 
   const readHead = async (label: string, phase: string, cwd: string) => {
     const r = await shell(label, phase, 'git rev-parse --verify HEAD', cwd)
-    const sha = r.ran && /^[0-9A-Za-z]+$/.test(lastLine(r.output)) ? lastLine(r.output) : undefined
+    const sha = r.ran ? lineShaped(r.output, SHA) : undefined
     return { sha, code: r.code, output: r.output }
   }
 
@@ -250,9 +257,7 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
     if (host.run) r = await shell(label, 'Worktree', script, repo)
     else {
       const prompt = worktreeCommandPrompt(repo, branch, `cd ${shellQuote(repo)} && ${script}`)
-      const a = await call('granny', 'command', label, 'Worktree', prompt, 'write', config.roles.granny, repo)
-      const ran = Boolean(a?.ran)
-      r = { ran, code: a?.exitCode ?? (ran ? 0 : '?'), output: a ? `${String(a.output ?? '')}${a.note ? `\n${a.note}` : ''}` : 'the worktree runner returned nothing' }
+      r = helped(label, await call('granny', 'command', label, 'Worktree', prompt, 'write', config.roles.granny, repo), 'the worktree runner returned nothing')
     }
     const path = r.ran ? reportedWorktree(r.output) : undefined
     if (!path) throw new Error(`worktree setup failed${repo === primary && branch === input.branch ? '' : ` for ${repo} ${branch}`} (exit ${r.code}): ${r.output.slice(-2000)}`)
@@ -687,7 +692,8 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
       if (start && impl.startSha !== start) host.log(`${name}: the implementer reported startSha ${impl.startSha}, but HEAD was ${start} before it ran - reviewing ${start}...HEAD`)
       const commits = async (label: string) => {
         const count = await shell(label, 'Implement', `git rev-list --count ${shellQuote(base)}..HEAD`, lane.cwd)
-        if (count.ran && /^\d+$/.test(lastLine(count.output))) return Number(lastLine(count.output))
+        const n = count.ran ? lineShaped(count.output, COUNT) : undefined
+        if (n !== undefined) return Number(n)
         host.log(`${name}: could not count the commits in ${base}..HEAD - reviewing it anyway (exit ${count.code}): ${count.output.slice(-500)}`)
         return undefined
       }

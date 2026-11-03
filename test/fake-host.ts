@@ -18,6 +18,8 @@ export interface FakeOptions {
   checks?: (command: string) => Review | undefined
   /** What the engine's `git status --porcelain` probe prints, in order (the last one repeats; default clean); 'git' with commits runs it in a real shell. */
   status?: string[]
+  /** A note the Claude Code helper adds to every command it reports (the worktree setup, the probes, checks and reviews). */
+  note?: string | ((command: string) => string | undefined)
 }
 
 export interface Setup {
@@ -67,6 +69,10 @@ export function fakeHost(opts: FakeOptions = {}) {
   const phases: string[] = []
   const probes: string[] = []
   let impl = 0
+  const noted = (command: string, r: CommandResult) => {
+    const note = typeof opts.note === 'function' ? opts.note(command) : opts.note
+    return { ran: r.code === 0, exitCode: r.code, output: r.output, ...(note === undefined ? {} : { note }) }
+  }
   const probe = async (command: string, cwd: string): Promise<CommandResult> => {
     probes.push(command)
     const c = opts.commits ?? 1
@@ -99,12 +105,11 @@ export function fakeHost(opts: FakeOptions = {}) {
       if (req.label === 'worktree' || (req.kind === 'command' && req.label.startsWith('worktree '))) {
         const line = /Run exactly this:\n(.+)\n/.exec(req.prompt)?.[1] ?? ''
         setups.push({ command: line, cwd: '/', request: req })
-        const r = await setUp(line, '/', cdTarget(line))
-        return { ran: r.code === 0, exitCode: r.code, output: r.output }
+        return noted(line, await setUp(line, '/', cdTarget(line)))
       }
       if (req.kind === 'command' && isProbe(req.prompt)) {
-        const r = await probe(/Run exactly this:\n(.+)\n/.exec(req.prompt)?.[1] ?? '', req.cwd)
-        return { ran: r.code === 0, exitCode: r.code, output: r.output }
+        const line = /Run exactly this:\n(.+)\n/.exec(req.prompt)?.[1] ?? ''
+        return noted(line, await probe(line, req.cwd))
       }
       calls.push(req)
       const custom = await opts.override?.(req)
@@ -129,8 +134,7 @@ export function fakeHost(opts: FakeOptions = {}) {
         case 'command': {
           const script = /never cut it short\):\n(.+)\n/.exec(req.prompt)?.[1] ?? /Run exactly this:\n(.+)\n/.exec(req.prompt)?.[1] ?? ''
           commands.push(script)
-          const r = await nextReview(script, '/')
-          return { ran: r.code === 0, exitCode: r.code, output: r.output }
+          return noted(script, await nextReview(script, '/'))
         }
         case 'findings':
           return { findings: [] }

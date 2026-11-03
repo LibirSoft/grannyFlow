@@ -526,6 +526,63 @@ describe('the base a stage review diffs against', () => {
   })
 })
 
+describe("the Claude Code helper's note", () => {
+  const helper = (extra: FakeOptions = {}) => fakeHost({ name: 'claude-code', direct: false, ...extra })
+  const reviewBase = (f: ReturnType<typeof fakeHost>) => /--base (\S+)/.exec(f.calls.find(c => c.label === 'review core r1 codex')!.prompt)?.[1]
+  const printing = (f: ReturnType<typeof fakeHost>, edit: (prompt: string, output: string) => string) => {
+    const agent = f.host.agent.bind(f.host)
+    f.host.agent = async req => {
+      const r = (await agent(req)) as { output?: unknown } | null
+      return req.kind === 'command' && r && typeof r.output === 'string' ? { ...r, output: edit(req.prompt, r.output) } : r
+    }
+  }
+
+  it('stays out of the HEAD and commit-count reads when the command ran', async () => {
+    const f = helper({ note: 'Ran the command via the helper.' })
+    const r = await runGranny(f.host, input())
+    expect(reviewBase(f)).toBe('deadbee1')
+    expect(f.logs.filter(l => l.includes('could not'))).toEqual([])
+    expect(f.logs).toContain("head core: the helper's note, kept out of the command's output: Ran the command via the helper.")
+    expect(r.stages[0]!.outcome).toBe('clean')
+  })
+
+  it('does not hide an empty stage: no commit still ends it no-changes', async () => {
+    const f = helper({ note: 'Ran the command via the helper.', commits: 0 })
+    const r = await runGranny(f.host, input())
+    expect(r.stages[0]).toMatchObject({ outcome: 'no-changes', note: 'the implementer made no commit: deadbee1..HEAD is empty, so there was nothing to review' })
+    expect(f.calls.some(c => c.label.startsWith('review'))).toBe(false)
+  })
+
+  it('never becomes the review base when it is one word', async () => {
+    const f = helper({ note: 'Done' })
+    await runGranny(f.host, input())
+    expect(reviewBase(f)).toBe('deadbee1')
+  })
+
+  it('takes the SHA and the count from the line that has their shape, not the last line', async () => {
+    const f = helper({ commits: 0 })
+    printing(f, (prompt, output) => (prompt.includes('git rev-parse --verify HEAD') ? `${output}Done\n` : prompt.includes('git rev-list --count') ? `${output}that is the count\n` : output))
+    const r = await runGranny(f.host, input())
+    expect(r.stages[0]).toMatchObject({ outcome: 'no-changes', note: 'the implementer made no commit: deadbee1..HEAD is empty, so there was nothing to review' })
+  })
+
+  it('reads no SHA from a word that is not hex, and falls back to the base', async () => {
+    const f = helper()
+    printing(f, (prompt, output) => (prompt.includes('git rev-parse --verify HEAD') ? 'Done\n' : output))
+    await runGranny(f.host, input())
+    expect(reviewBase(f)).toBe('main')
+    expect(f.logs.some(l => l.startsWith('core: could not read HEAD before the implementer ran - reviewing main...HEAD instead'))).toBe(true)
+  })
+
+  it('is still in the output when the command did not run', async () => {
+    const f = helper()
+    const agent = f.host.agent.bind(f.host)
+    f.host.agent = async req => (req.kind === 'command' && req.prompt.includes('git rev-parse --verify HEAD') ? { ran: false, exitCode: 127, output: '', note: 'git is not installed' } : agent(req))
+    await runGranny(f.host, input())
+    expect(f.logs.some(l => l.startsWith('core: could not read HEAD before the implementer ran - reviewing main...HEAD instead (exit 127)') && l.endsWith('git is not installed'))).toBe(true)
+  })
+})
+
 describe('red gates', () => {
   const gates = (red: string[]) => (req: { kind: string; label: string }) =>
     req.kind === 'implementation'

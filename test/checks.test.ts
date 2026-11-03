@@ -142,6 +142,12 @@ describe('checks', () => {
       expect(stage.note).toContain('metric not found in output')
     })
 
+    it("on Claude Code, reads the metric from what the check printed, never from the helper's note", async () => {
+      const f = scripted({ 'run-cov': [green('coverage: 60%')] }, { name: 'claude-code', direct: false, note: c => (c.includes('run-cov') ? 'Ran it, coverage: 95%' : undefined) })
+      const r = await runGranny(f.host, run({ checks: [{ name: 'cov', run: 'run-cov', maxRepairs: 0, metric: { pattern: 'coverage: ([0-9.]+)%', min: 80 } }] }))
+      expect(r.stages[0]!.checks?.[0]!.results[0]).toEqual({ name: 'cov', passed: false, code: 0, metric: 60, note: 'metric 60 is below min 80' })
+    })
+
     it('fails on a non-zero exit even when the metric is in bounds', async () => {
       const f = scripted({ 'run-cov': [{ code: 2, output: 'coverage: 90%' }] })
       const r = await runGranny(f.host, run({ maxRepairs: 0, checks: [{ name: 'cov', run: 'run-cov', metric: { pattern: 'coverage: ([0-9.]+)%', min: 80 } }] }))

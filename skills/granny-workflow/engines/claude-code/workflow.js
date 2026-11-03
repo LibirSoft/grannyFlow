@@ -913,8 +913,10 @@ var slug = (s) => s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, 
 var trimPath = (s) => s.replace(/\/+$/, "") || "/";
 var repoPathOf = (r) => typeof r === "string" ? r : r && typeof r === "object" ? r.repo : undefined;
 var baseName = (path) => path.slice(path.lastIndexOf("/") + 1);
-var lastLine = (output) => output.trim().split(`
-`).at(-1)?.trim() ?? "";
+var lineShaped = (output, shape) => output.split(`
+`).map((l) => l.trim()).find((l) => shape.test(l));
+var SHA = /^[0-9a-f]{7,64}$/i;
+var COUNT = /^\d+$/;
 var short = (sha) => sha.slice(0, 8);
 var STATUS_LINE = /^\s*[MADRCUT?!]{1,2}\s+\S/;
 var listed = (status) => status.map((l) => l.trim()).join(", ");
@@ -1035,14 +1037,19 @@ async function runGranny(host, input) {
       return { ran: r.code === 0, code: r.code, output: r.output };
     }
     const prompt = ask(cwd, label, `cd ${shellQuote(cwd)} && ${script}`);
-    const r = await call("granny", "command", label, phase, prompt, "write", config.roles.granny, cwd);
+    return helped(label, await call("granny", "command", label, phase, prompt, "write", config.roles.granny, cwd), `the ${label} runner returned nothing`);
+  };
+  const helped = (label, r, missing) => {
     const ran = Boolean(r?.ran);
-    return { ran, code: r?.exitCode ?? (ran ? 0 : "?"), output: r ? `${String(r.output ?? "")}${r.note ? `
-${r.note}` : ""}` : `the ${label} runner returned nothing` };
+    const note = typeof r?.note === "string" && r.note.trim() ? r.note : undefined;
+    if (ran && note)
+      host.log(`${label}: the helper's note, kept out of the command's output: ${note}`);
+    return { ran, code: r?.exitCode ?? (ran ? 0 : "?"), output: r ? `${String(r.output ?? "")}${!ran && note ? `
+${note}` : ""}` : missing };
   };
   const readHead = async (label, phase, cwd) => {
     const r = await shell(label, phase, "git rev-parse --verify HEAD", cwd);
-    const sha = r.ran && /^[0-9A-Za-z]+$/.test(lastLine(r.output)) ? lastLine(r.output) : undefined;
+    const sha = r.ran ? lineShaped(r.output, SHA) : undefined;
     return { sha, code: r.code, output: r.output };
   };
   const work = config.workDir.replace(/\/+$/, "");
@@ -1063,10 +1070,7 @@ ${r.note}` : ""}` : `the ${label} runner returned nothing` };
       r = await shell(label, "Worktree", script, repo);
     else {
       const prompt = worktreeCommandPrompt(repo, branch, `cd ${shellQuote(repo)} && ${script}`);
-      const a = await call("granny", "command", label, "Worktree", prompt, "write", config.roles.granny, repo);
-      const ran = Boolean(a?.ran);
-      r = { ran, code: a?.exitCode ?? (ran ? 0 : "?"), output: a ? `${String(a.output ?? "")}${a.note ? `
-${a.note}` : ""}` : "the worktree runner returned nothing" };
+      r = helped(label, await call("granny", "command", label, "Worktree", prompt, "write", config.roles.granny, repo), "the worktree runner returned nothing");
     }
     const path = r.ran ? reportedWorktree(r.output) : undefined;
     if (!path)
@@ -1507,8 +1511,9 @@ the last repair's deviations: ${deviations}` : ""}`;
         host.log(`${name}: the implementer reported startSha ${impl.startSha}, but HEAD was ${start} before it ran - reviewing ${start}...HEAD`);
       const commits = async (label) => {
         const count = await shell(label, "Implement", `git rev-list --count ${shellQuote(base)}..HEAD`, lane.cwd);
-        if (count.ran && /^\d+$/.test(lastLine(count.output)))
-          return Number(lastLine(count.output));
+        const n = count.ran ? lineShaped(count.output, COUNT) : undefined;
+        if (n !== undefined)
+          return Number(n);
         host.log(`${name}: could not count the commits in ${base}..HEAD - reviewing it anyway (exit ${count.code}): ${count.output.slice(-500)}`);
         return;
       };
