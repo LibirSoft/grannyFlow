@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- Checks: every check run records the HEAD it ran on (`checks[].head`). The final gate of a one-stage repo reuses the stage's last result only when HEAD is still that commit, and its log names the SHA; when a reviewer or the judge committed after the last gate, or HEAD could not be read, the checks run again. When the final check moves HEAD, the checks run once more without repairs (gate `pr-ready`); a red result sets `recheck: { passed: false, note }` and the branch is not PR-ready.
+
 ## 1.5.0
 
 ### Added
