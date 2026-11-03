@@ -64,7 +64,7 @@ describe('checks', () => {
     expect(f.cwds).toEqual([REPO])
     expect(r.stages[0]).toMatchObject({ outcome: 'clean', checks: [{ at: 'implement', attempt: 1, results: [{ name: 'tests', passed: true, code: 0 }] }] })
     expect(r).not.toHaveProperty('checks')
-    expect(f.logs).toContain('final review: final checks not rerun - 1 (core) ran them green last on this HEAD, and nothing changed since')
+    expect(f.logs).toContain('final review: final checks not rerun - 1 (core) ran them green last on start2, HEAD unchanged')
     expect(f.phases.slice(0, 3)).toEqual(['Implement', 'Checks', 'Review'])
     expect(f.logs).toContain('core: checks green (implement: tests)')
   })
@@ -201,7 +201,7 @@ describe('checks', () => {
     )
     const r = await runGranny(f.host, run({ maxRepairs: 0, checks: [TESTS] }))
     expect(f.events).toEqual(['implement core', 'check run-tests', 'review core r1 reviewer', 'fix core r1', 'check run-tests', 'pr-ready check'])
-    expect(r.finalReview).toMatchObject({ outcome: 'checks-failed', note: 'checks failed at final: 1 (core) ended with tests red on this HEAD, and nothing changed since' })
+    expect(r.finalReview).toMatchObject({ outcome: 'checks-failed', note: 'checks failed at final: 1 (core) ended with tests red on start3, HEAD unchanged' })
     expect(r.stages[0]).toMatchObject({ outcome: 'checks-failed', rounds: 1 })
     expect(r.stages[0]!.checks?.map(c => [c.at, c.results[0]!.passed])).toEqual([
       ['implement', true],
@@ -320,6 +320,19 @@ describe('checks', () => {
     const r = await runGranny(f.host, run({ checks: [TESTS, LINT] }, { stages: [{ name: 'core', task: 'WP-01', checks: ['tests'] }] }))
     expect(f.events.filter(e => e.startsWith('check'))).toEqual(['check run-tests'])
     expect(r.finalReview?.outcome).toBe('skipped')
+  })
+
+  it('rerun the checks at the final gate, and once more after the pr-ready check, when HEAD cannot be read', async () => {
+    const f = scripted({ 'run-tests': [green()] })
+    const run0 = f.host.run!
+    f.host.run = async (command, cwd) => (command.includes('git rev-parse --verify HEAD') ? { code: 128, output: 'fatal: not a git repository' } : run0(command, cwd))
+    const r = await runGranny(f.host, run({ checks: [TESTS] }))
+    expect(f.events.filter(e => e.startsWith('check') || e === 'pr-ready check')).toEqual(['check run-tests', 'check run-tests', 'pr-ready check', 'check run-tests'])
+    expect(r.stages[0]!.checks?.[0]).not.toHaveProperty('head')
+    expect(f.logs).toContain('final review: running the final checks - could not read the HEAD 1 (core) last ran them on, so their result is not reused')
+    expect(f.logs).toContain('pr-ready check: could not read HEAD after the pr-ready check or at the final checks - running them once more, without repairs')
+    expect(r.checks?.map(c => c.at)).toEqual(['final', 'pr-ready'])
+    expect(r.recheck).toEqual({ passed: true })
   })
 
   it('name an unknown branch state, not red commits, when a stage was skipped after a check runner failed', async () => {
@@ -461,31 +474,110 @@ describe('checks config', () => {
   })
 })
 
-describe('checks on a parallel lane in a real git repo', () => {
-  const git = (cwd: string, ...args: string[]) => {
-    const r = spawnSync('git', args, { cwd, encoding: 'utf8' })
-    if (r.status !== 0) throw new Error(`git ${args.join(' ')}: ${r.stderr}`)
-    return r.stdout.trim()
+const git = (cwd: string, ...args: string[]) => {
+  const r = spawnSync('git', args, { cwd, encoding: 'utf8' })
+  if (r.status !== 0) throw new Error(`git ${args.join(' ')}: ${r.stderr}`)
+  return r.stdout.trim()
+}
+const init = (repo: string) => {
+  mkdirSync(repo)
+  git(repo, 'init', '-q', '-b', 'main')
+  git(repo, 'config', 'user.email', 't@t')
+  git(repo, 'config', 'user.name', 't')
+  writeFileSync(join(repo, 'a.txt'), 'a\n')
+  git(repo, 'add', 'a.txt')
+  git(repo, 'commit', '-qm', 'init')
+}
+const commit = (cwd: string, file: string, text?: string) => {
+  if (text === undefined) git(cwd, 'rm', '-q', file)
+  else {
+    writeFileSync(join(cwd, file), text)
+    git(cwd, 'add', file)
   }
-  const init = (repo: string) => {
-    mkdirSync(repo)
-    git(repo, 'init', '-q', '-b', 'main')
-    git(repo, 'config', 'user.email', 't@t')
-    git(repo, 'config', 'user.name', 't')
-    writeFileSync(join(repo, 'a.txt'), 'a\n')
-    git(repo, 'add', 'a.txt')
-    git(repo, 'commit', '-qm', 'init')
-  }
-  const commit = (cwd: string, file: string, text?: string) => {
-    if (text === undefined) git(cwd, 'rm', '-q', file)
-    else {
-      writeFileSync(join(cwd, file), text)
-      git(cwd, 'add', file)
-    }
-    git(cwd, 'commit', '-qm', `${text === undefined ? 'fix' : 'test'}: ${file}`)
-  }
-  const done = (cwd: string, start: string) => ({ startSha: start, headSha: git(cwd, 'rev-parse', 'HEAD'), gatesGreen: true, gates: 'green', commits: [], untested: '' })
+  git(cwd, 'commit', '-qm', `${text === undefined ? 'fix' : 'test'}: ${file}`)
+}
+const done = (cwd: string, start: string) => ({ startSha: start, headSha: git(cwd, 'rev-parse', 'HEAD'), gatesGreen: true, gates: 'green', commits: [], untested: '' })
 
+describe('the HEAD a check gate ran on, in a real git repo', () => {
+  const GOOD = { name: 'tests', run: 'grep -qx good f.txt' }
+  const FINAL = { gatesGreen: true, gates: 'all green', commits: [], prBodyPath: '.granny/PR-BODY.md', issues: '' }
+  const oneStage = async (after: (req: AgentRequest, repo: string) => unknown = () => undefined) => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), 'granny-check-head-')))
+    const repo = join(root, 'r')
+    init(repo)
+    git(repo, 'checkout', '-qb', 'feat/x')
+    let gated = ''
+    const f = fakeHost({
+      commits: 'git',
+      shell: {},
+      override: req => {
+        if (req.kind !== 'implementation') return after(req, repo)
+        const start = git(repo, 'rev-parse', 'HEAD')
+        commit(repo, 'f.txt', 'good\n')
+        gated = git(repo, 'rev-parse', 'HEAD')
+        return done(repo, start)
+      },
+    })
+    try {
+      const r = await runGranny(f.host, { repo, branch: 'feat/x', base: 'main', stages: [{ name: 'core', task: 'WP-01' }], config: { worktree: false, checks: [GOOD] } })
+      return { f, r, gated, head: git(repo, 'rev-parse', 'HEAD'), checkRuns: f.commands.filter(c => c.includes(GOOD.run)).length }
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  }
+
+  it('records the HEAD each gate ran on and reuses the stage result at the final gate while HEAD is unchanged', async () => {
+    const { f, r, gated, checkRuns } = await oneStage()
+    expect(r.stages[0]).toMatchObject({ outcome: 'clean', checks: [{ at: 'implement', attempt: 1, head: gated, results: [{ name: 'tests', passed: true, code: 0 }] }] })
+    expect(checkRuns).toBe(1)
+    expect(f.logs).toContain(`final review: final checks not rerun - 1 (core) ran them green last on ${gated.slice(0, 8)}, HEAD unchanged`)
+    expect(r).not.toHaveProperty('checks')
+    expect(r).not.toHaveProperty('recheck')
+  })
+
+  it('reruns the final checks when a reviewer committed after the last green gate, and they fail', async () => {
+    const { f, r, gated, head, checkRuns } = await oneStage((req, repo) => {
+      if (req.role !== 'reviewer') return undefined
+      commit(repo, 'f.txt', 'bad\n')
+      return { findings: [] }
+    })
+    expect(r.stages[0]).toMatchObject({ outcome: 'clean' })
+    expect(checkRuns).toBe(2)
+    expect(f.logs).toContain(`final review: running the final checks - 1 (core) ran them last on ${gated.slice(0, 8)}, but HEAD is now ${head.slice(0, 8)}`)
+    expect(f.logs.some(l => l.includes('nothing changed since'))).toBe(false)
+    expect(r.finalReview).toMatchObject({ outcome: 'checks-failed' })
+    expect(r.checks).toEqual([{ at: 'final', attempt: 1, head, results: [{ name: 'tests', passed: false, code: 1 }] }])
+    expect(r).not.toHaveProperty('recheck')
+  })
+
+  it('reruns the checks once after the pr-ready check moved HEAD, and a red result marks the run not PR-ready', async () => {
+    const { f, r, gated, head, checkRuns } = await oneStage((req, repo) => {
+      if (req.kind !== 'final') return undefined
+      commit(repo, 'f.txt', 'bad\n')
+      return FINAL
+    })
+    expect(checkRuns).toBe(2)
+    expect(f.calls.some(c => c.label.startsWith('repair'))).toBe(false)
+    expect(r.checks).toEqual([{ at: 'pr-ready', attempt: 1, head, results: [{ name: 'tests', passed: false, code: 1 }] }])
+    expect(r.recheck).toMatchObject({ passed: false })
+    expect(r.recheck!.note).toContain('tests (exit 1)')
+    expect(f.logs).toContain(`pr-ready check: HEAD moved from ${gated.slice(0, 8)} to ${head.slice(0, 8)} after the final checks - running them once more, without repairs`)
+    expect(f.logs).toContain('pr-ready check: the checks are red after the pr-ready check - the branch is not PR-ready')
+  })
+
+  it('records a green recheck after the pr-ready check moved HEAD without breaking anything', async () => {
+    const { r, head, checkRuns } = await oneStage((req, repo) => {
+      if (req.kind !== 'final') return undefined
+      commit(repo, 'notes.txt', 'pr body tweak\n')
+      return FINAL
+    })
+    expect(checkRuns).toBe(2)
+    expect(r.recheck).toEqual({ passed: true })
+    expect(r.checks).toEqual([{ at: 'pr-ready', attempt: 1, head, results: [{ name: 'tests', passed: true, code: 0 }] }])
+  })
+})
+
+describe('checks on a parallel lane in a real git repo', () => {
   it('branch a lane from where the busy stage started, not from its unfinished red commits', async () => {
     const root = realpathSync(mkdtempSync(join(tmpdir(), 'granny-checks-lane-')))
     const a = join(root, 'a')

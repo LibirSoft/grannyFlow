@@ -91,7 +91,13 @@ export interface CheckResult {
 export interface CheckRun {
   at: string
   attempt: number
+  head?: string
   results: CheckResult[]
+}
+
+export interface Recheck {
+  passed: boolean
+  note?: string
 }
 
 export interface StageResult {
@@ -136,6 +142,7 @@ export interface RepoResult {
   worktree: string
   finalReview?: PlanResult
   checks?: CheckRun[]
+  recheck?: Recheck
   final: FinalReport | null
 }
 
@@ -149,6 +156,7 @@ export interface RunResult {
   stages: StageResult[]
   finalReview?: PlanResult
   checks?: CheckRun[]
+  recheck?: Recheck
   final: FinalReport | null
   repos?: RepoResult[]
 }

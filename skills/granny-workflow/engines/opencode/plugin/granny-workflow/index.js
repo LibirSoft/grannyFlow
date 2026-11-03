@@ -928,6 +928,9 @@ var slug = (s) => s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, 
 var trimPath = (s) => s.replace(/\/+$/, "") || "/";
 var repoPathOf = (r) => typeof r === "string" ? r : r && typeof r === "object" ? r.repo : undefined;
 var baseName = (path) => path.slice(path.lastIndexOf("/") + 1);
+var lastLine = (output) => output.trim().split(`
+`).at(-1)?.trim() ?? "";
+var short = (sha) => sha.slice(0, 8);
 function checkInput(input) {
   const errors = [];
   if (!input || typeof input !== "object")
@@ -1049,6 +1052,11 @@ async function runGranny(host, input) {
     const ran = Boolean(r?.ran);
     return { ran, code: r?.exitCode ?? (ran ? 0 : "?"), output: r ? `${String(r.output ?? "")}${r.note ? `
 ${r.note}` : ""}` : `the ${label} runner returned nothing` };
+  };
+  const readHead = async (label, phase, cwd) => {
+    const r = await shell(label, phase, "git rev-parse --verify HEAD", cwd);
+    const sha = r.ran && /^[0-9A-Za-z]+$/.test(lastLine(r.output)) ? lastLine(r.output) : undefined;
+    return { sha, code: r.code, output: r.output };
   };
   const setUpWorktree = async (repo, branch, from, label, shared) => {
     const script = worktreeScript(config, branch, from, worktreePath(repo, branch, config.worktreeDir, shared));
@@ -1172,7 +1180,8 @@ ${a.note}` : ""}` : "the worktree runner returned nothing" };
       const results = [];
       for (const check of checks)
         results.push(await runCheck(lane, name, check));
-      runs.push({ at, attempt: repairs + 1, results: results.map(({ output, broken, ...r }) => r) });
+      const head = (await readHead(`head ${name} ${at}`, CHECKS_PHASE, lane.cwd)).sha;
+      runs.push({ at, attempt: repairs + 1, ...head ? { head } : {}, results: results.map(({ output, broken, ...r }) => r) });
       const failed = results.filter((r) => !r.passed);
       if (!failed.length) {
         host.log(`${name}: checks green${repairs ? ` after ${repairs} repair${repairs > 1 ? "s" : ""}` : ""} (${at}: ${checks.map((c) => c.name).join(", ")})`);
@@ -1437,8 +1446,6 @@ the last repair's deviations: ${deviations}` : ""}`;
   const runStage = async (lane, st, i, name, began) => {
     let impl;
     let base = lane.base;
-    const lastLine = (output) => output.trim().split(`
-`).at(-1)?.trim() ?? "";
     const where = st.repo !== undefined && repoOf(st) !== primary ? { repo: repoOf(st) } : {};
     const task = st.task ? { number: i + 1, total: specs.length, name, task: st.task } : undefined;
     const checks = checksOf(st);
@@ -1446,8 +1453,8 @@ the last repair's deviations: ${deviations}` : ""}`;
     const ran = () => runs.length ? { checks: runs } : {};
     if (st.implement !== false) {
       host.phase("Implement");
-      const head = await shell(`head ${name}`, "Implement", "git rev-parse --verify HEAD", lane.cwd);
-      const start = head.ran && /^[0-9A-Za-z]+$/.test(lastLine(head.output)) ? lastLine(head.output) : undefined;
+      const head = await readHead(`head ${name}`, "Implement", lane.cwd);
+      const start = head.sha;
       began?.(start);
       if (start)
         base = start;
@@ -1643,6 +1650,7 @@ ${note}` : note } : result;
   const states = [...repoState.values()];
   const stageCount = (s) => specs.filter((st) => repoOf(st) === s.lane.repo).length;
   const finalRuns = new Map;
+  const reusedHead = new Map;
   const finalReview = async (s) => {
     const stages = stageCount(s);
     if (!stages)
@@ -1654,18 +1662,25 @@ ${note}` : note } : result;
     const single = stages === 1 && !s.merges ? specs.findIndex((st) => repoOf(st) === s.lane.repo) : -1;
     const last = single >= 0 ? results[single]?.checks?.at(-1) : undefined;
     const known = last && !last.results.some((r) => r.note === "check runner failed");
-    if (checks.length && last && known && last.results.map((r) => r.name).join(`
+    const same = checks.length && last && known && last.results.map((r) => r.name).join(`
 `) === checks.map((c) => c.name).join(`
-`)) {
+`);
+    const now = same ? (last.head ? await readHead(`head ${name}`, CHECKS_PHASE, s.lane.cwd) : undefined)?.sha : undefined;
+    if (same && now && now === last.head) {
+      reusedHead.set(s, now);
       const failed = last.results.filter((r) => !r.passed);
       if (!failed.length)
-        host.log(`${name}: final checks not rerun - ${nameOf(single)} ran them green last on this HEAD, and nothing changed since`);
+        host.log(`${name}: final checks not rerun - ${nameOf(single)} ran them green last on ${short(now)}, HEAD unchanged`);
       else {
-        const note = `checks failed at final: ${nameOf(single)} ended with ${failed.map((r) => r.name).join(", ")} red on this HEAD, and nothing changed since`;
+        const note = `checks failed at final: ${nameOf(single)} ended with ${failed.map((r) => r.name).join(", ")} red on ${short(now)}, HEAD unchanged`;
         host.log(`${name} not run - ${note}; the branch is not PR-ready, the final check still runs`);
         return { outcome: "checks-failed", rounds: 0, residual: [], unresolved: [], history: [], note };
       }
     } else if (checks.length) {
+      if (same) {
+        const why = !last.head ? `could not read the HEAD ${nameOf(single)} last ran them on` : !now ? "could not read HEAD" : `${nameOf(single)} ran them last on ${short(last.head)}, but HEAD is now ${short(now)}`;
+        host.log(`${name}: running the final checks - ${why}${now && last.head ? "" : ", so their result is not reused"}`);
+      }
       finalRuns.set(s, runs);
       const red = specs.findIndex((st, i) => repoOf(st) === s.lane.repo && results[i]?.outcome === "checks-failed");
       const noRepairs = !reviewed ? "no final review follows to see one" : red >= 0 ? `${nameOf(red)} already ended checks-failed` : undefined;
@@ -1703,14 +1718,30 @@ ${note}` : note } : result;
     for (const s of states)
       reviews.set(s, await finalReview(s));
   host.phase("PR ready");
+  const recheck = async (s, label, runs) => {
+    const checks = stageCount(s) ? finalChecksOf(s.lane.repo) : [];
+    if (!checks.length)
+      return;
+    const gated = runs.length ? runs.at(-1).head : reusedHead.get(s);
+    const now = (await readHead(`head ${label}`, "PR ready", s.lane.cwd)).sha;
+    if (gated && now === gated)
+      return;
+    host.log(`${label}: ${gated && now ? `HEAD moved from ${short(gated)} to ${short(now)} after the final checks` : "could not read HEAD after the pr-ready check or at the final checks"} - running them once more, without repairs`);
+    const gate = await checkGate(s.lane, label, "pr-ready", checks.map((c) => ({ ...c, maxRepairs: 0 })), runs);
+    if (gate.passed)
+      return { passed: true };
+    host.log(`${label}: the checks are red after the pr-ready check - the branch is not PR-ready`);
+    return { passed: false, note: gate.note };
+  };
   const check = async (s) => {
     const label = s.lane.repo === primary ? "pr-ready check" : `pr-ready check ${baseName(s.lane.repo)}`;
     const final = await call("granny", "final", label, "PR ready", finalPrompt(s.lane.p), "write", config.roles.granny, s.lane.cwd);
     if (!final)
       host.log(s.lane.repo === primary ? "final check returned nothing" : `${label} returned nothing`);
     const review = reviews.get(s);
-    const runs = finalRuns.get(s);
-    return { repo: s.lane.repo, base: s.lane.base, worktree: s.lane.cwd, ...review ? { finalReview: review } : {}, ...runs ? { checks: runs } : {}, final };
+    const runs = finalRuns.get(s) ?? [];
+    const again = await recheck(s, label, runs);
+    return { repo: s.lane.repo, base: s.lane.base, worktree: s.lane.cwd, ...review ? { finalReview: review } : {}, ...runs.length ? { checks: runs } : {}, ...again ? { recheck: again } : {}, final };
   };
   const finals = [];
   if (config.parallel)
@@ -1721,6 +1752,7 @@ ${note}` : note } : result;
   const final = finals[0].final;
   const primaryReview = finals[0].finalReview;
   const primaryChecks = finals[0].checks;
+  const primaryRecheck = finals[0].recheck;
   return {
     repo: input.repo,
     branch: input.branch,
@@ -1730,6 +1762,7 @@ ${note}` : note } : result;
     stages: results,
     ...primaryReview ? { finalReview: primaryReview } : {},
     ...primaryChecks ? { checks: primaryChecks } : {},
+    ...primaryRecheck ? { recheck: primaryRecheck } : {},
     final,
     ...finals.length > 1 ? { repos: finals } : {}
   };

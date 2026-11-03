@@ -42,6 +42,7 @@ import type {
   PlanDraft,
   PlanFix,
   PlanResult,
+  Recheck,
   RepoResult,
   ResultKind,
   Role,
@@ -110,6 +111,8 @@ const slug = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(
 const trimPath = (s: string) => s.replace(/\/+$/, '') || '/'
 const repoPathOf = (r: RepoInput): unknown => (typeof r === 'string' ? r : r && typeof r === 'object' ? r.repo : undefined)
 const baseName = (path: string) => path.slice(path.lastIndexOf('/') + 1)
+const lastLine = (output: string) => output.trim().split('\n').at(-1)?.trim() ?? ''
+const short = (sha: string) => sha.slice(0, 8)
 
 export function checkInput(input: RunInput): string[] {
   const errors: string[] = []
@@ -218,6 +221,12 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
     const r = await call('granny', 'command', label, phase, prompt, 'write', config.roles.granny, cwd)
     const ran = Boolean(r?.ran)
     return { ran, code: r?.exitCode ?? (ran ? 0 : '?'), output: r ? `${String(r.output ?? '')}${r.note ? `\n${r.note}` : ''}` : `the ${label} runner returned nothing` }
+  }
+
+  const readHead = async (label: string, phase: string, cwd: string) => {
+    const r = await shell(label, phase, 'git rev-parse --verify HEAD', cwd)
+    const sha = r.ran && /^[0-9A-Za-z]+$/.test(lastLine(r.output)) ? lastLine(r.output) : undefined
+    return { sha, code: r.code, output: r.output }
   }
 
   const setUpWorktree = async (repo: string, branch: string, from: string, label: string, shared: boolean): Promise<string> => {
@@ -330,7 +339,8 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
     for (let repairs = 0; ; repairs++) {
       const results: Array<CheckResult & { output: string; broken?: true }> = []
       for (const check of checks) results.push(await runCheck(lane, name, check))
-      runs.push({ at, attempt: repairs + 1, results: results.map(({ output, broken, ...r }) => r) })
+      const head = (await readHead(`head ${name} ${at}`, CHECKS_PHASE, lane.cwd)).sha
+      runs.push({ at, attempt: repairs + 1, ...(head ? { head } : {}), results: results.map(({ output, broken, ...r }) => r) })
       const failed = results.filter(r => !r.passed)
       if (!failed.length) {
         host.log(`${name}: checks green${repairs ? ` after ${repairs} repair${repairs > 1 ? 's' : ''}` : ''} (${at}: ${checks.map(c => c.name).join(', ')})`)
@@ -602,7 +612,6 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
   const runStage = async (lane: Lane, st: StageSpec, i: number, name: string, began?: (start?: string) => void): Promise<StageResult> => {
     let impl: Implementation | undefined
     let base = lane.base
-    const lastLine = (output: string) => output.trim().split('\n').at(-1)?.trim() ?? ''
     const where = st.repo !== undefined && repoOf(st) !== primary ? { repo: repoOf(st) } : {}
     const task: StageTask | undefined = st.task ? { number: i + 1, total: specs.length, name, task: st.task } : undefined
     const checks = checksOf(st)
@@ -610,8 +619,8 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
     const ran = () => (runs.length ? { checks: runs } : {})
     if (st.implement !== false) {
       host.phase('Implement')
-      const head = await shell(`head ${name}`, 'Implement', 'git rev-parse --verify HEAD', lane.cwd)
-      const start = head.ran && /^[0-9A-Za-z]+$/.test(lastLine(head.output)) ? lastLine(head.output) : undefined
+      const head = await readHead(`head ${name}`, 'Implement', lane.cwd)
+      const start = head.sha
       began?.(start)
       if (start) base = start
       else host.log(`${name}: could not read HEAD before the implementer ran - reviewing ${lane.base}...HEAD instead (exit ${head.code}): ${head.output.slice(-500)}`)
@@ -810,6 +819,7 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
   const states = [...repoState.values()]
   const stageCount = (s: RepoState) => specs.filter(st => repoOf(st) === s.lane.repo).length
   const finalRuns = new Map<RepoState, CheckRun[]>()
+  const reusedHead = new Map<RepoState, string>()
   const finalReview = async (s: RepoState): Promise<PlanResult | undefined> => {
     const stages = stageCount(s)
     if (!stages) return undefined
@@ -820,15 +830,22 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
     const single = stages === 1 && !s.merges ? specs.findIndex(st => repoOf(st) === s.lane.repo) : -1
     const last = single >= 0 ? results[single]?.checks?.at(-1) : undefined
     const known = last && !last.results.some(r => r.note === 'check runner failed')
-    if (checks.length && last && known && last.results.map(r => r.name).join('\n') === checks.map(c => c.name).join('\n')) {
+    const same = checks.length && last && known && last.results.map(r => r.name).join('\n') === checks.map(c => c.name).join('\n')
+    const now = same ? (last.head ? await readHead(`head ${name}`, CHECKS_PHASE, s.lane.cwd) : undefined)?.sha : undefined
+    if (same && now && now === last.head) {
+      reusedHead.set(s, now)
       const failed = last.results.filter(r => !r.passed)
-      if (!failed.length) host.log(`${name}: final checks not rerun - ${nameOf(single)} ran them green last on this HEAD, and nothing changed since`)
+      if (!failed.length) host.log(`${name}: final checks not rerun - ${nameOf(single)} ran them green last on ${short(now)}, HEAD unchanged`)
       else {
-        const note = `checks failed at final: ${nameOf(single)} ended with ${failed.map(r => r.name).join(', ')} red on this HEAD, and nothing changed since`
+        const note = `checks failed at final: ${nameOf(single)} ended with ${failed.map(r => r.name).join(', ')} red on ${short(now)}, HEAD unchanged`
         host.log(`${name} not run - ${note}; the branch is not PR-ready, the final check still runs`)
         return { outcome: 'checks-failed', rounds: 0, residual: [], unresolved: [], history: [], note }
       }
     } else if (checks.length) {
+      if (same) {
+        const why = !last.head ? `could not read the HEAD ${nameOf(single)} last ran them on` : !now ? 'could not read HEAD' : `${nameOf(single)} ran them last on ${short(last.head)}, but HEAD is now ${short(now)}`
+        host.log(`${name}: running the final checks - ${why}${now && last.head ? '' : ', so their result is not reused'}`)
+      }
       finalRuns.set(s, runs)
       const red = specs.findIndex((st, i) => repoOf(st) === s.lane.repo && results[i]?.outcome === 'checks-failed')
       const noRepairs = !reviewed ? 'no final review follows to see one' : red >= 0 ? `${nameOf(red)} already ended checks-failed` : undefined
@@ -860,13 +877,29 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
   else for (const s of states) reviews.set(s, await finalReview(s))
 
   host.phase('PR ready')
+  const recheck = async (s: RepoState, label: string, runs: CheckRun[]): Promise<Recheck | undefined> => {
+    const checks = stageCount(s) ? finalChecksOf(s.lane.repo) : []
+    if (!checks.length) return undefined
+    const gated = runs.length ? runs.at(-1)!.head : reusedHead.get(s)
+    const now = (await readHead(`head ${label}`, 'PR ready', s.lane.cwd)).sha
+    if (gated && now === gated) return undefined
+    host.log(
+      `${label}: ${gated && now ? `HEAD moved from ${short(gated)} to ${short(now)} after the final checks` : 'could not read HEAD after the pr-ready check or at the final checks'} - running them once more, without repairs`,
+    )
+    const gate = await checkGate(s.lane, label, 'pr-ready', checks.map(c => ({ ...c, maxRepairs: 0 })), runs)
+    if (gate.passed) return { passed: true }
+    host.log(`${label}: the checks are red after the pr-ready check - the branch is not PR-ready`)
+    return { passed: false, note: gate.note }
+  }
+
   const check = async (s: RepoState): Promise<RepoResult> => {
     const label = s.lane.repo === primary ? 'pr-ready check' : `pr-ready check ${baseName(s.lane.repo)}`
     const final = (await call('granny', 'final', label, 'PR ready', finalPrompt(s.lane.p), 'write', config.roles.granny, s.lane.cwd)) as FinalReport | null
     if (!final) host.log(s.lane.repo === primary ? 'final check returned nothing' : `${label} returned nothing`)
     const review = reviews.get(s)
-    const runs = finalRuns.get(s)
-    return { repo: s.lane.repo, base: s.lane.base, worktree: s.lane.cwd, ...(review ? { finalReview: review } : {}), ...(runs ? { checks: runs } : {}), final }
+    const runs = finalRuns.get(s) ?? []
+    const again = await recheck(s, label, runs)
+    return { repo: s.lane.repo, base: s.lane.base, worktree: s.lane.cwd, ...(review ? { finalReview: review } : {}), ...(runs.length ? { checks: runs } : {}), ...(again ? { recheck: again } : {}), final }
   }
   const finals: RepoResult[] = []
   if (config.parallel) finals.push(...(await Promise.all(states.map(check))))
@@ -875,6 +908,7 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
   const final = finals[0]!.final
   const primaryReview = finals[0]!.finalReview
   const primaryChecks = finals[0]!.checks
+  const primaryRecheck = finals[0]!.recheck
   return {
     repo: input.repo,
     branch: input.branch,
@@ -884,6 +918,7 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
     stages: results,
     ...(primaryReview ? { finalReview: primaryReview } : {}),
     ...(primaryChecks ? { checks: primaryChecks } : {}),
+    ...(primaryRecheck ? { recheck: primaryRecheck } : {}),
     final,
     ...(finals.length > 1 ? { repos: finals } : {}),
   }
