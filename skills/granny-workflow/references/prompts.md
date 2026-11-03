@@ -328,7 +328,7 @@ REVIEW:
 <findings as JSON>
 ```
 
-## Judge - from round 2 on (the plan judge gets the same EARLIER ROUNDS block; one "Round N sent" entry per earlier fix round, and P0/P1 findings join the list once a fixer declined findings)
+## Judge - from round 2 on (the plan judge gets the same EARLIER ROUNDS block; one "Round N sent" entry per earlier fix round, followed by its "kept as residual" list when that round left residual findings, and P0/P1 findings join the list once a fixer declined findings)
 
 ```text
 You are the JUDGE scoring a code review. Repo <repo>, branch <branch>, stage diff `'<stage start sha>'...HEAD`. Do not edit anything.
@@ -353,6 +353,16 @@ Round 1 sent to the fixer:
   }
 ]
 The fixer's deviations (findings it did not apply, and why): <the fixer's deviations>
+Round 1 kept as residual (not sent to the fixer):
+[
+  {
+    "label": "r1/<reviewer>-F<m>",
+    "severity": "<severity>",
+    "file": "<file>",
+    "title": "<title>",
+    "detail": "<detail>"
+  }
+]
 
 When a finding below repeats one of those earlier findings, set its repeatOf to that label. A repeat of a finding the fixer declined with a convincing reason that the code backs scores low - cite the label and the fixer's reason in your reason. When the fixer's reason is wrong, score the repeat on its merits (high when it is real) and say in reason why the fixer's reason does not hold. A repeat of a finding the fixer applied: check the fix in the code and score what is still wrong. A repeat of a residual finding: the fixer never saw it - score it on its merits.
 

@@ -37,7 +37,7 @@ for each stage - independent stages at the same time (parallel, default on):
      ├─ no reviewer reports a finding ─────────────► stage clean (without checks: gates-red when the last implementer or fix left gates red)
      └─ P0/P1 findings go straight to the implementer; the judge scores the rest 0-100 and merges duplicates
           ├─ any P0/P1, or score > threshold ─► implementer fixes those ─► checks again ─► review again
-          └─ none ─► stage done; the rest are "residual" for you
+          └─ none ─► stage done; the rest are "residual" for you, with the residual of earlier rounds
      cap: maxRounds reviews per stage
      a stage in another repo works in that repo's worktree; one whose repo is busy works in its own worktree, merged back after
 after the last stage (none threw): the checks its stages selected on every repo's whole branch (repaired only when a final review follows; red: not PR-ready, no final review),
@@ -57,7 +57,7 @@ The loop is code, not a prompt: on Claude Code and opencode an engine drives eve
 - **Parallel stages** (on by default, `"parallel": false` turns it off) - independent stages run at the same time. One run can span several repos (`repos`): the same logo change in two frontends, a Resilience4j config in every service - each repo gets its own worktree and its stages start together. Inside one repo, a stage that does not build on the one before (`after: []`, which the planner sets) runs in its own worktree and is merged back after its review loop; the implementer resolves a merge conflict, and granny checks with `git merge-base --is-ancestor` that the lane really is in the branch before it removes the lane - a lane that did not merge fails the run and stays where it is. A stage without `after` waits for the previous stage in its repo, so a plain stage list runs in order as before.
 - **Checks** (optional, `checks`) - commands granny runs itself, not the agents: after the implementer, after every fix, on the whole branch before the final review, and once more when the final check moved HEAD. A red check - a failing exit code, or a metric such as coverage outside its bounds - goes back to the implementer for a repair, at most `maxRepairs` times; a stage that stays red is never reviewed. Granny reads `git status --porcelain` before every check run and never checks or reviews uncommitted work: the implementer is asked to commit it first (the plan files stay uncommitted and do not count). On opencode granny executes the command directly; on Claude Code a helper agent runs it and reports the exit code.
 - **Reviewers** - as many as you configure, of any kind: Codex (the CLI or OpenAI's Codex plugin), a host model, or any CLI that answers a prompt. They all review every round at the same time; one that fails twice ends the stage `review-failed` instead of reading as clean.
-- **Judge** - P0/P1 findings skip it and go straight to the implementer. It scores every other finding 0-100 and merges duplicates across reviewers; findings above the threshold are fixed, the rest are left for you as residual.
+- **Judge** - P0/P1 findings skip it and go straight to the implementer. It scores every other finding 0-100 and merges duplicates across reviewers; findings above the threshold are fixed, the rest are left for you as residual - every round's, so a stage that ends `clean` can still list residual findings from an earlier round.
 
 ## Hosts
 
