@@ -496,6 +496,8 @@ describe('the base a stage review diffs against', () => {
     const r = await runGranny(f.host, input())
     expect(r.stages[0]).toMatchObject({ stage: 'core', outcome: 'no-changes', rounds: 0, residual: [], unresolved: [], history: [] })
     expect(r.stages[0]!.note).toBe('the implementer made no commit: start1..HEAD is empty, so there was nothing to review')
+    expect(f.probes).toEqual(['git rev-parse --verify HEAD', 'git rev-list --count start1..HEAD', 'git status --porcelain'])
+    expect(f.calls.filter(c => c.kind === 'implementation')).toHaveLength(1)
     expect(f.commands).toHaveLength(0)
     expect(f.calls.some(c => c.label.startsWith('review'))).toBe(false)
     expect(r.final).not.toBeNull()

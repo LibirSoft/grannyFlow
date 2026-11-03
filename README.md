@@ -26,7 +26,8 @@ optional - given a plan and "planReview": true (default false):
      └─ round-cap or review-failed ─► stop and report; nothing is implemented
 for each stage - independent stages at the same time (parallel, default on):
   granny reads HEAD, the implementer builds the stage
-     ├─ no commit since that HEAD ─► stage no-changes, not reviewed; the stages that build on it are skipped
+     ├─ no commit since that HEAD ─► one commit prompt when the tree is dirty; still no commit ─► stage no-changes,
+     │  not reviewed; the stages that build on it are skipped
   checks (config checks, default none): granny runs them itself; red ones go back to the implementer for a repair, up to maxRepairs
      never on uncommitted work: a dirty tree goes back to the implementer to commit, which spends a repair
      ├─ still red ─► stage checks-failed, not reviewed; the stages that build on it, and the later ones in its repo, are skipped

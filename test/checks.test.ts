@@ -629,6 +629,10 @@ describe('uncommitted work, in a real git repo', () => {
     onAsk: (req: AgentRequest, repo: string) => void,
     other: (req: AgentRequest, repo: string) => unknown = () => undefined,
     checks: unknown[] = [GOOD],
+    first: (repo: string) => void = repo => {
+      commit(repo, 'f.txt', 'bad\n')
+      writeFileSync(join(repo, 'f.txt'), 'good\n')
+    },
   ) => {
     const root = realpathSync(mkdtempSync(join(tmpdir(), 'granny-clean-tree-')))
     const repo = join(root, 'r')
@@ -640,10 +644,8 @@ describe('uncommitted work, in a real git repo', () => {
       override: req => {
         if (req.kind !== 'implementation') return other(req, repo)
         const start = git(repo, 'rev-parse', 'HEAD')
-        if (req.label === 'implement core') {
-          commit(repo, 'f.txt', 'bad\n')
-          writeFileSync(join(repo, 'f.txt'), 'good\n')
-        } else onAsk(req, repo)
+        if (req.label === 'implement core') first(repo)
+        else onAsk(req, repo)
         return done(repo, start)
       },
     })
@@ -708,6 +710,69 @@ describe('uncommitted work, in a real git repo', () => {
     expect(r.checks).toEqual([{ at: 'pr-ready', attempt: 1, head, results: [{ name: 'tests', passed: true, code: 0 }] }])
     expect(r.recheck).toEqual({ passed: false, note: 'uncommitted changes after the checks at pr-ready: ?? out.txt' })
     expect(f.logs).toContain('pr-ready check: the checks left uncommitted changes after the pr-ready check - the branch is not PR-ready: ?? out.txt')
+  })
+})
+
+describe('a stage whose implementer only left uncommitted work, in a real git repo', () => {
+  const GOOD = { name: 'tests', run: 'grep -qx good f.txt' }
+  const writeOnly = (repo: string) => writeFileSync(join(repo, 'f.txt'), 'good\n')
+  const commitAll = (_: AgentRequest, repo: string) => {
+    git(repo, 'add', 'f.txt')
+    git(repo, 'commit', '-qm', 'feat: f.txt')
+  }
+  const runWriteOnly = async (onAsk: (req: AgentRequest, repo: string) => void, checks: unknown[]) => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), 'granny-write-only-')))
+    const repo = join(root, 'r')
+    init(repo)
+    git(repo, 'checkout', '-qb', 'feat/x')
+    const f = fakeHost({
+      commits: 'git',
+      shell: {},
+      override: req => {
+        if (req.kind !== 'implementation') return undefined
+        const start = git(repo, 'rev-parse', 'HEAD')
+        if (req.label === 'implement core') writeOnly(repo)
+        else if (req.label === 'implement api') commit(repo, 'g.txt', 'api\n')
+        else onAsk(req, repo)
+        return done(repo, start)
+      },
+    })
+    try {
+      const stages = [{ name: 'core', task: 'WP-01' }, { name: 'api', task: 'WP-02' }]
+      const r = await runGranny(f.host, { repo, branch: 'feat/x', base: 'main', stages, config: { worktree: false, checks } })
+      return { f, r, status: git(repo, 'status', '--porcelain'), checkRuns: f.commands.filter(c => c.includes(GOOD.run)).length }
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  }
+  const asked = (f: ReturnType<typeof fakeHost>) => f.calls.filter(c => c.kind === 'implementation').map(c => c.label)
+
+  it('asks the implementer to commit before ending the stage no-changes, then checks and reviews the commit', async () => {
+    const { f, r, checkRuns } = await runWriteOnly(commitAll, [GOOD])
+    expect(asked(f).slice(0, 2)).toEqual(['implement core', 'commit core implement'])
+    expect(f.calls.find(c => c.label === 'commit core implement')!.prompt).toContain('?? f.txt')
+    expect(checkRuns).toBeGreaterThan(0)
+    expect(r.stages[0]).toMatchObject({ outcome: 'clean', checks: [{ at: 'implement', attempt: 1, results: [{ name: 'tests', passed: true }] }] })
+    expect(r.stages[1]!.outcome).not.toBe('skipped')
+  })
+
+  it('asks once without checks, then reviews the commit', async () => {
+    const { f, r } = await runWriteOnly(commitAll, [])
+    expect(asked(f).filter(l => l.includes('core'))).toEqual(['implement core', 'commit core implement'])
+    expect(f.calls.some(c => c.label === 'review core r1 reviewer')).toBe(true)
+    expect(r.stages[0]!.outcome).toBe('clean')
+    expect(r.stages[0]).not.toHaveProperty('note')
+  })
+
+  it('ends the stage no-changes, naming the uncommitted work, when the commit step commits nothing', async () => {
+    const { f, r, status, checkRuns } = await runWriteOnly(() => {}, [GOOD])
+    expect(asked(f).filter(l => l.includes('core'))).toEqual(['implement core', 'commit core implement'])
+    expect(checkRuns).toBe(0)
+    expect(f.calls.some(c => c.role === 'reviewer')).toBe(false)
+    expect(status).toBe('?? f.txt')
+    expect(r.stages[0]).toMatchObject({ outcome: 'no-changes', rounds: 0 })
+    expect(r.stages[0]!.note).toBe('the implementer made no commit: the work it left is uncommitted (?? f.txt), so there was nothing to review')
+    expect(r.stages[1]!.outcome).toBe('skipped')
   })
 })
 

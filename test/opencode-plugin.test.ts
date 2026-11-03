@@ -186,6 +186,14 @@ describe('opencode plugin helpers', () => {
     expect(text).toContain('- checks after the final check: RED - NOT PR-ready after the pr-ready check moved HEAD: uncommitted changes after the checks at pr-ready: ?? out.txt')
   })
 
+  it('names the work a no-changes stage left uncommitted in the finish summary', () => {
+    const final = { gatesGreen: true, gates: 'ok', commits: [], prBodyPath: '.granny/PR-BODY.md', issues: '' }
+    const note = 'the implementer made no commit: the work it left is uncommitted (?? f.txt), so there was nothing to review'
+    const stage = { stage: 'one', outcome: 'no-changes' as const, rounds: 0, residual: [], unresolved: [], history: [], note }
+    const text = summarize({ repo: '/r', branch: 'feat/x', base: 'main', worktree: '/r', stages: [stage], final }, false)
+    expect(text).toContain(`- one: no-changes, 0 review round(s) - ${note}`)
+  })
+
   it('parses provider/model#variant refs', () => {
     expect(modelRef('anthropic/claude-sonnet-5-5#high')).toEqual({ providerID: 'anthropic', id: 'claude-sonnet-5-5', variant: 'high' })
     expect(modelRef('zai-coding-plan/glm-5.3')).toEqual({ providerID: 'zai-coding-plan', id: 'glm-5.3' })

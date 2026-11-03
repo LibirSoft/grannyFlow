@@ -141,7 +141,7 @@ export function summarize(result: RunResult, worktree: boolean): string {
   }
   const lines = result.stages.map(
     s =>
-      `${line(s, s.repo ? `${s.stage} (${s.repo})` : s.stage)}${s.outcome === 'checks-failed' && s.note ? ` - ${s.note.split('\n')[0]}` : ''}${s.note && s.note.includes('in parallel on') ? ` - ${s.note.split('\n').at(-1)}` : ''}`,
+      `${line(s, s.repo ? `${s.stage} (${s.repo})` : s.stage)}${(s.outcome === 'checks-failed' || s.outcome === 'no-changes') && s.note ? ` - ${s.note.split('\n')[0]}` : ''}${s.note && s.note.includes('in parallel on') ? ` - ${s.note.split('\n').at(-1)}` : ''}`,
   )
   if (result.draft) {
     lines.push(`- plan written: ${result.draft.files.join(', ')} - ${result.draft.stages.length} proposed stage(s)${result.draft.questions ? ', open questions for the user' : ''}`)

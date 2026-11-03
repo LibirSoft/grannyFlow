@@ -94,7 +94,7 @@ export function renderPrompts(): string {
       repairPrompt(p, '<stage name>', 'implement', 1, [{ name: '<check name>', run: '<check run>', code: '<exit code>', note: '<metric note>', output: '<last 3000 characters of the output>' }], stage),
     ],
     [
-      'Implementer - commit (`git status --porcelain` listed uncommitted changes before a check gate - label `commit <stage> <gate> #<n>`, a repair - or, with no checks, after the implementer or a fix - label `commit <stage> implement` or `commit <stage> fix r<n>`)',
+      'Implementer - commit (`git status --porcelain` listed uncommitted changes before a check gate - label `commit <stage> <gate> #<n>`, a repair - or, with no checks or no commit at all, after the implementer, and with no checks after a fix - label `commit <stage> implement` or `commit <stage> fix r<n>`)',
       commitPrompt(p, '<stage name>', 'implement', ' M <file>\n?? <file>', stage),
     ],
     ['Implementer - merge (a stage that ran in its own worktree; its merge stopped on conflicts)', mergePrompt(p, '<stage name>', '<lane branch>', '<git merge output>')],

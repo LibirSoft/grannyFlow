@@ -230,7 +230,7 @@ Output (tail):
 ```
 ```
 
-## Implementer - commit (`git status --porcelain` listed uncommitted changes before a check gate - label `commit <stage> <gate> #<n>`, a repair - or, with no checks, after the implementer or a fix - label `commit <stage> implement` or `commit <stage> fix r<n>`)
+## Implementer - commit (`git status --porcelain` listed uncommitted changes before a check gate - label `commit <stage> <gate> #<n>`, a repair - or, with no checks or no commit at all, after the implementer, and with no checks after a fix - label `commit <stage> implement` or `commit <stage> fix r<n>`)
 
 ```text
 Working repo: <repo>, branch `<branch>` (verify with `git branch --show-current`). Never touch `<base>`, never rebase, never force-push, never `git remote add`, never push, never open a PR.

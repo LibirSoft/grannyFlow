@@ -345,17 +345,21 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
 
   const detail = (r: CheckResult) => r.note ?? `exit ${r.code}`
 
-  const commitWork = async (lane: Lane, name: string, at: string, stage?: StageTask): Promise<{ impl?: Implementation; by?: string; note?: string }> => {
+  const commitWork = async (lane: Lane, name: string, at: string, stage?: StageTask): Promise<{ impl?: Implementation; by?: string; left?: string[] }> => {
     const dirty = await uncommitted(`status ${name} ${at}`, 'Implement', lane.cwd)
     if (!dirty.length) return {}
     host.log(`${name}: uncommitted changes after ${at} - asking the implementer to commit them: ${listed(dirty)}`)
     const label = `commit ${name} ${at}`
     const impl = await implement(lane, label, commitPrompt(lane.p, name, at, dirty.join('\n'), stage))
     const left = await uncommitted(`status ${name} ${at} after commit`, 'Implement', lane.cwd)
-    if (!left.length) return { impl, by: `the commit step (${label})` }
+    return { impl, by: `the commit step (${label})`, ...(left.length ? { left } : {}) }
+  }
+
+  const unreviewed = (name: string, at: string, left: string[] | undefined) => {
+    if (!left) return undefined
     const note = `uncommitted changes after ${at}: ${listed(left)} - the review saw HEAD without them`
     host.log(`${name}: ${note}`)
-    return { impl, by: `the commit step (${label})`, note }
+    return note
   }
 
   const checkGate = async (lane: Lane, name: string, at: string, checks: CheckConfig[], runs: CheckRun[], stage?: StageTask): Promise<{ passed: boolean; note?: string }> => {
@@ -610,7 +614,8 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
       } else if (subject.kind === 'diff') {
         const left = await commitWork(lane, name, `fix r${round}`, subject.stage)
         if (left.impl && gates) Object.assign(gates, { green: left.impl.gatesGreen, text: left.impl.gates, by: left.by })
-        if (left.note) notes.push(left.note)
+        const note = unreviewed(name, `fix r${round}`, left.left)
+        if (note) notes.push(note)
       }
     }
     host.log(`${name}: hit the ${config.maxRounds}-round cap without a clean review`)
@@ -666,7 +671,7 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
     const runs: CheckRun[] = []
     const ran = () => (runs.length ? { checks: runs } : {})
     const notes: string[] = []
-    let committed: { impl?: Implementation; by?: string } = {}
+    let committed: { impl?: Implementation; by?: string; left?: string[] } = {}
     if (st.implement !== false) {
       host.phase('Implement')
       const head = await readHead(`head ${name}`, 'Implement', lane.cwd)
@@ -677,11 +682,23 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
       impl = await implement(lane, `implement ${name}`, implementPrompt(lane.p, st, i, specs.length, name, buildsOnEarlier(i)))
       if (!impl.gatesGreen) host.log(`${name}: implementer ended with RED gates - review will see it`)
       if (start && impl.startSha !== start) host.log(`${name}: the implementer reported startSha ${impl.startSha}, but HEAD was ${start} before it ran - reviewing ${start}...HEAD`)
-      const count = await shell(`commits ${name}`, 'Implement', `git rev-list --count ${shellQuote(base)}..HEAD`, lane.cwd)
-      if (!count.ran || !/^\d+$/.test(lastLine(count.output))) {
+      const commits = async (label: string) => {
+        const count = await shell(label, 'Implement', `git rev-list --count ${shellQuote(base)}..HEAD`, lane.cwd)
+        if (count.ran && /^\d+$/.test(lastLine(count.output))) return Number(lastLine(count.output))
         host.log(`${name}: could not count the commits in ${base}..HEAD - reviewing it anyway (exit ${count.code}): ${count.output.slice(-500)}`)
-      } else if (Number(lastLine(count.output)) === 0) {
-        const note = `the implementer made no commit: ${base}..HEAD is empty, so there was nothing to review`
+        return undefined
+      }
+      let left: string[] | undefined
+      let count = await commits(`commits ${name}`)
+      if (count === 0) {
+        committed = await commitWork(lane, name, 'implement', task)
+        left = committed.left
+        if (committed.impl) count = await commits(`commits ${name} after commit`)
+      }
+      if (count === 0) {
+        const note = left
+          ? `the implementer made no commit: the work it left is uncommitted (${listed(left)}), so there was nothing to review`
+          : `the implementer made no commit: ${base}..HEAD is empty, so there was nothing to review`
         host.log(`${name}: no-changes - ${note}`)
         return { stage: name, ...where, implementation: impl, outcome: 'no-changes', rounds: 0, residual: [], unresolved: [], history: [], note }
       }
@@ -689,9 +706,9 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
         const gate = await checkGate(lane, name, 'implement', checks, runs, task)
         if (!gate.passed) return { stage: name, ...where, implementation: impl, outcome: 'checks-failed', rounds: 0, residual: [], unresolved: [], history: [], note: gate.note, ...ran() }
       } else {
-        const left = await commitWork(lane, name, 'implement', task)
-        committed = left
-        if (left.note) notes.push(left.note)
+        if (!committed.impl) left = (committed = await commitWork(lane, name, 'implement', task)).left
+        const note = unreviewed(name, 'implement', left)
+        if (note) notes.push(note)
       }
     } else {
       began?.()

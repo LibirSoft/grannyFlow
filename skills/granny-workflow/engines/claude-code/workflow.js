@@ -1178,11 +1178,14 @@ ${a.note}` : ""}` : "the worktree runner returned nothing" };
     const impl = await implement(lane, label, commitPrompt(lane.p, name, at, dirty.join(`
 `), stage));
     const left = await uncommitted(`status ${name} ${at} after commit`, "Implement", lane.cwd);
-    if (!left.length)
-      return { impl, by: `the commit step (${label})` };
+    return { impl, by: `the commit step (${label})`, ...left.length ? { left } : {} };
+  };
+  const unreviewed = (name, at, left) => {
+    if (!left)
+      return;
     const note = `uncommitted changes after ${at}: ${listed(left)} - the review saw HEAD without them`;
     host.log(`${name}: ${note}`);
-    return { impl, by: `the commit step (${label})`, note };
+    return note;
   };
   const checkGate = async (lane, name, at, checks, runs, stage) => {
     host.phase(CHECKS_PHASE);
@@ -1426,8 +1429,9 @@ the last repair's deviations: ${deviations}` : ""}`;
         const left = await commitWork(lane, name, `fix r${round}`, subject.stage);
         if (left.impl && gates)
           Object.assign(gates, { green: left.impl.gatesGreen, text: left.impl.gates, by: left.by });
-        if (left.note)
-          notes.push(left.note);
+        const note = unreviewed(name, `fix r${round}`, left.left);
+        if (note)
+          notes.push(note);
       }
     }
     host.log(`${name}: hit the ${config.maxRounds}-round cap without a clean review`);
@@ -1499,11 +1503,23 @@ the last repair's deviations: ${deviations}` : ""}`;
         host.log(`${name}: implementer ended with RED gates - review will see it`);
       if (start && impl.startSha !== start)
         host.log(`${name}: the implementer reported startSha ${impl.startSha}, but HEAD was ${start} before it ran - reviewing ${start}...HEAD`);
-      const count = await shell(`commits ${name}`, "Implement", `git rev-list --count ${shellQuote(base)}..HEAD`, lane.cwd);
-      if (!count.ran || !/^\d+$/.test(lastLine(count.output))) {
+      const commits = async (label) => {
+        const count = await shell(label, "Implement", `git rev-list --count ${shellQuote(base)}..HEAD`, lane.cwd);
+        if (count.ran && /^\d+$/.test(lastLine(count.output)))
+          return Number(lastLine(count.output));
         host.log(`${name}: could not count the commits in ${base}..HEAD - reviewing it anyway (exit ${count.code}): ${count.output.slice(-500)}`);
-      } else if (Number(lastLine(count.output)) === 0) {
-        const note = `the implementer made no commit: ${base}..HEAD is empty, so there was nothing to review`;
+        return;
+      };
+      let left;
+      let count = await commits(`commits ${name}`);
+      if (count === 0) {
+        committed = await commitWork(lane, name, "implement", task);
+        left = committed.left;
+        if (committed.impl)
+          count = await commits(`commits ${name} after commit`);
+      }
+      if (count === 0) {
+        const note = left ? `the implementer made no commit: the work it left is uncommitted (${listed(left)}), so there was nothing to review` : `the implementer made no commit: ${base}..HEAD is empty, so there was nothing to review`;
         host.log(`${name}: no-changes - ${note}`);
         return { stage: name, ...where, implementation: impl, outcome: "no-changes", rounds: 0, residual: [], unresolved: [], history: [], note };
       }
@@ -1512,10 +1528,11 @@ the last repair's deviations: ${deviations}` : ""}`;
         if (!gate.passed)
           return { stage: name, ...where, implementation: impl, outcome: "checks-failed", rounds: 0, residual: [], unresolved: [], history: [], note: gate.note, ...ran() };
       } else {
-        const left = await commitWork(lane, name, "implement", task);
-        committed = left;
-        if (left.note)
-          notes.push(left.note);
+        if (!committed.impl)
+          left = (committed = await commitWork(lane, name, "implement", task)).left;
+        const note = unreviewed(name, "implement", left);
+        if (note)
+          notes.push(note);
       }
     } else {
       began?.();
