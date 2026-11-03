@@ -3,7 +3,7 @@ import { spawnSync } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import plugin, { createGrannyPlugin, isTransient, modelRef, pause, permissions, preflight, providerError } from '../src/adapters/opencode/plugin'
+import plugin, { createGrannyPlugin, isTransient, modelRef, pause, permissions, preflight, providerError, summarize } from '../src/adapters/opencode/plugin'
 import { brokerCompanion, records, sessionEndHook } from './fake-companion'
 
 const git = (cwd: string, ...args: string[]) => {
@@ -151,6 +151,27 @@ async function waitFor(check: () => boolean, ms = 4000) {
 }
 
 describe('opencode plugin helpers', () => {
+  it('says in the finish summary that the branch is not PR-ready when the checks rerun after the final check are red', () => {
+    const final = { gatesGreen: true, gates: 'ok', commits: [], prBodyPath: '.granny/PR-BODY.md', issues: '' }
+    const result = {
+      repo: '/r',
+      branch: 'feat/x',
+      base: 'main',
+      worktree: '/r',
+      stages: [],
+      final,
+      recheck: { passed: false, note: 'checks failed at pr-ready after 0 repair(s): tests (exit 1); out of repairs: tests (0)' },
+      repos: [
+        { repo: '/r', base: 'main', worktree: '/r', final },
+        { repo: '/s', base: 'main', worktree: '/s', recheck: { passed: true }, final },
+      ],
+    }
+    const text = summarize(result, false)
+    expect(text).toContain('- final: gates green, PR body .granny/PR-BODY.md\n- checks after the final check: RED - NOT PR-ready, the pr-ready check moved HEAD and the checks fail: checks failed at pr-ready after 0 repair(s): tests (exit 1); out of repairs: tests (0)')
+    expect(text).toContain('- checks after the final check /s: green on the HEAD the pr-ready check left')
+    expect(summarize({ ...result, recheck: undefined, repos: undefined }, false)).not.toContain('checks after the final check')
+  })
+
   it('parses provider/model#variant refs', () => {
     expect(modelRef('anthropic/claude-sonnet-5-5#high')).toEqual({ providerID: 'anthropic', id: 'claude-sonnet-5-5', variant: 'high' })
     expect(modelRef('zai-coding-plan/glm-5.3')).toEqual({ providerID: 'zai-coding-plan', id: 'glm-5.3' })

@@ -1897,10 +1897,15 @@ function summarize(result, worktree) {
   for (const r of result.repos?.slice(1) ?? [])
     if (r.finalReview)
       lines.push(reviewLine(r.finalReview, `final review ${r.repo}`));
+  const recheckLine = (r, name) => `- ${name}: ${r.passed ? "green on the HEAD the pr-ready check left" : `RED - NOT PR-ready, the pr-ready check moved HEAD and the checks fail: ${r.note ?? ""}`}`;
   if (result.final)
     lines.push(`- final: gates ${result.final.gatesGreen ? "green" : "RED"}, PR body ${result.final.prBodyPath}${result.final.issues ? `, issues: ${result.final.issues}` : ""}`);
+  if (result.recheck)
+    lines.push(recheckLine(result.recheck, "checks after the final check"));
   for (const r of result.repos?.slice(1) ?? []) {
     lines.push(`- final ${r.repo}: ${r.final ? `gates ${r.final.gatesGreen ? "green" : "RED"}, PR body ${r.final.prBodyPath}${r.final.issues ? `, issues: ${r.final.issues}` : ""}` : "returned nothing"}`);
+    if (r.recheck)
+      lines.push(recheckLine(r.recheck, `checks after the final check ${r.repo}`));
   }
   if (worktree)
     lines.push(`- worktree: ${result.worktree}${result.repos?.length ? ` (and ${result.repos.slice(1).map((r) => r.worktree).join(", ")})` : ""} - review and push from there; granny never removes it`);
@@ -2279,5 +2284,6 @@ export {
   permissions,
   preflight,
   providerError,
-  stageRepos
+  stageRepos,
+  summarize
 };
