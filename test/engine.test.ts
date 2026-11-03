@@ -78,6 +78,24 @@ describe('runGranny', () => {
     expect(r.stages[0]!.residual.map(x => x.title)).toEqual(['Nit 3'])
   })
 
+  it('follows a residual repeat the judge merged into another finding', async () => {
+    const f = fakeHost({
+      reviews: [
+        review(finding('P2', 'Real issue'), finding('P3', 'Nit')),
+        review(finding('P2', 'Other issue'), finding('P3', 'Nit 2'), finding('P3', 'Nit 2 from elsewhere')),
+        review(finding('P3', 'Nit 3')),
+      ],
+      scores: [
+        { 'codex-F1': 90, 'codex-F2': 20 },
+        { 'codex-F1': 90, 'codex-F2': { score: 20, repeatOf: 'r1/codex-F2', duplicateOf: 'codex-F3' }, 'codex-F3': 20 },
+        { 'codex-F1': { score: 20, repeatOf: 'r1/codex-F2' } },
+      ],
+    })
+    const r = await runGranny(f.host, input())
+    expect(r.stages[0]).toMatchObject({ outcome: 'residual-only', rounds: 3 })
+    expect(r.stages[0]!.residual.map(x => x.title)).toEqual(['Nit 3'])
+  })
+
   it('drops an earlier residual finding once a later round sent its repeat to the fixer', async () => {
     const f = fakeHost({
       reviews: [review(finding('P2', 'Real issue'), finding('P3', 'Nit')), review(finding('P2', 'Nit, worse')), 'No findings.'],

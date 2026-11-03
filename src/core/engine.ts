@@ -610,7 +610,11 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
         host.log(`${name} r${round}: ${f.id} dropped as a repeat of ${f.repeatOf}, which the fixer declined (score ${f.score}) - kept as residual`)
       }
       const repeated = new Set(unmerged.flatMap(f => (f.repeatOf ? [f.repeatOf] : [])))
-      const aliases = (f: Finding) => carried.filter(c => f.repeatOf !== undefined && c.labels.includes(f.repeatOf)).flatMap(c => c.labels)
+      const repeatsOf = (f: Finding) => new Set(unmerged.filter(u => u.id === f.id || f.duplicates?.includes(u.id)).flatMap(u => (u.repeatOf ? [u.repeatOf] : [])))
+      const aliases = (f: Finding) => {
+        const of = repeatsOf(f)
+        return carried.filter(c => c.labels.some(l => of.has(l))).flatMap(c => c.labels)
+      }
       carried = [
         ...carried.filter(c => !c.labels.some(l => repeated.has(l))),
         ...residual.map(f => ({ round, labels: [roundLabel(round, f), ...aliases(f)], finding: f })),
