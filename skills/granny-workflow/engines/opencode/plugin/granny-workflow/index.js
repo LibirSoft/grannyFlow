@@ -1056,14 +1056,6 @@ async function runGranny(host, input) {
     access,
     cwd
   });
-  const shell = async (label, phase, script, cwd, ask = gitCommandPrompt) => {
-    if (host.run) {
-      const r = await host.run(script, cwd);
-      return { ran: r.code === 0, code: r.code, output: r.output };
-    }
-    const prompt = ask(cwd, label, `cd ${shellQuote(cwd)} && ${script}`);
-    return helped(label, await call("granny", "command", label, phase, prompt, "write", config.roles.granny, cwd), `the ${label} runner returned nothing`);
-  };
   const helped = (label, r, missing) => {
     const ran = Boolean(r?.ran);
     const note = typeof r?.note === "string" && r.note.trim() ? r.note : undefined;
@@ -1071,6 +1063,14 @@ async function runGranny(host, input) {
       host.log(`${label}: the helper's note, kept out of the command's output: ${note}`);
     return { ran, code: r?.exitCode ?? (ran ? 0 : "?"), output: r ? `${String(r.output ?? "")}${!ran && note ? `
 ${note}` : ""}` : missing };
+  };
+  const shell = async (label, phase, script, cwd, ask = gitCommandPrompt) => {
+    if (host.run) {
+      const r = await host.run(script, cwd);
+      return { ran: r.code === 0, code: r.code, output: r.output };
+    }
+    const prompt = ask(cwd, label, `cd ${shellQuote(cwd)} && ${script}`);
+    return helped(label, await call("granny", "command", label, phase, prompt, "write", config.roles.granny, cwd), `the ${label} runner returned nothing`);
   };
   const readHead = async (label, phase, cwd) => {
     const r = await shell(label, phase, "git rev-parse --verify HEAD", cwd);

@@ -219,6 +219,13 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
       cwd,
     })
 
+  const helped = (label: string, r: any, missing: string): { ran: boolean; code: number | string; output: string } => {
+    const ran = Boolean(r?.ran)
+    const note = typeof r?.note === 'string' && r.note.trim() ? r.note : undefined
+    if (ran && note) host.log(`${label}: the helper's note, kept out of the command's output: ${note}`)
+    return { ran, code: r?.exitCode ?? (ran ? 0 : '?'), output: r ? `${String(r.output ?? '')}${!ran && note ? `\n${note}` : ''}` : missing }
+  }
+
   const shell = async (label: string, phase: string, script: string, cwd: string, ask = gitCommandPrompt): Promise<{ ran: boolean; code: number | string; output: string }> => {
     if (host.run) {
       const r = await host.run(script, cwd)
@@ -226,13 +233,6 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
     }
     const prompt = ask(cwd, label, `cd ${shellQuote(cwd)} && ${script}`)
     return helped(label, await call('granny', 'command', label, phase, prompt, 'write', config.roles.granny, cwd), `the ${label} runner returned nothing`)
-  }
-
-  const helped = (label: string, r: any, missing: string): { ran: boolean; code: number | string; output: string } => {
-    const ran = Boolean(r?.ran)
-    const note = typeof r?.note === 'string' && r.note.trim() ? r.note : undefined
-    if (ran && note) host.log(`${label}: the helper's note, kept out of the command's output: ${note}`)
-    return { ran, code: r?.exitCode ?? (ran ? 0 : '?'), output: r ? `${String(r.output ?? '')}${!ran && note ? `\n${note}` : ''}` : missing }
   }
 
   const readHead = async (label: string, phase: string, cwd: string) => {
