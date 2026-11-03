@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'bun:test'
 import { checkInput, runGranny, type RunInput } from '../src/core/engine'
 import type { AgentRequest } from '../src/core/types'
-import { fakeHost, withCodex } from './fake-host'
+import { fakeHost, withCodex, type Review } from './fake-host'
 
 const A = '/work/a'
 const B = '/work/b'
@@ -132,7 +132,7 @@ describe('parallel stages', () => {
     expect(f.commands).toContain('git merge --no-edit feat/x--s2-circuit-breaker')
     const merge = f.commands.indexOf('git merge --no-edit feat/x--s2-circuit-breaker')
     expect(f.cwds[merge]).toBe('/work/a-worktrees/feat-x')
-    expect(f.commands.some(c => c.includes(`git worktree remove --force ${lane} && git branch -d feat/x--s2-circuit-breaker`))).toBe(true)
+    expect(f.commands.some(c => c.includes(`git worktree remove --force ${lane} && echo '[granny] lane worktree removed' && git branch -d feat/x--s2-circuit-breaker`))).toBe(true)
     expect(r.stages[1]!.note).toContain('ran in parallel on feat/x--s2-circuit-breaker, merged')
     expect(f.calls.find(c => c.kind === 'final')!.prompt).toContain('.granny/PR-BODY-*.md')
   })
@@ -140,7 +140,7 @@ describe('parallel stages', () => {
   it('has the implementer resolve a merge that stops on conflicts', async () => {
     const f = fakeHost({
       worktree: lanePath,
-      reviews: (command: string) => (command.startsWith('git merge') ? { code: 1, output: 'CONFLICT (content): Merge conflict in src/a.ts' } : 'No findings.'),
+      reviews: (command: string) => (command.startsWith('git merge --no-edit') ? { code: 1, output: 'CONFLICT (content): Merge conflict in src/a.ts' } : 'No findings.'),
       override: async req => (req.label === 'implement one' ? new Promise(r => setTimeout(() => r(undefined), 15)) : undefined),
     })
     const r = await runGranny(f.host, input({ repos: undefined, stages: [{ name: 'one', task: 'WP-01' }, { name: 'two', task: 'WP-02', after: [] }] }))
@@ -224,7 +224,7 @@ describe('parallel stages in a real git repo', () => {
     git(cwd, 'commit', '-qm', `feat: ${file}`)
     return { startSha: start, headSha: git(cwd, 'rev-parse', 'HEAD'), gatesGreen: true, gates: 'green', commits: [], untested: '' }
   }
-  const run = (edits: Record<string, [string, string, number]>, resolve?: (cwd: string) => void) =>
+  const run = (edits: Record<string, [string, string, number] | ((cwd: string) => Promise<unknown>)>, resolve?: (cwd: string) => void) =>
     runGranny(
       fakeHost({
         worktree: 'git',
@@ -237,7 +237,7 @@ describe('parallel stages in a real git repo', () => {
             return { startSha: start, headSha: git(req.cwd, 'rev-parse', 'HEAD'), gatesGreen: true, gates: 'green', commits: [], untested: '' }
           }
           const e = edits[req.label]
-          return e ? commit(req.cwd, ...e)() : undefined
+          return typeof e === 'function' ? e(req.cwd) : e ? commit(req.cwd, ...e)() : undefined
         },
       }).host,
       {
@@ -281,6 +281,27 @@ describe('parallel stages in a real git repo', () => {
       fs.rmSync(root, { recursive: true, force: true })
     }
   })
+
+  it('fails the run and keeps the lane when a merge that stopped without a conflict leaves it out of HEAD', async () => {
+    setUp()
+    try {
+      const dirty = async (cwd: string) => {
+        await new Promise(r => setTimeout(r, 40))
+        fs.writeFileSync(join(cwd, 'a.txt'), 'uncommitted\n')
+        return undefined
+      }
+      await expect(run({ 'implement one': dirty, 'implement two': ['a.txt', 'two\n', 0] }, () => {})).rejects.toThrow(
+        'merge two: feat/x--s2-two is not merged into feat/x',
+      )
+      const wt = join(root, 'repo-worktrees', 'feat-x')
+      expect(fs.existsSync(join(root, 'repo-worktrees', 'feat-x--s2-two'))).toBe(true)
+      expect(git(repo, 'branch', '--list', '--format=%(refname:short)', 'feat/x--*')).toBe('feat/x--s2-two')
+      expect(spawnSync('git', ['merge-base', '--is-ancestor', 'feat/x--s2-two', 'HEAD'], { cwd: wt }).status).toBe(1)
+      expect(fs.readFileSync(join(wt, 'a.txt'), 'utf8')).toBe('uncommitted\n')
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true })
+    }
+  })
 })
 
 it('fails the run when the implementer leaves the merge unfinished', async () => {
@@ -293,6 +314,67 @@ it('fails the run when the implementer leaves the merge unfinished', async () =>
   await expect(runGranny(f.host, { repo: A, branch: 'feat/x', stages: [{ name: 'one', task: 'a' }, { name: 'two', task: 'b', after: [] }] })).rejects.toThrow(
     'merge two: the merge of feat/x--s2-two into feat/x is still unfinished',
   )
+})
+
+describe('lane merge verification', () => {
+  const laneInput = { repo: A, branch: 'feat/x', stages: [{ name: 'one', task: 'a' }, { name: 'two', task: 'b', after: [] }] }
+  const laneHost = (answer: (command: string) => Review | undefined) =>
+    fakeHost({
+      worktree: lanePath,
+      reviews: (command: string) => answer(command) ?? 'No findings.',
+      override: async req => (req.label === 'implement one' ? new Promise(r => setTimeout(() => r(undefined), 15)) : undefined),
+    })
+
+  it('fails the run without cleaning up when the merge stops without a conflict and the lane is not in HEAD', async () => {
+    const f = laneHost(command =>
+      command.startsWith('git merge --no-edit')
+        ? { code: 1, output: 'error: Your local changes to the following files would be overwritten by merge:\n\ta.txt' }
+        : command.startsWith('git merge-base --is-ancestor')
+          ? { code: 1, output: '' }
+          : undefined,
+    )
+    await expect(runGranny(f.host, laneInput)).rejects.toThrow(
+      'merge two: feat/x--s2-two is not merged into feat/x (git merge-base --is-ancestor exit 1) - its worktree /work/a-worktrees/feat-x--s2-two and branch feat/x--s2-two are left in place',
+    )
+    expect(f.commands).toContain("git merge-base --is-ancestor feat/x--s2-two HEAD")
+    expect(f.cwds[f.commands.indexOf('git merge-base --is-ancestor feat/x--s2-two HEAD')]).toBe('/work/a-worktrees/feat-x')
+    expect(f.commands.some(c => c.includes('git worktree remove') || c.includes('git branch -d'))).toBe(false)
+  })
+
+  it('fails the run when a merge reported as done left the lane out of HEAD', async () => {
+    const f = laneHost(command => (command.startsWith('git merge-base --is-ancestor') ? { code: 128, output: 'fatal: Not a valid object name' } : undefined))
+    await expect(runGranny(f.host, laneInput)).rejects.toThrow('merge two: feat/x--s2-two is not merged into feat/x (git merge-base --is-ancestor exit 128)')
+    expect(f.calls.some(c => c.label === 'resolve merge two')).toBe(false)
+    expect(f.commands.some(c => c.includes('git worktree remove'))).toBe(false)
+  })
+
+  it('starts the cleanup with the same ancestry check and reports a removed worktree whose branch was kept', async () => {
+    const f = laneHost(command =>
+      command.includes('git worktree remove')
+        ? { code: 1, output: '[granny] lane merged\n[granny] lane worktree clean\n[granny] lane worktree removed\nerror: the branch is not fully merged' }
+        : undefined,
+    )
+    const r = await runGranny(f.host, laneInput)
+    const cleanup = f.commands.find(c => c.includes('git worktree remove'))!
+    expect(cleanup.startsWith('git merge-base --is-ancestor feat/x--s2-two HEAD && ')).toBe(true)
+    expect(r.stages[1]!.note).toBe('ran in parallel on feat/x--s2-two, merged; its worktree /work/a-worktrees/feat-x--s2-two was removed, but its branch feat/x--s2-two was left in place')
+  })
+
+  it('says both the worktree and the branch were left in place when the cleanup stopped before removing anything', async () => {
+    const f = laneHost(command => (command.includes('git worktree remove') ? { code: 1, output: '[granny] lane merged\n' } : undefined))
+    const r = await runGranny(f.host, laneInput)
+    expect(r.stages[1]!.note).toBe(
+      'ran in parallel on feat/x--s2-two, merged; its worktree /work/a-worktrees/feat-x--s2-two and branch feat/x--s2-two were left in place (uncommitted changes in the worktree)',
+    )
+    expect(f.logs).toContainEqual(expect.stringContaining('merge two: left /work/a-worktrees/feat-x--s2-two (feat/x--s2-two) in place'))
+  })
+
+  it('merges and cleans up as before when the lane is in HEAD', async () => {
+    const f = laneHost(() => undefined)
+    const r = await runGranny(f.host, laneInput)
+    expect(r.stages[1]!.note).toBe('ran in parallel on feat/x--s2-two, merged')
+    expect(r.stages.map(s => s.outcome)).toEqual(['clean', 'clean'])
+  })
 })
 
 it('documents a run input that checkInput accepts in the config reference', () => {
