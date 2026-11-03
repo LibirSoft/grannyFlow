@@ -347,13 +347,13 @@ FINDINGS (P0/P1 or score > ${p.config.threshold}):
 ${JSON.stringify(accepted, null, 2)}`
 }
 
-export function finalPrompt(p: PromptContext): string {
+export function finalPrompt(p: PromptContext, plans: string[] = []): string {
   const attribution = p.config.aiAttribution
     ? ''
     : ` \`git log ${shellQuote(p.base)}..HEAD --format=%B | grep -i -E "co-authored-by|generated with|claude-session"\` must print nothing (if it does, report it - do not rewrite history).`
   return `${common(p)}
 
-You are GRANNY doing the FINAL CHECK - no push, no remote, no PR. Run every gate and record exact numbers. \`git status --short\` must be clean.${attribution} Make ${prBodyPath(p.config)} complete and accurate against the actual commits${p.config.parallel ? `; fold in the notes of stages that ran in their own worktree (${p.config.workDir}/PR-BODY-*.md, when any exist) and delete those files` : ''}. Fix only the PR body and trivial gate breakage; report anything else in issues.`
+You are GRANNY doing the FINAL CHECK - no push, no remote, no PR. Run every gate and record exact numbers. \`git status --short\` must be clean${plans.length ? ` except for the plan files ${plans.join(', ')}, which stay uncommitted: never stage or commit them` : ''}.${attribution} Make ${prBodyPath(p.config)} complete and accurate against the actual commits${p.config.parallel ? `; fold in the notes of stages that ran in their own worktree (${p.config.workDir}/PR-BODY-*.md, when any exist) and delete those files` : ''}. Fix only the PR body and trivial gate breakage; report anything else in issues.`
 }
 
 export function mergePrompt(p: PromptContext, name: string, lane: string, output: string): string {

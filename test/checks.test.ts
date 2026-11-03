@@ -745,8 +745,10 @@ describe('plan files inside the repo, in a real git repo', () => {
   }
 
   it('does not count the uncommitted plan files as uncommitted work', async () => {
-    const { r, status, asked } = await runWithPlans(repo => commit(repo, 'f.txt', 'good\n'))
+    const { f, r, status, asked } = await runWithPlans(repo => commit(repo, 'f.txt', 'good\n'))
     expect(asked).toEqual(['implement core'])
+    const final = f.calls.find(c => c.kind === 'final')!.prompt
+    expect(final).toMatch(/`git status --short` must be clean except for the plan files \S+\/r\/plan\.md, \S+\/r\/plans\/it's two\.md, which stay uncommitted: never stage or commit them\./)
     expect(r.stages[0]).toMatchObject({ outcome: 'clean', checks: [{ at: 'implement', attempt: 1, results: [{ name: 'tests', passed: true }] }] })
     expect(r.stages[0]).not.toHaveProperty('note')
     expect(status).toBe('M plan.md\n?? plans/')

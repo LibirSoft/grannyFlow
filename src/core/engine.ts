@@ -233,7 +233,6 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
   }
 
   const work = config.workDir.replace(/\/+$/, '')
-  const plansIn = (cwd: string): string[] => plans.filter(f => f.startsWith(`${trimPath(cwd)}/`) && !f.slice(trimPath(cwd).length + 1).startsWith(`${work}/`))
 
   const uncommitted = async (label: string, phase: string, cwd: string): Promise<string[]> => {
     const keep = plansIn(cwd).map(f => shellQuote(`:(exclude,literal)${f.slice(trimPath(cwd).length + 1)}`))
@@ -295,6 +294,7 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
 
   const draft = input.goal !== undefined ? await draftPlan(input.goal) : undefined
   const plans = draft ? draft.files : planFiles(input)
+  const plansIn = (cwd: string): string[] => plans.filter(f => f.startsWith(`${trimPath(cwd)}/`) && !f.slice(trimPath(cwd).length + 1).startsWith(`${work}/`))
   const context = [plans.length ? `Plan files - read them first: ${plans.join(', ')}` : '', input.context ?? ''].filter(Boolean).join('\n') || undefined
   const promptFor = (repo: string, cwd: string, branch: string, others: string[], prBody?: string): PromptContext => ({
     repo: cwd,
@@ -978,7 +978,7 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
 
   const check = async (s: RepoState): Promise<RepoResult> => {
     const label = s.lane.repo === primary ? 'pr-ready check' : `pr-ready check ${baseName(s.lane.repo)}`
-    const final = (await call('granny', 'final', label, 'PR ready', finalPrompt(s.lane.p), 'write', config.roles.granny, s.lane.cwd)) as FinalReport | null
+    const final = (await call('granny', 'final', label, 'PR ready', finalPrompt(s.lane.p, plansIn(s.lane.cwd)), 'write', config.roles.granny, s.lane.cwd)) as FinalReport | null
     if (!final) host.log(s.lane.repo === primary ? 'final check returned nothing' : `${label} returned nothing`)
     const review = reviews.get(s)
     const runs = finalRuns.get(s) ?? []

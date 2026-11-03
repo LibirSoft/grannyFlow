@@ -673,11 +673,11 @@ ${overruledSection(overruled, earlier)}
 FINDINGS (P0/P1 or score > ${p.config.threshold}):
 ${JSON.stringify(accepted, null, 2)}`;
 }
-function finalPrompt(p) {
+function finalPrompt(p, plans = []) {
   const attribution = p.config.aiAttribution ? "" : ` \`git log ${shellQuote(p.base)}..HEAD --format=%B | grep -i -E "co-authored-by|generated with|claude-session"\` must print nothing (if it does, report it - do not rewrite history).`;
   return `${common(p)}
 
-You are GRANNY doing the FINAL CHECK - no push, no remote, no PR. Run every gate and record exact numbers. \`git status --short\` must be clean.${attribution} Make ${prBodyPath(p.config)} complete and accurate against the actual commits${p.config.parallel ? `; fold in the notes of stages that ran in their own worktree (${p.config.workDir}/PR-BODY-*.md, when any exist) and delete those files` : ""}. Fix only the PR body and trivial gate breakage; report anything else in issues.`;
+You are GRANNY doing the FINAL CHECK - no push, no remote, no PR. Run every gate and record exact numbers. \`git status --short\` must be clean${plans.length ? ` except for the plan files ${plans.join(", ")}, which stay uncommitted: never stage or commit them` : ""}.${attribution} Make ${prBodyPath(p.config)} complete and accurate against the actual commits${p.config.parallel ? `; fold in the notes of stages that ran in their own worktree (${p.config.workDir}/PR-BODY-*.md, when any exist) and delete those files` : ""}. Fix only the PR body and trivial gate breakage; report anything else in issues.`;
 }
 function mergePrompt(p, name, lane, output) {
   return `${common(p)}
@@ -1046,7 +1046,6 @@ ${r.note}` : ""}` : `the ${label} runner returned nothing` };
     return { sha, code: r.code, output: r.output };
   };
   const work = config.workDir.replace(/\/+$/, "");
-  const plansIn = (cwd) => plans.filter((f) => f.startsWith(`${trimPath(cwd)}/`) && !f.slice(trimPath(cwd).length + 1).startsWith(`${work}/`));
   const uncommitted = async (label, phase, cwd) => {
     const keep = plansIn(cwd).map((f) => shellQuote(`:(exclude,literal)${f.slice(trimPath(cwd).length + 1)}`));
     const r = await shell(label, phase, `git status --porcelain${keep.length ? ` -- ':(top)' ${keep.join(" ")}` : ""}`, cwd);
@@ -1117,6 +1116,7 @@ ${a.note}` : ""}` : "the worktree runner returned nothing" };
   };
   const draft = input.goal !== undefined ? await draftPlan(input.goal) : undefined;
   const plans = draft ? draft.files : planFiles(input);
+  const plansIn = (cwd) => plans.filter((f) => f.startsWith(`${trimPath(cwd)}/`) && !f.slice(trimPath(cwd).length + 1).startsWith(`${work}/`));
   const context = [plans.length ? `Plan files - read them first: ${plans.join(", ")}` : "", input.context ?? ""].filter(Boolean).join(`
 `) || undefined;
   const promptFor = (repo, cwd, branch, others, prBody) => ({
@@ -1805,7 +1805,7 @@ ${note}` : note } : result;
   };
   const check = async (s) => {
     const label = s.lane.repo === primary ? "pr-ready check" : `pr-ready check ${baseName(s.lane.repo)}`;
-    const final = await call("granny", "final", label, "PR ready", finalPrompt(s.lane.p), "write", config.roles.granny, s.lane.cwd);
+    const final = await call("granny", "final", label, "PR ready", finalPrompt(s.lane.p, plansIn(s.lane.cwd)), "write", config.roles.granny, s.lane.cwd);
     if (!final)
       host.log(s.lane.repo === primary ? "final check returned nothing" : `${label} returned nothing`);
     const review = reviews.get(s);

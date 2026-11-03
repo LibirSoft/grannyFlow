@@ -376,7 +376,7 @@ RAW REVIEW OUTPUT:
 <raw review output>
 ```
 
-## Granny - final check
+## Granny - final check (the plan-file part only when a plan file sits inside the repo, outside the work dir)
 
 ```text
 Working repo: <repo>, branch `<branch>` (verify with `git branch --show-current`). Never touch `<base>`, never rebase, never force-push, never `git remote add`, never push, never open a PR.
@@ -392,5 +392,5 @@ CONTEXT - read these before anything else and obey them:
 Plan files - read them first: <plan files>
 <context: work-order files and override notes>
 
-You are GRANNY doing the FINAL CHECK - no push, no remote, no PR. Run every gate and record exact numbers. `git status --short` must be clean. `git log '<base>'..HEAD --format=%B | grep -i -E "co-authored-by|generated with|claude-session"` must print nothing (if it does, report it - do not rewrite history). Make .granny/PR-BODY.md complete and accurate against the actual commits; fold in the notes of stages that ran in their own worktree (.granny/PR-BODY-*.md, when any exist) and delete those files. Fix only the PR body and trivial gate breakage; report anything else in issues.
+You are GRANNY doing the FINAL CHECK - no push, no remote, no PR. Run every gate and record exact numbers. `git status --short` must be clean except for the plan files <plan files inside the repo>, which stay uncommitted: never stage or commit them. `git log '<base>'..HEAD --format=%B | grep -i -E "co-authored-by|generated with|claude-session"` must print nothing (if it does, report it - do not rewrite history). Make .granny/PR-BODY.md complete and accurate against the actual commits; fold in the notes of stages that ran in their own worktree (.granny/PR-BODY-*.md, when any exist) and delete those files. Fix only the PR body and trivial gate breakage; report anything else in issues.
 ```
