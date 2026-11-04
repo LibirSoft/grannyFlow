@@ -40,6 +40,8 @@ describe('claude-code workflow.js', () => {
       if (kind.startsWith('ran') && prompt.includes('git rev-parse --verify HEAD')) return { ran: true, exitCode: 0, output: 's1\n' }
       if (kind.startsWith('ran') && prompt.includes('git rev-list --count')) return { ran: true, exitCode: 0, output: '1\n' }
       if (kind.startsWith('ran') && prompt.includes('git status --porcelain')) return { ran: true, exitCode: 0, output: '' }
+      if (kind.startsWith('ran') && prompt.includes('nohup bash -c')) return { ran: true, exitCode: 0, output: 'started\n' }
+      if (kind.startsWith('ran') && / wait \d+$/.test(opts.label)) return { ran: true, exitCode: 0, output: 'done\n' }
       if (kind.startsWith('ran')) {
         reviews++
         return { ran: true, exitCode: 0, output: reviews === 1 ? review(finding('P2', 'Off by one')) : 'No findings.' }
@@ -70,7 +72,8 @@ describe('claude-code workflow.js', () => {
     expect(impl.opts).toMatchObject({ label: 'implement one', phase: 'Implement', model: 'opus', effort: 'high' })
     expect(impl.prompt).toContain('Working repo: /r-worktrees/feat-x, branch `feat/x`')
     const runner = calls.find(c => c.opts.label === 'review one r1 codex')!
-    expect(runner.prompt).toContain('\ncd /r-worktrees/feat-x && mkdir -p .granny')
+    expect(runner.prompt).toContain('\ncd /r-worktrees/feat-x && if [ -s .granny/review-one-r1-codex.pid ]')
+    expect(calls.filter(c => c.opts.label.startsWith('review one r1 codex')).map(c => c.opts.label)).toEqual(['review one r1 codex', 'review one r1 codex wait 1', 'review one r1 codex read'])
     expect(runner.prompt.startsWith('READ-ONLY ROLE')).toBe(true)
     expect(runner.opts.model).toBeUndefined()
     const judge = calls.find(c => c.opts.label === 'judge one r1')!
@@ -95,6 +98,8 @@ describe('claude-code workflow.js', () => {
       if (kind.startsWith('ran') && prompt.includes('git rev-parse --verify HEAD')) return { ran: true, exitCode: 0, output: 's1\n' }
       if (kind.startsWith('ran') && prompt.includes('git rev-list --count')) return { ran: true, exitCode: 0, output: '1\n' }
       if (kind.startsWith('ran') && prompt.includes('git status --porcelain')) return { ran: true, exitCode: 0, output: '' }
+      if (kind.startsWith('ran') && prompt.includes('nohup bash -c')) return { ran: true, exitCode: 0, output: 'started\n' }
+      if (kind.startsWith('ran') && / wait \d+$/.test(opts.label)) return { ran: true, exitCode: 0, output: 'done\n' }
       if (kind.startsWith('ran')) {
         reviews++
         return { ran: true, exitCode: 0, output: reviews === 1 ? review(finding('P1', 'Missing migration step', '/plans/v1.md', 4)) : 'No findings.' }
@@ -116,6 +121,7 @@ describe('claude-code workflow.js', () => {
     const runner = calls.find(c => c.opts.label === 'review plan review r1 codex')!
     expect(runner.opts.phase).toBe('Plan review')
     expect(runner.prompt).toContain('node "$companion" task')
+    expect(calls.find(c => c.opts.label === 'review plan review r1 codex read')!.opts.phase).toBe('Plan review')
     const fix = calls.find(c => c.opts.label === 'fix plan review r1')!
     expect(fix.opts.phase).toBe('Plan review')
     expect(fix.prompt.startsWith('READ-ONLY ROLE')).toBe(false)

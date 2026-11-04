@@ -1,4 +1,6 @@
 import { spawn } from 'node:child_process'
+import { existsSync, statSync } from 'node:fs'
+import { isAbsolute, join } from 'node:path'
 import type { AgentRequest, CommandResult, Host, HostName } from '../src/core/types'
 
 export type Review = CommandResult | string
@@ -22,6 +24,8 @@ export interface FakeOptions {
   timeoutProbe?: Review
   /** A note the Claude Code helper adds to every command it reports (the worktree setup, the probes, checks and reviews). */
   note?: string | ((command: string) => string | undefined)
+  /** What the Claude Code helper reports for the n-th wait of a detached review (default `done`); null for a helper that returned nothing. */
+  wait?: (command: string, n: number) => Review | null
 }
 
 export interface Setup {
@@ -41,6 +45,14 @@ const COMMITS_PROBE = /git rev-list --count (\S+)\.\.HEAD/
 const STATUS_PROBE = /(^|&& )git status --porcelain( -- .*)?$/m
 const TIMEOUT_PROBE = 'command -v gtimeout'
 const isProbe = (command: string) => command.includes(HEAD_PROBE) || COMMITS_PROBE.test(command) || STATUS_PROBE.test(command) || command.includes(TIMEOUT_PROBE)
+
+const unquote = (word: string) => (word.startsWith("'") ? word.slice(1, -1).replaceAll(`'\\''`, "'") : word)
+const START = /nohup bash -c ('(?:[^']|'\\'')*') > \/dev\/null/
+const JOB = /^echo \$\$ > .+?; \((.*)\) > .+? 2>&1; echo \$\? > (.+)$/s
+const isWait = (command: string) => command.includes('echo pending')
+const isRead = (command: string) => command.includes('exit "${code:-1}"')
+const isStop = (command: string) => command.includes('echo stopped')
+const jobOf = (command: string) => /review-[^\s']*?-r\d+-[a-z0-9-]+(?=\.(?:exit|out|pid))/.exec(command)?.[0] ?? ''
 
 const cdTarget = (line: string) => {
   const quoted = /^cd ((?:'[^']*'(?:\\''[^']*')*)|\S+) && /.exec(line)?.[1] ?? ''
@@ -72,6 +84,8 @@ export function fakeHost(opts: FakeOptions = {}) {
   const phases: string[] = []
   const probes: string[] = []
   let impl = 0
+  const jobs = new Map<string, { script: string; result?: CommandResult; waits: number; exit?: string }>()
+  const stops: string[] = []
   const noted = (command: string, r: CommandResult) => {
     const note = typeof opts.note === 'function' ? opts.note(command) : opts.note
     return { ran: r.code === 0, exitCode: r.code, output: r.output, ...(note === undefined ? {} : { note }) }
@@ -102,6 +116,44 @@ export function fakeHost(opts: FakeOptions = {}) {
     const next = list.shift()
     return next === undefined ? CLEAN : asResult(next)
   }
+
+  const detached = async (command: string): Promise<unknown> => {
+    const cwd = cdTarget(command)
+    const key = `${cwd}\0${jobOf(command)}`
+    if (START.test(command)) {
+      const [, body, exit] = JOB.exec(unquote(START.exec(command)![1]!))!
+      const script = `cd ${command.slice(3, command.indexOf(' && '))} && ${body}`
+      commands.push(script)
+      const file = unquote(exit!)
+      const job: { script: string; result?: CommandResult; waits: number; exit?: string } = { script, waits: 0, exit: isAbsolute(file) ? file : join(cwd, file) }
+      jobs.set(key, job)
+      if (opts.shell) return noted(command, await bash(command, '/', opts.shell.env))
+      job.result = await nextReview(script, '/')
+      return { ran: true, exitCode: 0, output: 'started\n' }
+    }
+    const job = jobs.get(key)
+    if (!job) throw new Error(`no detached review started for ${command}`)
+    if (isWait(command)) {
+      job.waits++
+      if (opts.shell) {
+        const file = opts.wait ? job.exit!.replace(/\.exit$/, '.pid') : job.exit!
+        for (let i = 0; i < 500 && !(existsSync(file) && statSync(file).size > 0); i++) await new Promise(r => setTimeout(r, 20))
+      }
+      if (opts.wait) {
+        const r = opts.wait(command, job.waits)
+        return r === null ? null : noted(command, asResult(r))
+      }
+      if (opts.shell) return noted(command, await bash(command, '/', opts.shell.env))
+      return noted(command, { code: 0, output: 'done\n' })
+    }
+    if (isStop(command)) {
+      stops.push(command)
+      return opts.shell ? noted(command, await bash(command, '/', opts.shell.env)) : { ran: true, exitCode: 0, output: 'stopped\n' }
+    }
+    if (opts.shell) return noted(job.script, await bash(command, '/', opts.shell.env))
+    return noted(job.script, job.result ?? CLEAN)
+  }
+  const isDetached = (command: string) => START.test(command) || isWait(command) || isRead(command) || isStop(command)
 
   const host: Host = {
     name: opts.name ?? 'opencode',
@@ -136,6 +188,8 @@ export function fakeHost(opts: FakeOptions = {}) {
           return { score: 50, perFinding, rationale: 'r' }
         }
         case 'command': {
+          const step = /Run exactly this[^\n]*:\n(.+)\n/.exec(req.prompt)?.[1] ?? ''
+          if (isDetached(step)) return detached(step)
           const script = /never cut it short\):\n(.+)\n/.exec(req.prompt)?.[1] ?? /Run exactly this:\n(.+)\n/.exec(req.prompt)?.[1] ?? ''
           commands.push(script)
           return noted(script, await nextReview(script, '/'))
@@ -161,7 +215,7 @@ export function fakeHost(opts: FakeOptions = {}) {
       return nextReview(command, cwd)
     }
   }
-  return { host, calls, commands, cwds, setups, logs, phases, probes }
+  return { host, calls, commands, cwds, setups, logs, phases, probes, stops }
 }
 
 export const finding = (severity: string, title: string, file = 'src/a.ts', line = 3) =>

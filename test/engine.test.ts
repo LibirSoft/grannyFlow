@@ -415,12 +415,12 @@ describe('runGranny', () => {
     expect(runner.role).toBe('granny')
     expect(runner.label).toBe('review core r1 codex')
     expect(runner.prompt).toContain(
-      'cd /work/repo && mkdir -p .granny && rm -f .granny/review-core-r1-codex.md .granny/review-core-r1-codex.log && codex_plugins="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/plugins/cache/openai-codex/codex"; companion_version=$(',
+      '; mkdir -p .granny && rm -f .granny/review-core-r1-codex.md .granny/review-core-r1-codex.log .granny/review-core-r1-codex.out .granny/review-core-r1-codex.exit .granny/review-core-r1-codex.pid && { set -m; nohup bash -c \'echo $$ > .granny/review-core-r1-codex.pid; (codex_plugins="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/plugins/cache/openai-codex/codex"; companion_version=$(',
     )
     expect(runner.prompt).not.toContain('sort -V')
     expect(runner.prompt).toContain('node "$companion" review --wait --base deadbee1 --scope branch > .granny/review-core-r1-codex.md 2> .granny/review-core-r1-codex.log;')
     expect(runner.prompt).toContain('codex exec review --base deadbee1 -o .granny/review-core-r1-codex.md > .granny/review-core-r1-codex.log 2>&1;')
-    expect(runner.prompt).toContain(`never cut it short):\n${f.commands[0]}\n\nSet ran=true`)
+    expect(f.commands[0]).toStartWith('cd /work/repo && codex_plugins=')
   })
 
   it('logs the reviewer backend it knows without running anything to find out', async () => {
@@ -456,7 +456,9 @@ describe('runGranny', () => {
 
     const runner = fakeHost({ name: 'claude-code', direct: false, reviews: ['No findings.'] })
     await runGranny(runner.host, input({ repo, config }))
-    expect(runner.calls.find(c => c.kind === 'command')!.prompt).toContain(`\n${`cd ${r} && mkdir -p ${wd()} && rm -f`}`)
+    expect(runner.calls.find(c => c.kind === 'command')!.prompt).toContain(`\ncd ${r} && if [ -s ${wd('/review-core-r1-codex.pid')} ] && [ ! -s ${wd('/review-core-r1-codex.exit')} ]; then `)
+    expect(runner.calls.find(c => c.kind === 'command')!.prompt).toContain(`; mkdir -p ${wd()} && rm -f ${wd('/review-core-r1-codex.md')} `)
+    expect(runner.commands[0]).toStartWith(`cd ${r} && codex_plugins=`)
 
     const agent = fakeHost({ override: req => (req.kind === 'findings' ? { findings: [] } : undefined) })
     await runGranny(agent.host, input({ repo, config: { ...config, reviewers: [{ engine: 'agent' }] }, stages: [{ name: 'audit', implement: false }], base: "it's" }))
@@ -592,6 +594,112 @@ describe('the base a stage review diffs against', () => {
       input({ repos: [other], stages: [{ name: 'a', task: 'A' }, { name: 'b', task: 'B', repo: other }], config: { parallel: false } }),
     )
     expect(r.stages.map(s => [s.stage, s.outcome])).toEqual([['a', 'no-changes'], ['b', 'clean']])
+  })
+})
+
+describe('a review command on Claude Code', () => {
+  const cc = (extra: FakeOptions = {}) => fakeHost({ name: 'claude-code', direct: false, ...extra })
+  const steps = (f: ReturnType<typeof fakeHost>) => f.calls.filter(c => c.kind === 'command' && c.label.startsWith('review ')).map(c => c.label)
+  const promptOf = (f: ReturnType<typeof fakeHost>, label: string) => f.calls.find(c => c.label === label)!.prompt
+  const waits = (tag: string, n: number) => Array.from({ length: n }, (_, i) => `review ${tag} wait ${i + 1}`)
+  const md = '.granny/review-core-r1-codex'
+
+  it('starts the review detached, waits for it in engine steps until it is done, then reads its output', async () => {
+    const f = cc({ reviews: [review(finding('P2', 'Off by one')), 'No findings.'], scores: [{ 'codex-F1': 90 }], wait: (_, n) => (n < 3 ? 'pending\n' : 'done\n') })
+    const r = await runGranny(f.host, input())
+    expect(r.stages[0]).toMatchObject({ outcome: 'clean', rounds: 2 })
+    expect(r.stages[0]!.history[0]!.findings.map(x => x.title)).toEqual(['Off by one'])
+    expect(steps(f)).toEqual([
+      'review core r1 codex',
+      ...waits('core r1 codex', 3),
+      'review core r1 codex read',
+      'review core r2 codex',
+      ...waits('core r2 codex', 3),
+      'review core r2 codex read',
+    ])
+    const start = promptOf(f, 'review core r1 codex')
+    expect(start).toContain(`\ncd /work/repo && if [ -s ${md}.pid ] && [ ! -s ${md}.exit ]; then kill -TERM -- "-$(cat ${md}.pid)" 2>/dev/null || kill -TERM "$(cat ${md}.pid)" 2>/dev/null; fi; mkdir -p .granny && rm -f ${md}.md ${md}.log ${md}.out ${md}.exit ${md}.pid && { set -m; nohup bash -c 'echo $$ > ${md}.pid; (`)
+    expect(start).toContain(`) > ${md}.out 2>&1; echo $? > ${md}.exit' > /dev/null 2>&1 < /dev/null & } && echo started\n`)
+    expect(f.commands[0]!.startsWith('cd /work/repo && codex_plugins="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/plugins/cache/openai-codex/codex"; companion_version=$(')).toBe(true)
+    expect(f.commands[0]).toContain(`node "$companion" review --wait --base deadbee1 --scope branch > ${md}.md 2> ${md}.log;`)
+    expect(promptOf(f, 'review core r1 codex wait 2')).toContain(
+      `\ncd /work/repo && bash -c 'until [ -s ${md}.exit ] || [ "$SECONDS" -ge 540 ]; do sleep 5; done'; if [ -s ${md}.exit ]; then echo done; else echo pending; fi\n`,
+    )
+    expect(promptOf(f, 'review core r1 codex read')).toContain(`\ncd /work/repo && code=$(cat ${md}.exit); cat ${md}.out; exit "\${code:-1}"\n`)
+  })
+
+  it('keeps every rm out of the detached script, where the helper shell cannot check it', async () => {
+    const f = cc()
+    await runGranny(f.host, input())
+    const detached = /nohup bash -c ('(?:[^']|'\\'')*')/.exec(promptOf(f, 'review core r1 codex'))![1]!
+    expect(detached).not.toMatch(/\brm\b/)
+    expect(f.commands[0]).not.toMatch(/\brm -f\b/)
+  })
+
+  it('gives each step a fixed command and leaves no choice of how to wait to the helper', async () => {
+    const f = cc({ wait: (_, n) => (n < 2 ? 'pending\n' : 'done\n') })
+    await runGranny(f.host, input())
+    const prompts = f.calls.filter(c => c.kind === 'command' && c.label.startsWith('review ')).map(c => c.prompt)
+    expect(prompts).toHaveLength(4)
+    for (const p of prompts) {
+      expect(p).not.toContain('pgrep')
+      expect(p).not.toContain('background mode')
+      expect(p).not.toContain('wait for it to finish')
+      expect(p).toContain('Run exactly this')
+    }
+    const [wait1, wait2] = [promptOf(f, 'review core r1 codex wait 1'), promptOf(f, 'review core r1 codex wait 2')]
+    expect(wait1).toContain('wait 1 of at most 7')
+    expect(wait2).toContain('wait 2 of at most 7')
+    expect(wait1).toContain("in the foreground (never in the background), with your shell tool's timeout set to 600000 ms (10 minutes)")
+  })
+
+  it('counts a wait whose helper returned nothing or failed as still pending', async () => {
+    const f = cc({ wait: (_, n) => (n === 1 ? null : n === 2 ? { code: 1, output: 'bash: oops' } : 'done\n') })
+    const r = await runGranny(f.host, input())
+    expect(r.stages[0]).toMatchObject({ outcome: 'clean' })
+    expect(steps(f)).toEqual(['review core r1 codex', ...waits('core r1 codex', 3), 'review core r1 codex read'])
+  })
+
+  it('stops a review still running after 7 waits, retries it once, then ends the stage review-failed', async () => {
+    const f = cc({ wait: () => 'pending\n' })
+    const r = await runGranny(f.host, input())
+    expect(r.stages[0]).toMatchObject({ outcome: 'review-failed', rounds: 1 })
+    expect(r.stages[0]!.note).toContain('codex: review command still running after 7 waits of up to 9 minutes (63 minutes) - stopped it')
+    expect(steps(f)).toEqual([
+      'review core r1 codex',
+      ...waits('core r1 codex', 7),
+      'review core r1 codex stop',
+      'review core r1 codex #2',
+      ...waits('core r1 codex #2', 7),
+      'review core r1 codex #2 stop',
+    ])
+    expect(promptOf(f, 'review core r1 codex stop')).toContain(
+      `\ncd /work/repo && if [ -s ${md}.pid ]; then kill -TERM -- "-$(cat ${md}.pid)" 2>/dev/null || kill -TERM "$(cat ${md}.pid)" 2>/dev/null; fi; rm -f ${md}.pid; echo stopped\n`,
+    )
+    expect(f.logs.some(l => l.startsWith('core r1 codex: did not run - retrying once. review command still running after 7 waits'))).toBe(true)
+  })
+
+  it('fails the attempt without waiting when the review did not start', async () => {
+    const f = cc({ override: req => (req.label === 'review core r1 codex' ? { ran: false, exitCode: 127, output: 'nohup: command not found', note: 'no nohup' } : undefined) })
+    const r = await runGranny(f.host, input())
+    expect(r.stages[0]).toMatchObject({ outcome: 'clean' })
+    expect(steps(f)).toEqual(['review core r1 codex', 'review core r1 codex #2', 'review core r1 codex #2 wait 1', 'review core r1 codex #2 read'])
+    expect(f.logs).toContain('core r1 codex: did not run - retrying once. review command did not start (exit 127) (no nohup): nohup: command not found')
+  })
+
+  it('runs a command reviewer the same way, and its exit code comes from the read', async () => {
+    const f = cc({ reviews: [{ code: 3, output: 'glm: quota exceeded' }, 'No findings.'] })
+    const r = await runGranny(f.host, input({ config: { reviewers: [GLM] } }))
+    expect(r.stages[0]).toMatchObject({ outcome: 'clean' })
+    expect(steps(f)).toEqual(['review core r1 glm', 'review core r1 glm wait 1', 'review core r1 glm read', 'review core r1 glm #2', 'review core r1 glm #2 wait 1', 'review core r1 glm #2 read'])
+    expect(f.logs.some(l => l.startsWith('core r1 glm: did not run - retrying once. review command exited 3') && l.endsWith('glm: quota exceeded'))).toBe(true)
+  })
+
+  it('keeps running the review command directly where the host has a shell', async () => {
+    const f = fakeHost({ reviews: ['No findings.'] })
+    await runGranny(f.host, input())
+    expect(f.calls.some(c => c.kind === 'command')).toBe(false)
+    expect(f.commands[0]).toStartWith('mkdir -p .granny && rm -f .granny/review-core-r1-codex.md .granny/review-core-r1-codex.log && codex exec review')
   })
 })
 
@@ -732,7 +840,9 @@ describe('the worktree', () => {
     const f = fakeHost({ name: 'claude-code', direct: false, worktree: WT })
     await runGranny(f.host, input())
     const runner = f.calls.find(c => c.label === 'review core r1 codex')!
-    expect(runner.prompt).toContain(`\ncd ${WT} && mkdir -p .granny && rm -f .granny/review-core-r1-codex.md`)
+    expect(runner.prompt).toContain(`\ncd ${WT} && if [ -s .granny/review-core-r1-codex.pid ]`)
+    expect(f.calls.find(c => c.label === 'review core r1 codex wait 1')!.prompt).toContain(`\ncd ${WT} && bash -c `)
+    expect(f.calls.find(c => c.label === 'review core r1 codex read')!.prompt).toContain(`\ncd ${WT} && code=$(cat .granny/review-core-r1-codex.exit)`)
     expect(runner.prompt).toContain(`Stage "core" of repo ${WT}, branch`)
   })
 
@@ -1030,6 +1140,10 @@ describe('several reviewers', () => {
     expect(f.calls.filter(c => c.label.startsWith('review')).map(c => c.label).sort()).toEqual([
       'review core r1 codex',
       'review core r1 codex #2',
+      'review core r1 codex #2 read',
+      'review core r1 codex #2 wait 1',
+      'review core r1 codex read',
+      'review core r1 codex wait 1',
       'review core r1 opus',
       'review core r1 opus #2',
     ])
@@ -1352,7 +1466,7 @@ describe('the review script in a real shell', () => {
   const withoutNode = () => {
     const tools = join(home, 'tools without node')
     mkdirSync(tools)
-    for (const tool of ['bash', 'cat', 'mkdir', 'rm', 'sort', 'tail']) symlinkSync(Bun.which(tool)!, join(tools, tool))
+    for (const tool of ['bash', 'cat', 'mkdir', 'nohup', 'rm', 'sleep', 'sort', 'tail']) symlinkSync(Bun.which(tool)!, join(tools, tool))
     return shell({ PATH: `${bin}:${tools}` })
   }
   const titles = (r: Awaited<ReturnType<typeof runGranny>>) => r.stages[0]!.history[0]!.findings.map(x => [x.severity, x.title])
@@ -1369,6 +1483,20 @@ describe('the review script in a real shell', () => {
     expect(f.logs).toContain(`core r1 codex: reviewer: codex-plugin review (${companionDir('1.0.10')}/codex-companion.mjs)`)
     expect(readFileSync(join(repo, workDir, 'review-core-r1-codex.md'), 'utf8')).toBe(readFileSync(join(FIXTURES, 'codex-plugin-review.md'), 'utf8'))
     expect(readFileSync(join(repo, workDir, 'review-core-r1-codex.log'), 'utf8')).toBe('[codex] progress\n')
+    expect(readFileSync(join(repo, workDir, 'review-core-r1-codex.exit'), 'utf8')).toBe('0\n')
+    expect(readFileSync(join(repo, workDir, 'review-core-r1-codex.out'), 'utf8')).toStartWith(`[granny] reviewer: codex-plugin review (`)
+  })
+
+  it('stops a detached review still running at the wait cap on Claude Code, and leaves no process behind', async () => {
+    const slow = { name: 'slow', engine: 'command', command: 'sleep 37.25; echo "No findings against {base}."' }
+    const f = fakeHost({ name: 'claude-code', direct: false, shell: shell(), wait: () => 'pending\n' })
+    const r = await runGranny(f.host, input({ repo, config: { maxRounds: 1, workDir, reviewers: [slow] } }))
+    expect(r.stages[0]).toMatchObject({ outcome: 'review-failed', rounds: 1 })
+    expect(f.stops).toHaveLength(2)
+    await new Promise(res => setTimeout(res, 200))
+    expect(Bun.spawnSync(['pgrep', '-f', '^sleep 37\\.25$']).exitCode).toBe(1)
+    expect(existsSync(join(repo, workDir, 'review-core-r1-slow.pid'))).toBe(false)
+    expect(existsSync(join(repo, workDir, 'review-core-r1-slow.exit'))).toBe(false)
   })
 
   it('looks for the companion under CLAUDE_CONFIG_DIR instead of ~/.claude when it is set', async () => {

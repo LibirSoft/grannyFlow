@@ -256,8 +256,30 @@ describe('the plan review', () => {
     expect(r.plan).toMatchObject({ outcome: 'clean' })
     const runner = f.calls.find(c => c.label === 'review plan review r1 codex')!
     expect(runner).toMatchObject({ role: 'granny', kind: 'command', phase: 'Plan review', access: 'read-only' })
-    expect(runner.prompt).toContain(`\ncd ${WT} && mkdir -p .granny && rm -f .granny/review-plan-review-r1-codex.md`)
+    expect(runner.prompt).toContain(`; mkdir -p .granny && rm -f .granny/review-plan-review-r1-codex.md .granny/review-plan-review-r1-codex.log`)
+    expect(runner.prompt).toContain('{ set -m; nohup bash -c ')
     expect(runner.prompt).toContain('node "$companion" task')
+    expect(f.calls.filter(c => c.kind === 'command' && c.label.startsWith('review plan review')).map(c => [c.label, c.phase])).toEqual([
+      ['review plan review r1 codex', 'Plan review'],
+      ['review plan review r1 codex wait 1', 'Plan review'],
+      ['review plan review r1 codex read', 'Plan review'],
+    ])
+    expect(f.calls.find(c => c.label === 'review plan review r1 codex wait 1')!.prompt).toContain(`\ncd ${WT} && bash -c 'until [ -s .granny/review-plan-review-r1-codex.exit ]`)
+  })
+
+  it('waits for a slow plan-review command on Claude Code until it is done, then reads its findings', async () => {
+    const f = fakeHost({
+      name: 'claude-code',
+      direct: false,
+      worktree: WT,
+      reviews: [review(planFinding('P2', 'Gap')), 'No findings.'],
+      scores: [{ 'codex-F1': 90 }],
+      wait: (_, n) => (n < 4 ? 'pending\n' : 'done\n'),
+    })
+    const r = await runGranny(f.host, input({ plan: PLAN, config: { planReview: true } }))
+    expect(r.plan).toMatchObject({ outcome: 'clean', rounds: 2 })
+    expect(r.plan!.history[0]!.findings.map(x => x.title)).toEqual(['Gap'])
+    expect(f.calls.filter(c => c.label.startsWith('review plan review r1 codex wait')).map(c => c.label)).toEqual([1, 2, 3, 4].map(n => `review plan review r1 codex wait ${n}`))
   })
 
   it('throws when the plan fixer returns nothing', async () => {
@@ -360,8 +382,10 @@ describe('the plan-review command of each reviewer engine', () => {
 
   it('fills {prompt} of a command reviewer with the plan-review prompt', () => {
     const s = planReviewScript(rv({ engine: 'command', command: 'llm -m {model} {prompt}', model: 'm' }), config, 'opencode', 'main', stem, prompt)!
+    const body = `llm -m m ${quoted} > .granny/review-plan-review-r1-codex.log 2>&1; code=$?; if [ -s .granny/review-plan-review-r1-codex.md ]; then cat .granny/review-plan-review-r1-codex.md; else cat .granny/review-plan-review-r1-codex.log; fi; exit $code`
     expect(s).toEqual({
-      script: `mkdir -p .granny && rm -f .granny/review-plan-review-r1-codex.md .granny/review-plan-review-r1-codex.log && llm -m m ${quoted} > .granny/review-plan-review-r1-codex.log 2>&1; code=$?; if [ -s .granny/review-plan-review-r1-codex.md ]; then cat .granny/review-plan-review-r1-codex.md; else cat .granny/review-plan-review-r1-codex.log; fi; exit $code`,
+      script: `mkdir -p .granny && rm -f .granny/review-plan-review-r1-codex.md .granny/review-plan-review-r1-codex.log && ${body}`,
+      body,
       backend: 'custom command',
     })
   })
