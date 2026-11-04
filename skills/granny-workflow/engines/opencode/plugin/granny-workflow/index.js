@@ -672,7 +672,7 @@ function gatesLine(c) {
   if (c.gates === "auto") {
     return "Gates: every test, lint/format check, build and typecheck command the project has (package.json scripts, Makefile, pyproject, Cargo, CI config). All must pass before every commit; report each exact command and its numbers.";
   }
-  return `Gates, all must pass before every commit; report exact numbers: ${c.gates.map((g) => "`" + g + "`").join(", ")}.`;
+  return `Gates (all must pass before every commit; report exact numbers): ${c.gates.map((g) => "`" + g + "`").join(", ")}.`;
 }
 function common(p) {
   const c = p.config;
