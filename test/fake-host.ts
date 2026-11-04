@@ -77,6 +77,7 @@ export function fakeHost(opts: FakeOptions = {}) {
   const scores = [...(opts.scores ?? [])]
   const statuses = [...(opts.status ?? [])]
   const calls: AgentRequest[] = []
+  const requests: AgentRequest[] = []
   const commands: string[] = []
   const cwds: string[] = []
   const setups: Setup[] = []
@@ -158,6 +159,7 @@ export function fakeHost(opts: FakeOptions = {}) {
   const host: Host = {
     name: opts.name ?? 'opencode',
     async agent(req) {
+      requests.push(req)
       if (req.label === 'worktree' || (req.kind === 'command' && req.label.startsWith('worktree '))) {
         const line = /Run exactly this:\n(.+)\n/.exec(req.prompt)?.[1] ?? ''
         setups.push({ command: line, cwd: '/', request: req })
@@ -215,7 +217,7 @@ export function fakeHost(opts: FakeOptions = {}) {
       return nextReview(command, cwd)
     }
   }
-  return { host, calls, commands, cwds, setups, logs, phases, probes, stops }
+  return { host, calls, requests, commands, cwds, setups, logs, phases, probes, stops }
 }
 
 export const finding = (severity: string, title: string, file = 'src/a.ts', line = 3) =>

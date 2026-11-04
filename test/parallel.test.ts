@@ -384,7 +384,7 @@ it('documents a run input that checkInput accepts in the config reference', () =
   expect(checkInput(JSON.parse(block))).toEqual([])
 })
 
-it('runs the lane setup, the merge and the cleanup through granny helper agents on Claude Code', async () => {
+it('runs the lane setup, the merge and the cleanup through helper agents on Claude Code', async () => {
   const f = fakeHost({
     name: 'claude-code',
     direct: false,
@@ -407,6 +407,13 @@ it('runs the lane setup, the merge and the cleanup through granny helper agents 
   expect(f.calls.find(c => c.label === 'implement two')!.cwd).toBe('/work/a-worktrees/feat-x--s2-two')
   expect(f.calls.find(c => c.label === 'implement bee')!.cwd).toBe('/work/b-worktrees/feat-x')
   expect(r.stages.map(s => s.outcome)).toEqual(['clean', 'clean', 'clean'])
+  const relays = f.requests.filter(q => ['worktree two', 'merge two', 'verify merge two', 'cleanup two'].includes(q.label))
+  expect(relays.map(q => [q.label, q.role, q.model, q.effort])).toEqual([
+    ['worktree two', 'helper', 'haiku', 'low'],
+    ['merge two', 'helper', 'haiku', 'low'],
+    ['verify merge two', 'helper', 'haiku', 'low'],
+    ['cleanup two', 'helper', 'haiku', 'low'],
+  ])
 })
 
 it('tells only a stage that builds on earlier work in its repo to read the earlier stages', async () => {

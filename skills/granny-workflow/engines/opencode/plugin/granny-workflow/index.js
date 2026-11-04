@@ -10,6 +10,7 @@ import { isAbsolute, join } from "path";
 var DEFAULT_CONFIG = {
   roles: {
     granny: {},
+    helper: { model: { "claude-code": "haiku" }, effort: "low" },
     planner: {},
     implementer: {},
     judge: { model: { "claude-code": "sonnet" } }
@@ -34,7 +35,7 @@ var DEFAULT_CONFIG = {
   checks: [],
   maxRepairs: 2
 };
-var ROLES = ["granny", "planner", "implementer", "judge"];
+var ROLES = ["granny", "helper", "planner", "implementer", "judge"];
 var TOP_KEYS = new Set(["$schema", "roles", "worktreeDir", ...Object.keys(DEFAULT_CONFIG).filter((k) => k !== "roles")]);
 var ROLE_KEYS = new Set(["model", "effort"]);
 var REVIEWER_KEYS = new Set(["name", "engine", "model", "effort", "mode", "focus", "command"]);
@@ -1176,7 +1177,7 @@ ${note}` : ""}` : missing };
       return { ran: r.code === 0, code: r.code, output: r.output };
     }
     const prompt = ask(cwd, label, `cd ${shellQuote(cwd)} && ${script}`);
-    return helped(label, await call("granny", "command", label, phase, prompt, "write", config.roles.granny, cwd), `the ${label} runner returned nothing`);
+    return helped(label, await call("helper", "command", label, phase, prompt, "write", config.roles.helper, cwd), `the ${label} runner returned nothing`);
   };
   const readHead = async (label, phase, cwd) => {
     const r = await shell(label, phase, "git rev-parse --verify HEAD", cwd);
@@ -1207,7 +1208,7 @@ ${note}` : ""}` : missing };
       r = await shell(label, "Worktree", script, repo);
     else {
       const prompt = worktreeCommandPrompt(repo, branch, `cd ${shellQuote(repo)} && ${script}`);
-      r = helped(label, await call("granny", "command", label, "Worktree", prompt, "write", config.roles.granny, repo), "the worktree runner returned nothing");
+      r = helped(label, await call("helper", "command", label, "Worktree", prompt, "write", config.roles.helper, repo), "the worktree runner returned nothing");
     }
     const path = r.ran ? reportedWorktree(r.output) : undefined;
     if (!path)
@@ -1449,7 +1450,7 @@ the last repair's deviations: ${deviations}` : ""}`;
         note = `review command exited ${r.code}: ${r.output.slice(-2000)}`;
     } else {
       const job = detachedReview(plan, config, stem, cwd);
-      const step = (label, prompt) => call("granny", "command", label, phase, prompt, "read-only", config.roles.granny, cwd);
+      const step = (label, prompt) => call("helper", "command", label, phase, prompt, "read-only", config.roles.helper, cwd);
       const started = await step(`review ${tag}`, reviewStartPrompt(p, name, rv.name, job.start));
       if (!started?.ran) {
         const said = String(started?.output ?? "");

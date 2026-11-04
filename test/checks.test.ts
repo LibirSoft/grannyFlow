@@ -507,7 +507,7 @@ describe('checks', () => {
     const f = scripted({ 'run-tests': [green('12 pass')] }, { name: 'claude-code', direct: false })
     const r = await runGranny(f.host, run({ checks: [TESTS] }))
     const check = f.calls.find(c => c.label === 'check core tests')!
-    expect(check).toMatchObject({ kind: 'command', role: 'granny', phase: 'Checks', cwd: REPO })
+    expect(check).toMatchObject({ kind: 'command', role: 'helper', phase: 'Checks', cwd: REPO })
     expect(check.prompt).toContain(`cd ${REPO} && run-tests`)
     expect(check.prompt).toContain('Never invent output or an exit code')
     expect(f.calls.some(c => c.label === 'check final review tests')).toBe(false)
