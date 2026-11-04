@@ -694,18 +694,18 @@ function common(p) {
 `);
 }
 var repoAsk = (p, repos) => (repos.length ? `
-This goal spans several repos: ${p.repo} (the primary) and ${repos.join(", ")}. Explore each one the goal touches. A stage works in exactly one repo: set its repo to the absolute path of that repo (leave it out for the primary). When the same change goes to several repos, give each repo its own stage.` : "") + `
-Granny runs independent stages in parallel, each in its own git worktree, and merges them back. Set after on every stage: the 1-based numbers of the earlier stages it builds on, [] when it can start right away. Two stages are independent when neither needs the other's code and they do not edit the same files${repos.length ? " (the same change in several repos usually is)" : ""}; when in doubt, make the later one wait.`;
+The goal spans several repos: ${p.repo} (the primary) and ${repos.join(", ")}. Explore each one it touches. A stage works in exactly one repo: set its repo to that repo's absolute path (omit it for the primary). The same change in several repos gets one stage per repo.` : "") + `
+Independent stages run in parallel, each in its own git worktree. Set after on every stage: the 1-based numbers of the earlier stages it builds on, [] if it can start right away. Stages are independent when neither needs the other's code and they edit different files${repos.length ? " (the same change in several repos usually is)" : ""}; when in doubt, make the later one wait.`;
 function draftPrompt(p, goal, plans, repos = []) {
   return `${common(p)}
 
-You are the PLANNER. Nothing is implemented yet: write a plan, not code. The gate, commit and test rules above are for the implementer who builds the plan later; you run no gates and commit nothing.
+You are the PLANNER: write a plan, not code. The gate, commit and test rules above are for the implementer who builds it later; run no gates and commit nothing.
 GOAL:
 ${goal}
 
-Explore the repo first - the code, configs, lockfiles, tests and docs the goal touches. Then write the plan to ${plans.join(", ")} (absolute paths; create the directories if missing). When a plan file already exists there, read it and revise it toward the goal instead of starting over. Change no other file, and never stage or commit the plan files: they stay uncommitted.
-Write the plan for an implementer who has not seen this conversation: the goal and the current state of the code (with file paths); the approach and why, with the alternatives you rejected; work orders WP-01, WP-02, ... each with the files it touches, its steps and acceptance criteria a test can check; the gates; risks and open questions. Name versions, APIs, flags and files as the repo has them, not from memory.
-Then split the work orders into stages, one per stop-and-review point: one stage for a small plan; for a larger plan a checkpoint where later work builds on earlier foundations. Each stage's task names exactly which work orders it does.${repoAsk(p, repos)}
+First explore the code, configs, lockfiles, tests and docs the goal touches. Then write the plan to ${plans.join(", ")} (absolute paths; create missing directories). If a plan file already exists there, revise it toward the goal instead of starting over. Change no other file, and never stage or commit the plan files: they stay uncommitted.
+Write it for an implementer who has not seen this conversation: the goal and the current state of the code (with file paths); the approach and why, with the alternatives you rejected; work orders WP-01, WP-02, ..., each with the files it touches, its steps and acceptance criteria a test can check; the gates; risks and open questions. Name versions, APIs, flags and files as the repo has them, not from memory.
+Split the work orders into stages, one per stop-and-review point: one stage for a small plan; for a larger one, a checkpoint where later work builds on earlier foundations. Each stage's task names exactly which work orders it does.${repoAsk(p, repos)}
 Return files (the absolute paths you wrote), stages ([{ name, task, after${repos.length ? ", repo" : ""} }]), summary (a few lines for the user: the approach and the work orders) and questions (decisions only the user can make, each with the default the plan assumes; empty when none).`;
 }
 function implementPrompt(p, stage, index, total, name, builds = index > 0) {
@@ -860,15 +860,14 @@ Extract every finding it reports - none merged, dropped or invented - with id (F
 RAW REVIEW OUTPUT:
 ${output}`;
 }
-var JUDGE_FROM = (findings) => `The findings come from one or more reviewers; each names its reviewer. ${judgeRouting(findings)}`;
-var JUDGE_DUPES = "If a finding reports the same problem as another one in this list, classify it too and set its duplicateOf to the id of the one to keep. Then score the whole review 0-100 (correctness + actionability; mostly wrong or trivial findings = low); that score is informational only.";
+var JUDGE_DUPES = "If a finding reports the same problem as another one in this list (reviewers overlap), classify it too and set its duplicateOf to the id of the one to keep. Then score the whole review 0-100 for correctness and actionability (mostly wrong or trivial findings = low; informational only).";
 function judgePrompt(p, reviewBase, findings, earlier = [], stage, note) {
   return `You are the JUDGE classifying the findings of a code review. Repo ${p.repo}, branch ${p.branch}, stage diff \`${shellQuote(reviewBase)}...HEAD\`. Do not edit anything.
 ${note ? note + `
 ` : ""}${p.context ? `Design context:
 ` + p.context + `
 ` : ""}${taskSection(stage)}
-${JUDGE_FROM(findings)}
+${judgeRouting(findings)}
 For each finding, open the cited code and check that it is real and correctly described.${stage ? " Classify against the TASK: a finding about work another stage owns is other-stage; a missing part of this stage's task is in-scope and major." : ""} ${JUDGE_DUPES}
 ${rubric(stage ? "the stage's TASK" : "what the change set out to do")}
 ${judgeHistory(earlier)}
@@ -886,7 +885,7 @@ function planJudgePrompt(p, plans, findings, earlier = []) {
 ${p.context ? `Design context:
 ` + p.context + `
 ` : ""}
-${JUDGE_FROM(findings)}
+${judgeRouting(findings)}
 For each finding, open the cited plan line and the code, config or dependency it names, and check that it is real and correctly described. Classify impact by what the plan would cause if implemented as written; evidence is the plan's path:line plus the repo path:line that shows the problem. ${JUDGE_DUPES}
 ${rubric("the goal of the plan")}
 ${judgeHistory(earlier)}
@@ -904,10 +903,10 @@ ${overruledSection(overruled)}
 ${findingsList(accepted)}`;
 }
 function finalPrompt(p, plans = []) {
-  const attribution = p.config.aiAttribution ? "" : ` \`git log ${shellQuote(p.base)}..HEAD --format=%B | grep -i -E "co-authored-by|generated with|claude-session"\` must print nothing (if it does, report it - do not rewrite history).`;
+  const attribution = p.config.aiAttribution ? "" : ` \`git log ${shellQuote(p.base)}..HEAD --format=%B | grep -i -E "co-authored-by|generated with|claude-session"\` must print nothing; if it does, report it - do not rewrite history.`;
   return `${common(p)}
 
-You are GRANNY doing the FINAL CHECK - no push, no remote, no PR. Run every gate and record exact numbers. \`git status --short\` must be clean${plans.length ? ` except for the plan files ${plans.join(", ")}, which stay uncommitted: never stage or commit them` : ""}.${attribution} Make ${prBodyPath(p.config)} complete and accurate against the actual commits${p.config.parallel ? `; fold in the notes of stages that ran in their own worktree (${p.config.workDir}/PR-BODY-*.md, when any exist) and delete those files` : ""}. Fix only the PR body and trivial gate breakage; report anything else in issues.`;
+You are GRANNY doing the FINAL CHECK. Run every gate and record exact numbers. \`git status --short\` must be clean${plans.length ? ` except for the plan files ${plans.join(", ")}, which stay uncommitted: never stage or commit them` : ""}.${attribution} Make ${prBodyPath(p.config)} complete and accurate against the actual commits${p.config.parallel ? `; fold in the notes of stages that ran in their own worktree (${p.config.workDir}/PR-BODY-*.md, if any) and delete those files` : ""}. Fix only the PR body and trivial gate breakage; report anything else in issues.`;
 }
 function mergePrompt(p, name, lane, output) {
   return `${common(p)}

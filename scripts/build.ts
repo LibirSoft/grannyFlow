@@ -117,7 +117,7 @@ export function renderPrompts(): string {
       'Implementer - fix, from round 2 on when the judge overruled the fixer (the plan fix gets the same OVERRULED block)',
       fixPrompt(p, '<stage name>', 2, [], overruled).replace(/\[\]$/, '<accepted findings as JSON>'),
     ],
-    ['Granny - a check command, the helper agent on Claude Code (on opencode granny runs it itself; a check with timeout runs as `timeout <s> bash -c \'<run>\'`, or `gtimeout` where only that is on PATH; for a check without a metric the parenthesis reads `when it is very long, the last 3000 characters are enough`)', checkCommandPrompt('<repo>', 'check <stage name> <check name>', "cd '<repo>' && <check run>", '<metric pattern>')],
+    ['Granny - a check command, the helper agent on Claude Code (on opencode granny runs it itself; a check with timeout runs as `timeout <s> bash -c \'<run>\'`, or `gtimeout` where only that is on PATH; for a check without a metric the parenthesis reads `if very long, the last 3000 characters are enough`)', checkCommandPrompt('<repo>', 'check <stage name> <check name>', "cd '<repo>' && <check run>", '<metric pattern>')],
     [
       'Implementer - repair (checks failed at `implement`, `fix r<n>` or `final`; one block per failed check)',
       repairPrompt(p, '<stage name>', 'implement', 1, [{ name: '<check name>', run: '<check run>', code: '<exit code>', note: '<metric note>', output: '<last 3000 characters of the output>' }], stage),

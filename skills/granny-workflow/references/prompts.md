@@ -30,14 +30,14 @@ Code comments: default none; add one only when the reason cannot be recovered fr
 CONTEXT - read it before anything else and obey it:
 <context: work-order files and override notes>
 
-You are the PLANNER. Nothing is implemented yet: write a plan, not code. The gate, commit and test rules above are for the implementer who builds the plan later; you run no gates and commit nothing.
+You are the PLANNER: write a plan, not code. The gate, commit and test rules above are for the implementer who builds it later; run no gates and commit nothing.
 GOAL:
 <goal>
 
-Explore the repo first - the code, configs, lockfiles, tests and docs the goal touches. Then write the plan to <repo>/.granny/plans/<branch-slug>.md (absolute paths; create the directories if missing). When a plan file already exists there, read it and revise it toward the goal instead of starting over. Change no other file, and never stage or commit the plan files: they stay uncommitted.
-Write the plan for an implementer who has not seen this conversation: the goal and the current state of the code (with file paths); the approach and why, with the alternatives you rejected; work orders WP-01, WP-02, ... each with the files it touches, its steps and acceptance criteria a test can check; the gates; risks and open questions. Name versions, APIs, flags and files as the repo has them, not from memory.
-Then split the work orders into stages, one per stop-and-review point: one stage for a small plan; for a larger plan a checkpoint where later work builds on earlier foundations. Each stage's task names exactly which work orders it does.
-Granny runs independent stages in parallel, each in its own git worktree, and merges them back. Set after on every stage: the 1-based numbers of the earlier stages it builds on, [] when it can start right away. Two stages are independent when neither needs the other's code and they do not edit the same files; when in doubt, make the later one wait.
+First explore the code, configs, lockfiles, tests and docs the goal touches. Then write the plan to <repo>/.granny/plans/<branch-slug>.md (absolute paths; create missing directories). If a plan file already exists there, revise it toward the goal instead of starting over. Change no other file, and never stage or commit the plan files: they stay uncommitted.
+Write it for an implementer who has not seen this conversation: the goal and the current state of the code (with file paths); the approach and why, with the alternatives you rejected; work orders WP-01, WP-02, ..., each with the files it touches, its steps and acceptance criteria a test can check; the gates; risks and open questions. Name versions, APIs, flags and files as the repo has them, not from memory.
+Split the work orders into stages, one per stop-and-review point: one stage for a small plan; for a larger one, a checkpoint where later work builds on earlier foundations. Each stage's task names exactly which work orders it does.
+Independent stages run in parallel, each in its own git worktree. Set after on every stage: the 1-based numbers of the earlier stages it builds on, [] if it can start right away. Stages are independent when neither needs the other's code and they edit different files; when in doubt, make the later one wait.
 Return files (the absolute paths you wrote), stages ([{ name, task, after }]), summary (a few lines for the user: the approach and the work orders) and questions (decisions only the user can make, each with the default the plan assumes; empty when none).
 ```
 
@@ -77,8 +77,8 @@ Design context:
 Plan files - read them first: <plan files>
 <context: work-order files and override notes>
 
-The findings come from one or more reviewers; each names its reviewer. P0/P1 findings are not in this list: they go to the implementer without you.
-For each finding, open the cited plan line and the code, config or dependency it names, and check that it is real and correctly described. Classify impact by what the plan would cause if implemented as written; evidence is the plan's path:line plus the repo path:line that shows the problem. If a finding reports the same problem as another one in this list, classify it too and set its duplicateOf to the id of the one to keep. Then score the whole review 0-100 (correctness + actionability; mostly wrong or trivial findings = low); that score is informational only.
+P0/P1 findings are not in this list: they go to the implementer without you.
+For each finding, open the cited plan line and the code, config or dependency it names, and check that it is real and correctly described. Classify impact by what the plan would cause if implemented as written; evidence is the plan's path:line plus the repo path:line that shows the problem. If a finding reports the same problem as another one in this list (reviewers overlap), classify it too and set its duplicateOf to the id of the one to keep. Then score the whole review 0-100 for correctness and actionability (mostly wrong or trivial findings = low; informational only).
 Classify every finding - do not score it. Give each exactly these fields:
 - verdict: confirmed (the code shows the problem) | refuted (the code shows it is absent or not a problem) | unverified (you cannot tell either way).
 - impact, how bad IF it triggers: critical | major | moderate | minor | none.
@@ -199,7 +199,7 @@ FINDINGS (P0/P1, or sent by the judge's classification; decision names the rule)
 <accepted findings as JSON>
 ```
 
-## Granny - a check command, the helper agent on Claude Code (on opencode granny runs it itself; a check with timeout runs as `timeout <s> bash -c '<run>'`, or `gtimeout` where only that is on PATH; for a check without a metric the parenthesis reads `when it is very long, the last 3000 characters are enough`)
+## Granny - a check command, the helper agent on Claude Code (on opencode granny runs it itself; a check with timeout runs as `timeout <s> bash -c '<run>'`, or `gtimeout` where only that is on PATH; for a check without a metric the parenthesis reads `if very long, the last 3000 characters are enough`)
 
 ```text
 Run one check command for the "check <stage name> <check name>" step and return its output. Run nothing else; edit, stage or commit nothing.
@@ -382,8 +382,8 @@ Plan files - read them first: <plan files>
 Stage 2/2 "<stage name>" - its TASK:
 <stage task>
 
-The findings come from one or more reviewers; each names its reviewer. P0/P1 findings are not in this list: they go to the implementer without you.
-For each finding, open the cited code and check that it is real and correctly described. Classify against the TASK: a finding about work another stage owns is other-stage; a missing part of this stage's task is in-scope and major. If a finding reports the same problem as another one in this list, classify it too and set its duplicateOf to the id of the one to keep. Then score the whole review 0-100 (correctness + actionability; mostly wrong or trivial findings = low); that score is informational only.
+P0/P1 findings are not in this list: they go to the implementer without you.
+For each finding, open the cited code and check that it is real and correctly described. Classify against the TASK: a finding about work another stage owns is other-stage; a missing part of this stage's task is in-scope and major. If a finding reports the same problem as another one in this list (reviewers overlap), classify it too and set its duplicateOf to the id of the one to keep. Then score the whole review 0-100 for correctness and actionability (mostly wrong or trivial findings = low; informational only).
 Classify every finding - do not score it. Give each exactly these fields:
 - verdict: confirmed (the code shows the problem) | refuted (the code shows it is absent or not a problem) | unverified (you cannot tell either way).
 - impact, how bad IF it triggers: critical | major | moderate | minor | none.
@@ -414,8 +414,8 @@ Plan files - read them first: <plan files>
 Stage 2/2 "<stage name>" - its TASK:
 <stage task>
 
-The findings come from one or more reviewers; each names its reviewer. P0/P1 findings are not in this list: they go to the implementer without you.
-For each finding, open the cited code and check that it is real and correctly described. Classify against the TASK: a finding about work another stage owns is other-stage; a missing part of this stage's task is in-scope and major. If a finding reports the same problem as another one in this list, classify it too and set its duplicateOf to the id of the one to keep. Then score the whole review 0-100 (correctness + actionability; mostly wrong or trivial findings = low); that score is informational only.
+P0/P1 findings are not in this list: they go to the implementer without you.
+For each finding, open the cited code and check that it is real and correctly described. Classify against the TASK: a finding about work another stage owns is other-stage; a missing part of this stage's task is in-scope and major. If a finding reports the same problem as another one in this list (reviewers overlap), classify it too and set its duplicateOf to the id of the one to keep. Then score the whole review 0-100 for correctness and actionability (mostly wrong or trivial findings = low; informational only).
 Classify every finding - do not score it. Give each exactly these fields:
 - verdict: confirmed (the code shows the problem) | refuted (the code shows it is absent or not a problem) | unverified (you cannot tell either way).
 - impact, how bad IF it triggers: critical | major | moderate | minor | none.
@@ -500,8 +500,8 @@ Design context:
 Plan files - read them first: <plan files>
 <context: work-order files and override notes>
 
-The findings come from one or more reviewers; each names its reviewer. P0/P1 findings are not in this list: they go to the implementer without you.
-For each finding, open the cited code and check that it is real and correctly described. If a finding reports the same problem as another one in this list, classify it too and set its duplicateOf to the id of the one to keep. Then score the whole review 0-100 (correctness + actionability; mostly wrong or trivial findings = low); that score is informational only.
+P0/P1 findings are not in this list: they go to the implementer without you.
+For each finding, open the cited code and check that it is real and correctly described. If a finding reports the same problem as another one in this list (reviewers overlap), classify it too and set its duplicateOf to the id of the one to keep. Then score the whole review 0-100 for correctness and actionability (mostly wrong or trivial findings = low; informational only).
 Classify every finding - do not score it. Give each exactly these fields:
 - verdict: confirmed (the code shows the problem) | refuted (the code shows it is absent or not a problem) | unverified (you cannot tell either way).
 - impact, how bad IF it triggers: critical | major | moderate | minor | none.
@@ -615,5 +615,5 @@ CONTEXT - read it before anything else and obey it:
 Plan files - read them first: <plan files>
 <context: work-order files and override notes>
 
-You are GRANNY doing the FINAL CHECK - no push, no remote, no PR. Run every gate and record exact numbers. `git status --short` must be clean except for the plan files <plan files inside the repo>, which stay uncommitted: never stage or commit them. `git log '<base>'..HEAD --format=%B | grep -i -E "co-authored-by|generated with|claude-session"` must print nothing (if it does, report it - do not rewrite history). Make .granny/PR-BODY.md complete and accurate against the actual commits; fold in the notes of stages that ran in their own worktree (.granny/PR-BODY-*.md, when any exist) and delete those files. Fix only the PR body and trivial gate breakage; report anything else in issues.
+You are GRANNY doing the FINAL CHECK. Run every gate and record exact numbers. `git status --short` must be clean except for the plan files <plan files inside the repo>, which stay uncommitted: never stage or commit them. `git log '<base>'..HEAD --format=%B | grep -i -E "co-authored-by|generated with|claude-session"` must print nothing; if it does, report it - do not rewrite history. Make .granny/PR-BODY.md complete and accurate against the actual commits; fold in the notes of stages that ran in their own worktree (.granny/PR-BODY-*.md, if any) and delete those files. Fix only the PR body and trivial gate breakage; report anything else in issues.
 ```
