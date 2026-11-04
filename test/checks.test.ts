@@ -327,7 +327,7 @@ describe('checks', () => {
     const inRepo = (config: Record<string, unknown>, extra: Partial<RunInput> = {}) => run(config, { repo: tempDir('granny-repo-'), ...extra })
 
     it('is gtimeout when only gtimeout is on PATH, probed once per run', async () => {
-      const f = fakeHost({ shell: { env: { PATH: bin(['gtimeout', Bun.which('timeout')!]) } } })
+      const f = fakeHost({ shell: { env: { PATH: bin(['gtimeout', (Bun.which('timeout') ?? Bun.which('gtimeout'))!]) } } })
       const r = await runGranny(f.host, inRepo({ checks: [timed()] }, { stages: [{ name: 'one', task: 'WP-01' }, { name: 'two', task: 'WP-02' }] }))
       expect(r.stages.map(s => s.outcome)).toEqual(['clean', 'clean'])
       expect(f.commands.filter(c => c.includes('bash -c true'))).toEqual(['gtimeout 5 bash -c true', 'gtimeout 5 bash -c true', 'gtimeout 5 bash -c true'])
