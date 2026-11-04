@@ -1,4 +1,4 @@
-import type { HostName } from './types'
+import { IMPACTS, type HostName, type Impact } from './types'
 
 export type ModelSpec = string | Partial<Record<HostName, string>>
 
@@ -37,6 +37,7 @@ export interface GrannyConfig {
   roles: Record<ConfigRole, RoleConfig>
   reviewers: ReviewerConfig[]
   threshold: number
+  alwaysFix: Impact[]
   maxRounds: number
   base: string
   gates: string[] | 'auto'
@@ -64,6 +65,7 @@ export const DEFAULT_CONFIG: GrannyConfig = {
   },
   reviewers: [{ name: 'reviewer', engine: 'agent' }],
   threshold: 70,
+  alwaysFix: ['critical', 'major'],
   maxRounds: 4,
   base: 'main',
   gates: 'auto',
@@ -218,6 +220,9 @@ function validate(c: GrannyConfig): string[] {
   const errors: string[] = []
   if (typeof c.threshold !== 'number' || !(c.threshold >= 0 && c.threshold <= 100)) {
     errors.push('threshold must be a number between 0 and 100')
+  }
+  if (!Array.isArray(c.alwaysFix) || !c.alwaysFix.every(i => IMPACTS.includes(i))) {
+    errors.push(`alwaysFix must be an array of impact classes (${IMPACTS.join(', ')})`)
   }
   if (!Number.isInteger(c.maxRounds) || c.maxRounds < 1) errors.push('maxRounds must be an integer >= 1')
   if (typeof c.base !== 'string' || !c.base) errors.push('base must be a non-empty string')

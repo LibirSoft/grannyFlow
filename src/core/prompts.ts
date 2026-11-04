@@ -20,10 +20,26 @@ export interface Overruled {
 
 export const roundLabel = (round: number, f: Pick<Finding, 'id'>) => `r${round}/${f.id}`
 
-const judgeRouting = (p: PromptContext, findings: Finding[]): string =>
+const judgeRouting = (findings: Finding[]): string =>
   findings.some(isBlocker)
-    ? `P0/P1 findings are in this list only because a fixer declined findings in an earlier round: score them like the rest. A P0/P1 goes to the implementer whatever its score, unless its repeatOf names a finding the fixer declined and you score it ${p.config.threshold} or lower.`
-    : 'P0/P1 findings are not in this list: they go to the implementer without a score.'
+    ? 'P0/P1 findings are in this list only because a fixer declined findings in an earlier round: classify them like the rest. A P0/P1 goes to the implementer whatever you classify, unless its repeatOf names a finding the fixer declined - then your classification decides it like any other finding.'
+    : 'P0/P1 findings are not in this list: they go to the implementer without the judge.'
+
+const rubric = (task: string) => `Classify every finding below - do not score it. The engine computes a priority from your classes and decides what goes to the implementer, so give each finding exactly these fields:
+- verdict: confirmed (the code shows the problem) | refuted (the code shows it is not there or not a problem) | unverified (you could not confirm it either way).
+- impact: how bad it is IF it triggers - critical | major | moderate | minor | none.
+  Judge impact assuming the trigger happens. Likelihood never lowers impact; it is its own field.
+  - critical: data loss or corruption, writing to the wrong record, a security or authorization bypass, a secret or personal data leak, a draft going public, an irreversible operation, stored data silently read differently.
+  - major: the user cannot get out from inside the app (a lock only a reload clears, endless loading, a crash); something that worked silently breaks; an API or contract break; a required part of ${task} is missing.
+  - moderate: wrong behaviour with an easy workaround; a wrong or missing error message; a missing test for changed behaviour; duplicated logic.
+  - minor: a visual defect, naming, style.
+  - none: not a problem at all.
+- likelihood: common (the normal flow) | edge (special timing or state: a race, an expired session, a boundary value) | rare (forced input, a rarely used feature).
+- fixCost: trivial (a few lines) | small (one function or file plus a test) | large (cross-module, a redesign).
+- scope: in-scope | pre-existing (it was already there before this change) | other-stage (another stage's job).
+- evidence: path:line plus the concrete trigger steps, e.g. \`Editor.tsx:225\` + "save -> go back in history -> the late response arrives -> save again". Always give a path:line: evidence without one counts as unverified, and an unverified finding's impact is lowered one class.
+- reason: one line.
+Example: a late save response re-binds the editor to another post's id, so the next save can overwrite the wrong post - confirmed, critical, edge, small, in-scope, even though the window is narrow.`
 
 function judgeHistory(earlier: EarlierRound[]): string {
   if (!earlier.length) return ''
@@ -41,7 +57,7 @@ The findings the fixer declined (did not fix), and why:${declined}${notes}${kept
 EARLIER ROUNDS of this review - the findings already sent to the fixer, under round-qualified labels, the ones the fixer declined with its reasons, and the findings kept as residual for the user:
 ${rounds.join('\n\n')}
 
-When a finding below repeats one of those earlier findings, set its repeatOf to that label. A repeat of a finding the fixer declined with a convincing reason that the code backs scores low - cite the label and the fixer's reason in your reason. When the fixer's reason is wrong, score the repeat on its merits (high when it is real) and say in reason why the fixer's reason does not hold. A repeat of a finding the fixer applied: check the fix in the code and score what is still wrong. A repeat of a residual finding: the fixer never saw it - score it on its merits.
+When a finding below repeats one of those earlier findings, set its repeatOf to that label. A repeat of a finding the fixer declined with a convincing reason that the code backs: classify it refuted, or by its scope when it belongs elsewhere, and cite the label and the fixer's reason in your reason. When the fixer's reason is wrong, classify the repeat on its merits and say in reason why the fixer's reason does not hold. A repeat of a finding the fixer applied: check the fix in the code and classify what is still wrong. A repeat of a residual finding: the fixer never saw it - classify it on its merits.
 `
 }
 
@@ -138,7 +154,7 @@ export function fixPrompt(p: PromptContext, name: string, round: number, accepte
 You are the IMPLEMENTER, fixing review round ${round} of stage "${name}".
 Apply the review findings on top of the current branch state (read \`git log --oneline ${shellQuote(p.base)}..HEAD\` and the code first). Fix every finding below, red-green where it changes behaviour, keep the gates green, commit (\`fix(...)\`), and add each finding id with what you did to the "Review fixes" section of ${prBodyOf(p)}. A finding you believe is wrong: do not fix it, and list it in declined with its id and your reason.
 ${overruledSection(overruled)}
-FINDINGS (P0/P1 or score > ${p.config.threshold}):
+FINDINGS (P0/P1, or the judge's classification sent them - each names the rule in decision):
 ${JSON.stringify(accepted, null, 2)}`
 }
 
@@ -355,20 +371,22 @@ ${output}`
 }
 
 export function judgePrompt(p: PromptContext, reviewBase: string, findings: Finding[], earlier: EarlierRound[] = [], stage?: StageTask, note?: string): string {
-  return `You are the JUDGE scoring a code review. Repo ${p.repo}, branch ${p.branch}, stage diff \`${shellQuote(reviewBase)}...HEAD\`. Do not edit anything.
+  return `You are the JUDGE classifying the findings of a code review. Repo ${p.repo}, branch ${p.branch}, stage diff \`${shellQuote(reviewBase)}...HEAD\`. Do not edit anything.
 ${note ? note + '\n' : ''}${p.context ? 'Design context:\n' + p.context + '\n' : ''}${taskSection(stage)}
-The findings come from one or more reviewers; each names its reviewer. ${judgeRouting(p, findings)}
-For each finding below, open the cited code and judge whether it is real, correctly described and worth fixing; score it 0-100 (findings the code refutes score low).${stage ? ' Score against the TASK: a finding about work another stage owns scores low; a missing part of this stage\'s task is worth fixing.' : ''} When a finding reports the same problem as another finding in this list, score it too and set its duplicateOf to the id of the finding to keep. Then score the whole review 0-100 (correctness + actionability; mostly wrong or trivial findings = low).
+The findings come from one or more reviewers; each names its reviewer. ${judgeRouting(findings)}
+For each finding below, open the cited code and check whether it is real and correctly described.${stage ? " Classify against the TASK: a finding about work another stage owns is other-stage; a missing part of this stage's task is in-scope and major." : ''} When a finding reports the same problem as another finding in this list, classify it too and set its duplicateOf to the id of the finding to keep. Then score the whole review 0-100 (correctness + actionability; mostly wrong or trivial findings = low) - that score is informational only.
+${rubric(stage ? "the stage's TASK" : 'what the change set out to do')}
 ${judgeHistory(earlier)}
 REVIEW:
 ${JSON.stringify(findings, null, 2)}`
 }
 
 export function planJudgePrompt(p: PromptContext, plans: string[], findings: Finding[], earlier: EarlierRound[] = []): string {
-  return `You are the JUDGE scoring a plan review. Repo ${p.repo}, branch ${p.branch}, plan ${plans.join(', ')}. Implementation has not started. Do not edit anything.
+  return `You are the JUDGE classifying the findings of a plan review. Repo ${p.repo}, branch ${p.branch}, plan ${plans.join(', ')}. Implementation has not started. Do not edit anything.
 ${p.context ? 'Design context:\n' + p.context + '\n' : ''}
-The findings come from one or more reviewers; each names its reviewer. ${judgeRouting(p, findings)}
-For each finding below, open the cited plan line and the code, config or dependency it talks about, and judge whether it is real, correctly described and worth fixing in the plan before implementation starts; score it 0-100 (findings the repo refutes score low). When a finding reports the same problem as another finding in this list, score it too and set its duplicateOf to the id of the finding to keep. Then score the whole review 0-100 (correctness + actionability; mostly wrong or trivial findings = low).
+The findings come from one or more reviewers; each names its reviewer. ${judgeRouting(findings)}
+For each finding below, open the cited plan line and the code, config or dependency it talks about, and check whether it is real and correctly described. Classify impact by what the plan would cause once implemented as written; evidence is the plan's path:line plus the repo path:line that shows the problem. When a finding reports the same problem as another finding in this list, classify it too and set its duplicateOf to the id of the finding to keep. Then score the whole review 0-100 (correctness + actionability; mostly wrong or trivial findings = low) - that score is informational only.
+${rubric('the goal of the plan')}
 ${judgeHistory(earlier)}
 REVIEW:
 ${JSON.stringify(findings, null, 2)}`
@@ -386,7 +404,7 @@ ${
   } Take the date from \`date +%F\` in your shell.
 Fix every finding below. A finding you believe is wrong: leave the plan as it is for it, and list it in declined with its id and your reason.
 ${overruledSection(overruled)}
-FINDINGS (P0/P1 or score > ${p.config.threshold}):
+FINDINGS (P0/P1, or the judge's classification sent them - each names the rule in decision):
 ${JSON.stringify(accepted, null, 2)}`
 }
 

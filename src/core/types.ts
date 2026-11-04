@@ -2,6 +2,25 @@ export type HostName = 'claude-code' | 'opencode'
 
 export type Role = 'granny' | 'helper' | 'planner' | 'implementer' | 'reviewer' | 'judge'
 
+export const IMPACTS = ['critical', 'major', 'moderate', 'minor', 'none'] as const
+export type Impact = (typeof IMPACTS)[number]
+
+export const VERDICTS = ['confirmed', 'refuted', 'unverified'] as const
+export type Verdict = (typeof VERDICTS)[number]
+export const LIKELIHOODS = ['common', 'edge', 'rare'] as const
+export type Likelihood = (typeof LIKELIHOODS)[number]
+export const FIX_COSTS = ['trivial', 'small', 'large'] as const
+export type FixCost = (typeof FIX_COSTS)[number]
+export const SCOPES = ['in-scope', 'pre-existing', 'other-stage'] as const
+export type Scope = (typeof SCOPES)[number]
+
+export interface Decision {
+  rule: number
+  action: 'fix' | 'residual'
+  why: string
+  attention?: true
+}
+
 export type ResultKind = 'draft' | 'implementation' | 'planFix' | 'findings' | 'score' | 'command' | 'final'
 
 export type JsonSchema = {
@@ -45,8 +64,17 @@ export interface Finding {
   line?: number
   title: string
   detail: string
+  verdict?: Verdict
+  impact?: Impact
+  likelihood?: Likelihood
+  fixCost?: FixCost
+  scope?: Scope
+  evidence?: string
+  priority?: number
+  /** A judge that returns the old 0-100 score instead of a classification. */
   score?: number
   reason?: string
+  decision?: Decision
   duplicates?: string[]
   repeatOf?: string
 }

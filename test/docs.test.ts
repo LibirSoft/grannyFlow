@@ -44,7 +44,7 @@ describe('skill docs', () => {
       ...Object.keys(DEFAULT_CONFIG).filter(k => k !== 'roles'),
     ]
     expect(rows.map(r => r.key).sort()).toEqual(expected.sort())
-    for (const key of ['threshold', 'maxRounds', 'planReview', 'base', 'gates', 'workDir', 'worktree', 'language', 'aiAttribution', 'reviewers'] as const) {
+    for (const key of ['threshold', 'alwaysFix', 'maxRounds', 'planReview', 'base', 'gates', 'workDir', 'worktree', 'language', 'aiAttribution', 'reviewers'] as const) {
       expect({ key, value: JSON.parse(rows.find(r => r.key === key)!.value.slice(1, -1)) }).toEqual({ key, value: DEFAULT_CONFIG[key] })
     }
     expect(() => resolveConfig([{ $schema: './granny.schema.json' }])).not.toThrow()

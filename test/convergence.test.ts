@@ -42,7 +42,7 @@ describe('a finding the fixer declined', () => {
     expect(r2).toContain('r1/codex-F1')
     expect(r2).toContain(DECLINE)
     expect(r2).toContain('repeatOf')
-    expect(f.logs).toContain('core r2: codex-F1 dropped as a repeat of r1/codex-F1, which the fixer declined (score 20) - kept as residual')
+    expect(f.logs).toContain('core r2: codex-F1 dropped as a repeat of r1/codex-F1, which the fixer declined (rule 8: under the bar: score 20 (numeric score, no classification)) - kept as residual')
     expect(r2).toContain(`- r1/codex-F1: ${DECLINE}`)
     expect(r.stages[0]!.history[0]!.declined).toEqual([{ id: 'codex-F1', reason: DECLINE }])
     expect(r.stages[0]!.history[0]!.deviations).toBeUndefined()
@@ -122,7 +122,7 @@ describe('a finding the fixer declined', () => {
     const fix = prompt(f.calls, 'fix core r2')!
     expect(fix).toContain('Real blocker')
     expect(fix).not.toContain('Phantom blocker')
-    expect(f.logs).toContain('core r2: codex-F1 dropped as a repeat of r1/codex-F1, which the fixer declined (score 15) - kept as residual')
+    expect(f.logs).toContain('core r2: codex-F1 dropped as a repeat of r1/codex-F1, which the fixer declined (rule 8: under the bar: score 15 (numeric score, no classification)) - kept as residual')
     expect(f.logs.some(l => l.includes('codex-F2 dropped'))).toBe(false)
   })
 
@@ -137,7 +137,7 @@ describe('a finding the fixer declined', () => {
     expect(r.stages[0]).toMatchObject({ outcome: 'clean', rounds: 4, residual: [] })
     expect(prompt(f.calls, 'fix core r2')).not.toContain('Phantom blocker')
     expect(prompt(f.calls, 'fix core r3')).toContain('Phantom blocker')
-    expect(f.logs).toContain('core r2: codex-F1 dropped as a repeat of r1/codex-F1, which the fixer declined (score 15) - kept as residual')
+    expect(f.logs).toContain('core r2: codex-F1 dropped as a repeat of r1/codex-F1, which the fixer declined (rule 8: under the bar: score 15 (numeric score, no classification)) - kept as residual')
     expect(f.logs.some(l => l.startsWith('core r3: codex-F1 dropped'))).toBe(false)
   })
 
@@ -175,7 +175,7 @@ describe('a finding the fixer declined', () => {
     expect(r2).toContain('OVERRULED')
     expect(r2).toContain(`  you said: ${DECLINE}`)
     expect(r2).toContain('codex-F1 (repeat of r1/codex-F1): reason codex-F1')
-    expect(f.logs).toContain('core r2: the judge overruled the fixer on codex-F1 (repeat of r1/codex-F1, score 85)')
+    expect(f.logs).toContain('core r2: the judge overruled the fixer on codex-F1 (repeat of r1/codex-F1, rule 7: score 85 > threshold 70 (numeric score, no classification))')
   })
 
   it('does not take a repeat of a residual finding for a repeat of a declined one', async () => {

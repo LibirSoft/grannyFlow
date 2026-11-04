@@ -1,3 +1,4 @@
+import { FIX_COSTS, IMPACTS, LIKELIHOODS, SCOPES, VERDICTS } from './types'
 import type { JsonSchema, ResultKind } from './types'
 
 const DECLINED = {
@@ -93,19 +94,24 @@ export const SCHEMAS: Record<ResultKind, JsonSchema> = {
   score: {
     type: 'object',
     properties: {
-      score: { type: 'number', description: '0-100 overall: how correct, verified and actionable this review is' },
+      score: { type: 'number', description: '0-100 overall, informational only: how correct, verified and actionable this review is' },
       perFinding: {
         type: 'array',
         items: {
           type: 'object',
           properties: {
             id: { type: 'string' },
-            score: { type: 'number' },
-            reason: { type: 'string' },
+            verdict: { type: 'string', enum: [...VERDICTS], description: 'is it really in the code?' },
+            impact: { type: 'string', enum: [...IMPACTS], description: 'how bad IF it triggers - likelihood never lowers it' },
+            likelihood: { type: 'string', enum: [...LIKELIHOODS] },
+            fixCost: { type: 'string', enum: [...FIX_COSTS] },
+            scope: { type: 'string', enum: [...SCOPES] },
+            evidence: { type: 'string', description: 'path:line plus the concrete trigger steps' },
+            reason: { type: 'string', description: 'one line' },
             duplicateOf: { type: 'string', description: 'id of another finding in this list that reports the same problem; omit when there is none' },
             repeatOf: { type: 'string', description: 'label of the earlier-round finding this one repeats, exactly as listed under EARLIER ROUNDS (e.g. r1/codex-F2); omit when it repeats none' },
           },
-          required: ['id', 'score', 'reason'],
+          required: ['id', 'verdict', 'impact', 'likelihood', 'fixCost', 'scope', 'evidence', 'reason'],
         },
       },
       rationale: { type: 'string' },

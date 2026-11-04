@@ -6,6 +6,13 @@ import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, write
 import { homedir } from "os";
 import { isAbsolute, join } from "path";
 
+// src/core/types.ts
+var IMPACTS = ["critical", "major", "moderate", "minor", "none"];
+var VERDICTS = ["confirmed", "refuted", "unverified"];
+var LIKELIHOODS = ["common", "edge", "rare"];
+var FIX_COSTS = ["trivial", "small", "large"];
+var SCOPES = ["in-scope", "pre-existing", "other-stage"];
+
 // src/core/config.ts
 var DEFAULT_CONFIG = {
   roles: {
@@ -17,6 +24,7 @@ var DEFAULT_CONFIG = {
   },
   reviewers: [{ name: "reviewer", engine: "agent" }],
   threshold: 70,
+  alwaysFix: ["critical", "major"],
   maxRounds: 4,
   base: "main",
   gates: "auto",
@@ -181,6 +189,9 @@ function validate(c) {
   const errors = [];
   if (typeof c.threshold !== "number" || !(c.threshold >= 0 && c.threshold <= 100)) {
     errors.push("threshold must be a number between 0 and 100");
+  }
+  if (!Array.isArray(c.alwaysFix) || !c.alwaysFix.every((i) => IMPACTS.includes(i))) {
+    errors.push(`alwaysFix must be an array of impact classes (${IMPACTS.join(", ")})`);
   }
   if (!Number.isInteger(c.maxRounds) || c.maxRounds < 1)
     errors.push("maxRounds must be an integer >= 1");
@@ -390,6 +401,9 @@ function reviewFailure(text) {
   return FAILED_RENDER.exec(text)?.[0];
 }
 var isBlocker = (f) => /^\s*(p0|p1|critical|high)\b/i.test(String(f.severity ?? ""));
+var JUDGED = ["verdict", "impact", "likelihood", "fixCost", "scope", "evidence", "score", "priority", "reason", "decision"];
+var fixes = (f) => f.decision?.action !== "residual";
+var rank = (f) => f.priority ?? f.score ?? -1;
 function mergeDuplicates(findings, duplicateOf) {
   const ids = new Set(findings.map((f) => f.id));
   const keeper = (id) => {
@@ -414,30 +428,113 @@ function mergeDuplicates(findings, duplicateOf) {
     const dups = findings.filter((d) => into.get(d.id) === f.id);
     if (!dups.length)
       return f;
-    const group = [f, ...dups];
+    const top = [f, ...dups].reduce((a, b) => fixes(b) !== fixes(a) ? fixes(b) ? b : a : rank(b) > rank(a) ? b : a);
     const merged = { ...f, duplicates: dups.map((d) => d.id) };
-    if (group.some((g) => g.score === undefined)) {
-      delete merged.score;
-      delete merged.reason;
-    } else {
-      const top = group.reduce((a, b) => b.score > a.score ? b : a);
-      merged.score = top.score;
-      merged.reason = top.reason;
+    for (const key of JUDGED) {
+      if (top[key] === undefined)
+        delete merged[key];
+      else
+        merged[key] = top[key];
     }
     return merged;
   });
   return { findings: kept, merged: [...into].map(([id, k]) => ({ id, into: k })) };
 }
-function triage(findings, threshold, repeatsDeclined = () => false) {
-  const accepted = [];
-  const residual = [];
-  for (const f of findings) {
-    if (isBlocker(f) && !repeatsDeclined(f) || f.score === undefined || f.score > threshold)
-      accepted.push(f);
-    else
-      residual.push(f);
+var PRIORITY = {
+  critical: { common: 100, edge: 95, rare: 90 },
+  major: { common: 90, edge: 80, rare: 65 },
+  moderate: { common: 75, edge: 55, rare: 35 },
+  minor: { common: 35, edge: 25, rare: 15 },
+  none: { common: 0, edge: 0, rare: 0 }
+};
+var COST = { trivial: 15, small: 0, large: -15 };
+function priorityOf(impact, likelihood, fixCost) {
+  if (impact === "none")
+    return 0;
+  return Math.max(0, Math.min(100, PRIORITY[impact][likelihood] + COST[fixCost]));
+}
+var PATH_LINE = /\S+:\d+/;
+var ENUMS = { verdict: VERDICTS, impact: IMPACTS, likelihood: LIKELIHOODS, fixCost: FIX_COSTS, scope: SCOPES };
+var lower = (impact) => IMPACTS[Math.min(IMPACTS.indexOf(impact) + 1, IMPACTS.length - 1)];
+function classify(entry) {
+  if (!entry)
+    return { kind: "none", why: "not judged" };
+  const keys = [...Object.keys(ENUMS), "evidence"];
+  if (keys.every((k) => entry[k] === undefined)) {
+    return typeof entry.score === "number" && Number.isFinite(entry.score) ? { kind: "score", score: entry.score } : { kind: "none", why: "not judged" };
   }
-  return { accepted, residual };
+  const problems = [];
+  for (const [key, values] of Object.entries(ENUMS)) {
+    const v = entry[key];
+    if (v === undefined)
+      problems.push(`${key} missing`);
+    else if (!values.includes(v))
+      problems.push(`${key} ${JSON.stringify(v)}`);
+  }
+  const evidence = typeof entry.evidence === "string" ? entry.evidence.trim() : "";
+  if (!evidence)
+    problems.push(entry.evidence === undefined ? "evidence missing" : `evidence ${JSON.stringify(entry.evidence)}`);
+  if (problems.length)
+    return { kind: "none", why: `invalid classification: ${problems.join(", ")}` };
+  const fields = { ...entry, evidence };
+  let note = "";
+  if (fields.verdict !== "unverified" && !PATH_LINE.test(evidence)) {
+    fields.verdict = "unverified";
+    note = "no path:line in the evidence, so unverified: ";
+  }
+  if (fields.verdict === "unverified" && fields.impact !== "none") {
+    note = ` - ${note || "unverified: "}impact lowered from ${fields.impact}`;
+    fields.impact = lower(fields.impact);
+  } else
+    note = "";
+  return {
+    kind: "classified",
+    fields: { verdict: fields.verdict, impact: fields.impact, likelihood: fields.likelihood, fixCost: fields.fixCost, scope: fields.scope, evidence },
+    note
+  };
+}
+function decide(f, entry, policy, repeatsDeclined = () => false) {
+  const out = { ...f };
+  for (const key of JUDGED)
+    delete out[key];
+  if (typeof entry?.reason === "string")
+    out.reason = entry.reason;
+  const c = classify(entry);
+  const done = (rule, action, why, attention) => ({
+    ...out,
+    decision: { rule, action, why, ...attention ? { attention: true } : {} }
+  });
+  if (c.kind === "classified") {
+    Object.assign(out, c.fields);
+    out.priority = priorityOf(c.fields.impact, c.fields.likelihood, c.fields.fixCost);
+  } else if (c.kind === "score")
+    out.score = c.score;
+  if (isBlocker(f) && !repeatsDeclined(out))
+    return done(1, "fix", "P0/P1");
+  if (c.kind === "none")
+    return done(2, "fix", c.why);
+  if (c.kind === "score") {
+    return c.score > policy.threshold ? done(7, "fix", `score ${c.score} > threshold ${policy.threshold} (numeric score, no classification)`) : done(8, "residual", `under the bar: score ${c.score} (numeric score, no classification)`);
+  }
+  const { verdict, impact, likelihood, fixCost, scope } = c.fields;
+  const p = out.priority;
+  const classes = `${impact}/${likelihood}/${fixCost}`;
+  if (verdict === "refuted")
+    return done(3, "residual", "refuted");
+  if (scope === "other-stage")
+    return done(4, "residual", "left to the stage that owns it");
+  if (scope === "pre-existing") {
+    const attention = impact === "critical" || impact === "major";
+    return done(5, "residual", attention ? `pre-existing - ATTENTION: impact ${impact}` : "pre-existing", attention);
+  }
+  if (policy.alwaysFix.includes(impact))
+    return done(6, "fix", `impact ${impact} is in alwaysFix (${classes} -> ${p})${c.note}`);
+  if (p > policy.threshold)
+    return done(7, "fix", `priority ${p} > threshold ${policy.threshold} (${classes})${c.note}`);
+  return done(8, "residual", `under the bar: ${classes} -> ${p}${c.note}`);
+}
+function triage(findings) {
+  return { accepted: findings.filter(fixes), residual: findings.filter((f) => !fixes(f)) };
 }
 function declinedOf(value, sent) {
   const declined = [];
@@ -461,7 +558,22 @@ function shellQuote(value) {
 
 // src/core/prompts.ts
 var roundLabel = (round, f) => `r${round}/${f.id}`;
-var judgeRouting = (p, findings) => findings.some(isBlocker) ? `P0/P1 findings are in this list only because a fixer declined findings in an earlier round: score them like the rest. A P0/P1 goes to the implementer whatever its score, unless its repeatOf names a finding the fixer declined and you score it ${p.config.threshold} or lower.` : "P0/P1 findings are not in this list: they go to the implementer without a score.";
+var judgeRouting = (findings) => findings.some(isBlocker) ? "P0/P1 findings are in this list only because a fixer declined findings in an earlier round: classify them like the rest. A P0/P1 goes to the implementer whatever you classify, unless its repeatOf names a finding the fixer declined - then your classification decides it like any other finding." : "P0/P1 findings are not in this list: they go to the implementer without the judge.";
+var rubric = (task) => `Classify every finding below - do not score it. The engine computes a priority from your classes and decides what goes to the implementer, so give each finding exactly these fields:
+- verdict: confirmed (the code shows the problem) | refuted (the code shows it is not there or not a problem) | unverified (you could not confirm it either way).
+- impact: how bad it is IF it triggers - critical | major | moderate | minor | none.
+  Judge impact assuming the trigger happens. Likelihood never lowers impact; it is its own field.
+  - critical: data loss or corruption, writing to the wrong record, a security or authorization bypass, a secret or personal data leak, a draft going public, an irreversible operation, stored data silently read differently.
+  - major: the user cannot get out from inside the app (a lock only a reload clears, endless loading, a crash); something that worked silently breaks; an API or contract break; a required part of ${task} is missing.
+  - moderate: wrong behaviour with an easy workaround; a wrong or missing error message; a missing test for changed behaviour; duplicated logic.
+  - minor: a visual defect, naming, style.
+  - none: not a problem at all.
+- likelihood: common (the normal flow) | edge (special timing or state: a race, an expired session, a boundary value) | rare (forced input, a rarely used feature).
+- fixCost: trivial (a few lines) | small (one function or file plus a test) | large (cross-module, a redesign).
+- scope: in-scope | pre-existing (it was already there before this change) | other-stage (another stage's job).
+- evidence: path:line plus the concrete trigger steps, e.g. \`Editor.tsx:225\` + "save -> go back in history -> the late response arrives -> save again". Always give a path:line: evidence without one counts as unverified, and an unverified finding's impact is lowered one class.
+- reason: one line.
+Example: a late save response re-binds the editor to another post's id, so the next save can overwrite the wrong post - confirmed, critical, edge, small, in-scope, even though the window is narrow.`;
 function judgeHistory(earlier) {
   if (!earlier.length)
     return "";
@@ -484,7 +596,7 @@ ${rounds.join(`
 
 `)}
 
-When a finding below repeats one of those earlier findings, set its repeatOf to that label. A repeat of a finding the fixer declined with a convincing reason that the code backs scores low - cite the label and the fixer's reason in your reason. When the fixer's reason is wrong, score the repeat on its merits (high when it is real) and say in reason why the fixer's reason does not hold. A repeat of a finding the fixer applied: check the fix in the code and score what is still wrong. A repeat of a residual finding: the fixer never saw it - score it on its merits.
+When a finding below repeats one of those earlier findings, set its repeatOf to that label. A repeat of a finding the fixer declined with a convincing reason that the code backs: classify it refuted, or by its scope when it belongs elsewhere, and cite the label and the fixer's reason in your reason. When the fixer's reason is wrong, classify the repeat on its merits and say in reason why the fixer's reason does not hold. A repeat of a finding the fixer applied: check the fix in the code and classify what is still wrong. A repeat of a residual finding: the fixer never saw it - classify it on its merits.
 `;
 }
 function overruledSection(overruled) {
@@ -560,7 +672,7 @@ function fixPrompt(p, name, round, accepted, overruled = []) {
 You are the IMPLEMENTER, fixing review round ${round} of stage "${name}".
 Apply the review findings on top of the current branch state (read \`git log --oneline ${shellQuote(p.base)}..HEAD\` and the code first). Fix every finding below, red-green where it changes behaviour, keep the gates green, commit (\`fix(...)\`), and add each finding id with what you did to the "Review fixes" section of ${prBodyOf(p)}. A finding you believe is wrong: do not fix it, and list it in declined with its id and your reason.
 ${overruledSection(overruled)}
-FINDINGS (P0/P1 or score > ${p.config.threshold}):
+FINDINGS (P0/P1, or the judge's classification sent them - each names the rule in decision):
 ${JSON.stringify(accepted, null, 2)}`;
 }
 var REPORT = "Set ran=true only if it exited 0, exitCode to its exit code, and output to everything it printed, verbatim and complete. If it failed, set ran=false and explain in note. Never invent output.";
@@ -715,24 +827,26 @@ RAW REVIEW OUTPUT:
 ${output}`;
 }
 function judgePrompt(p, reviewBase, findings, earlier = [], stage, note) {
-  return `You are the JUDGE scoring a code review. Repo ${p.repo}, branch ${p.branch}, stage diff \`${shellQuote(reviewBase)}...HEAD\`. Do not edit anything.
+  return `You are the JUDGE classifying the findings of a code review. Repo ${p.repo}, branch ${p.branch}, stage diff \`${shellQuote(reviewBase)}...HEAD\`. Do not edit anything.
 ${note ? note + `
 ` : ""}${p.context ? `Design context:
 ` + p.context + `
 ` : ""}${taskSection(stage)}
-The findings come from one or more reviewers; each names its reviewer. ${judgeRouting(p, findings)}
-For each finding below, open the cited code and judge whether it is real, correctly described and worth fixing; score it 0-100 (findings the code refutes score low).${stage ? " Score against the TASK: a finding about work another stage owns scores low; a missing part of this stage's task is worth fixing." : ""} When a finding reports the same problem as another finding in this list, score it too and set its duplicateOf to the id of the finding to keep. Then score the whole review 0-100 (correctness + actionability; mostly wrong or trivial findings = low).
+The findings come from one or more reviewers; each names its reviewer. ${judgeRouting(findings)}
+For each finding below, open the cited code and check whether it is real and correctly described.${stage ? " Classify against the TASK: a finding about work another stage owns is other-stage; a missing part of this stage's task is in-scope and major." : ""} When a finding reports the same problem as another finding in this list, classify it too and set its duplicateOf to the id of the finding to keep. Then score the whole review 0-100 (correctness + actionability; mostly wrong or trivial findings = low) - that score is informational only.
+${rubric(stage ? "the stage's TASK" : "what the change set out to do")}
 ${judgeHistory(earlier)}
 REVIEW:
 ${JSON.stringify(findings, null, 2)}`;
 }
 function planJudgePrompt(p, plans, findings, earlier = []) {
-  return `You are the JUDGE scoring a plan review. Repo ${p.repo}, branch ${p.branch}, plan ${plans.join(", ")}. Implementation has not started. Do not edit anything.
+  return `You are the JUDGE classifying the findings of a plan review. Repo ${p.repo}, branch ${p.branch}, plan ${plans.join(", ")}. Implementation has not started. Do not edit anything.
 ${p.context ? `Design context:
 ` + p.context + `
 ` : ""}
-The findings come from one or more reviewers; each names its reviewer. ${judgeRouting(p, findings)}
-For each finding below, open the cited plan line and the code, config or dependency it talks about, and judge whether it is real, correctly described and worth fixing in the plan before implementation starts; score it 0-100 (findings the repo refutes score low). When a finding reports the same problem as another finding in this list, score it too and set its duplicateOf to the id of the finding to keep. Then score the whole review 0-100 (correctness + actionability; mostly wrong or trivial findings = low).
+The findings come from one or more reviewers; each names its reviewer. ${judgeRouting(findings)}
+For each finding below, open the cited plan line and the code, config or dependency it talks about, and check whether it is real and correctly described. Classify impact by what the plan would cause once implemented as written; evidence is the plan's path:line plus the repo path:line that shows the problem. When a finding reports the same problem as another finding in this list, classify it too and set its duplicateOf to the id of the finding to keep. Then score the whole review 0-100 (correctness + actionability; mostly wrong or trivial findings = low) - that score is informational only.
+${rubric("the goal of the plan")}
 ${judgeHistory(earlier)}
 REVIEW:
 ${JSON.stringify(findings, null, 2)}`;
@@ -745,7 +859,7 @@ Edit the plan files in place at their absolute paths: ${plans.join(", ")}. Chang
 ${round === 1 ? "At the top of each plan file you change, add a section `## rN deltas (<date>)` - N one higher than the highest rN deltas section already in that file, r1 when there is none - listing each finding id and what you changed for it." : "At the top of each plan file you change, extend the newest `## rN deltas (<date>)` section - an earlier round of this plan review added it - with each finding id and what you changed for it; add one (N one higher than the highest in that file, r1 when there is none) where it is missing."} Take the date from \`date +%F\` in your shell.
 Fix every finding below. A finding you believe is wrong: leave the plan as it is for it, and list it in declined with its id and your reason.
 ${overruledSection(overruled)}
-FINDINGS (P0/P1 or score > ${p.config.threshold}):
+FINDINGS (P0/P1, or the judge's classification sent them - each names the rule in decision):
 ${JSON.stringify(accepted, null, 2)}`;
 }
 function finalPrompt(p, plans = []) {
@@ -938,19 +1052,24 @@ var SCHEMAS = {
   score: {
     type: "object",
     properties: {
-      score: { type: "number", description: "0-100 overall: how correct, verified and actionable this review is" },
+      score: { type: "number", description: "0-100 overall, informational only: how correct, verified and actionable this review is" },
       perFinding: {
         type: "array",
         items: {
           type: "object",
           properties: {
             id: { type: "string" },
-            score: { type: "number" },
-            reason: { type: "string" },
+            verdict: { type: "string", enum: [...VERDICTS], description: "is it really in the code?" },
+            impact: { type: "string", enum: [...IMPACTS], description: "how bad IF it triggers - likelihood never lowers it" },
+            likelihood: { type: "string", enum: [...LIKELIHOODS] },
+            fixCost: { type: "string", enum: [...FIX_COSTS] },
+            scope: { type: "string", enum: [...SCOPES] },
+            evidence: { type: "string", description: "path:line plus the concrete trigger steps" },
+            reason: { type: "string", description: "one line" },
             duplicateOf: { type: "string", description: "id of another finding in this list that reports the same problem; omit when there is none" },
             repeatOf: { type: "string", description: "label of the earlier-round finding this one repeats, exactly as listed under EARLIER ROUNDS (e.g. r1/codex-F2); omit when it repeats none" }
           },
-          required: ["id", "score", "reason"]
+          required: ["id", "verdict", "impact", "likelihood", "fixCost", "scope", "evidence", "reason"]
         }
       },
       rationale: { type: "string" }
@@ -1555,28 +1674,28 @@ the last repair's deviations: ${deviations}` : ""}`;
       const blockers = found.filter(isBlocker);
       const judged = declined.size ? found : found.filter((f) => !isBlocker(f));
       if (blockers.length && declined.size) {
-        host.log(`${name} r${round}: ${blockers.length} P0/P1 finding(s) go to the judge too - the fixer declined findings before, so a repeat of one can be scored down: ${blockers.map((f) => f.id).join(", ")}`);
+        host.log(`${name} r${round}: ${blockers.length} P0/P1 finding(s) go to the judge too - the fixer declined findings before, so a repeat of one can stay residual: ${blockers.map((f) => f.id).join(", ")}`);
       } else if (blockers.length) {
         host.log(`${name} r${round}: ${blockers.length} P0/P1 finding(s) go to the implementer without the judge: ${blockers.map((f) => f.id).join(", ")}`);
       }
-      let findings = found;
-      unmerged = found;
+      const declinedBefore = (f) => f.repeatOf !== undefined && declined.has(f.repeatOf);
+      const policy = { threshold: config.threshold, alwaysFix: config.alwaysFix };
+      let findings = found.map((f) => decide(f, undefined, policy, declinedBefore));
+      unmerged = findings;
       let score = null;
       if (judged.length) {
         const prompt = subject.kind === "plan" ? planJudgePrompt(p, subject.files, judged, earlier) : judgePrompt(p, subject.base, judged, earlier, subject.stage, subject.note);
         const scored = await call("judge", "score", `judge ${name} r${round}`, phase, prompt, "read-only", config.roles.judge, lane.cwd);
         if (!scored)
-          host.log(`${name} r${round}: judge returned nothing - all ${judged.length} finding(s) go to the implementer unscored`);
-        const per = Array.isArray(scored?.perFinding) ? scored.perFinding : [];
+          host.log(`${name} r${round}: judge returned nothing - all ${judged.length} finding(s) go to the implementer unjudged (rule 2)`);
+        const per = Array.isArray(scored?.perFinding) ? scored.perFinding.filter((x) => x && typeof x === "object" && typeof x.id === "string") : [];
         const judgedIds = new Set(judged.map((f) => f.id));
         const blockerIds = new Set(blockers.map((f) => f.id));
         const duplicateOf = new Map(per.filter((x) => judgedIds.has(x.id) && typeof x.duplicateOf === "string" && judgedIds.has(x.duplicateOf)).filter((x) => !blockerIds.has(x.id) || blockerIds.has(x.duplicateOf)).map((x) => [x.id, x.duplicateOf]));
         const withScores = found.map((f) => {
           const s = judgedIds.has(f.id) ? per.find((x) => x.id === f.id) : undefined;
-          if (!s)
-            return { ...f };
-          const repeat = typeof s.repeatOf === "string" && (labels.has(s.repeatOf) || residualLabels.has(s.repeatOf)) ? { repeatOf: s.repeatOf } : {};
-          return { ...f, score: s.score, reason: s.reason, ...repeat };
+          const repeat = typeof s?.repeatOf === "string" && (labels.has(s.repeatOf) || residualLabels.has(s.repeatOf)) ? { repeatOf: s.repeatOf } : {};
+          return decide({ ...f, ...repeat }, s, policy, declinedBefore);
         });
         const merge = mergeDuplicates(withScores, duplicateOf);
         for (const m of merge.merged)
@@ -1587,10 +1706,12 @@ the last repair's deviations: ${deviations}` : ""}`;
       }
       history.push({ round, score, findings });
       host.log(`${name} r${round}: ${findings.length} finding(s), review score ${score} (informational)`);
-      const declinedBefore = (f) => f.repeatOf !== undefined && declined.has(f.repeatOf);
-      const { accepted, residual } = triage(findings, config.threshold, declinedBefore);
+      const { accepted, residual } = triage(findings);
+      const ruled = (f) => `rule ${f.decision.rule}: ${f.decision.why}`;
+      if (accepted.length)
+        host.log(`${name} r${round}: to the implementer: ${accepted.map((f) => `${f.id} (${ruled(f)})`).join(", ")}`);
       for (const f of residual.filter(declinedBefore)) {
-        host.log(`${name} r${round}: ${f.id} dropped as a repeat of ${f.repeatOf}, which the fixer declined (score ${f.score}) - kept as residual`);
+        host.log(`${name} r${round}: ${f.id} dropped as a repeat of ${f.repeatOf}, which the fixer declined (${ruled(f)}) - kept as residual`);
       }
       const repeated = new Set(unmerged.flatMap((f) => f.repeatOf ? [f.repeatOf] : []));
       const repeatsOf = (f) => new Set(unmerged.filter((u) => u.id === f.id || f.duplicates?.includes(u.id)).flatMap((u) => u.repeatOf ? [u.repeatOf] : []));
@@ -1603,7 +1724,9 @@ the last repair's deviations: ${deviations}` : ""}`;
         ...residual.map((f) => ({ round, labels: [roundLabel(round, f), ...aliases(f)], finding: f }))
       ];
       if (residual.length) {
-        host.log(`${name} r${round}: ${residual.length} finding(s) <= ${config.threshold} and not P0/P1${residual.some(isBlocker) ? " (or a repeat of a declined one)" : ""}, not sent: ${residual.map((f) => `${f.id}(${f.score})`).join(", ")}`);
+        host.log(`${name} r${round}: ${residual.length} finding(s) kept as residual, not sent: ${residual.map((f) => `${f.id} (${ruled(f)})`).join(", ")}`);
+        for (const f of residual.filter((f) => f.decision.attention))
+          host.log(`${name} r${round}: ATTENTION ${f.id} is pre-existing with impact ${f.impact} - left for the user`);
       }
       if (!accepted.length) {
         host.log(`${name} r${round}: nothing actionable left - stage done with ${carried.length} residual finding(s) for the user`);
@@ -1611,7 +1734,7 @@ the last repair's deviations: ${deviations}` : ""}`;
       }
       const overruled = accepted.filter(declinedBefore).map((f) => ({ id: f.id, repeatOf: f.repeatOf, reason: f.reason, said: declined.get(f.repeatOf) }));
       for (const o of overruled) {
-        host.log(`${name} r${round}: the judge overruled the fixer on ${o.id} (repeat of ${o.repeatOf}, score ${accepted.find((f) => f.id === o.id).score})`);
+        host.log(`${name} r${round}: the judge overruled the fixer on ${o.id} (repeat of ${o.repeatOf}, ${ruled(accepted.find((f) => f.id === o.id))})`);
       }
       let fixed;
       if (subject.kind === "plan") {
