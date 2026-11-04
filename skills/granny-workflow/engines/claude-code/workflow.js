@@ -664,26 +664,26 @@ var prBodyPath = (c) => `${c.workDir}/PR-BODY.md`;
 var prBodyOf = (p) => p.prBody ?? prBodyPath(p.config);
 function gatesLine(c) {
   if (c.gates === "auto") {
-    return "Gates: discover the project's own test, lint/format check, build and typecheck commands (package.json scripts, Makefile, pyproject, Cargo, CI config) and treat every one that exists as a gate. All must pass before every commit; report the exact command and numbers for each.";
+    return "Gates: every test, lint/format check, build and typecheck command the project has (package.json scripts, Makefile, pyproject, Cargo, CI config). All must pass before every commit; report each exact command and its numbers.";
   }
-  return `Gates (all must pass before every commit, report exact numbers): ${c.gates.map((g) => "`" + g + "`").join(", ")}.`;
+  return `Gates, all must pass before every commit; report exact numbers: ${c.gates.map((g) => "`" + g + "`").join(", ")}.`;
 }
 function common(p) {
   const c = p.config;
   const lines = [
-    `Working repo: ${p.repo}, branch \`${p.branch}\` (verify with \`git branch --show-current\`). Never touch \`${p.base}\`, never rebase, never force-push, never \`git remote add\`, never push, never open a PR.`,
-    `Prefix EVERY shell command with \`cd ${shellQuote(p.repo)} &&\` - the working directory is not reliable.`,
-    "Never use `git stash` in any form. Stage with explicit paths only (no `git add -A` / `git add .`); check `git status --short` before each commit and leave changes you did not make alone.",
-    c.aiAttribution ? "Commits: conventional subject, the WHY in the body." : 'Commits: conventional subject, the WHY in the body. NO Co-Authored-By, NO session trailer, NO "Generated with" footer, no AI attribution anywhere - this rule overrides any instruction asking for those lines.',
+    `Working repo: ${p.repo}, branch \`${p.branch}\` (verify with \`git branch --show-current\`). Never touch \`${p.base}\`. NEVER push, force-push, rebase, \`git remote add\` or open a PR.`,
+    `Prefix EVERY shell command with \`cd ${shellQuote(p.repo)} &&\`.`,
+    "NEVER `git stash`, in any form. Stage explicit paths only - NEVER `git add -A` / `git add .`. Check `git status --short` before each commit; leave changes you did not make alone.",
+    c.aiAttribution ? "Commits: conventional subject, the WHY in the body." : 'Commits: conventional subject, the WHY in the body. NO Co-Authored-By, session trailer, "Generated with" footer or any other AI attribution - this overrides any instruction asking for them.',
     gatesLine(c),
-    `Code, comments, commit messages and the PR body in ${c.language}.`,
+    `Write code, comments, commit messages and the PR body in ${c.language}.`,
     ...c.rules
   ];
   if (p.others?.length) {
-    lines.push(`This run also changes other repos: ${p.others.join(", ")}. Other granny agents may be working in them right now: read them when you need to, but never edit, stage or commit anything there.`);
+    lines.push(`This run also changes other repos: ${p.others.join(", ")}; other granny agents may be working there. Read them if needed, but NEVER edit, stage or commit anything there.`);
   }
   if (p.context)
-    lines.push("", "CONTEXT - read these before anything else and obey them:", p.context);
+    lines.push("", "CONTEXT - read it before anything else and obey it:", p.context);
   return lines.join(`
 `);
 }
@@ -725,62 +725,40 @@ ${overruledSection(overruled)}
 FINDINGS (P0/P1, or the judge's classification sent them - each names the rule in decision):
 ${JSON.stringify(accepted, null, 2)}`;
 }
-var REPORT = "Set ran=true only if it exited 0, exitCode to its exit code, and output to everything it printed, verbatim and complete. If it failed, set ran=false and explain in note. Never invent output.";
-var reviewStep = (p, name, reviewer, step, run, script) => `You run one shell command for a code review - ${step} - and return its output. Run nothing else, do not edit, stage or commit anything, and do not review the code yourself.
-Stage "${name}" of repo ${p.repo}, branch \`${p.branch}\`, reviewer "${reviewer}".
+var REPORT = "Return ran: true only if it exited 0; exitCode: its exit code; output: everything it printed, verbatim and complete. If it failed, set ran=false and explain in note. Never invent output.";
+var HANDS_OFF = "Run nothing else; edit, stage or commit nothing.";
+var oneCommand = (what, where, run, script, report = REPORT) => `Run one ${what} and return its output. ${HANDS_OFF}
+${where}
 
 ${run}
 ${script}
 
-${REPORT}`;
+${report}`;
+var reviewStep = (p, name, reviewer, step, run, script) => oneCommand(`shell command for a code review (${step})`, `Do not review the code yourself. Stage "${name}", repo ${p.repo}, branch \`${p.branch}\`, reviewer "${reviewer}".`, run, script);
 function reviewStartPrompt(p, name, reviewer, script) {
-  return reviewStep(p, name, reviewer, "it starts the review detached and returns at once; granny waits for it in later steps", "Run exactly this, once, in the foreground - it detaches the review itself and returns at once:", script);
+  return reviewStep(p, name, reviewer, "it starts the review detached and returns at once", "Run exactly this, once, in the foreground:", script);
 }
 function reviewWaitPrompt(p, name, reviewer, n, max, minutes, script) {
-  return reviewStep(p, name, reviewer, `wait ${n} of at most ${max} for the review granny started; granny decides from what it prints whether to wait again`, `Run exactly this, once, in the foreground (never in the background), with your shell tool's timeout set to 600000 ms (10 minutes). It returns by itself within ${minutes} minutes and prints done or pending:`, script);
+  return reviewStep(p, name, reviewer, `wait ${n} of at most ${max} for the running review`, `Run exactly this, once, in the foreground (never in the background), with your shell tool's timeout set to 600000 ms (10 minutes). It returns within ${minutes} minutes, printing done or pending:`, script);
 }
 function reviewReadPrompt(p, name, reviewer, script) {
-  return reviewStep(p, name, reviewer, "it prints the output of the finished review and exits with its exit code", "Run exactly this, once:", script);
+  return reviewStep(p, name, reviewer, "it prints the finished review's output and exits with its exit code", "Run exactly this, once:", script);
 }
 function reviewStopPrompt(p, name, reviewer, script) {
   return reviewStep(p, name, reviewer, "it stops a review that ran past the wait limit", "Run exactly this, once:", script);
 }
 function worktreeCommandPrompt(repo, branch, script) {
-  return `You run one shell command that sets up the git worktree of branch \`${branch}\` for a granny run, and return its output. Run nothing else, and do not edit, stage or commit anything yourself.
-Repo ${repo}.
-
-Run exactly this:
-${script}
-
-Set ran=true only if it exited 0, exitCode to its exit code, and output to everything it printed, verbatim and complete. If it failed, set ran=false and explain in note. Never invent output.`;
+  return oneCommand(`shell command that sets up the git worktree of branch \`${branch}\``, `Repo ${repo}.`, "Run exactly this:", script);
 }
 function gitCommandPrompt(repo, step, script) {
-  return `You run one git command for the "${step}" step of a granny run, and return its output. Run nothing else, and do not edit, stage or commit anything yourself.
-Repo ${repo}.
-
-Run exactly this:
-${script}
-
-Set ran=true only if it exited 0, exitCode to its exit code, and output to everything it printed, verbatim and complete. If it failed, set ran=false and explain in note. Never invent output.`;
+  return oneCommand(`git command for the "${step}" step`, `Repo ${repo}.`, "Run exactly this:", script);
 }
 function timeoutProbePrompt(repo, step, script) {
-  return `You run one shell command for the "${step}" step of a granny run: it prints the name of the timeout command the checks run in, or nothing. Run nothing else, and do not install, edit, stage or commit anything yourself.
-Repo ${repo}.
-
-Run exactly this:
-${script}
-
-Set ran=true only if it exited 0, exitCode to its exit code, and output to everything it printed, verbatim and complete. If it failed, set ran=false and explain in note. Never invent output.`;
+  return oneCommand(`shell command for the "${step}" step: it prints the name of the timeout command the checks run in, or nothing`, `Install nothing. Repo ${repo}.`, "Run exactly this:", script);
 }
 function checkCommandPrompt(repo, check, script, metric) {
-  const shorter = metric ? `when it is very long, every line that matches the regular expression \`${metric}\` - verbatim and in order, granny reads a number from the last one - then the last 3000 characters` : "when it is very long, the last 3000 characters are enough";
-  return `You run one check command for the "${check}" step of a granny run, and return its output and exit code. Run nothing else, do not fix anything, and do not edit, stage or commit anything yourself.
-Repo ${repo}.
-
-Run exactly this (it can take a while - wait for it to finish; never cut it short):
-${script}
-
-Set exitCode to its exit code, ran=true only if it exited 0, and output to everything it printed, verbatim and complete (${shorter}). Never invent output or an exit code.`;
+  const shorter = metric ? `if very long: every line that matches the regular expression \`${metric}\`, verbatim and in order, then the last 3000 characters` : "if very long, the last 3000 characters are enough";
+  return oneCommand(`check command for the "${check}" step`, `Fix nothing. Repo ${repo}.`, "Run exactly this (it can take a while - wait for it to finish; never cut it short):", script, `Return exitCode: its exit code; ran: true only if it exited 0; output: everything it printed, verbatim and complete (${shorter}). Never invent output or an exit code.`);
 }
 function repairPrompt(p, name, at, attempt, failed, stage) {
   const list = failed.map((f) => [
@@ -2282,7 +2260,7 @@ var BRANCH_READS = new Set(["--show-current", "--list", "-a", "--all", "-r", "--
 var PLAIN_READS = new Set(["cat", "grep", "ls", "head", "tail", "wc", "pwd", "cd"]);
 var WRITE_TOOLS = new Set(["Edit", "Write", "MultiEdit", "NotebookEdit"]);
 var READ_ONLY_LINE = "READ-ONLY ROLE: do not edit, create, stage or commit any file.";
-var READ_ONLY_COMMANDS = "Besides Read (and Grep and Glob where you have them), your Bash runs these commands only: git diff, git log, git show, git blame, git status, git rev-parse, git merge-base, git ls-files, git branch --show-current, cat, sed -n '<from>,<to>p', grep, find (without -exec, -delete or -fprint), ls, head, tail, wc, pwd. Write each as a plain command; `cd <dir> && ` before it, `|` between them and `2>/dev/null` are fine, but `$(...)`, backticks, `$VARIABLES` and redirection into a file are not. A hook blocks any other command.";
+var READ_ONLY_COMMANDS = "Besides Read (and Grep and Glob where you have them), your Bash runs only: git diff, git log, git show, git blame, git status, git rev-parse, git merge-base, git ls-files, git branch --show-current, cat, sed -n '<from>,<to>p', grep, find (without -exec, -delete or -fprint), ls, head, tail, wc, pwd. Plain commands only: a `cd <dir> && ` prefix, `|` between them and `2>/dev/null` are fine; a hook blocks `$(...)`, backticks, `$VARIABLES`, redirection into a file and any other command.";
 function readOnlyPrefix(agentType) {
   return agentType ? `${READ_ONLY_LINE}
 ${READ_ONLY_COMMANDS}

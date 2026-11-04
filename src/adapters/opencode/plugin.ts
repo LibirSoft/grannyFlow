@@ -351,7 +351,7 @@ export const createGrannyPlugin = ({ delays = DEFAULT_DELAYS, sleep = pause, kil
       }
 
       const converse = async (req: AgentRequest, tool: string, session: string) => {
-        let text = `${req.prompt}\n\nWhen you are done, call the \`${tool}\` tool exactly once with your result. That call is your final answer: its arguments are everything the caller receives.`
+        let text = `${req.prompt}\n\nWhen done, call the \`${tool}\` tool exactly once with your result. That call is your final answer: the caller receives only its arguments.`
         let misses = 0
         let backoffs = 0
         while (misses < 3) {

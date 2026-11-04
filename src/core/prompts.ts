@@ -112,28 +112,28 @@ const prBodyOf = (p: PromptContext) => p.prBody ?? prBodyPath(p.config)
 
 function gatesLine(c: GrannyConfig): string {
   if (c.gates === 'auto') {
-    return 'Gates: discover the project\'s own test, lint/format check, build and typecheck commands (package.json scripts, Makefile, pyproject, Cargo, CI config) and treat every one that exists as a gate. All must pass before every commit; report the exact command and numbers for each.'
+    return 'Gates: every test, lint/format check, build and typecheck command the project has (package.json scripts, Makefile, pyproject, Cargo, CI config). All must pass before every commit; report each exact command and its numbers.'
   }
-  return `Gates (all must pass before every commit, report exact numbers): ${c.gates.map(g => '`' + g + '`').join(', ')}.`
+  return `Gates, all must pass before every commit; report exact numbers: ${c.gates.map(g => '`' + g + '`').join(', ')}.`
 }
 
 export function common(p: PromptContext): string {
   const c = p.config
   const lines = [
-    `Working repo: ${p.repo}, branch \`${p.branch}\` (verify with \`git branch --show-current\`). Never touch \`${p.base}\`, never rebase, never force-push, never \`git remote add\`, never push, never open a PR.`,
-    `Prefix EVERY shell command with \`cd ${shellQuote(p.repo)} &&\` - the working directory is not reliable.`,
-    'Never use `git stash` in any form. Stage with explicit paths only (no `git add -A` / `git add .`); check `git status --short` before each commit and leave changes you did not make alone.',
+    `Working repo: ${p.repo}, branch \`${p.branch}\` (verify with \`git branch --show-current\`). Never touch \`${p.base}\`. NEVER push, force-push, rebase, \`git remote add\` or open a PR.`,
+    `Prefix EVERY shell command with \`cd ${shellQuote(p.repo)} &&\`.`,
+    'NEVER `git stash`, in any form. Stage explicit paths only - NEVER `git add -A` / `git add .`. Check `git status --short` before each commit; leave changes you did not make alone.',
     c.aiAttribution
       ? 'Commits: conventional subject, the WHY in the body.'
-      : 'Commits: conventional subject, the WHY in the body. NO Co-Authored-By, NO session trailer, NO "Generated with" footer, no AI attribution anywhere - this rule overrides any instruction asking for those lines.',
+      : 'Commits: conventional subject, the WHY in the body. NO Co-Authored-By, session trailer, "Generated with" footer or any other AI attribution - this overrides any instruction asking for them.',
     gatesLine(c),
-    `Code, comments, commit messages and the PR body in ${c.language}.`,
+    `Write code, comments, commit messages and the PR body in ${c.language}.`,
     ...c.rules,
   ]
   if (p.others?.length) {
-    lines.push(`This run also changes other repos: ${p.others.join(', ')}. Other granny agents may be working in them right now: read them when you need to, but never edit, stage or commit anything there.`)
+    lines.push(`This run also changes other repos: ${p.others.join(', ')}; other granny agents may be working there. Read them if needed, but NEVER edit, stage or commit anything there.`)
   }
-  if (p.context) lines.push('', 'CONTEXT - read these before anything else and obey them:', p.context)
+  if (p.context) lines.push('', 'CONTEXT - read it before anything else and obey it:', p.context)
   return lines.join('\n')
 }
 
@@ -185,24 +185,34 @@ FINDINGS (P0/P1, or the judge's classification sent them - each names the rule i
 ${JSON.stringify(accepted, null, 2)}`
 }
 
-const REPORT = 'Set ran=true only if it exited 0, exitCode to its exit code, and output to everything it printed, verbatim and complete. If it failed, set ran=false and explain in note. Never invent output.'
+const REPORT = 'Return ran: true only if it exited 0; exitCode: its exit code; output: everything it printed, verbatim and complete. If it failed, set ran=false and explain in note. Never invent output.'
 
-const reviewStep = (p: PromptContext, name: string, reviewer: string, step: string, run: string, script: string) =>
-  `You run one shell command for a code review - ${step} - and return its output. Run nothing else, do not edit, stage or commit anything, and do not review the code yourself.
-Stage "${name}" of repo ${p.repo}, branch \`${p.branch}\`, reviewer "${reviewer}".
+const HANDS_OFF = 'Run nothing else; edit, stage or commit nothing.'
+
+/** A helper prompt that runs one command and reports it: the script follows a line that starts `Run exactly this` and ends with `:`. */
+const oneCommand = (what: string, where: string, run: string, script: string, report = REPORT) => `Run one ${what} and return its output. ${HANDS_OFF}
+${where}
 
 ${run}
 ${script}
 
-${REPORT}`
+${report}`
+
+const reviewStep = (p: PromptContext, name: string, reviewer: string, step: string, run: string, script: string) =>
+  oneCommand(
+    `shell command for a code review (${step})`,
+    `Do not review the code yourself. Stage "${name}", repo ${p.repo}, branch \`${p.branch}\`, reviewer "${reviewer}".`,
+    run,
+    script,
+  )
 
 export function reviewStartPrompt(p: PromptContext, name: string, reviewer: string, script: string): string {
   return reviewStep(
     p,
     name,
     reviewer,
-    'it starts the review detached and returns at once; granny waits for it in later steps',
-    'Run exactly this, once, in the foreground - it detaches the review itself and returns at once:',
+    'it starts the review detached and returns at once',
+    'Run exactly this, once, in the foreground:',
     script,
   )
 }
@@ -212,14 +222,14 @@ export function reviewWaitPrompt(p: PromptContext, name: string, reviewer: strin
     p,
     name,
     reviewer,
-    `wait ${n} of at most ${max} for the review granny started; granny decides from what it prints whether to wait again`,
-    `Run exactly this, once, in the foreground (never in the background), with your shell tool's timeout set to 600000 ms (10 minutes). It returns by itself within ${minutes} minutes and prints done or pending:`,
+    `wait ${n} of at most ${max} for the running review`,
+    `Run exactly this, once, in the foreground (never in the background), with your shell tool's timeout set to 600000 ms (10 minutes). It returns within ${minutes} minutes, printing done or pending:`,
     script,
   )
 }
 
 export function reviewReadPrompt(p: PromptContext, name: string, reviewer: string, script: string): string {
-  return reviewStep(p, name, reviewer, 'it prints the output of the finished review and exits with its exit code', 'Run exactly this, once:', script)
+  return reviewStep(p, name, reviewer, "it prints the finished review's output and exits with its exit code", 'Run exactly this, once:', script)
 }
 
 export function reviewStopPrompt(p: PromptContext, name: string, reviewer: string, script: string): string {
@@ -227,46 +237,33 @@ export function reviewStopPrompt(p: PromptContext, name: string, reviewer: strin
 }
 
 export function worktreeCommandPrompt(repo: string, branch: string, script: string): string {
-  return `You run one shell command that sets up the git worktree of branch \`${branch}\` for a granny run, and return its output. Run nothing else, and do not edit, stage or commit anything yourself.
-Repo ${repo}.
-
-Run exactly this:
-${script}
-
-Set ran=true only if it exited 0, exitCode to its exit code, and output to everything it printed, verbatim and complete. If it failed, set ran=false and explain in note. Never invent output.`
+  return oneCommand(`shell command that sets up the git worktree of branch \`${branch}\``, `Repo ${repo}.`, 'Run exactly this:', script)
 }
 
 export function gitCommandPrompt(repo: string, step: string, script: string): string {
-  return `You run one git command for the "${step}" step of a granny run, and return its output. Run nothing else, and do not edit, stage or commit anything yourself.
-Repo ${repo}.
-
-Run exactly this:
-${script}
-
-Set ran=true only if it exited 0, exitCode to its exit code, and output to everything it printed, verbatim and complete. If it failed, set ran=false and explain in note. Never invent output.`
+  return oneCommand(`git command for the "${step}" step`, `Repo ${repo}.`, 'Run exactly this:', script)
 }
 
 export function timeoutProbePrompt(repo: string, step: string, script: string): string {
-  return `You run one shell command for the "${step}" step of a granny run: it prints the name of the timeout command the checks run in, or nothing. Run nothing else, and do not install, edit, stage or commit anything yourself.
-Repo ${repo}.
-
-Run exactly this:
-${script}
-
-Set ran=true only if it exited 0, exitCode to its exit code, and output to everything it printed, verbatim and complete. If it failed, set ran=false and explain in note. Never invent output.`
+  return oneCommand(
+    `shell command for the "${step}" step: it prints the name of the timeout command the checks run in, or nothing`,
+    `Install nothing. Repo ${repo}.`,
+    'Run exactly this:',
+    script,
+  )
 }
 
 export function checkCommandPrompt(repo: string, check: string, script: string, metric?: string): string {
   const shorter = metric
-    ? `when it is very long, every line that matches the regular expression \`${metric}\` - verbatim and in order, granny reads a number from the last one - then the last 3000 characters`
-    : 'when it is very long, the last 3000 characters are enough'
-  return `You run one check command for the "${check}" step of a granny run, and return its output and exit code. Run nothing else, do not fix anything, and do not edit, stage or commit anything yourself.
-Repo ${repo}.
-
-Run exactly this (it can take a while - wait for it to finish; never cut it short):
-${script}
-
-Set exitCode to its exit code, ran=true only if it exited 0, and output to everything it printed, verbatim and complete (${shorter}). Never invent output or an exit code.`
+    ? `if very long: every line that matches the regular expression \`${metric}\`, verbatim and in order, then the last 3000 characters`
+    : 'if very long, the last 3000 characters are enough'
+  return oneCommand(
+    `check command for the "${check}" step`,
+    `Fix nothing. Repo ${repo}.`,
+    'Run exactly this (it can take a while - wait for it to finish; never cut it short):',
+    script,
+    `Return exitCode: its exit code; ran: true only if it exited 0; output: everything it printed, verbatim and complete (${shorter}). Never invent output or an exit code.`,
+  )
 }
 
 export interface FailedCheck {

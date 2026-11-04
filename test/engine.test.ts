@@ -708,7 +708,8 @@ describe('a review command on Claude Code', () => {
       expect(p).not.toContain('wait for it to finish')
       expect(p).toContain('Run exactly this')
     }
-    expect(promptOf(f, 'review core r1 codex')).toContain('Run exactly this, once, in the foreground - it detaches the review itself and returns at once:\n')
+    expect(promptOf(f, 'review core r1 codex')).toContain('it starts the review detached and returns at once')
+    expect(promptOf(f, 'review core r1 codex')).toContain('Run exactly this, once, in the foreground:\n')
     const [wait1, wait2] = [promptOf(f, 'review core r1 codex wait 1'), promptOf(f, 'review core r1 codex wait 2')]
     expect(wait1).toContain('wait 1 of at most 7')
     expect(wait2).toContain('wait 2 of at most 7')
@@ -905,7 +906,7 @@ describe('the worktree', () => {
     expect(runner.prompt).toContain(`\ncd ${WT} && if [ -s .granny/review-core-r1-codex.pid ]`)
     expect(f.calls.find(c => c.label === 'review core r1 codex wait 1')!.prompt).toContain(`\ncd ${WT} && bash -c `)
     expect(f.calls.find(c => c.label === 'review core r1 codex read')!.prompt).toContain(`\ncd ${WT} && code=$(cat .granny/review-core-r1-codex.exit)`)
-    expect(runner.prompt).toContain(`Stage "core" of repo ${WT}, branch`)
+    expect(runner.prompt).toContain(`Stage "core", repo ${WT}, branch`)
   })
 
   it('runs the setup script on Claude Code through a helper agent that may write', async () => {

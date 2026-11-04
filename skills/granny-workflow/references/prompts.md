@@ -6,28 +6,28 @@ The exact prompts the engines send, rendered with the default config. Fill the `
 ## Granny - worktree setup, the helper agent on Claude Code (on Cursor, run the command yourself)
 
 ```text
-You run one shell command that sets up the git worktree of branch `<branch>` for a granny run, and return its output. Run nothing else, and do not edit, stage or commit anything yourself.
+Run one shell command that sets up the git worktree of branch `<branch>` and return its output. Run nothing else; edit, stage or commit nothing.
 Repo <repo>.
 
 Run exactly this:
 cd '<repo>' && ex="$(git rev-parse --git-common-dir)/info/exclude" && mkdir -p "${ex%/*}" && { grep -qxF -e /.granny/ "$ex" 2>/dev/null || { if [ -s "$ex" ] && [ -n "$(tail -c 1 "$ex")" ]; then echo >> "$ex"; fi; printf '%s\n' /.granny/ >> "$ex"; }; } && wt=$(git worktree list --porcelain | while IFS= read -r l; do case "$l" in "worktree "*) p=${l#worktree };; "branch refs/heads/"*) if [ "${l#branch refs/heads/}" = '<branch>' ]; then printf '%s\n' "$p"; break; fi;; esac; done) && if [ -n "$wt" ]; then changes=$(git -C "$wt" status --porcelain) || exit 1; if [ -n "$changes" ]; then printf '[granny] worktree failed: %s has %s checked out with uncommitted changes - commit or discard them, then run again:\n' "$wt" '<branch>'; git -C "$wt" status --short; exit 1; fi; elif git show-ref --verify --quiet 'refs/heads/<branch>'; then wt='<worktreeDir>/<branch-slug>'; git worktree add "$wt" '<branch>' || exit 1; else wt='<worktreeDir>/<branch-slug>'; git worktree add -b '<branch>' "$wt" '<base>' || exit 1; fi && printf '%s%s\n' '[granny] worktree: ' "$wt"
 
-Set ran=true only if it exited 0, exitCode to its exit code, and output to everything it printed, verbatim and complete. If it failed, set ran=false and explain in note. Never invent output.
+Return ran: true only if it exited 0; exitCode: its exit code; output: everything it printed, verbatim and complete. If it failed, set ran=false and explain in note. Never invent output.
 ```
 
 ## Planner - a run with goal (context here is the run's context only; the plan files do not exist yet)
 
 ```text
-Working repo: <repo>, branch `<branch>` (verify with `git branch --show-current`). Never touch `<base>`, never rebase, never force-push, never `git remote add`, never push, never open a PR.
-Prefix EVERY shell command with `cd '<repo>' &&` - the working directory is not reliable.
-Never use `git stash` in any form. Stage with explicit paths only (no `git add -A` / `git add .`); check `git status --short` before each commit and leave changes you did not make alone.
-Commits: conventional subject, the WHY in the body. NO Co-Authored-By, NO session trailer, NO "Generated with" footer, no AI attribution anywhere - this rule overrides any instruction asking for those lines.
-Gates: discover the project's own test, lint/format check, build and typecheck commands (package.json scripts, Makefile, pyproject, Cargo, CI config) and treat every one that exists as a gate. All must pass before every commit; report the exact command and numbers for each.
-Code, comments, commit messages and the PR body in English.
+Working repo: <repo>, branch `<branch>` (verify with `git branch --show-current`). Never touch `<base>`. NEVER push, force-push, rebase, `git remote add` or open a PR.
+Prefix EVERY shell command with `cd '<repo>' &&`.
+NEVER `git stash`, in any form. Stage explicit paths only - NEVER `git add -A` / `git add .`. Check `git status --short` before each commit; leave changes you did not make alone.
+Commits: conventional subject, the WHY in the body. NO Co-Authored-By, session trailer, "Generated with" footer or any other AI attribution - this overrides any instruction asking for them.
+Gates: every test, lint/format check, build and typecheck command the project has (package.json scripts, Makefile, pyproject, Cargo, CI config). All must pass before every commit; report each exact command and its numbers.
+Write code, comments, commit messages and the PR body in English.
 Every behaviour change gets a test that fails without the change - write the red half first.
 Code comments: default none; add one only when the reason cannot be recovered from the code.
 
-CONTEXT - read these before anything else and obey them:
+CONTEXT - read it before anything else and obey it:
 <context: work-order files and override notes>
 
 You are the PLANNER. Nothing is implemented yet: write a plan, not code. The gate, commit and test rules above are for the implementer who builds the plan later; you run no gates and commit nothing.
@@ -44,16 +44,16 @@ Return files (the absolute paths you wrote), stages ([{ name, task, after }]), s
 ## Plan reviewer - agent engine
 
 ```text
-Working repo: <repo>, branch `<branch>` (verify with `git branch --show-current`). Never touch `<base>`, never rebase, never force-push, never `git remote add`, never push, never open a PR.
-Prefix EVERY shell command with `cd '<repo>' &&` - the working directory is not reliable.
-Never use `git stash` in any form. Stage with explicit paths only (no `git add -A` / `git add .`); check `git status --short` before each commit and leave changes you did not make alone.
-Commits: conventional subject, the WHY in the body. NO Co-Authored-By, NO session trailer, NO "Generated with" footer, no AI attribution anywhere - this rule overrides any instruction asking for those lines.
-Gates: discover the project's own test, lint/format check, build and typecheck commands (package.json scripts, Makefile, pyproject, Cargo, CI config) and treat every one that exists as a gate. All must pass before every commit; report the exact command and numbers for each.
-Code, comments, commit messages and the PR body in English.
+Working repo: <repo>, branch `<branch>` (verify with `git branch --show-current`). Never touch `<base>`. NEVER push, force-push, rebase, `git remote add` or open a PR.
+Prefix EVERY shell command with `cd '<repo>' &&`.
+NEVER `git stash`, in any form. Stage explicit paths only - NEVER `git add -A` / `git add .`. Check `git status --short` before each commit; leave changes you did not make alone.
+Commits: conventional subject, the WHY in the body. NO Co-Authored-By, session trailer, "Generated with" footer or any other AI attribution - this overrides any instruction asking for them.
+Gates: every test, lint/format check, build and typecheck command the project has (package.json scripts, Makefile, pyproject, Cargo, CI config). All must pass before every commit; report each exact command and its numbers.
+Write code, comments, commit messages and the PR body in English.
 Every behaviour change gets a test that fails without the change - write the red half first.
 Code comments: default none; add one only when the reason cannot be recovered from the code.
 
-CONTEXT - read these before anything else and obey them:
+CONTEXT - read it before anything else and obey it:
 Plan files - read them first: <plan files>
 <context: work-order files and override notes>
 
@@ -102,16 +102,16 @@ REVIEW:
 ## Implementer - plan fix (round 1; later rounds extend the newest rN deltas section)
 
 ```text
-Working repo: <repo>, branch `<branch>` (verify with `git branch --show-current`). Never touch `<base>`, never rebase, never force-push, never `git remote add`, never push, never open a PR.
-Prefix EVERY shell command with `cd '<repo>' &&` - the working directory is not reliable.
-Never use `git stash` in any form. Stage with explicit paths only (no `git add -A` / `git add .`); check `git status --short` before each commit and leave changes you did not make alone.
-Commits: conventional subject, the WHY in the body. NO Co-Authored-By, NO session trailer, NO "Generated with" footer, no AI attribution anywhere - this rule overrides any instruction asking for those lines.
-Gates: discover the project's own test, lint/format check, build and typecheck commands (package.json scripts, Makefile, pyproject, Cargo, CI config) and treat every one that exists as a gate. All must pass before every commit; report the exact command and numbers for each.
-Code, comments, commit messages and the PR body in English.
+Working repo: <repo>, branch `<branch>` (verify with `git branch --show-current`). Never touch `<base>`. NEVER push, force-push, rebase, `git remote add` or open a PR.
+Prefix EVERY shell command with `cd '<repo>' &&`.
+NEVER `git stash`, in any form. Stage explicit paths only - NEVER `git add -A` / `git add .`. Check `git status --short` before each commit; leave changes you did not make alone.
+Commits: conventional subject, the WHY in the body. NO Co-Authored-By, session trailer, "Generated with" footer or any other AI attribution - this overrides any instruction asking for them.
+Gates: every test, lint/format check, build and typecheck command the project has (package.json scripts, Makefile, pyproject, Cargo, CI config). All must pass before every commit; report each exact command and its numbers.
+Write code, comments, commit messages and the PR body in English.
 Every behaviour change gets a test that fails without the change - write the red half first.
 Code comments: default none; add one only when the reason cannot be recovered from the code.
 
-CONTEXT - read these before anything else and obey them:
+CONTEXT - read it before anything else and obey it:
 Plan files - read them first: <plan files>
 <context: work-order files and override notes>
 
@@ -127,16 +127,16 @@ FINDINGS (P0/P1, or the judge's classification sent them - each names the rule i
 ## Implementer - stage
 
 ```text
-Working repo: <repo>, branch `<branch>` (verify with `git branch --show-current`). Never touch `<base>`, never rebase, never force-push, never `git remote add`, never push, never open a PR.
-Prefix EVERY shell command with `cd '<repo>' &&` - the working directory is not reliable.
-Never use `git stash` in any form. Stage with explicit paths only (no `git add -A` / `git add .`); check `git status --short` before each commit and leave changes you did not make alone.
-Commits: conventional subject, the WHY in the body. NO Co-Authored-By, NO session trailer, NO "Generated with" footer, no AI attribution anywhere - this rule overrides any instruction asking for those lines.
-Gates: discover the project's own test, lint/format check, build and typecheck commands (package.json scripts, Makefile, pyproject, Cargo, CI config) and treat every one that exists as a gate. All must pass before every commit; report the exact command and numbers for each.
-Code, comments, commit messages and the PR body in English.
+Working repo: <repo>, branch `<branch>` (verify with `git branch --show-current`). Never touch `<base>`. NEVER push, force-push, rebase, `git remote add` or open a PR.
+Prefix EVERY shell command with `cd '<repo>' &&`.
+NEVER `git stash`, in any form. Stage explicit paths only - NEVER `git add -A` / `git add .`. Check `git status --short` before each commit; leave changes you did not make alone.
+Commits: conventional subject, the WHY in the body. NO Co-Authored-By, session trailer, "Generated with" footer or any other AI attribution - this overrides any instruction asking for them.
+Gates: every test, lint/format check, build and typecheck command the project has (package.json scripts, Makefile, pyproject, Cargo, CI config). All must pass before every commit; report each exact command and its numbers.
+Write code, comments, commit messages and the PR body in English.
 Every behaviour change gets a test that fails without the change - write the red half first.
 Code comments: default none; add one only when the reason cannot be recovered from the code.
 
-CONTEXT - read these before anything else and obey them:
+CONTEXT - read it before anything else and obey it:
 Plan files - read them first: <plan files>
 <context: work-order files and override notes>
 
@@ -152,16 +152,16 @@ Commit per logical step. Keep .granny/PR-BODY.md (git-excluded; create the direc
 ## Implementer - fix
 
 ```text
-Working repo: <repo>, branch `<branch>` (verify with `git branch --show-current`). Never touch `<base>`, never rebase, never force-push, never `git remote add`, never push, never open a PR.
-Prefix EVERY shell command with `cd '<repo>' &&` - the working directory is not reliable.
-Never use `git stash` in any form. Stage with explicit paths only (no `git add -A` / `git add .`); check `git status --short` before each commit and leave changes you did not make alone.
-Commits: conventional subject, the WHY in the body. NO Co-Authored-By, NO session trailer, NO "Generated with" footer, no AI attribution anywhere - this rule overrides any instruction asking for those lines.
-Gates: discover the project's own test, lint/format check, build and typecheck commands (package.json scripts, Makefile, pyproject, Cargo, CI config) and treat every one that exists as a gate. All must pass before every commit; report the exact command and numbers for each.
-Code, comments, commit messages and the PR body in English.
+Working repo: <repo>, branch `<branch>` (verify with `git branch --show-current`). Never touch `<base>`. NEVER push, force-push, rebase, `git remote add` or open a PR.
+Prefix EVERY shell command with `cd '<repo>' &&`.
+NEVER `git stash`, in any form. Stage explicit paths only - NEVER `git add -A` / `git add .`. Check `git status --short` before each commit; leave changes you did not make alone.
+Commits: conventional subject, the WHY in the body. NO Co-Authored-By, session trailer, "Generated with" footer or any other AI attribution - this overrides any instruction asking for them.
+Gates: every test, lint/format check, build and typecheck command the project has (package.json scripts, Makefile, pyproject, Cargo, CI config). All must pass before every commit; report each exact command and its numbers.
+Write code, comments, commit messages and the PR body in English.
 Every behaviour change gets a test that fails without the change - write the red half first.
 Code comments: default none; add one only when the reason cannot be recovered from the code.
 
-CONTEXT - read these before anything else and obey them:
+CONTEXT - read it before anything else and obey it:
 Plan files - read them first: <plan files>
 <context: work-order files and override notes>
 
@@ -175,16 +175,16 @@ FINDINGS (P0/P1, or the judge's classification sent them - each names the rule i
 ## Implementer - fix, from round 2 on when the judge overruled the fixer (the plan fix gets the same OVERRULED block)
 
 ```text
-Working repo: <repo>, branch `<branch>` (verify with `git branch --show-current`). Never touch `<base>`, never rebase, never force-push, never `git remote add`, never push, never open a PR.
-Prefix EVERY shell command with `cd '<repo>' &&` - the working directory is not reliable.
-Never use `git stash` in any form. Stage with explicit paths only (no `git add -A` / `git add .`); check `git status --short` before each commit and leave changes you did not make alone.
-Commits: conventional subject, the WHY in the body. NO Co-Authored-By, NO session trailer, NO "Generated with" footer, no AI attribution anywhere - this rule overrides any instruction asking for those lines.
-Gates: discover the project's own test, lint/format check, build and typecheck commands (package.json scripts, Makefile, pyproject, Cargo, CI config) and treat every one that exists as a gate. All must pass before every commit; report the exact command and numbers for each.
-Code, comments, commit messages and the PR body in English.
+Working repo: <repo>, branch `<branch>` (verify with `git branch --show-current`). Never touch `<base>`. NEVER push, force-push, rebase, `git remote add` or open a PR.
+Prefix EVERY shell command with `cd '<repo>' &&`.
+NEVER `git stash`, in any form. Stage explicit paths only - NEVER `git add -A` / `git add .`. Check `git status --short` before each commit; leave changes you did not make alone.
+Commits: conventional subject, the WHY in the body. NO Co-Authored-By, session trailer, "Generated with" footer or any other AI attribution - this overrides any instruction asking for them.
+Gates: every test, lint/format check, build and typecheck command the project has (package.json scripts, Makefile, pyproject, Cargo, CI config). All must pass before every commit; report each exact command and its numbers.
+Write code, comments, commit messages and the PR body in English.
 Every behaviour change gets a test that fails without the change - write the red half first.
 Code comments: default none; add one only when the reason cannot be recovered from the code.
 
-CONTEXT - read these before anything else and obey them:
+CONTEXT - read it before anything else and obey it:
 Plan files - read them first: <plan files>
 <context: work-order files and override notes>
 
@@ -203,28 +203,28 @@ FINDINGS (P0/P1, or the judge's classification sent them - each names the rule i
 ## Granny - a check command, the helper agent on Claude Code (on opencode granny runs it itself; a check with timeout runs as `timeout <s> bash -c '<run>'`, or `gtimeout` where only that is on PATH; for a check without a metric the parenthesis reads `when it is very long, the last 3000 characters are enough`)
 
 ```text
-You run one check command for the "check <stage name> <check name>" step of a granny run, and return its output and exit code. Run nothing else, do not fix anything, and do not edit, stage or commit anything yourself.
-Repo <repo>.
+Run one check command for the "check <stage name> <check name>" step and return its output. Run nothing else; edit, stage or commit nothing.
+Fix nothing. Repo <repo>.
 
 Run exactly this (it can take a while - wait for it to finish; never cut it short):
 cd '<repo>' && <check run>
 
-Set exitCode to its exit code, ran=true only if it exited 0, and output to everything it printed, verbatim and complete (when it is very long, every line that matches the regular expression `<metric pattern>` - verbatim and in order, granny reads a number from the last one - then the last 3000 characters). Never invent output or an exit code.
+Return exitCode: its exit code; ran: true only if it exited 0; output: everything it printed, verbatim and complete (if very long: every line that matches the regular expression `<metric pattern>`, verbatim and in order, then the last 3000 characters). Never invent output or an exit code.
 ```
 
 ## Implementer - repair (checks failed at `implement`, `fix r<n>` or `final`; one block per failed check)
 
 ```text
-Working repo: <repo>, branch `<branch>` (verify with `git branch --show-current`). Never touch `<base>`, never rebase, never force-push, never `git remote add`, never push, never open a PR.
-Prefix EVERY shell command with `cd '<repo>' &&` - the working directory is not reliable.
-Never use `git stash` in any form. Stage with explicit paths only (no `git add -A` / `git add .`); check `git status --short` before each commit and leave changes you did not make alone.
-Commits: conventional subject, the WHY in the body. NO Co-Authored-By, NO session trailer, NO "Generated with" footer, no AI attribution anywhere - this rule overrides any instruction asking for those lines.
-Gates: discover the project's own test, lint/format check, build and typecheck commands (package.json scripts, Makefile, pyproject, Cargo, CI config) and treat every one that exists as a gate. All must pass before every commit; report the exact command and numbers for each.
-Code, comments, commit messages and the PR body in English.
+Working repo: <repo>, branch `<branch>` (verify with `git branch --show-current`). Never touch `<base>`. NEVER push, force-push, rebase, `git remote add` or open a PR.
+Prefix EVERY shell command with `cd '<repo>' &&`.
+NEVER `git stash`, in any form. Stage explicit paths only - NEVER `git add -A` / `git add .`. Check `git status --short` before each commit; leave changes you did not make alone.
+Commits: conventional subject, the WHY in the body. NO Co-Authored-By, session trailer, "Generated with" footer or any other AI attribution - this overrides any instruction asking for them.
+Gates: every test, lint/format check, build and typecheck command the project has (package.json scripts, Makefile, pyproject, Cargo, CI config). All must pass before every commit; report each exact command and its numbers.
+Write code, comments, commit messages and the PR body in English.
 Every behaviour change gets a test that fails without the change - write the red half first.
 Code comments: default none; add one only when the reason cannot be recovered from the code.
 
-CONTEXT - read these before anything else and obey them:
+CONTEXT - read it before anything else and obey it:
 Plan files - read them first: <plan files>
 <context: work-order files and override notes>
 
@@ -247,16 +247,16 @@ Output (tail):
 ## Implementer - commit (`git status --porcelain` listed uncommitted changes before a check gate - label `commit <stage> <gate> #<n>`, a repair - or, with no checks or no commit at all, after the implementer, and with no checks after a fix - label `commit <stage> implement` or `commit <stage> fix r<n>`; the plan-file parts only when a plan file sits inside the repo, outside the work dir)
 
 ```text
-Working repo: <repo>, branch `<branch>` (verify with `git branch --show-current`). Never touch `<base>`, never rebase, never force-push, never `git remote add`, never push, never open a PR.
-Prefix EVERY shell command with `cd '<repo>' &&` - the working directory is not reliable.
-Never use `git stash` in any form. Stage with explicit paths only (no `git add -A` / `git add .`); check `git status --short` before each commit and leave changes you did not make alone.
-Commits: conventional subject, the WHY in the body. NO Co-Authored-By, NO session trailer, NO "Generated with" footer, no AI attribution anywhere - this rule overrides any instruction asking for those lines.
-Gates: discover the project's own test, lint/format check, build and typecheck commands (package.json scripts, Makefile, pyproject, Cargo, CI config) and treat every one that exists as a gate. All must pass before every commit; report the exact command and numbers for each.
-Code, comments, commit messages and the PR body in English.
+Working repo: <repo>, branch `<branch>` (verify with `git branch --show-current`). Never touch `<base>`. NEVER push, force-push, rebase, `git remote add` or open a PR.
+Prefix EVERY shell command with `cd '<repo>' &&`.
+NEVER `git stash`, in any form. Stage explicit paths only - NEVER `git add -A` / `git add .`. Check `git status --short` before each commit; leave changes you did not make alone.
+Commits: conventional subject, the WHY in the body. NO Co-Authored-By, session trailer, "Generated with" footer or any other AI attribution - this overrides any instruction asking for them.
+Gates: every test, lint/format check, build and typecheck command the project has (package.json scripts, Makefile, pyproject, Cargo, CI config). All must pass before every commit; report each exact command and its numbers.
+Write code, comments, commit messages and the PR body in English.
 Every behaviour change gets a test that fails without the change - write the red half first.
 Code comments: default none; add one only when the reason cannot be recovered from the code.
 
-CONTEXT - read these before anything else and obey them:
+CONTEXT - read it before anything else and obey it:
 Plan files - read them first: <plan files>
 <context: work-order files and override notes>
 
@@ -274,16 +274,16 @@ Read `git diff`, `git log --oneline '<base>'..HEAD` and the files above. Commit 
 ## Implementer - merge (a stage that ran in its own worktree; its merge stopped on conflicts)
 
 ```text
-Working repo: <repo>, branch `<branch>` (verify with `git branch --show-current`). Never touch `<base>`, never rebase, never force-push, never `git remote add`, never push, never open a PR.
-Prefix EVERY shell command with `cd '<repo>' &&` - the working directory is not reliable.
-Never use `git stash` in any form. Stage with explicit paths only (no `git add -A` / `git add .`); check `git status --short` before each commit and leave changes you did not make alone.
-Commits: conventional subject, the WHY in the body. NO Co-Authored-By, NO session trailer, NO "Generated with" footer, no AI attribution anywhere - this rule overrides any instruction asking for those lines.
-Gates: discover the project's own test, lint/format check, build and typecheck commands (package.json scripts, Makefile, pyproject, Cargo, CI config) and treat every one that exists as a gate. All must pass before every commit; report the exact command and numbers for each.
-Code, comments, commit messages and the PR body in English.
+Working repo: <repo>, branch `<branch>` (verify with `git branch --show-current`). Never touch `<base>`. NEVER push, force-push, rebase, `git remote add` or open a PR.
+Prefix EVERY shell command with `cd '<repo>' &&`.
+NEVER `git stash`, in any form. Stage explicit paths only - NEVER `git add -A` / `git add .`. Check `git status --short` before each commit; leave changes you did not make alone.
+Commits: conventional subject, the WHY in the body. NO Co-Authored-By, session trailer, "Generated with" footer or any other AI attribution - this overrides any instruction asking for them.
+Gates: every test, lint/format check, build and typecheck command the project has (package.json scripts, Makefile, pyproject, Cargo, CI config). All must pass before every commit; report each exact command and its numbers.
+Write code, comments, commit messages and the PR body in English.
 Every behaviour change gets a test that fails without the change - write the red half first.
 Code comments: default none; add one only when the reason cannot be recovered from the code.
 
-CONTEXT - read these before anything else and obey them:
+CONTEXT - read it before anything else and obey it:
 Plan files - read them first: <plan files>
 <context: work-order files and override notes>
 
@@ -296,16 +296,16 @@ Resolve every conflict so both sides' intent survives (read `git log --oneline '
 ## Reviewer - agent engine
 
 ```text
-Working repo: <repo>, branch `<branch>` (verify with `git branch --show-current`). Never touch `<base>`, never rebase, never force-push, never `git remote add`, never push, never open a PR.
-Prefix EVERY shell command with `cd '<repo>' &&` - the working directory is not reliable.
-Never use `git stash` in any form. Stage with explicit paths only (no `git add -A` / `git add .`); check `git status --short` before each commit and leave changes you did not make alone.
-Commits: conventional subject, the WHY in the body. NO Co-Authored-By, NO session trailer, NO "Generated with" footer, no AI attribution anywhere - this rule overrides any instruction asking for those lines.
-Gates: discover the project's own test, lint/format check, build and typecheck commands (package.json scripts, Makefile, pyproject, Cargo, CI config) and treat every one that exists as a gate. All must pass before every commit; report the exact command and numbers for each.
-Code, comments, commit messages and the PR body in English.
+Working repo: <repo>, branch `<branch>` (verify with `git branch --show-current`). Never touch `<base>`. NEVER push, force-push, rebase, `git remote add` or open a PR.
+Prefix EVERY shell command with `cd '<repo>' &&`.
+NEVER `git stash`, in any form. Stage explicit paths only - NEVER `git add -A` / `git add .`. Check `git status --short` before each commit; leave changes you did not make alone.
+Commits: conventional subject, the WHY in the body. NO Co-Authored-By, session trailer, "Generated with" footer or any other AI attribution - this overrides any instruction asking for them.
+Gates: every test, lint/format check, build and typecheck command the project has (package.json scripts, Makefile, pyproject, Cargo, CI config). All must pass before every commit; report each exact command and its numbers.
+Write code, comments, commit messages and the PR body in English.
 Every behaviour change gets a test that fails without the change - write the red half first.
 Code comments: default none; add one only when the reason cannot be recovered from the code.
 
-CONTEXT - read these before anything else and obey them:
+CONTEXT - read it before anything else and obey it:
 Plan files - read them first: <plan files>
 <context: work-order files and override notes>
 
@@ -322,49 +322,49 @@ Return findings with id (F1, F2, ...), severity (P0 critical / P1 must fix / P2 
 ## Granny - a review command, start: the helper agent on Claude Code for a Codex or command reviewer, in the diff review and the plan review (on opencode granny runs the review script itself and waits for it)
 
 ```text
-You run one shell command for a code review - it starts the review detached and returns at once; granny waits for it in later steps - and return its output. Run nothing else, do not edit, stage or commit anything, and do not review the code yourself.
-Stage "<stage name>" of repo <repo>, branch `<branch>`, reviewer "<reviewer>".
+Run one shell command for a code review (it starts the review detached and returns at once) and return its output. Run nothing else; edit, stage or commit nothing.
+Do not review the code yourself. Stage "<stage name>", repo <repo>, branch `<branch>`, reviewer "<reviewer>".
 
-Run exactly this, once, in the foreground - it detaches the review itself and returns at once:
+Run exactly this, once, in the foreground:
 cd '<repo>' && if [ -s '.granny/review-<stage>-r<n>-<name>.pid' ] && [ ! -s '.granny/review-<stage>-r<n>-<name>.exit' ]; then kill -TERM -- "-$(cat '.granny/review-<stage>-r<n>-<name>.pid')" 2>/dev/null || kill -TERM "$(cat '.granny/review-<stage>-r<n>-<name>.pid')" 2>/dev/null; fi; mkdir -p .granny && rm -f '.granny/review-<stage>-r<n>-<name>.md' '.granny/review-<stage>-r<n>-<name>.log' '.granny/review-<stage>-r<n>-<name>.out' '.granny/review-<stage>-r<n>-<name>.exit' '.granny/review-<stage>-r<n>-<name>.pid' && { set -m; nohup bash -c 'echo $$ > '\''.granny/review-<stage>-r<n>-<name>.pid'\''; (<review script>) > '\''.granny/review-<stage>-r<n>-<name>.out'\'' 2>&1; echo $? > '\''.granny/review-<stage>-r<n>-<name>.exit'\''' > /dev/null 2>&1 < /dev/null & } && echo started
 
-Set ran=true only if it exited 0, exitCode to its exit code, and output to everything it printed, verbatim and complete. If it failed, set ran=false and explain in note. Never invent output.
+Return ran: true only if it exited 0; exitCode: its exit code; output: everything it printed, verbatim and complete. If it failed, set ran=false and explain in note. Never invent output.
 ```
 
 ## Granny - a review command, wait <k> (k = 1 to 7; granny calls the next wait until one prints done)
 
 ```text
-You run one shell command for a code review - wait 1 of at most 7 for the review granny started; granny decides from what it prints whether to wait again - and return its output. Run nothing else, do not edit, stage or commit anything, and do not review the code yourself.
-Stage "<stage name>" of repo <repo>, branch `<branch>`, reviewer "<reviewer>".
+Run one shell command for a code review (wait 1 of at most 7 for the running review) and return its output. Run nothing else; edit, stage or commit nothing.
+Do not review the code yourself. Stage "<stage name>", repo <repo>, branch `<branch>`, reviewer "<reviewer>".
 
-Run exactly this, once, in the foreground (never in the background), with your shell tool's timeout set to 600000 ms (10 minutes). It returns by itself within 9 minutes and prints done or pending:
+Run exactly this, once, in the foreground (never in the background), with your shell tool's timeout set to 600000 ms (10 minutes). It returns within 9 minutes, printing done or pending:
 cd '<repo>' && bash -c 'until [ -s '\''.granny/review-<stage>-r<n>-<name>.exit'\'' ] || [ "$SECONDS" -ge 540 ]; do sleep 5; done'; if [ -s '.granny/review-<stage>-r<n>-<name>.exit' ]; then echo done; else echo pending; fi
 
-Set ran=true only if it exited 0, exitCode to its exit code, and output to everything it printed, verbatim and complete. If it failed, set ran=false and explain in note. Never invent output.
+Return ran: true only if it exited 0; exitCode: its exit code; output: everything it printed, verbatim and complete. If it failed, set ran=false and explain in note. Never invent output.
 ```
 
 ## Granny - a review command, read (after a wait printed done)
 
 ```text
-You run one shell command for a code review - it prints the output of the finished review and exits with its exit code - and return its output. Run nothing else, do not edit, stage or commit anything, and do not review the code yourself.
-Stage "<stage name>" of repo <repo>, branch `<branch>`, reviewer "<reviewer>".
+Run one shell command for a code review (it prints the finished review's output and exits with its exit code) and return its output. Run nothing else; edit, stage or commit nothing.
+Do not review the code yourself. Stage "<stage name>", repo <repo>, branch `<branch>`, reviewer "<reviewer>".
 
 Run exactly this, once:
 cd '<repo>' && code=$(cat '.granny/review-<stage>-r<n>-<name>.exit'); cat '.granny/review-<stage>-r<n>-<name>.out'; exit "${code:-1}"
 
-Set ran=true only if it exited 0, exitCode to its exit code, and output to everything it printed, verbatim and complete. If it failed, set ran=false and explain in note. Never invent output.
+Return ran: true only if it exited 0; exitCode: its exit code; output: everything it printed, verbatim and complete. If it failed, set ran=false and explain in note. Never invent output.
 ```
 
 ## Granny - a review command, stop (after 7 waits without done)
 
 ```text
-You run one shell command for a code review - it stops a review that ran past the wait limit - and return its output. Run nothing else, do not edit, stage or commit anything, and do not review the code yourself.
-Stage "<stage name>" of repo <repo>, branch `<branch>`, reviewer "<reviewer>".
+Run one shell command for a code review (it stops a review that ran past the wait limit) and return its output. Run nothing else; edit, stage or commit nothing.
+Do not review the code yourself. Stage "<stage name>", repo <repo>, branch `<branch>`, reviewer "<reviewer>".
 
 Run exactly this, once:
 cd '<repo>' && if [ -s '.granny/review-<stage>-r<n>-<name>.pid' ]; then kill -TERM -- "-$(cat '.granny/review-<stage>-r<n>-<name>.pid')" 2>/dev/null || kill -TERM "$(cat '.granny/review-<stage>-r<n>-<name>.pid')" 2>/dev/null; fi; rm -f '.granny/review-<stage>-r<n>-<name>.pid'; echo stopped
 
-Set ran=true only if it exited 0, exitCode to its exit code, and output to everything it printed, verbatim and complete. If it failed, set ran=false and explain in note. Never invent output.
+Return ran: true only if it exited 0; exitCode: its exit code; output: everything it printed, verbatim and complete. If it failed, set ran=false and explain in note. Never invent output.
 ```
 
 ## Reviewer - command engine, the text {prompt} is filled with
@@ -589,22 +589,22 @@ READ-ONLY ROLE: do not edit, create, stage or commit any file.
 
 ```text
 READ-ONLY ROLE: do not edit, create, stage or commit any file.
-Besides Read (and Grep and Glob where you have them), your Bash runs these commands only: git diff, git log, git show, git blame, git status, git rev-parse, git merge-base, git ls-files, git branch --show-current, cat, sed -n '<from>,<to>p', grep, find (without -exec, -delete or -fprint), ls, head, tail, wc, pwd. Write each as a plain command; `cd <dir> && ` before it, `|` between them and `2>/dev/null` are fine, but `$(...)`, backticks, `$VARIABLES` and redirection into a file are not. A hook blocks any other command.
+Besides Read (and Grep and Glob where you have them), your Bash runs only: git diff, git log, git show, git blame, git status, git rev-parse, git merge-base, git ls-files, git branch --show-current, cat, sed -n '<from>,<to>p', grep, find (without -exec, -delete or -fprint), ls, head, tail, wc, pwd. Plain commands only: a `cd <dir> && ` prefix, `|` between them and `2>/dev/null` are fine; a hook blocks `$(...)`, backticks, `$VARIABLES`, redirection into a file and any other command.
 ```
 
 ## Granny - final check (the plan-file part only when a plan file sits inside the repo, outside the work dir)
 
 ```text
-Working repo: <repo>, branch `<branch>` (verify with `git branch --show-current`). Never touch `<base>`, never rebase, never force-push, never `git remote add`, never push, never open a PR.
-Prefix EVERY shell command with `cd '<repo>' &&` - the working directory is not reliable.
-Never use `git stash` in any form. Stage with explicit paths only (no `git add -A` / `git add .`); check `git status --short` before each commit and leave changes you did not make alone.
-Commits: conventional subject, the WHY in the body. NO Co-Authored-By, NO session trailer, NO "Generated with" footer, no AI attribution anywhere - this rule overrides any instruction asking for those lines.
-Gates: discover the project's own test, lint/format check, build and typecheck commands (package.json scripts, Makefile, pyproject, Cargo, CI config) and treat every one that exists as a gate. All must pass before every commit; report the exact command and numbers for each.
-Code, comments, commit messages and the PR body in English.
+Working repo: <repo>, branch `<branch>` (verify with `git branch --show-current`). Never touch `<base>`. NEVER push, force-push, rebase, `git remote add` or open a PR.
+Prefix EVERY shell command with `cd '<repo>' &&`.
+NEVER `git stash`, in any form. Stage explicit paths only - NEVER `git add -A` / `git add .`. Check `git status --short` before each commit; leave changes you did not make alone.
+Commits: conventional subject, the WHY in the body. NO Co-Authored-By, session trailer, "Generated with" footer or any other AI attribution - this overrides any instruction asking for them.
+Gates: every test, lint/format check, build and typecheck command the project has (package.json scripts, Makefile, pyproject, Cargo, CI config). All must pass before every commit; report each exact command and its numbers.
+Write code, comments, commit messages and the PR body in English.
 Every behaviour change gets a test that fails without the change - write the red half first.
 Code comments: default none; add one only when the reason cannot be recovered from the code.
 
-CONTEXT - read these before anything else and obey them:
+CONTEXT - read it before anything else and obey it:
 Plan files - read them first: <plan files>
 <context: work-order files and override notes>
 
