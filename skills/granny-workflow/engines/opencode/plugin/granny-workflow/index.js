@@ -1607,15 +1607,32 @@ the last repair's deviations: ${deviations}` : ""}`;
       const open = await shell(`check ${label}`, "Implement", "if git rev-parse -q --verify MERGE_HEAD >/dev/null; then git status --short; exit 1; fi", main.cwd);
       if (!open.ran)
         throw new Error(`${label}: the merge of ${lane.branch} into ${main.branch} is still unfinished in ${main.cwd} - resolve it, then resume with fromStage: ${open.output.slice(-1000)}`);
-    } else
-      host.log(`${label}: ${lane.branch} merged into ${main.branch}`);
-    const cleanup = `[ -z "$(git -C ${shellQuote(lane.cwd)} status --porcelain)" ] && git worktree remove --force ${shellQuote(lane.cwd)} && git branch -d ${shellQuote(lane.branch)}`;
-    const cleaned = await shell(`cleanup ${name}`, "Implement", cleanup, main.cwd);
-    if (!cleaned.ran) {
-      host.log(`${label}: left ${lane.cwd} (${lane.branch}) in place - remove it yourself once you have checked it: ${cleaned.output.slice(-500)}`);
-      return `ran in parallel on ${lane.branch}; its worktree ${lane.cwd} was left in place`;
     }
-    return merged.ran ? `ran in parallel on ${lane.branch}, merged` : `ran in parallel on ${lane.branch}, merged after the implementer resolved conflicts`;
+    const inHead = `git merge-base --is-ancestor ${shellQuote(lane.branch)} HEAD`;
+    const verified = await shell(`verify ${label}`, "Implement", inHead, main.cwd);
+    if (!verified.ran) {
+      const why = merged.ran ? "" : ` - the merge stopped with: ${merged.output.slice(-1000)}`;
+      throw new Error(`${label}: ${lane.branch} is not merged into ${main.branch} (git merge-base --is-ancestor exit ${verified.code}) - its worktree ${lane.cwd} and branch ${lane.branch} are left in place; merge it in ${main.cwd}, then resume with fromStage${why}`);
+    }
+    host.log(merged.ran ? `${label}: ${lane.branch} merged into ${main.branch}` : `${label}: ${lane.branch} merged into ${main.branch} after the implementer resolved conflicts`);
+    const done = merged.ran ? `ran in parallel on ${lane.branch}, merged` : `ran in parallel on ${lane.branch}, merged after the implementer resolved conflicts`;
+    const step = (marker) => `echo '[granny] ${marker}'`;
+    const cleanup = [
+      inHead,
+      step("lane merged"),
+      `[ -z "$(git -C ${shellQuote(lane.cwd)} status --porcelain)" ]`,
+      step("lane worktree clean"),
+      `git worktree remove --force ${shellQuote(lane.cwd)}`,
+      step("lane worktree removed"),
+      `git branch -d ${shellQuote(lane.branch)}`
+    ].join(" && ");
+    const cleaned = await shell(`cleanup ${name}`, "Implement", cleanup, main.cwd);
+    if (cleaned.ran)
+      return done;
+    const reached = (marker) => cleaned.output.includes(`[granny] ${marker}`);
+    const left = reached("lane worktree removed") ? `its worktree ${lane.cwd} was removed, but its branch ${lane.branch} was left in place` : `its worktree ${lane.cwd} and branch ${lane.branch} were left in place (${reached("lane worktree clean") ? "git worktree remove failed" : reached("lane merged") ? "uncommitted changes in the worktree" : "the cleanup could not confirm the merge"})`;
+    host.log(`${label}: left ${reached("lane worktree removed") ? lane.branch : `${lane.cwd} (${lane.branch})`} in place - remove it yourself once you have checked it: ${cleaned.output.slice(-500)}`);
+    return `${done}; ${left}`;
   };
   const startStage = async (i) => {
     const st = specs[i];
