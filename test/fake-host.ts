@@ -16,6 +16,8 @@ export interface FakeOptions {
   commits?: number | 'git' | ((base: string) => number)
   /** Answers a command before the reviews do; undefined passes it on. */
   checks?: (command: string) => Review | undefined
+  /** What the engine's `git status --porcelain` probe prints, in order (the last one repeats; default clean); 'git' with commits runs it in a real shell. */
+  status?: string[]
 }
 
 export interface Setup {
@@ -32,7 +34,8 @@ export const reviewerOf = (command: string) => /review-.+?-r\d+-([a-z0-9-]+)\.md
 const isWorktreeSetup = (command: string) => command.includes('git worktree list --porcelain')
 const HEAD_PROBE = 'git rev-parse --verify HEAD'
 const COMMITS_PROBE = /git rev-list --count (\S+)\.\.HEAD/
-const isProbe = (command: string) => command.includes(HEAD_PROBE) || COMMITS_PROBE.test(command)
+const STATUS_PROBE = /(^|&& )git status --porcelain( -- .*)?$/m
+const isProbe = (command: string) => command.includes(HEAD_PROBE) || COMMITS_PROBE.test(command) || STATUS_PROBE.test(command)
 
 const cdTarget = (line: string) => {
   const quoted = /^cd ((?:'[^']*'(?:\\''[^']*')*)|\S+) && /.exec(line)?.[1] ?? ''
@@ -55,6 +58,7 @@ export function fakeHost(opts: FakeOptions = {}) {
   const queue = Array.isArray(source) ? [...source] : []
   const perReviewer = !Array.isArray(source) && typeof source === 'object' ? Object.fromEntries(Object.entries(source).map(([k, v]) => [k, [...v]])) : {}
   const scores = [...(opts.scores ?? [])]
+  const statuses = [...(opts.status ?? [])]
   const calls: AgentRequest[] = []
   const commands: string[] = []
   const cwds: string[] = []
@@ -67,6 +71,7 @@ export function fakeHost(opts: FakeOptions = {}) {
     probes.push(command)
     const c = opts.commits ?? 1
     if (c === 'git') return bash(command, cwd, opts.shell?.env)
+    if (STATUS_PROBE.test(command)) return { code: 0, output: (statuses.length > 1 ? statuses.shift() : statuses[0]) ?? '' }
     if (command.includes(HEAD_PROBE)) return { code: 0, output: `start${impl + 1}\n` }
     const base = COMMITS_PROBE.exec(command)![1]!
     return { code: 0, output: `${typeof c === 'function' ? c(base) : c}\n` }

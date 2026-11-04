@@ -39,6 +39,7 @@ describe('claude-code workflow.js', () => {
       if (kind.startsWith('startSha')) return { startSha: 's1', headSha: 'h1', gatesGreen: true, gates: 'ok', commits: ['c'], untested: '' }
       if (kind.startsWith('ran') && prompt.includes('git rev-parse --verify HEAD')) return { ran: true, exitCode: 0, output: 's1\n' }
       if (kind.startsWith('ran') && prompt.includes('git rev-list --count')) return { ran: true, exitCode: 0, output: '1\n' }
+      if (kind.startsWith('ran') && prompt.includes('git status --porcelain')) return { ran: true, exitCode: 0, output: '' }
       if (kind.startsWith('ran')) {
         reviews++
         return { ran: true, exitCode: 0, output: reviews === 1 ? review(finding('P2', 'Off by one')) : 'No findings.' }
@@ -93,6 +94,7 @@ describe('claude-code workflow.js', () => {
       if (kind.startsWith('startSha')) return { startSha: 's1', headSha: 'h1', gatesGreen: true, gates: 'ok', commits: ['c'], untested: '' }
       if (kind.startsWith('ran') && prompt.includes('git rev-parse --verify HEAD')) return { ran: true, exitCode: 0, output: 's1\n' }
       if (kind.startsWith('ran') && prompt.includes('git rev-list --count')) return { ran: true, exitCode: 0, output: '1\n' }
+      if (kind.startsWith('ran') && prompt.includes('git status --porcelain')) return { ran: true, exitCode: 0, output: '' }
       if (kind.startsWith('ran')) {
         reviews++
         return { ran: true, exitCode: 0, output: reviews === 1 ? review(finding('P1', 'Missing migration step', '/plans/v1.md', 4)) : 'No findings.' }

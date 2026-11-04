@@ -622,3 +622,250 @@ describe('checks on a parallel lane in a real git repo', () => {
     }
   })
 })
+
+describe('uncommitted work, in a real git repo', () => {
+  const GOOD = { name: 'tests', run: 'grep -qx good f.txt' }
+  const runDirty = async (
+    onAsk: (req: AgentRequest, repo: string) => void,
+    other: (req: AgentRequest, repo: string) => unknown = () => undefined,
+    checks: unknown[] = [GOOD],
+    first: (repo: string) => void = repo => {
+      commit(repo, 'f.txt', 'bad\n')
+      writeFileSync(join(repo, 'f.txt'), 'good\n')
+    },
+  ) => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), 'granny-clean-tree-')))
+    const repo = join(root, 'r')
+    init(repo)
+    git(repo, 'checkout', '-qb', 'feat/x')
+    const f = fakeHost({
+      commits: 'git',
+      shell: {},
+      override: req => {
+        if (req.kind !== 'implementation') return other(req, repo)
+        const start = git(repo, 'rev-parse', 'HEAD')
+        if (req.label === 'implement core') first(repo)
+        else onAsk(req, repo)
+        return done(repo, start)
+      },
+    })
+    try {
+      const r = await runGranny(f.host, { repo, branch: 'feat/x', base: 'main', stages: [{ name: 'core', task: 'WP-01' }], config: { worktree: false, checks } })
+      return {
+        f,
+        r,
+        head: git(repo, 'rev-parse', 'HEAD'),
+        committed: git(repo, 'show', 'HEAD:f.txt'),
+        status: git(repo, 'status', '--porcelain'),
+        checkRuns: f.commands.filter(c => c.includes(GOOD.run)).length,
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  }
+  const commitAll = (_: AgentRequest, repo: string) => {
+    git(repo, 'add', 'f.txt')
+    git(repo, 'commit', '-qm', 'fix: f.txt')
+  }
+
+  it('asks the implementer to commit before a check gate runs, then checks the committed tree', async () => {
+    const { f, r, head, committed, checkRuns } = await runDirty(commitAll)
+    expect(f.calls.filter(c => c.kind === 'implementation').map(c => c.label)).toEqual(['implement core', 'commit core implement #1'])
+    const ask = f.calls.find(c => c.label === 'commit core implement #1')!
+    expect(ask.phase).toBe('Implement')
+    expect(ask.prompt).toContain(' M f.txt')
+    expect(ask.prompt).toContain('WP-01')
+    expect(ask.prompt).toContain('never `git stash`')
+    expect(f.logs).toContain('core: uncommitted changes before the checks at implement - repair 1/2: M f.txt')
+    expect(committed).toBe('good')
+    expect(checkRuns).toBe(1)
+    expect(r.stages[0]).toMatchObject({ outcome: 'clean', checks: [{ at: 'implement', attempt: 2, head, results: [{ name: 'tests', passed: true, code: 0 }] }] })
+  })
+
+  it('ends the stage checks-failed without running the checks or a review while the work stays uncommitted', async () => {
+    const { f, r, committed, status, checkRuns } = await runDirty(() => {})
+    expect(f.calls.filter(c => c.kind === 'implementation').map(c => c.label)).toEqual(['implement core', 'commit core implement #1', 'commit core implement #2'])
+    expect(checkRuns).toBe(0)
+    expect(f.calls.some(c => c.role === 'reviewer')).toBe(false)
+    expect(committed).toBe('bad')
+    expect(status).toBe('M f.txt')
+    expect(r.stages[0]).toMatchObject({ outcome: 'checks-failed', rounds: 0 })
+    expect(r.stages[0]).not.toHaveProperty('checks')
+    expect(r.stages[0]!.note).toBe('checks not run at implement - uncommitted changes: M f.txt (still there after 2 repair(s))')
+    expect(r.finalReview).toMatchObject({ outcome: 'checks-failed', note: 'checks not run at final - uncommitted changes: M f.txt' })
+    expect(r.recheck).toMatchObject({ passed: false, note: 'checks not run at pr-ready - uncommitted changes: M f.txt' })
+  })
+
+  it('marks the run not PR-ready when the checks rerun after the pr-ready check leave the tree dirty', async () => {
+    const writes = { name: 'tests', run: `${GOOD.run} && { [ ! -e notes.txt ] || echo report > out.txt; }` }
+    const { f, r, head } = await runDirty(
+      commitAll,
+      (req, repo) => {
+        if (req.kind !== 'final') return undefined
+        commit(repo, 'notes.txt', 'pr body tweak\n')
+        return { gatesGreen: true, gates: 'all green', commits: [], prBodyPath: '.granny/PR-BODY.md', issues: '' }
+      },
+      [writes],
+    )
+    expect(r.checks).toEqual([{ at: 'pr-ready', attempt: 1, head, results: [{ name: 'tests', passed: true, code: 0 }] }])
+    expect(r.recheck).toEqual({ passed: false, note: 'uncommitted changes after the checks at pr-ready: ?? out.txt' })
+    expect(f.logs).toContain('pr-ready check: the checks left uncommitted changes after the pr-ready check - the branch is not PR-ready: ?? out.txt')
+  })
+})
+
+describe('plan files inside the repo, in a real git repo', () => {
+  const GOOD = { name: 'tests', run: 'grep -qx good f.txt' }
+  const runWithPlans = async (implement: (repo: string) => void, onAsk: (req: AgentRequest, repo: string) => void = () => {}) => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), 'granny-plan-files-')))
+    const repo = join(root, 'r')
+    init(repo)
+    commit(repo, 'plan.md', '# plan\n')
+    git(repo, 'checkout', '-qb', 'feat/x')
+    writeFileSync(join(repo, 'plan.md'), '# plan\n\n## r1 deltas\n')
+    mkdirSync(join(repo, 'plans'))
+    writeFileSync(join(repo, 'plans', "it's two.md"), '# two\n')
+    const f = fakeHost({
+      commits: 'git',
+      shell: {},
+      override: req => {
+        if (req.kind !== 'implementation') return undefined
+        const start = git(repo, 'rev-parse', 'HEAD')
+        if (req.label === 'implement core') implement(repo)
+        else onAsk(req, repo)
+        return done(repo, start)
+      },
+    })
+    try {
+      const plan = [join(repo, 'plan.md'), join(repo, 'plans', "it's two.md")]
+      const r = await runGranny(f.host, { repo, branch: 'feat/x', base: 'main', plan, stages: [{ name: 'core', task: 'WP-01' }], config: { worktree: false, checks: [GOOD] } })
+      return { f, r, status: git(repo, 'status', '--porcelain'), asked: f.calls.filter(c => c.kind === 'implementation').map(c => c.label) }
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  }
+
+  it('does not count the uncommitted plan files as uncommitted work', async () => {
+    const { f, r, status, asked } = await runWithPlans(repo => commit(repo, 'f.txt', 'good\n'))
+    expect(asked).toEqual(['implement core'])
+    const final = f.calls.find(c => c.kind === 'final')!.prompt
+    expect(final).toMatch(/`git status --short` must be clean except for the plan files \S+\/r\/plan\.md, \S+\/r\/plans\/it's two\.md, which stay uncommitted: never stage or commit them\./)
+    expect(r.stages[0]).toMatchObject({ outcome: 'clean', checks: [{ at: 'implement', attempt: 1, results: [{ name: 'tests', passed: true }] }] })
+    expect(r.stages[0]).not.toHaveProperty('note')
+    expect(status).toBe('M plan.md\n?? plans/')
+  })
+
+  it('leaves the plan files out of the commit prompt and tells the implementer not to commit them', async () => {
+    const { f, r, status, asked } = await runWithPlans(
+      repo => writeFileSync(join(repo, 'f.txt'), 'good\n'),
+      (_, repo) => {
+        git(repo, 'add', 'f.txt')
+        git(repo, 'commit', '-qm', 'feat: f.txt')
+      },
+    )
+    expect(asked).toEqual(['implement core', 'commit core implement'])
+    const prompt = f.calls.find(c => c.label === 'commit core implement')!.prompt
+    expect(prompt).toContain('?? f.txt')
+    expect(prompt).not.toContain('M plan.md')
+    expect(prompt).not.toContain('?? plans/')
+    expect(prompt).toContain('Leave the plan files')
+    expect(r.stages[0]!.outcome).toBe('clean')
+    expect(status).toBe('M plan.md\n?? plans/')
+  })
+})
+
+describe('a stage whose implementer only left uncommitted work, in a real git repo', () => {
+  const GOOD = { name: 'tests', run: 'grep -qx good f.txt' }
+  const writeOnly = (repo: string) => writeFileSync(join(repo, 'f.txt'), 'good\n')
+  const commitAll = (_: AgentRequest, repo: string) => {
+    git(repo, 'add', 'f.txt')
+    git(repo, 'commit', '-qm', 'feat: f.txt')
+  }
+  const runWriteOnly = async (onAsk: (req: AgentRequest, repo: string) => void, checks: unknown[]) => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), 'granny-write-only-')))
+    const repo = join(root, 'r')
+    init(repo)
+    git(repo, 'checkout', '-qb', 'feat/x')
+    const f = fakeHost({
+      commits: 'git',
+      shell: {},
+      override: req => {
+        if (req.kind !== 'implementation') return undefined
+        const start = git(repo, 'rev-parse', 'HEAD')
+        if (req.label === 'implement core') writeOnly(repo)
+        else if (req.label === 'implement api') commit(repo, 'g.txt', 'api\n')
+        else onAsk(req, repo)
+        return done(repo, start)
+      },
+    })
+    try {
+      const stages = [{ name: 'core', task: 'WP-01' }, { name: 'api', task: 'WP-02' }]
+      const r = await runGranny(f.host, { repo, branch: 'feat/x', base: 'main', stages, config: { worktree: false, checks } })
+      return { f, r, status: git(repo, 'status', '--porcelain'), checkRuns: f.commands.filter(c => c.includes(GOOD.run)).length }
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  }
+  const asked = (f: ReturnType<typeof fakeHost>) => f.calls.filter(c => c.kind === 'implementation').map(c => c.label)
+
+  it('asks the implementer to commit before ending the stage no-changes, then checks and reviews the commit', async () => {
+    const { f, r, checkRuns } = await runWriteOnly(commitAll, [GOOD])
+    expect(asked(f).slice(0, 2)).toEqual(['implement core', 'commit core implement'])
+    expect(f.calls.find(c => c.label === 'commit core implement')!.prompt).toContain('?? f.txt')
+    expect(checkRuns).toBeGreaterThan(0)
+    expect(r.stages[0]).toMatchObject({ outcome: 'clean', checks: [{ at: 'implement', attempt: 1, results: [{ name: 'tests', passed: true }] }] })
+    expect(r.stages[1]!.outcome).not.toBe('skipped')
+  })
+
+  it('asks once without checks, then reviews the commit', async () => {
+    const { f, r } = await runWriteOnly(commitAll, [])
+    expect(asked(f).filter(l => l.includes('core'))).toEqual(['implement core', 'commit core implement'])
+    expect(f.calls.some(c => c.label === 'review core r1 reviewer')).toBe(true)
+    expect(r.stages[0]!.outcome).toBe('clean')
+    expect(r.stages[0]).not.toHaveProperty('note')
+  })
+
+  it('ends the stage no-changes, naming the uncommitted work, when the commit step commits nothing', async () => {
+    const { f, r, status, checkRuns } = await runWriteOnly(() => {}, [GOOD])
+    expect(asked(f).filter(l => l.includes('core'))).toEqual(['implement core', 'commit core implement'])
+    expect(checkRuns).toBe(0)
+    expect(f.calls.some(c => c.role === 'reviewer')).toBe(false)
+    expect(status).toBe('?? f.txt')
+    expect(r.stages[0]).toMatchObject({ outcome: 'no-changes', rounds: 0 })
+    expect(r.stages[0]!.note).toBe('the implementer made no commit: the work it left is uncommitted (?? f.txt), so there was nothing to review')
+    expect(r.stages[1]!.outcome).toBe('skipped')
+  })
+})
+
+describe('uncommitted work without checks', () => {
+  it('asks the implementer once to commit, and names what stayed uncommitted in the stage note', async () => {
+    const f = scripted({}, { status: [' M src/a.ts\n?? scratch.txt\n'] })
+    const r = await runGranny(f.host, run())
+    expect(f.calls.map(c => c.label)).toEqual(['implement core', 'commit core implement', 'review core r1 reviewer', 'pr-ready check'])
+    expect(f.calls[1]!.prompt).toContain('?? scratch.txt')
+    expect(r.stages[0]).toMatchObject({ outcome: 'clean', note: 'uncommitted changes after implement: M src/a.ts, ?? scratch.txt - the review saw HEAD without them' })
+    expect(f.logs).toContain('core: uncommitted changes after implement: M src/a.ts, ?? scratch.txt - the review saw HEAD without them')
+  })
+
+  it('adds nothing when the commit step leaves a clean tree, but takes its gates report', async () => {
+    const redCommit = (req: AgentRequest) =>
+      req.label === 'commit core implement' ? { startSha: 's', headSha: 'h', gatesGreen: false, gates: '1 failing', commits: ['c'], untested: '' } : undefined
+    const f = scripted({}, { status: [' M src/a.ts\n', ''], override: redCommit })
+    const r = await runGranny(f.host, run())
+    expect(r.stages[0]!.outcome).toBe('gates-red')
+    expect(r.stages[0]!.note).toBe('the review found nothing to fix, but the commit step (commit core implement) left the gates red: 1 failing')
+  })
+
+  it('probes after every fix round too', async () => {
+    const f = scripted({}, { status: ['', ' M src/a.ts\n'], override: req => (req.label === 'review core r1 reviewer' ? p1 : undefined) })
+    const r = await runGranny(f.host, run())
+    expect(f.calls.map(c => c.label)).toEqual(['implement core', 'review core r1 reviewer', 'fix core r1', 'commit core fix r1', 'review core r2 reviewer', 'pr-ready check'])
+    expect(r.stages[0]!.note).toBe('uncommitted changes after fix r1: M src/a.ts - the review saw HEAD without them')
+  })
+
+  it('costs nothing but the status read on a clean tree, also through the helper on Claude Code', async () => {
+    const f = scripted({ 'run-tests': [green()] }, { name: 'claude-code', direct: false })
+    await runGranny(f.host, run({ checks: [TESTS] }))
+    expect(f.calls.map(c => c.label)).toEqual(['implement core', 'check core tests', 'review core r1 reviewer', 'pr-ready check'])
+    expect(f.probes).toContain(`cd ${REPO} && git status --porcelain`)
+  })
+})

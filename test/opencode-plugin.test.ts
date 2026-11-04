@@ -167,9 +167,31 @@ describe('opencode plugin helpers', () => {
       ],
     }
     const text = summarize(result, false)
-    expect(text).toContain('- final: gates green, PR body .granny/PR-BODY.md\n- checks after the final check: RED - NOT PR-ready, the pr-ready check moved HEAD and the checks fail: checks failed at pr-ready after 0 repair(s): tests (exit 1); out of repairs: tests (0)')
+    expect(text).toContain('- final: gates green, PR body .granny/PR-BODY.md\n- checks after the final check: RED - NOT PR-ready after the pr-ready check moved HEAD: checks failed at pr-ready after 0 repair(s): tests (exit 1); out of repairs: tests (0)')
     expect(text).toContain('- checks after the final check /s: green on the HEAD the pr-ready check left')
     expect(summarize({ ...result, recheck: undefined, repos: undefined }, false)).not.toContain('checks after the final check')
+  })
+
+  it('names work left uncommitted in the finish summary', () => {
+    const final = { gatesGreen: true, gates: 'ok', commits: [], prBodyPath: '.granny/PR-BODY.md', issues: '' }
+    const left = 'uncommitted changes after implement: M src/a.ts - the review saw HEAD without them'
+    const stage = { stage: 'one', outcome: 'clean' as const, rounds: 1, residual: [], unresolved: [], history: [], note: left }
+    const finalReview = { outcome: 'clean' as const, rounds: 2, residual: [], unresolved: [], history: [], note: 'uncommitted changes after fix r1: ?? out.txt - the review saw HEAD without them' }
+    const text = summarize(
+      { repo: '/r', branch: 'feat/x', base: 'main', worktree: '/r', stages: [stage], finalReview, final, recheck: { passed: false, note: 'uncommitted changes after the checks at pr-ready: ?? out.txt' } },
+      false,
+    )
+    expect(text).toContain(`- one: clean, 1 review round(s) - ${left}`)
+    expect(text).toContain('- final review: clean, 2 review round(s) - uncommitted changes after fix r1: ?? out.txt - the review saw HEAD without them')
+    expect(text).toContain('- checks after the final check: RED - NOT PR-ready after the pr-ready check moved HEAD: uncommitted changes after the checks at pr-ready: ?? out.txt')
+  })
+
+  it('names the work a no-changes stage left uncommitted in the finish summary', () => {
+    const final = { gatesGreen: true, gates: 'ok', commits: [], prBodyPath: '.granny/PR-BODY.md', issues: '' }
+    const note = 'the implementer made no commit: the work it left is uncommitted (?? f.txt), so there was nothing to review'
+    const stage = { stage: 'one', outcome: 'no-changes' as const, rounds: 0, residual: [], unresolved: [], history: [], note }
+    const text = summarize({ repo: '/r', branch: 'feat/x', base: 'main', worktree: '/r', stages: [stage], final }, false)
+    expect(text).toContain(`- one: no-changes, 0 review round(s) - ${note}`)
   })
 
   it('parses provider/model#variant refs', () => {

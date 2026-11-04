@@ -4,6 +4,7 @@ import {
   agentReviewPrompt,
   checkCommandPrompt,
   commandReviewPrompt,
+  commitPrompt,
   draftPrompt,
   extractPrompt,
   finalPrompt,
@@ -113,6 +114,8 @@ const repoPathOf = (r: RepoInput): unknown => (typeof r === 'string' ? r : r && 
 const baseName = (path: string) => path.slice(path.lastIndexOf('/') + 1)
 const lastLine = (output: string) => output.trim().split('\n').at(-1)?.trim() ?? ''
 const short = (sha: string) => sha.slice(0, 8)
+const STATUS_LINE = /^\s*[MADRCUT?!]{1,2}\s+\S/
+const listed = (status: string[]) => status.map(l => l.trim()).join(', ')
 
 export function checkInput(input: RunInput): string[] {
   const errors: string[] = []
@@ -229,6 +232,18 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
     return { sha, code: r.code, output: r.output }
   }
 
+  const work = config.workDir.replace(/\/+$/, '')
+
+  const uncommitted = async (label: string, phase: string, cwd: string): Promise<string[]> => {
+    const keep = plansIn(cwd).map(f => shellQuote(`:(exclude,literal)${f.slice(trimPath(cwd).length + 1)}`))
+    const r = await shell(label, phase, `git status --porcelain${keep.length ? ` -- ':(top)' ${keep.join(' ')}` : ''}`, cwd)
+    if (!r.ran) {
+      host.log(`${label}: could not read the working tree status - going on without it (exit ${r.code}): ${r.output.slice(-500)}`)
+      return []
+    }
+    return r.output.split('\n').filter(l => STATUS_LINE.test(l) && !`${l.trim().replace(/^\S+\s+/, '')}/`.startsWith(`${work}/`))
+  }
+
   const setUpWorktree = async (repo: string, branch: string, from: string, label: string, shared: boolean): Promise<string> => {
     const script = worktreeScript(config, branch, from, worktreePath(repo, branch, config.worktreeDir, shared))
     let r: { ran: boolean; code: number | string; output: string }
@@ -279,6 +294,7 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
 
   const draft = input.goal !== undefined ? await draftPlan(input.goal) : undefined
   const plans = draft ? draft.files : planFiles(input)
+  const plansIn = (cwd: string): string[] => plans.filter(f => f.startsWith(`${trimPath(cwd)}/`) && !f.slice(trimPath(cwd).length + 1).startsWith(`${work}/`))
   const context = [plans.length ? `Plan files - read them first: ${plans.join(', ')}` : '', input.context ?? ''].filter(Boolean).join('\n') || undefined
   const promptFor = (repo: string, cwd: string, branch: string, others: string[], prBody?: string): PromptContext => ({
     repo: cwd,
@@ -332,11 +348,40 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
 
   const detail = (r: CheckResult) => r.note ?? `exit ${r.code}`
 
+  const commitWork = async (lane: Lane, name: string, at: string, stage?: StageTask): Promise<{ impl?: Implementation; by?: string; left?: string[] }> => {
+    const dirty = await uncommitted(`status ${name} ${at}`, 'Implement', lane.cwd)
+    if (!dirty.length) return {}
+    host.log(`${name}: uncommitted changes after ${at} - asking the implementer to commit them: ${listed(dirty)}`)
+    const label = `commit ${name} ${at}`
+    const impl = await implement(lane, label, commitPrompt(lane.p, name, at, dirty.join('\n'), plansIn(lane.cwd), stage))
+    const left = await uncommitted(`status ${name} ${at} after commit`, 'Implement', lane.cwd)
+    return { impl, by: `the commit step (${label})`, ...(left.length ? { left } : {}) }
+  }
+
+  const unreviewed = (name: string, at: string, left: string[] | undefined) => {
+    if (!left) return undefined
+    const note = `uncommitted changes after ${at}: ${listed(left)} - the review saw HEAD without them`
+    host.log(`${name}: ${note}`)
+    return note
+  }
+
   const checkGate = async (lane: Lane, name: string, at: string, checks: CheckConfig[], runs: CheckRun[], stage?: StageTask): Promise<{ passed: boolean; note?: string }> => {
     host.phase(CHECKS_PHASE)
     const budget = (c: CheckConfig) => c.maxRepairs ?? config.maxRepairs
+    const most = Math.max(0, ...checks.map(budget))
     let deviations: string | undefined
     for (let repairs = 0; ; repairs++) {
+      const dirty = await uncommitted(`status ${name} ${at}`, CHECKS_PHASE, lane.cwd)
+      if (dirty.length && repairs >= most) {
+        const note = `checks not run at ${at} - uncommitted changes: ${listed(dirty)}${repairs ? ` (still there after ${repairs} repair(s))` : ''}${deviations ? `\nthe last repair's deviations: ${deviations}` : ''}`
+        host.log(`${name}: checks-failed - ${note}`)
+        return { passed: false, note }
+      }
+      if (dirty.length) {
+        host.log(`${name}: uncommitted changes before the checks at ${at} - repair ${repairs + 1}/${most}: ${listed(dirty)}`)
+        deviations = saidSomething((await implement(lane, `commit ${name} ${at} #${repairs + 1}`, commitPrompt(lane.p, name, at, dirty.join('\n'), plansIn(lane.cwd), stage))).deviations)
+        continue
+      }
       const results: Array<CheckResult & { output: string; broken?: true }> = []
       for (const check of checks) results.push(await runCheck(lane, name, check))
       const head = (await readHead(`head ${name} ${at}`, CHECKS_PHASE, lane.cwd)).sha
@@ -463,8 +508,14 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
       }),
     )
 
-  const reviewLoop = async (lane: Lane, name: string, subject: Subject, reviewers = config.reviewers, opts: { gates?: Gates; checks?: CheckConfig[]; runs?: CheckRun[] } = {}): Promise<PlanResult> => {
-    const { gates, checks = [], runs = [] } = opts
+  const reviewLoop = async (
+    lane: Lane,
+    name: string,
+    subject: Subject,
+    reviewers = config.reviewers,
+    opts: { gates?: Gates; checks?: CheckConfig[]; runs?: CheckRun[]; notes?: string[] } = {},
+  ): Promise<PlanResult> => {
+    const { gates, checks = [], runs = [], notes = [] } = opts
     const { p } = lane
     const phase = phaseOf(subject)
     const history: RoundRecord[] = []
@@ -563,6 +614,11 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
         const gate = await checkGate(lane, name, `fix r${round}`, checks, runs, subject.stage)
         if (!gate.passed) return { outcome: 'checks-failed', rounds: round, residual, unresolved: [], history, note: gate.note }
         host.phase(phase)
+      } else if (subject.kind === 'diff') {
+        const left = await commitWork(lane, name, `fix r${round}`, subject.stage)
+        if (left.impl && gates) Object.assign(gates, { green: left.impl.gatesGreen, text: left.impl.gates, by: left.by })
+        const note = unreviewed(name, `fix r${round}`, left.left)
+        if (note) notes.push(note)
       }
     }
     host.log(`${name}: hit the ${config.maxRounds}-round cap without a clean review`)
@@ -617,6 +673,8 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
     const checks = checksOf(st)
     const runs: CheckRun[] = []
     const ran = () => (runs.length ? { checks: runs } : {})
+    const notes: string[] = []
+    let committed: { impl?: Implementation; by?: string; left?: string[] } = {}
     if (st.implement !== false) {
       host.phase('Implement')
       const head = await readHead(`head ${name}`, 'Implement', lane.cwd)
@@ -627,17 +685,33 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
       impl = await implement(lane, `implement ${name}`, implementPrompt(lane.p, st, i, specs.length, name, buildsOnEarlier(i)))
       if (!impl.gatesGreen) host.log(`${name}: implementer ended with RED gates - review will see it`)
       if (start && impl.startSha !== start) host.log(`${name}: the implementer reported startSha ${impl.startSha}, but HEAD was ${start} before it ran - reviewing ${start}...HEAD`)
-      const count = await shell(`commits ${name}`, 'Implement', `git rev-list --count ${shellQuote(base)}..HEAD`, lane.cwd)
-      if (!count.ran || !/^\d+$/.test(lastLine(count.output))) {
+      const commits = async (label: string) => {
+        const count = await shell(label, 'Implement', `git rev-list --count ${shellQuote(base)}..HEAD`, lane.cwd)
+        if (count.ran && /^\d+$/.test(lastLine(count.output))) return Number(lastLine(count.output))
         host.log(`${name}: could not count the commits in ${base}..HEAD - reviewing it anyway (exit ${count.code}): ${count.output.slice(-500)}`)
-      } else if (Number(lastLine(count.output)) === 0) {
-        const note = `the implementer made no commit: ${base}..HEAD is empty, so there was nothing to review`
+        return undefined
+      }
+      let left: string[] | undefined
+      let count = await commits(`commits ${name}`)
+      if (count === 0) {
+        committed = await commitWork(lane, name, 'implement', task)
+        left = committed.left
+        if (committed.impl) count = await commits(`commits ${name} after commit`)
+      }
+      if (count === 0) {
+        const note = left
+          ? `the implementer made no commit: the work it left is uncommitted (${listed(left)}), so there was nothing to review`
+          : `the implementer made no commit: ${base}..HEAD is empty, so there was nothing to review`
         host.log(`${name}: no-changes - ${note}`)
         return { stage: name, ...where, implementation: impl, outcome: 'no-changes', rounds: 0, residual: [], unresolved: [], history: [], note }
       }
       if (checks.length) {
         const gate = await checkGate(lane, name, 'implement', checks, runs, task)
         if (!gate.passed) return { stage: name, ...where, implementation: impl, outcome: 'checks-failed', rounds: 0, residual: [], unresolved: [], history: [], note: gate.note, ...ran() }
+      } else {
+        if (!committed.impl) left = (committed = await commitWork(lane, name, 'implement', task)).left
+        const note = unreviewed(name, 'implement', left)
+        if (note) notes.push(note)
       }
     } else {
       began?.()
@@ -645,7 +719,8 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
     }
 
     host.phase('Review')
-    const gates: Gates | undefined = impl && !runs.length ? { green: impl.gatesGreen, text: impl.gates, by: 'the implementer' } : undefined
+    const last = committed.impl ?? impl
+    const gates: Gates | undefined = last && !runs.length ? { green: last.gatesGreen, text: last.gates, by: committed.by ?? 'the implementer' } : undefined
     const loop: PlanResult = st.review === false
       ? { outcome: 'review-skipped' as const, rounds: 0, residual: [], unresolved: [], history: [] }
       : await reviewLoop(
@@ -653,14 +728,15 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
           name,
           { kind: 'diff', base, ...(task ? { stage: task } : {}) },
           undefined,
-          { gates, checks, runs },
+          { gates, checks, runs, notes },
         )
     if (gates && !gates.green && (loop.outcome === 'clean' || loop.outcome === 'residual-only')) {
       loop.outcome = 'gates-red'
       loop.note = `the review found nothing to fix, but ${gates.by} left the gates red: ${gates.text}`
       host.log(`${name}: gates-red - ${loop.note}`)
     }
-    return { stage: name, ...where, ...(impl ? { implementation: impl } : {}), ...loop, ...ran() }
+    const note = [loop.note, ...notes].filter(Boolean).join('\n')
+    return { stage: name, ...where, ...(impl ? { implementation: impl } : {}), ...loop, ...(note ? { note } : {}), ...ran() }
   }
 
   const mergeLane = async (state: RepoState, lane: Lane, name: string): Promise<string | undefined> => {
@@ -865,7 +941,10 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
     if (!reviewed) return skipped('skipped', `${name} skipped - ${why}`, why)
     host.phase(FINAL_REVIEW_PHASE)
     host.log(`${name}: reviewing ${s.lane.base}...HEAD across ${stages} stage(s)${s.merges ? ` and ${s.merges} lane merge(s)` : ''}`)
-    const r = await reviewLoop(s.lane, name, { kind: 'diff', base: s.lane.base, note: WHOLE_BRANCH_NOTE }, undefined, { checks, runs })
+    const notes: string[] = []
+    const looped = await reviewLoop(s.lane, name, { kind: 'diff', base: s.lane.base, note: WHOLE_BRANCH_NOTE }, undefined, { checks, runs, notes })
+    const note = [looped.note, ...notes].filter(Boolean).join('\n')
+    const r = note ? { ...looped, note } : looped
     if (r.outcome === 'checks-failed') host.log(`${name} ended checks-failed - the final check still runs, but the branch is not PR-ready`)
     if (r.outcome === 'round-cap' || r.outcome === 'review-failed') {
       host.log(`${name} ended ${r.outcome} - the final check still runs, but the branch has ${r.unresolved.length} unresolved finding(s)`)
@@ -887,14 +966,19 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
       `${label}: ${gated && now ? `HEAD moved from ${short(gated)} to ${short(now)} after the final checks` : 'could not read HEAD after the pr-ready check or at the final checks'} - running them once more, without repairs`,
     )
     const gate = await checkGate(s.lane, label, 'pr-ready', checks.map(c => ({ ...c, maxRepairs: 0 })), runs)
-    if (gate.passed) return { passed: true }
-    host.log(`${label}: the checks are red after the pr-ready check - the branch is not PR-ready`)
-    return { passed: false, note: gate.note }
+    if (!gate.passed) {
+      host.log(`${label}: the checks are red after the pr-ready check - the branch is not PR-ready`)
+      return { passed: false, note: gate.note }
+    }
+    const left = await uncommitted(`status ${label} after the checks`, 'PR ready', s.lane.cwd)
+    if (!left.length) return { passed: true }
+    host.log(`${label}: the checks left uncommitted changes after the pr-ready check - the branch is not PR-ready: ${listed(left)}`)
+    return { passed: false, note: `uncommitted changes after the checks at pr-ready: ${listed(left)}` }
   }
 
   const check = async (s: RepoState): Promise<RepoResult> => {
     const label = s.lane.repo === primary ? 'pr-ready check' : `pr-ready check ${baseName(s.lane.repo)}`
-    const final = (await call('granny', 'final', label, 'PR ready', finalPrompt(s.lane.p), 'write', config.roles.granny, s.lane.cwd)) as FinalReport | null
+    const final = (await call('granny', 'final', label, 'PR ready', finalPrompt(s.lane.p, plansIn(s.lane.cwd)), 'write', config.roles.granny, s.lane.cwd)) as FinalReport | null
     if (!final) host.log(s.lane.repo === primary ? 'final check returned nothing' : `${label} returned nothing`)
     const review = reviews.get(s)
     const runs = finalRuns.get(s) ?? []

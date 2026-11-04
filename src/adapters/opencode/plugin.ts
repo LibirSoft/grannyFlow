@@ -136,11 +136,12 @@ export function summarize(result: RunResult, worktree: boolean): string {
       s.residual.length ? `${s.residual.length} residual` : '',
       s.unresolved.length ? `${s.unresolved.length} unresolved` : '',
     ].filter(Boolean).join(', ')
-    return `- ${name}: ${s.outcome}, ${s.rounds} review round(s)${extra ? ` (${extra})` : ''}`
+    const left = s.note?.split('\n').find(l => l.startsWith('uncommitted changes after'))
+    return `- ${name}: ${s.outcome}, ${s.rounds} review round(s)${extra ? ` (${extra})` : ''}${left ? ` - ${left}` : ''}`
   }
   const lines = result.stages.map(
     s =>
-      `${line(s, s.repo ? `${s.stage} (${s.repo})` : s.stage)}${s.outcome === 'checks-failed' && s.note ? ` - ${s.note.split('\n')[0]}` : ''}${s.note && s.note.includes('in parallel on') ? ` - ${s.note.split('\n').at(-1)}` : ''}`,
+      `${line(s, s.repo ? `${s.stage} (${s.repo})` : s.stage)}${(s.outcome === 'checks-failed' || s.outcome === 'no-changes') && s.note ? ` - ${s.note.split('\n')[0]}` : ''}${s.note && s.note.includes('in parallel on') ? ` - ${s.note.split('\n').at(-1)}` : ''}`,
   )
   if (result.draft) {
     lines.push(`- plan written: ${result.draft.files.join(', ')} - ${result.draft.stages.length} proposed stage(s)${result.draft.questions ? ', open questions for the user' : ''}`)
@@ -155,7 +156,7 @@ export function summarize(result: RunResult, worktree: boolean): string {
   if (result.finalReview) lines.push(reviewLine(result.finalReview, 'final review'))
   for (const r of result.repos?.slice(1) ?? []) if (r.finalReview) lines.push(reviewLine(r.finalReview, `final review ${r.repo}`))
   const recheckLine = (r: Recheck, name: string) =>
-    `- ${name}: ${r.passed ? 'green on the HEAD the pr-ready check left' : `RED - NOT PR-ready, the pr-ready check moved HEAD and the checks fail: ${r.note ?? ''}`}`
+    `- ${name}: ${r.passed ? 'green on the HEAD the pr-ready check left' : `RED - NOT PR-ready after the pr-ready check moved HEAD: ${r.note ?? ''}`}`
   if (result.final) lines.push(`- final: gates ${result.final.gatesGreen ? 'green' : 'RED'}, PR body ${result.final.prBodyPath}${result.final.issues ? `, issues: ${result.final.issues}` : ''}`)
   if (result.recheck) lines.push(recheckLine(result.recheck, 'checks after the final check'))
   for (const r of result.repos?.slice(1) ?? []) {
