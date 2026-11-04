@@ -61,6 +61,46 @@ The loop is code, not a prompt: on Claude Code and opencode an engine drives eve
 - **Reviewers** - as many as you configure, of any kind: Codex (the CLI or OpenAI's Codex plugin), a host model, or any CLI that answers a prompt. They all review every round at the same time; one that fails twice ends the stage `review-failed` instead of reading as clean.
 - **Judge** - P0/P1 findings skip it and go straight to the implementer. It classifies every other finding - verdict, impact if it triggers, likelihood, fix cost, scope and `path:line` evidence - and merges duplicates across reviewers; it gives no score. The engine turns the classes into a priority and a fixed decision table decides: `critical` and `major` impacts are fixed (`alwaysFix`), other findings when their priority is above the threshold, and refuted, pre-existing and other-stage findings are left for you. The rest are residual, each with the rule that kept it - every round's, so a stage that ends `clean` can still list residual findings from an earlier round. Every decision goes into a ledger the judge sees in later rounds and, for the stage reviews, in the final review; a finding it marks as a repeat cannot drop below the classes it had before unless the judge refutes it with new `path:line` evidence.
 
+### How a finding is decided
+
+The judge classifies; code decides. A single 0-100 score mixed how likely a bug is with how bad it is, so a rare data-corruption bug could land under the bar. Granny keeps the two apart: the judge rates impact *as if the trigger happens*, and likelihood is its own field.
+
+Priority = impact × likelihood, plus fix cost (`trivial` +15, `small` 0, `large` −15), clamped to 0..100:
+
+| impact | common | edge | rare |
+|---|---|---|---|
+| critical | 100 | 95 | 90 |
+| major | 90 | 80 | 65 |
+| moderate | 75 | 55 | 35 |
+| minor | 35 | 25 | 15 |
+| none | 0 | 0 | 0 |
+
+The first matching rule wins:
+
+| # | when | then |
+|---|---|---|
+| 1 | P0/P1, unless it repeats a finding the fixer declined | **fix** |
+| 2 | the judge did not classify it, also on its one retry | **fix** |
+| 3 | `verdict` is `refuted` | residual |
+| 4 | `scope` is `other-stage` | residual, left to the stage that owns it |
+| 5 | `scope` is `pre-existing` | residual, flagged ATTENTION when `critical` or `major` |
+| 6 | impact is in `alwaysFix` (default `critical`, `major`) | **fix**, whatever the likelihood, cost or threshold |
+| 7 | priority > `threshold` (default 70) | **fix** |
+| 8 | everything else | residual, with its classes and priority |
+
+Evidence without a `path:line` makes the finding `unverified`, which lowers its impact one class. Each decision records the rule that made it, so a residual finding always says why it was left.
+
+Four findings from a real run, which the old 0-100 judge all left under the bar:
+
+| finding | old score | classes | priority | now |
+|---|---|---|---|---|
+| a late save response re-binds the editor to another post, so the next save overwrites it | 55, then 68 | critical · edge · small | 95 | **fix** (rule 6) |
+| an expired session leaves Save dead until a reload | 68, then 62 | major · edge · small | 80 | **fix** (rule 6) |
+| a YAML merge drops the inherited `published: false`, so a draft can go public | 55 | critical · rare · trivial | 100 | **fix** (rule 6) |
+| a countdown reads "in 0 months" at exactly 30 days | 52 | minor · edge · trivial | 40 | residual (rule 8) |
+
+The guard the other way: `minor` can never pass the default threshold (at most 35 + 15 = 50), and `moderate` passes only on the common path. Full rules, the retry and the ledger: [config.md](skills/granny-workflow/references/config.md#the-decision-table).
+
 ## Hosts
 
 <picture>
