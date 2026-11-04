@@ -194,6 +194,14 @@ describe('opencode plugin helpers', () => {
     expect(text).toContain(`- one: clean, 1 review round(s) - ${unread}`)
   })
 
+  it('names the red gates a checked stage reported in the finish summary', () => {
+    const final = { gatesGreen: true, gates: 'ok', commits: [], prBodyPath: '.granny/PR-BODY.md', issues: '' }
+    const warned = 'the checks passed, but the implementer reported red gates: lint red'
+    const stage = { stage: 'one', outcome: 'clean' as const, rounds: 1, residual: [], unresolved: [], history: [], note: warned }
+    const text = summarize({ repo: '/r', branch: 'feat/x', base: 'main', worktree: '/r', stages: [stage], final }, false)
+    expect(text).toContain(`- one: clean, 1 review round(s) - ${warned}`)
+  })
+
   it('names the work a no-changes stage left uncommitted in the finish summary', () => {
     const final = { gatesGreen: true, gates: 'ok', commits: [], prBodyPath: '.granny/PR-BODY.md', issues: '' }
     const note = 'the implementer made no commit: the work it left is uncommitted (?? f.txt), so there was nothing to review'

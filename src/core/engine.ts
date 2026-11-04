@@ -408,11 +408,16 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
     return note
   }
 
-  const checkGate = async (lane: Lane, name: string, at: string, checks: CheckConfig[], runs: CheckRun[], stage?: StageTask): Promise<{ passed: boolean; note?: string }> => {
+  const checkGate = async (lane: Lane, name: string, at: string, checks: CheckConfig[], runs: CheckRun[], stage?: StageTask, gates?: Gates): Promise<{ passed: boolean; note?: string }> => {
     host.phase(CHECKS_PHASE)
     const budget = (c: CheckConfig) => c.maxRepairs ?? config.maxRepairs
     const most = Math.max(0, ...checks.map(budget))
     let deviations: string | undefined
+    const step = async (label: string, by: string, prompt: string) => {
+      const impl = await implement(lane, label, prompt)
+      if (gates) Object.assign(gates, { green: impl.gatesGreen, text: impl.gates, by: `${by} (${label})` })
+      return saidSomething(impl.deviations)
+    }
     for (let repairs = 0; ; repairs++) {
       const dirty = await uncommitted(`status ${name} ${at}`, CHECKS_PHASE, lane.cwd)
       if (!Array.isArray(dirty)) {
@@ -427,7 +432,7 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
       }
       if (dirty.length) {
         host.log(`${name}: uncommitted changes before the checks at ${at} - repair ${repairs + 1}/${most}: ${listed(dirty)}`)
-        deviations = saidSomething((await implement(lane, `commit ${name} ${at} #${repairs + 1}`, commitPrompt(lane.p, name, at, dirty.join('\n'), plansIn(lane.cwd), stage))).deviations)
+        deviations = await step(`commit ${name} ${at} #${repairs + 1}`, 'the commit step', commitPrompt(lane.p, name, at, dirty.join('\n'), plansIn(lane.cwd), stage))
         continue
       }
       const results: Array<CheckResult & { output: string; broken?: true }> = []
@@ -454,7 +459,7 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
       }
       for (const r of failed) host.log(`${name}: check ${r.name} failed (${detail(r)}) - repair ${repairs + 1}/${budget(configOf(r))}`)
       const sent: FailedCheck[] = failed.map(r => ({ ...r, run: configOf(r).run }))
-      deviations = saidSomething((await implement(lane, `repair ${name} ${at} #${repairs + 1}`, repairPrompt(lane.p, name, at, repairs + 1, sent, stage))).deviations)
+      deviations = await step(`repair ${name} ${at} #${repairs + 1}`, 'the last repair', repairPrompt(lane.p, name, at, repairs + 1, sent, stage))
     }
   }
 
@@ -692,7 +697,7 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
       if (refused.length) history.at(-1)!.declined = refused
       earlier.push({ round, sent: accepted, ...(residual.length ? { residual } : {}), ...(said ? { deviations: said } : {}), ...(refused.length ? { declined: refused } : {}) })
       if (subject.kind === 'diff' && checks.length) {
-        const gate = await checkGate(lane, name, `fix r${round}`, checks, runs, subject.stage)
+        const gate = await checkGate(lane, name, `fix r${round}`, checks, runs, subject.stage, gates)
         if (!gate.passed) return { outcome: 'checks-failed', rounds: round, residual: kept(), unresolved: [], history, note: gate.note }
         host.phase(phase)
       } else if (subject.kind === 'diff') {
@@ -756,6 +761,7 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
     const ran = () => (runs.length ? { checks: runs } : {})
     const notes: string[] = []
     let committed: Committed = {}
+    let gates: Gates | undefined
     if (st.implement !== false) {
       host.phase('Implement')
       const head = await readHead(`head ${name}`, 'Implement', lane.cwd)
@@ -794,11 +800,16 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
         host.log(`${name}: no-changes - ${note}`)
         return { stage: name, ...where, implementation: impl, outcome: 'no-changes', rounds: 0, residual: [], unresolved: [], history: [], note }
       }
+      const last = committed.impl ?? impl
+      gates = { green: last.gatesGreen, text: last.gates, by: committed.by ?? 'the implementer' }
       if (checks.length) {
-        const gate = await checkGate(lane, name, 'implement', checks, runs, task)
+        const gate = await checkGate(lane, name, 'implement', checks, runs, task, gates)
         if (!gate.passed) return { stage: name, ...where, implementation: impl, outcome: 'checks-failed', rounds: 0, residual: [], unresolved: [], history: [], note: gate.note, ...ran() }
       } else {
-        if (!committed.impl) committed = await commitWork(lane, name, 'implement', task)
+        if (!committed.impl) {
+          committed = await commitWork(lane, name, 'implement', task)
+          if (committed.impl) gates = { green: committed.impl.gatesGreen, text: committed.impl.gates, by: committed.by! }
+        }
         const note = unreviewed(name, 'implement', committed)
         if (note) notes.push(note)
       }
@@ -808,8 +819,6 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
     }
 
     host.phase('Review')
-    const last = committed.impl ?? impl
-    const gates: Gates | undefined = last && !runs.length ? { green: last.gatesGreen, text: last.gates, by: committed.by ?? 'the implementer' } : undefined
     const loop: PlanResult = st.review === false
       ? { outcome: 'review-skipped' as const, rounds: 0, residual: [], unresolved: [], history: [] }
       : await reviewLoop(
@@ -819,10 +828,15 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
           undefined,
           { gates, checks, runs, notes },
         )
-    if (gates && !gates.green && (loop.outcome === 'clean' || loop.outcome === 'residual-only')) {
+    if (gates && !gates.green && !runs.length && (loop.outcome === 'clean' || loop.outcome === 'residual-only')) {
       loop.outcome = 'gates-red'
       loop.note = `the review found nothing to fix, but ${gates.by} left the gates red: ${gates.text}`
       host.log(`${name}: gates-red - ${loop.note}`)
+    }
+    if (gates && !gates.green && runs.length && loop.outcome !== 'checks-failed') {
+      const warned = `the checks passed, but ${gates.by} reported red gates: ${gates.text}`
+      host.log(`${name}: ${warned}`)
+      notes.push(warned)
     }
     const note = [loop.note, ...notes].filter(Boolean).join('\n')
     return { stage: name, ...where, ...(impl ? { implementation: impl } : {}), ...loop, ...(note ? { note } : {}), ...ran() }
