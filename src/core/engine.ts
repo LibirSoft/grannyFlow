@@ -629,7 +629,6 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
       const policy = { threshold: config.threshold, alwaysFix: config.alwaysFix }
       let findings = found.map(f => decide(f, undefined, policy, declinedBefore))
       unmerged = findings
-      let score: number | null = null
       if (judged.length) {
         const prompt = subject.kind === 'plan' ? planJudgePrompt(p, subject.files, judged, earlier) : judgePrompt(p, subject.base, judged, earlier, subject.stage, subject.note)
         const label = `judge ${name} r${round}`
@@ -649,7 +648,7 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
         const unjudged = (decided: Finding[]) => decided.filter(f => judgedIds.has(f.id) && f.decision!.rule === 2)
         const listed = (fs: Finding[]) => fs.map(f => `${f.id} (${f.decision!.why})`).join(', ')
 
-        const scored = await call('judge', 'score', label, phase, prompt, 'read-only', config.roles.judge, lane.cwd)
+        const scored = await call('judge', 'judge', label, phase, prompt, 'read-only', config.roles.judge, lane.cwd)
         let per = entriesOf(scored)
         let withScores = decideAll(per)
         let left = unjudged(withScores)
@@ -657,7 +656,7 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
         if (left.length) {
           host.log(`${name} r${round}: ${scored ? `judge left ${left.length} finding(s) unclassified - retrying once: ${listed(left)}` : 'judge returned nothing - retrying once'}`)
           const problems = scored ? left.map(f => ({ id: f.id, why: f.decision!.why === 'not judged' ? 'no classification in your answer' : f.decision!.why })) : null
-          retried = await call('judge', 'score', `${label} retry`, phase, `${prompt}\n\n${judgeRetryNote(problems)}`, 'read-only', config.roles.judge, lane.cwd)
+          retried = await call('judge', 'judge', `${label} retry`, phase, `${prompt}\n\n${judgeRetryNote(problems)}`, 'read-only', config.roles.judge, lane.cwd)
           const again = new Set(left.map(f => f.id))
           const fresh = entriesOf(retried).filter(x => again.has(x.id))
           per = [...per.filter(x => !again.has(x.id) || !fresh.some(y => y.id === x.id)), ...fresh]
@@ -676,10 +675,9 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
         for (const m of merge.merged) host.log(`${name} r${round}: judge merged ${m.id} into ${m.into} (duplicate)`)
         unmerged = withScores
         findings = merge.findings
-        score = typeof scored?.score === 'number' ? scored.score : typeof retried?.score === 'number' ? retried.score : null
       }
-      history.push({ round, score, findings })
-      host.log(`${name} r${round}: ${findings.length} finding(s), review score ${score} (informational)`)
+      history.push({ round, findings })
+      host.log(`${name} r${round}: ${findings.length} finding(s)`)
 
       const { accepted, residual } = triage(findings)
       const entry: EarlierRound = { round, sent: accepted, ...(residual.length ? { residual } : {}) }

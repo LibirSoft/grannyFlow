@@ -1,15 +1,35 @@
 import { spawn } from 'node:child_process'
 import { existsSync, statSync } from 'node:fs'
 import { isAbsolute, join } from 'node:path'
+import { priorityOf } from '../src/core/review'
 import type { AgentRequest, CommandResult, Host, HostName } from '../src/core/types'
 
 export type Review = CommandResult | string
 export type Reviews = Review[] | Record<string, Review[]> | ((command: string) => Review | Promise<Review>)
 
+/**
+ * A confirmed, in-scope classification below alwaysFix (moderate or minor) whose priority is exactly `priority`,
+ * preferring likelihood common. Throws for a priority no such classification reaches.
+ */
+export function classesFor(priority: number): Record<string, string> {
+  for (const likelihood of ['common', 'edge', 'rare'] as const) {
+    for (const impact of ['moderate', 'minor'] as const) {
+      for (const fixCost of ['small', 'trivial', 'large'] as const) {
+        if (priorityOf(impact, likelihood, fixCost) === priority) return { verdict: 'confirmed', impact, likelihood, fixCost, scope: 'in-scope', evidence: 'src/a.ts:1 - fixture' }
+      }
+    }
+  }
+  throw new Error(`fake judge: no moderate/minor classification has priority ${priority}`)
+}
+
 export interface FakeOptions {
   name?: HostName
   direct?: boolean
   reviews?: Reviews
+  /**
+   * One judge answer per entry, by finding id. A number n stands for a confirmed, in-scope classification whose
+   * computed priority is exactly n (see classesFor); `{ score: n, ...rest }` is that classification plus rest.
+   */
   scores?: Array<Record<string, number | Record<string, unknown>> | null>
   override?: (req: AgentRequest) => unknown
   shell?: { env?: Record<string, string> }
@@ -180,13 +200,15 @@ export function fakeHost(opts: FakeOptions = {}) {
           return { files: ['/work/repo/.granny/plans/feat-x.md'], stages: [{ name: 'core', task: 'WP-01' }], summary: 'one stage' }
         case 'planFix':
           return { files: ['/plans/v1.md'], changes: 'fixed' }
-        case 'score': {
+        case 'judge': {
           const s = scores.length ? scores.shift() : {}
           if (s === null) return null
           const perFinding = Object.entries(s ?? {}).map(([id, v]) => {
-            return { id, reason: `reason ${id}`, ...(typeof v === 'number' ? { score: v } : v) }
+            if (typeof v === 'number') return { id, reason: `reason ${id}`, ...classesFor(v) }
+            const { score, ...rest } = v as Record<string, unknown>
+            return { id, reason: `reason ${id}`, ...(typeof score === 'number' ? classesFor(score) : {}), ...rest }
           })
-          return { score: 50, perFinding, rationale: 'r' }
+          return { perFinding, rationale: 'r' }
         }
         case 'command': {
           const step = /Run exactly this[^\n]*:\n(.+)\n/.exec(req.prompt)?.[1] ?? ''

@@ -23,7 +23,7 @@ export interface Decision {
   raised?: string
 }
 
-export type ResultKind = 'draft' | 'implementation' | 'planFix' | 'findings' | 'score' | 'command' | 'final'
+export type ResultKind = 'draft' | 'implementation' | 'planFix' | 'findings' | 'judge' | 'command' | 'final'
 
 export type JsonSchema = {
   type: 'object'
@@ -73,8 +73,6 @@ export interface Finding {
   scope?: Scope
   evidence?: string
   priority?: number
-  /** A judge that returns the old 0-100 score instead of a classification. */
-  score?: number
   reason?: string
   decision?: Decision
   duplicates?: string[]
@@ -109,7 +107,6 @@ export interface Implementation {
 
 export interface RoundRecord {
   round: number
-  score: number | null
   findings: Finding[]
   deviations?: string
   declined?: Declined[]

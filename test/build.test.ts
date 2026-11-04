@@ -46,7 +46,9 @@ describe('claude-code workflow.js', () => {
         reviews++
         return { ran: true, exitCode: 0, output: reviews === 1 ? review(finding('P2', 'Off by one')) : 'No findings.' }
       }
-      if (kind.startsWith('score')) return { score: 80, perFinding: [{ id: 'codex-F1', score: 85, reason: 'real' }], rationale: 'ok' }
+      if (kind.startsWith('perFinding')) {
+        return { perFinding: [{ id: 'codex-F1', verdict: 'confirmed', impact: 'moderate', likelihood: 'common', fixCost: 'trivial', scope: 'in-scope', evidence: 'src/a.ts:1 - off by one', reason: 'real' }], rationale: 'ok' }
+      }
       if (kind.startsWith('gatesGreen')) return { gatesGreen: true, gates: 'ok', commits: ['c'], prBodyPath: '.granny/PR-BODY.md', issues: '' }
       throw new Error(`unexpected schema ${kind}`)
     }
@@ -80,7 +82,7 @@ describe('claude-code workflow.js', () => {
     const judge = calls.find(c => c.opts.label === 'judge one r1')!
     expect(judge.opts.model).toBe('haiku')
     expect(calls.some(c => c.opts.label === 'fix one r1' && c.prompt.includes('Off by one'))).toBe(true)
-    expect(logs.some(l => l.includes('review score 80'))).toBe(true)
+    expect(logs.some(l => l.includes('one r1: to the implementer: codex-F1 (rule 7: priority 90 > threshold 80 (moderate/common/trivial))'))).toBe(true)
   })
 
   it('declares the Plan review phase and reviews and fixes a plan through the Workflow agent() API', async () => {

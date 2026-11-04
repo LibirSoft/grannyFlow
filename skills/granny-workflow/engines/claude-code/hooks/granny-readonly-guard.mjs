@@ -11,7 +11,7 @@ var WRITE_TOOLS = new Set(["Edit", "Write", "MultiEdit", "NotebookEdit"]);
 var FIND_ACTIONS = /^-(exec|execdir|ok|okdir|delete|fprint|fprint0|fprintf|fls)$/;
 var SED_FLAGS = /^-[nEr]+$/;
 var SED_PRINT = /^\s*(\d+|\$)(\s*,\s*(\d+|\$))?\s*p\s*(;\s*(\d+|\$)(\s*,\s*(\d+|\$))?\s*p\s*)*;?\s*$/;
-var READ_ONLY_COMMANDS = "Besides Read (and Grep and Glob where you have them), your Bash runs these commands only: git diff, git log, git show, git blame, git status, git rev-parse, git merge-base, git ls-files, git branch --show-current, cat, sed -n '<from>,<to>p', grep, find (without -exec, -delete or -fprint), ls, head, tail, wc, pwd. Write each as a plain command; `cd <dir> && ` before it, `|` between them and `2>/dev/null` are fine, but `$(...)`, backticks, `$VARIABLES` and redirection into a file are not. A hook blocks any other command.";
+var READ_ONLY_COMMANDS = "Besides Read (and Grep and Glob where you have them), your Bash runs only: git diff, git log, git show, git blame, git status, git rev-parse, git merge-base, git ls-files, git branch --show-current, cat, sed -n '<from>,<to>p', grep, find (without -exec, -delete or -fprint), ls, head, tail, wc, pwd. Plain commands only: a `cd <dir> && ` prefix, `|` between them and `2>/dev/null` are fine; a hook blocks `$(...)`, backticks, `$VARIABLES`, redirection into a file and any other command.";
 function lex(command) {
   const tokens = [];
   let word = "";

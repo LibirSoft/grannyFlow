@@ -91,10 +91,9 @@ export const SCHEMAS: Record<ResultKind, JsonSchema> = {
     },
     required: ['ran', 'output'],
   },
-  score: {
+  judge: {
     type: 'object',
     properties: {
-      score: { type: 'number', description: '0-100 overall, informational only: how correct, verified and actionable this review is' },
       perFinding: {
         type: 'array',
         items: {
@@ -116,7 +115,7 @@ export const SCHEMAS: Record<ResultKind, JsonSchema> = {
       },
       rationale: { type: 'string' },
     },
-    required: ['score', 'perFinding', 'rationale'],
+    required: ['perFinding', 'rationale'],
   },
   final: {
     type: 'object',

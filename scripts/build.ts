@@ -117,7 +117,7 @@ export function renderPrompts(): string {
       'Implementer - fix, from round 2 on when the judge overruled the fixer (the plan fix gets the same OVERRULED block)',
       fixPrompt(p, '<stage name>', 2, [], overruled).replace(/\[\]$/, '<accepted findings as JSON>'),
     ],
-    ['Granny - a check command, the helper agent on Claude Code (on opencode granny runs it itself; a check with timeout runs as `timeout <s> bash -c \'<run>\'`, or `gtimeout` where only that is on PATH; for a check without a metric the parenthesis reads `when it is very long, the last 3000 characters are enough`)', checkCommandPrompt('<repo>', 'check <stage name> <check name>', "cd '<repo>' && <check run>", '<metric pattern>')],
+    ['Granny - a check command, the helper agent on Claude Code (on opencode granny runs it itself; a check with timeout runs as `timeout <s> bash -c \'<run>\'`, or `gtimeout` where only that is on PATH; for a check without a metric the parenthesis reads `if very long, the last 3000 characters are enough`)', checkCommandPrompt('<repo>', 'check <stage name> <check name>', "cd '<repo>' && <check run>", '<metric pattern>')],
     [
       'Implementer - repair (checks failed at `implement`, `fix r<n>` or `final`; one block per failed check)',
       repairPrompt(p, '<stage name>', 'implement', 1, [{ name: '<check name>', run: '<check run>', code: '<exit code>', note: '<metric note>', output: '<last 3000 characters of the output>' }], stage),
@@ -141,7 +141,7 @@ export function renderPrompts(): string {
     ['Reviewer - command engine, the text {prompt} is filled with', commandReviewPrompt(p, '<stage name>', '<stage start sha>', stage)],
     ['Judge', judgePrompt(p, '<stage start sha>', [], [], stage).replace(/\[\]$/, '<findings as JSON>')],
     [
-      'Judge - from round 2 on (the plan judge gets the same EARLIER DECISIONS block; one "Round N sent" entry per earlier fix round, followed by its "kept as residual" list when that round left residual findings, and P0/P1 findings join the list once a fixer declined findings; a field the finding does not have, such as the classes of an unjudged P0/P1, is left out, and `score` replaces them for a numeric-score judge answer; `(ratchet raised <what>)` follows the why when the ratchet raised the finding)',
+      'Judge - from round 2 on (the plan judge gets the same EARLIER DECISIONS block; one "Round N sent" entry per earlier fix round, followed by its "kept as residual" list when that round left residual findings, and P0/P1 findings join the list once a fixer declined findings; a field the finding does not have, such as the classes of an unjudged P0/P1, is left out; `(ratchet raised <what>)` follows the why when the ratchet raised the finding)',
       judgePrompt(p, '<stage start sha>', [], earlier, stage).replace(/\[\]$/, '<findings as JSON>'),
     ],
     [

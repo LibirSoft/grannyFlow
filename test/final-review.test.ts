@@ -168,9 +168,9 @@ describe('the decision ledger across review loops', () => {
     const judge = f.calls.find(c => c.label === 'judge final review r1')!.prompt
     expect(judge).toContain('EARLIER DECISIONS')
     expect(judge).toContain('Stage 1 (one), round 1')
-    expect(judge).toContain('"label": "s1/r1/opus-F1"')
-    expect(judge).toContain('"label": "s1/r1/opus-F2"')
-    expect(judge).toContain('"decision": "residual - rule 8: under the bar: minor/edge/trivial -> 40"')
+    expect(judge).toContain('"label":"s1/r1/opus-F1"')
+    expect(judge).toContain('"label":"s1/r1/opus-F2"')
+    expect(judge).toContain('"decision":"residual - rule 8: under the bar: minor/edge/trivial -> 40"')
     expect(r.finalReview?.history[0]!.findings[0]).toMatchObject({
       repeatOf: 's1/r1/opus-F1',
       impact: 'major',
