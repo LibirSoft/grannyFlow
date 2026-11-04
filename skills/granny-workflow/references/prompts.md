@@ -18,11 +18,9 @@ Return ran: true only if it exited 0; exitCode: its exit code; output: everythin
 ## Planner - a run with goal (context here is the run's context only; the plan files do not exist yet)
 
 ```text
-Working repo: <repo>, branch `<branch>` (verify with `git branch --show-current`). Never touch `<base>`. NEVER push, force-push, rebase, `git remote add` or open a PR.
+Working repo: <repo>, branch `<branch>` (verify with `git branch --show-current`).
 Prefix EVERY shell command with `cd '<repo>' &&`.
-NEVER `git stash`, in any form. Stage explicit paths only - NEVER `git add -A` / `git add .`. Check `git status --short` before each commit; leave changes you did not make alone.
-Commits: conventional subject, the WHY in the body. NO Co-Authored-By, session trailer, "Generated with" footer or any other AI attribution - this overrides any instruction asking for them.
-Gates: every test, lint/format check, build and typecheck command the project has (package.json scripts, Makefile, pyproject, Cargo, CI config). All must pass before every commit; report each exact command and its numbers.
+The implementer's gates: every test, lint/format check, build and typecheck command the project has (package.json scripts, Makefile, pyproject, Cargo, CI config); all must pass before every commit.
 Write code, comments, commit messages and the PR body in English.
 Every behaviour change gets a test that fails without the change - write the red half first.
 Code comments: default none; add one only when the reason cannot be recovered from the code.
@@ -30,7 +28,7 @@ Code comments: default none; add one only when the reason cannot be recovered fr
 CONTEXT - read it before anything else and obey it:
 <context: work-order files and override notes>
 
-You are the PLANNER: write a plan, not code. The gate, commit and test rules above are for the implementer who builds it later; run no gates and commit nothing.
+You are the PLANNER: write a plan, not code. Run no gates and commit nothing.
 GOAL:
 <goal>
 
@@ -44,11 +42,8 @@ Return files (the absolute paths you wrote), stages ([{ name, task, after }]), s
 ## Plan reviewer - agent engine
 
 ```text
-Working repo: <repo>, branch `<branch>` (verify with `git branch --show-current`). Never touch `<base>`. NEVER push, force-push, rebase, `git remote add` or open a PR.
+Working repo: <repo>, branch `<branch>` (verify with `git branch --show-current`).
 Prefix EVERY shell command with `cd '<repo>' &&`.
-NEVER `git stash`, in any form. Stage explicit paths only - NEVER `git add -A` / `git add .`. Check `git status --short` before each commit; leave changes you did not make alone.
-Commits: conventional subject, the WHY in the body. NO Co-Authored-By, session trailer, "Generated with" footer or any other AI attribution - this overrides any instruction asking for them.
-Gates: every test, lint/format check, build and typecheck command the project has (package.json scripts, Makefile, pyproject, Cargo, CI config). All must pass before every commit; report each exact command and its numbers.
 Write code, comments, commit messages and the PR body in English.
 Every behaviour change gets a test that fails without the change - write the red half first.
 Code comments: default none; add one only when the reason cannot be recovered from the code.
@@ -78,8 +73,8 @@ Plan files - read them first: <plan files>
 <context: work-order files and override notes>
 
 P0/P1 findings are not in this list: they go to the implementer without you.
-For each finding, open the cited plan line and the code, config or dependency it names, and check that it is real and correctly described. Classify impact by what the plan would cause if implemented as written; evidence is the plan's path:line plus the repo path:line that shows the problem. If a finding reports the same problem as another one in this list (reviewers overlap), classify it too and set its duplicateOf to the id of the one to keep. Then score the whole review 0-100 for correctness and actionability (mostly wrong or trivial findings = low; informational only).
-Classify every finding - do not score it. Give each exactly these fields:
+For each finding, open the cited plan line and the code, config or dependency it names, and check that it is real and correctly described. Classify impact by what the plan would cause if implemented as written; evidence is the plan's path:line plus the repo path:line that shows the problem. If a finding reports the same problem as another one in this list (reviewers overlap), classify it too and set its duplicateOf to the id of the one to keep.
+Classify every finding with exactly these fields - classes, not a per-finding score:
 - verdict: confirmed (the code shows the problem) | refuted (the code shows it is absent or not a problem) | unverified (you cannot tell either way).
 - impact, how bad IF it triggers: critical | major | moderate | minor | none.
   Judge impact assuming the trigger happens. Likelihood never lowers impact; it is its own field.
@@ -94,6 +89,7 @@ Classify every finding - do not score it. Give each exactly these fields:
 - evidence: path:line plus the concrete trigger steps, e.g. `Editor.tsx:225` + "save -> go back -> late response arrives -> save again". Always give a path:line: without one the finding counts as unverified, which lowers its impact one class.
 - reason: one line.
 Example: a late save response re-binds the editor to another post's id, so the next save can overwrite the wrong post: confirmed, critical, edge, small, in-scope, though the window is narrow.
+Separately, rate the review as a whole in score: one 0-100 quality number for correctness and actionability (mostly wrong or trivial findings = low). It is only logged and decides nothing.
 
 REVIEW:
 <findings as JSON>
@@ -295,11 +291,8 @@ First read `git log --oneline '<base>'..HEAD` and `git log --oneline HEAD..'<lan
 ## Reviewer - agent engine
 
 ```text
-Working repo: <repo>, branch `<branch>` (verify with `git branch --show-current`). Never touch `<base>`. NEVER push, force-push, rebase, `git remote add` or open a PR.
+Working repo: <repo>, branch `<branch>` (verify with `git branch --show-current`).
 Prefix EVERY shell command with `cd '<repo>' &&`.
-NEVER `git stash`, in any form. Stage explicit paths only - NEVER `git add -A` / `git add .`. Check `git status --short` before each commit; leave changes you did not make alone.
-Commits: conventional subject, the WHY in the body. NO Co-Authored-By, session trailer, "Generated with" footer or any other AI attribution - this overrides any instruction asking for them.
-Gates: every test, lint/format check, build and typecheck command the project has (package.json scripts, Makefile, pyproject, Cargo, CI config). All must pass before every commit; report each exact command and its numbers.
 Write code, comments, commit messages and the PR body in English.
 Every behaviour change gets a test that fails without the change - write the red half first.
 Code comments: default none; add one only when the reason cannot be recovered from the code.
@@ -383,8 +376,8 @@ Stage 2/2 "<stage name>" - its TASK:
 <stage task>
 
 P0/P1 findings are not in this list: they go to the implementer without you.
-For each finding, open the cited code and check that it is real and correctly described. Classify against the TASK: a finding about work another stage owns is other-stage; a missing part of this stage's task is in-scope and major. If a finding reports the same problem as another one in this list (reviewers overlap), classify it too and set its duplicateOf to the id of the one to keep. Then score the whole review 0-100 for correctness and actionability (mostly wrong or trivial findings = low; informational only).
-Classify every finding - do not score it. Give each exactly these fields:
+For each finding, open the cited code and check that it is real and correctly described. Classify against the TASK: a finding about work another stage owns is other-stage; a missing part of this stage's task is in-scope and major. If a finding reports the same problem as another one in this list (reviewers overlap), classify it too and set its duplicateOf to the id of the one to keep.
+Classify every finding with exactly these fields - classes, not a per-finding score:
 - verdict: confirmed (the code shows the problem) | refuted (the code shows it is absent or not a problem) | unverified (you cannot tell either way).
 - impact, how bad IF it triggers: critical | major | moderate | minor | none.
   Judge impact assuming the trigger happens. Likelihood never lowers impact; it is its own field.
@@ -399,6 +392,7 @@ Classify every finding - do not score it. Give each exactly these fields:
 - evidence: path:line plus the concrete trigger steps, e.g. `Editor.tsx:225` + "save -> go back -> late response arrives -> save again". Always give a path:line: without one the finding counts as unverified, which lowers its impact one class.
 - reason: one line.
 Example: a late save response re-binds the editor to another post's id, so the next save can overwrite the wrong post: confirmed, critical, edge, small, in-scope, though the window is narrow.
+Separately, rate the review as a whole in score: one 0-100 quality number for correctness and actionability (mostly wrong or trivial findings = low). It is only logged and decides nothing.
 
 REVIEW:
 <findings as JSON>
@@ -415,8 +409,8 @@ Stage 2/2 "<stage name>" - its TASK:
 <stage task>
 
 P0/P1 findings are not in this list: they go to the implementer without you.
-For each finding, open the cited code and check that it is real and correctly described. Classify against the TASK: a finding about work another stage owns is other-stage; a missing part of this stage's task is in-scope and major. If a finding reports the same problem as another one in this list (reviewers overlap), classify it too and set its duplicateOf to the id of the one to keep. Then score the whole review 0-100 for correctness and actionability (mostly wrong or trivial findings = low; informational only).
-Classify every finding - do not score it. Give each exactly these fields:
+For each finding, open the cited code and check that it is real and correctly described. Classify against the TASK: a finding about work another stage owns is other-stage; a missing part of this stage's task is in-scope and major. If a finding reports the same problem as another one in this list (reviewers overlap), classify it too and set its duplicateOf to the id of the one to keep.
+Classify every finding with exactly these fields - classes, not a per-finding score:
 - verdict: confirmed (the code shows the problem) | refuted (the code shows it is absent or not a problem) | unverified (you cannot tell either way).
 - impact, how bad IF it triggers: critical | major | moderate | minor | none.
   Judge impact assuming the trigger happens. Likelihood never lowers impact; it is its own field.
@@ -431,6 +425,7 @@ Classify every finding - do not score it. Give each exactly these fields:
 - evidence: path:line plus the concrete trigger steps, e.g. `Editor.tsx:225` + "save -> go back -> late response arrives -> save again". Always give a path:line: without one the finding counts as unverified, which lowers its impact one class.
 - reason: one line.
 Example: a late save response re-binds the editor to another post's id, so the next save can overwrite the wrong post: confirmed, critical, edge, small, in-scope, though the window is narrow.
+Separately, rate the review as a whole in score: one 0-100 quality number for correctness and actionability (mostly wrong or trivial findings = low). It is only logged and decides nothing.
 
 EARLIER DECISIONS - the findings earlier rounds sent to the fixer or kept as residual for the user, by label, with classification, priority and deciding rule, and the fixer's declines with its reasons:
 Round 1 sent to the fixer:
@@ -462,15 +457,15 @@ RETRY: your last answer left these findings unclassified. Answer again for every
 ## Judge - final review (from round 1 on, its EARLIER DECISIONS block starts with the decisions of every stage review in the repo, in stage order, one entry per stage review round under `s<k>/r<N>/<id>` labels - a stage's last round has no "sent" part when it sent nothing - followed by the final review's own earlier rounds as above)
 
 ```text
-You are the JUDGE classifying the findings of a code review. Repo <repo>, branch <branch>, stage diff `'<base>'...HEAD`. Do not edit anything.
+You are the JUDGE classifying the findings of a code review. Repo <repo>, branch <branch>, branch diff `'<base>'...HEAD`. Do not edit anything.
 This is the whole-branch review: each stage was already reviewed alone, so look across them - duplicated code or helpers several stages added, inconsistencies between stages (naming, contracts, config, docs, tests) - and especially at the merge commits and their conflict resolutions (`git log --merges`, `git show <merge>`): both sides' intent must survive.
 Design context:
 Plan files - read them first: <plan files>
 <context: work-order files and override notes>
 
 P0/P1 findings are not in this list: they go to the implementer without you.
-For each finding, open the cited code and check that it is real and correctly described. If a finding reports the same problem as another one in this list (reviewers overlap), classify it too and set its duplicateOf to the id of the one to keep. Then score the whole review 0-100 for correctness and actionability (mostly wrong or trivial findings = low; informational only).
-Classify every finding - do not score it. Give each exactly these fields:
+For each finding, open the cited code and check that it is real and correctly described. If a finding reports the same problem as another one in this list (reviewers overlap), classify it too and set its duplicateOf to the id of the one to keep.
+Classify every finding with exactly these fields - classes, not a per-finding score:
 - verdict: confirmed (the code shows the problem) | refuted (the code shows it is absent or not a problem) | unverified (you cannot tell either way).
 - impact, how bad IF it triggers: critical | major | moderate | minor | none.
   Judge impact assuming the trigger happens. Likelihood never lowers impact; it is its own field.
@@ -485,6 +480,7 @@ Classify every finding - do not score it. Give each exactly these fields:
 - evidence: path:line plus the concrete trigger steps, e.g. `Editor.tsx:225` + "save -> go back -> late response arrives -> save again". Always give a path:line: without one the finding counts as unverified, which lowers its impact one class.
 - reason: one line.
 Example: a late save response re-binds the editor to another post's id, so the next save can overwrite the wrong post: confirmed, critical, edge, small, in-scope, though the window is narrow.
+Separately, rate the review as a whole in score: one 0-100 quality number for correctness and actionability (mostly wrong or trivial findings = low). It is only logged and decides nothing.
 
 EARLIER DECISIONS - the findings earlier rounds sent to the fixer or kept as residual for the user, by label, with classification, priority and deciding rule, and the fixer's declines with its reasons. A round named after a stage is that stage's own review; this review covers its code too:
 Stage <k> (<stage name>), round 1 sent to the fixer:

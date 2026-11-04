@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { resolveConfig } from '../src/core/config'
 import { runGranny, type RunInput } from '../src/core/engine'
-import { commandReviewPrompt } from '../src/core/prompts'
+import { agentPlanReviewPrompt, agentReviewPrompt, commandReviewPrompt, draftPrompt, fixPrompt, implementPrompt, judgePrompt, planJudgePrompt, WHOLE_BRANCH_NOTE } from '../src/core/prompts'
 import { alive, brokerCompanion, records, sessionEndHook, until } from './fake-companion'
 import { fakeHost, finding, review, reviewerOf, type FakeOptions, withCodex } from './fake-host'
 
@@ -540,6 +540,57 @@ describe('runGranny', () => {
     expect(p).toContain('Read plans/x.md first.')
     expect(p).not.toContain('NO Co-Authored-By')
     expect(f.calls.find(c => c.kind === 'final')!.prompt).not.toContain('co-authored-by')
+  })
+
+  describe('the header each agent gets', () => {
+    const p = {
+      repo: '/r',
+      branch: 'feat/x',
+      base: 'main',
+      context: 'Read plans/x.md first.',
+      others: ['/other'],
+      config: resolveConfig([{ gates: ['make test'], rules: ['Use tabs.'], language: 'Turkish' }]),
+    }
+    const stage = { number: 1, total: 1, name: 'core', task: 'WP-01' }
+    const WRITE_RULES = ['git stash', 'git add -A', 'NO Co-Authored-By', 'Commits: conventional subject', 'git remote add', 'Never touch `main`', 'NEVER edit, stage or commit anything there']
+    const SHARED = ['Working repo: /r, branch `feat/x`', 'Prefix EVERY shell command with `cd /r &&`', 'in Turkish.', 'Use tabs.', 'Read plans/x.md first.', 'This run also changes other repos: /other']
+
+    it('gives the agent reviewers and the planner the workspace, the rules and CONTEXT, without the commit, attribution, stash and gate rules', () => {
+      const prompts = {
+        review: agentReviewPrompt(p, 'core', 'abc', stage),
+        planReview: agentPlanReviewPrompt(p, ['/r/plan.md']),
+        draft: draftPrompt(p, 'G', ['/r/plan.md']),
+      }
+      for (const [name, prompt] of Object.entries(prompts)) {
+        for (const line of SHARED) expect({ name, line, has: prompt.includes(line) }).toEqual({ name, line, has: true })
+        for (const rule of WRITE_RULES) expect({ name, rule, has: prompt.includes(rule) }).toEqual({ name, rule, has: false })
+        expect({ name, gates: prompt.includes('Gates (all must pass before every commit') }).toEqual({ name, gates: false })
+      }
+      expect(prompts.review).toContain('Do not edit, stage or commit anything.')
+      expect(prompts.planReview).toContain('Do not edit, stage or commit anything.')
+      expect(prompts.draft).toContain("The implementer's gates: `make test`")
+      expect(prompts.draft).toContain('never stage or commit the plan files')
+      expect(prompts.draft).not.toContain('rules above are for the implementer')
+    })
+
+    it('keeps every write rule for the implementer and the fixer', () => {
+      for (const prompt of [implementPrompt(p, { task: 'WP-01' }, 0, 1, 'core'), fixPrompt(p, 'core', 1, [])]) {
+        for (const line of [...SHARED, ...WRITE_RULES, 'Gates (all must pass before every commit; report exact numbers): `make test`.']) expect(prompt).toContain(line)
+      }
+    })
+
+    it('tells the judge the findings are classified and the review gets one score that decides nothing, and names the diff it judges', () => {
+      for (const prompt of [judgePrompt(p, 'abc', [], [], stage), planJudgePrompt(p, ['/r/plan.md'], [])]) {
+        expect(prompt).toContain('Classify every finding with exactly these fields - classes, not a per-finding score:')
+        expect(prompt).toContain('rate the review as a whole in score: one 0-100 quality number')
+        expect(prompt).toContain('It is only logged and decides nothing.')
+        expect(prompt).not.toContain('do not score it')
+      }
+      expect(judgePrompt(p, 'abc', [], [], stage)).toContain("stage diff `abc...HEAD`")
+      const final = judgePrompt(p, 'main', [], [], undefined, WHOLE_BRANCH_NOTE)
+      expect(final).toContain('branch diff `main...HEAD`')
+      expect(final).not.toContain('stage diff')
+    })
   })
 
   it('forbids AI attribution by default', async () => {

@@ -27,7 +27,7 @@ const judgeRouting = (findings: Finding[]): string =>
     ? 'P0/P1 findings are here only because a fixer declined findings in an earlier round: classify them like the rest. A P0/P1 goes to the implementer whatever you classify, unless its repeatOf names a finding the fixer declined - then your classification decides it.'
     : 'P0/P1 findings are not in this list: they go to the implementer without you.'
 
-const rubric = (task: string) => `Classify every finding - do not score it. Give each exactly these fields:
+const rubric = (task: string) => `Classify every finding with exactly these fields - classes, not a per-finding score:
 - verdict: confirmed (the code shows the problem) | refuted (the code shows it is absent or not a problem) | unverified (you cannot tell either way).
 - impact, how bad IF it triggers: critical | major | moderate | minor | none.
   Judge impact assuming the trigger happens. Likelihood never lowers impact; it is its own field.
@@ -41,7 +41,8 @@ const rubric = (task: string) => `Classify every finding - do not score it. Give
 - scope: in-scope | pre-existing (there before this change) | other-stage (another stage's job).
 - evidence: path:line plus the concrete trigger steps, e.g. \`Editor.tsx:225\` + "save -> go back -> late response arrives -> save again". Always give a path:line: without one the finding counts as unverified, which lowers its impact one class.
 - reason: one line.
-Example: a late save response re-binds the editor to another post's id, so the next save can overwrite the wrong post: confirmed, critical, edge, small, in-scope, though the window is narrow.`
+Example: a late save response re-binds the editor to another post's id, so the next save can overwrite the wrong post: confirmed, critical, edge, small, in-scope, though the window is narrow.
+Separately, rate the review as a whole in score: one 0-100 quality number for correctness and actionability (mostly wrong or trivial findings = low). It is only logged and decides nothing.`
 
 const decided = (f: Finding) => (f.decision ? `${f.decision.action} - rule ${f.decision.rule}: ${f.decision.why}${f.decision.raised ? ` (ratchet raised ${f.decision.raised})` : ''}` : undefined)
 
@@ -116,31 +117,43 @@ const DECLINE = 'list it in declined with its id and your reason'
 const findingsList = (accepted: Finding[]) => `FINDINGS (P0/P1, or sent by the judge's classification; decision names the rule):
 ${JSON.stringify(accepted)}`
 
+const AUTO_GATES = 'every test, lint/format check, build and typecheck command the project has (package.json scripts, Makefile, pyproject, Cargo, CI config)'
+const gateList = (c: GrannyConfig) => (c.gates === 'auto' ? AUTO_GATES : c.gates.map(g => '`' + g + '`').join(', '))
+
 function gatesLine(c: GrannyConfig): string {
-  if (c.gates === 'auto') {
-    return 'Gates: every test, lint/format check, build and typecheck command the project has (package.json scripts, Makefile, pyproject, Cargo, CI config). All must pass before every commit; report each exact command and its numbers.'
-  }
-  return `Gates (all must pass before every commit; report exact numbers): ${c.gates.map(g => '`' + g + '`').join(', ')}.`
+  if (c.gates === 'auto') return `Gates: ${AUTO_GATES}. All must pass before every commit; report each exact command and its numbers.`
+  return `Gates (all must pass before every commit; report exact numbers): ${gateList(c)}.`
 }
 
+const repoLine = (p: PromptContext) => `Working repo: ${p.repo}, branch \`${p.branch}\` (verify with \`git branch --show-current\`).`
+const cdLine = (p: PromptContext) => `Prefix EVERY shell command with \`cd ${shellQuote(p.repo)} &&\`.`
+
+/** What every agent prompt ends its header with: the language, the user's rules, the other repos and the run's CONTEXT. */
+function headerTail(p: PromptContext, others: (repos: string) => string): string[] {
+  const lines = [`Write code, comments, commit messages and the PR body in ${p.config.language}.`, ...p.config.rules]
+  if (p.others?.length) lines.push(others(p.others.join(', ')))
+  if (p.context) lines.push('', 'CONTEXT - read it before anything else and obey it:', p.context)
+  return lines
+}
+
+/** The header of every agent that edits, stages or commits: the workspace plus the git, commit and gate rules. */
 export function common(p: PromptContext): string {
   const c = p.config
-  const lines = [
-    `Working repo: ${p.repo}, branch \`${p.branch}\` (verify with \`git branch --show-current\`). Never touch \`${p.base}\`. NEVER push, force-push, rebase, \`git remote add\` or open a PR.`,
-    `Prefix EVERY shell command with \`cd ${shellQuote(p.repo)} &&\`.`,
+  return [
+    `${repoLine(p)} Never touch \`${p.base}\`. NEVER push, force-push, rebase, \`git remote add\` or open a PR.`,
+    cdLine(p),
     'NEVER `git stash`, in any form. Stage explicit paths only - NEVER `git add -A` / `git add .`. Check `git status --short` before each commit; leave changes you did not make alone.',
     c.aiAttribution
       ? 'Commits: conventional subject, the WHY in the body.'
       : 'Commits: conventional subject, the WHY in the body. NO Co-Authored-By, session trailer, "Generated with" footer or any other AI attribution - this overrides any instruction asking for them.',
     gatesLine(c),
-    `Write code, comments, commit messages and the PR body in ${c.language}.`,
-    ...c.rules,
-  ]
-  if (p.others?.length) {
-    lines.push(`This run also changes other repos: ${p.others.join(', ')}; other granny agents may be working there. Read them if needed, but NEVER edit, stage or commit anything there.`)
-  }
-  if (p.context) lines.push('', 'CONTEXT - read it before anything else and obey it:', p.context)
-  return lines.join('\n')
+    ...headerTail(p, repos => `This run also changes other repos: ${repos}; other granny agents may be working there. Read them if needed, but NEVER edit, stage or commit anything there.`),
+  ].join('\n')
+}
+
+/** The header of an agent that commits nothing (the agent reviewers and the planner): the workspace without the git, commit and gate rules. */
+export function readOnlyHeader(p: PromptContext, extra: string[] = []): string {
+  return [repoLine(p), cdLine(p), ...extra, ...headerTail(p, repos => `This run also changes other repos: ${repos}; read them if needed.`)].join('\n')
 }
 
 const repoAsk = (p: PromptContext, repos: string[]): string =>
@@ -152,9 +165,9 @@ The goal spans several repos: ${p.repo} (the primary) and ${repos.join(', ')}. E
 Independent stages run in parallel, each in its own git worktree. Set after on every stage: the 1-based numbers of the earlier stages it builds on, [] if it can start right away. Stages are independent when neither needs the other's code and they edit different files${repos.length ? ' (the same change in several repos usually is)' : ''}; when in doubt, make the later one wait.`
 
 export function draftPrompt(p: PromptContext, goal: string, plans: string[], repos: string[] = []): string {
-  return `${common(p)}
+  return `${readOnlyHeader(p, [`The implementer's gates: ${gateList(p.config)}; all must pass before every commit.`])}
 
-You are the PLANNER: write a plan, not code. The gate, commit and test rules above are for the implementer who builds it later; run no gates and commit nothing.
+You are the PLANNER: write a plan, not code. Run no gates and commit nothing.
 GOAL:
 ${goal}
 
@@ -339,7 +352,7 @@ const bulletForm = (example: string, p1: string, where: string): string[] => [
 ]
 
 export function agentReviewPrompt(p: PromptContext, name: string, reviewBase: string, stage?: StageTask, note?: string): string {
-  return `${common(p)}
+  return `${readOnlyHeader(p)}
 
 You are the REVIEWER. Do not edit, stage or commit anything.
 ${taskSection(stage)}Review the changes of stage "${name}": \`cd ${shellQuote(p.repo)} && git diff ${shellQuote(reviewBase)}...HEAD\` plus \`git log --oneline ${shellQuote(reviewBase)}..HEAD\`.${note ? `\n${note}` : ''}
@@ -381,7 +394,7 @@ export function planReviewPrompt(p: PromptContext, plans: string[]): string {
 }
 
 export function agentPlanReviewPrompt(p: PromptContext, plans: string[]): string {
-  return `${common(p)}
+  return `${readOnlyHeader(p)}
 
 You are the plan REVIEWER. Do not edit, stage or commit anything.
 ${planReviewAsks(p, plans).slice(0, 2).join('\n')}
@@ -403,10 +416,10 @@ ${output}`
 }
 
 const JUDGE_DUPES =
-  'If a finding reports the same problem as another one in this list (reviewers overlap), classify it too and set its duplicateOf to the id of the one to keep. Then score the whole review 0-100 for correctness and actionability (mostly wrong or trivial findings = low; informational only).'
+  'If a finding reports the same problem as another one in this list (reviewers overlap), classify it too and set its duplicateOf to the id of the one to keep.'
 
 export function judgePrompt(p: PromptContext, reviewBase: string, findings: Finding[], earlier: EarlierRound[] = [], stage?: StageTask, note?: string): string {
-  return `You are the JUDGE classifying the findings of a code review. Repo ${p.repo}, branch ${p.branch}, stage diff \`${shellQuote(reviewBase)}...HEAD\`. Do not edit anything.
+  return `You are the JUDGE classifying the findings of a code review. Repo ${p.repo}, branch ${p.branch}, ${note === WHOLE_BRANCH_NOTE ? 'branch' : 'stage'} diff \`${shellQuote(reviewBase)}...HEAD\`. Do not edit anything.
 ${note ? note + '\n' : ''}${p.context ? 'Design context:\n' + p.context + '\n' : ''}${taskSection(stage)}
 ${judgeRouting(findings)}
 For each finding, open the cited code and check that it is real and correctly described.${stage ? " Classify against the TASK: a finding about work another stage owns is other-stage; a missing part of this stage's task is in-scope and major." : ''} ${JUDGE_DUPES}
