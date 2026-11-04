@@ -64,7 +64,7 @@ describe('checks', () => {
     expect(f.cwds).toEqual([REPO])
     expect(r.stages[0]).toMatchObject({ outcome: 'clean', checks: [{ at: 'implement', attempt: 1, results: [{ name: 'tests', passed: true, code: 0 }] }] })
     expect(r).not.toHaveProperty('checks')
-    expect(f.logs).toContain('final review: final checks not rerun - 1 (core) ran them green last on start2, HEAD unchanged')
+    expect(f.logs).toContain('final review: final checks not rerun - 1 (core) ran them green last on deadbee2, HEAD unchanged')
     expect(f.phases.slice(0, 3)).toEqual(['Implement', 'Checks', 'Review'])
     expect(f.logs).toContain('core: checks green (implement: tests)')
   })
@@ -142,6 +142,12 @@ describe('checks', () => {
       expect(stage.note).toContain('metric not found in output')
     })
 
+    it("on Claude Code, reads the metric from what the check printed, never from the helper's note", async () => {
+      const f = scripted({ 'run-cov': [green('coverage: 60%')] }, { name: 'claude-code', direct: false, note: c => (c.includes('run-cov') ? 'Ran it, coverage: 95%' : undefined) })
+      const r = await runGranny(f.host, run({ checks: [{ name: 'cov', run: 'run-cov', maxRepairs: 0, metric: { pattern: 'coverage: ([0-9.]+)%', min: 80 } }] }))
+      expect(r.stages[0]!.checks?.[0]!.results[0]).toEqual({ name: 'cov', passed: false, code: 0, metric: 60, note: 'metric 60 is below min 80' })
+    })
+
     it('fails on a non-zero exit even when the metric is in bounds', async () => {
       const f = scripted({ 'run-cov': [{ code: 2, output: 'coverage: 90%' }] })
       const r = await runGranny(f.host, run({ maxRepairs: 0, checks: [{ name: 'cov', run: 'run-cov', metric: { pattern: 'coverage: ([0-9.]+)%', min: 80 } }] }))
@@ -201,7 +207,7 @@ describe('checks', () => {
     )
     const r = await runGranny(f.host, run({ maxRepairs: 0, checks: [TESTS] }))
     expect(f.events).toEqual(['implement core', 'check run-tests', 'review core r1 reviewer', 'fix core r1', 'check run-tests', 'pr-ready check'])
-    expect(r.finalReview).toMatchObject({ outcome: 'checks-failed', note: 'checks failed at final: 1 (core) ended with tests red on start3, HEAD unchanged' })
+    expect(r.finalReview).toMatchObject({ outcome: 'checks-failed', note: 'checks failed at final: 1 (core) ended with tests red on deadbee3, HEAD unchanged' })
     expect(r.stages[0]).toMatchObject({ outcome: 'checks-failed', rounds: 1 })
     expect(r.stages[0]!.checks?.map(c => [c.at, c.results[0]!.passed])).toEqual([
       ['implement', true],
@@ -276,7 +282,7 @@ describe('checks', () => {
 
   it('take over from the self-reported gates: green checks keep a red-gates stage clean', async () => {
     const redGates = (req: AgentRequest) =>
-      req.kind === 'implementation' ? { startSha: 'start1', headSha: 'h', gatesGreen: false, gates: '1 failing', commits: ['c'], untested: '' } : undefined
+      req.kind === 'implementation' ? { startSha: 'deadbee1', headSha: 'h', gatesGreen: false, gates: '1 failing', commits: ['c'], untested: '' } : undefined
     const checked = scripted({ 'run-tests': [green()] }, { override: redGates })
     expect((await runGranny(checked.host, run({ checks: [TESTS] }))).stages[0]!.outcome).toBe('clean')
     const unchecked = scripted({}, { override: redGates })
@@ -867,5 +873,77 @@ describe('uncommitted work without checks', () => {
     await runGranny(f.host, run({ checks: [TESTS] }))
     expect(f.calls.map(c => c.label)).toEqual(['implement core', 'check core tests', 'review core r1 reviewer', 'pr-ready check'])
     expect(f.probes).toContain(`cd ${REPO} && git status --porcelain`)
+  })
+})
+
+describe('a working tree status that cannot be read', () => {
+  const UNREADABLE: CommandResult = { code: 128, output: 'fatal: index file corrupt' }
+  const WHY = 'exit 128: fatal: index file corrupt'
+  const retried = 'status core implement: could not read the working tree status (exit 128) - reading it once more'
+
+  it('fails the gate after one more read, without running the checks or spending a repair', async () => {
+    const f = scripted({ 'run-tests': [green()] }, { status: [UNREADABLE] })
+    const r = await runGranny(f.host, run({ checks: [TESTS] }))
+    expect(f.commands.filter(c => c.includes('run-tests'))).toEqual([])
+    expect(f.calls.some(c => c.label.startsWith('repair') || c.label.startsWith('commit'))).toBe(false)
+    expect(f.probes.filter(c => c.includes('git status --porcelain')).length).toBeGreaterThanOrEqual(2)
+    expect(f.logs).toContain(retried)
+    expect(r.stages[0]).toMatchObject({ outcome: 'checks-failed', note: `checks not run at implement - working tree status unreadable (${WHY})` })
+    expect(r.finalReview).toMatchObject({ outcome: 'checks-failed', note: `checks not run at final - working tree status unreadable (${WHY})` })
+    expect(r.recheck).toEqual({ passed: false, note: `checks not run at pr-ready - working tree status unreadable (${WHY})` })
+  })
+
+  it('goes on when the second read works', async () => {
+    const f = scripted({ 'run-tests': [green()] }, { status: [UNREADABLE, ''] })
+    const r = await runGranny(f.host, run({ checks: [TESTS] }))
+    expect(f.logs).toContain(retried)
+    expect(r.stages[0]!.outcome).toBe('clean')
+  })
+
+  it('without checks, says in the stage note that the review may have missed uncommitted work', async () => {
+    const f = scripted({}, { status: [UNREADABLE, UNREADABLE, ''] })
+    const r = await runGranny(f.host, run())
+    expect(f.calls.some(c => c.label.startsWith('commit'))).toBe(false)
+    expect(r.stages[0]).toMatchObject({ outcome: 'clean', note: `working tree status unreadable after implement (${WHY}) - the review saw HEAD and may have missed uncommitted work` })
+  })
+
+  it('says so in the stage note when the status cannot be read after the commit step', async () => {
+    const f = scripted({}, { status: ['?? f.txt\n', UNREADABLE] })
+    const r = await runGranny(f.host, run())
+    expect(f.calls.map(c => c.label)).toEqual(['implement core', 'commit core implement', 'review core r1 reviewer', 'pr-ready check'])
+    expect(f.logs).toContain('status core implement after commit: could not read the working tree status (exit 128) - reading it once more')
+    expect(r.stages[0]).toMatchObject({ outcome: 'clean', note: `working tree status unreadable after implement (${WHY}) - the review saw HEAD and may have missed uncommitted work` })
+  })
+
+  it('says so in the stage note when the status cannot be read after a fix round', async () => {
+    const f = scripted({}, { status: ['', ' M src/a.ts\n', UNREADABLE], override: req => (req.label === 'review core r1 reviewer' ? p1 : undefined) })
+    const r = await runGranny(f.host, run())
+    expect(f.calls.map(c => c.label)).toEqual(['implement core', 'review core r1 reviewer', 'fix core r1', 'commit core fix r1', 'review core r2 reviewer', 'pr-ready check'])
+    expect(r.stages[0]).toMatchObject({ outcome: 'clean', note: `working tree status unreadable after fix r1 (${WHY}) - the review saw HEAD and may have missed uncommitted work` })
+  })
+
+  it('ends an empty stage no-changes and says the status could not be read', async () => {
+    const f = scripted({}, { commits: 0, status: [UNREADABLE] })
+    const r = await runGranny(f.host, run())
+    expect(r.stages[0]).toMatchObject({
+      outcome: 'no-changes',
+      note: `the implementer made no commit: deadbee1..HEAD is empty, so there was nothing to review; the working tree status could not be read (${WHY}), so uncommitted work may be left`,
+    })
+  })
+
+  it('marks the run not PR-ready when it cannot be read after the pr-ready checks', async () => {
+    let checked = false
+    let reads = 0
+    const f = scripted({ 'run-tests': [green()] }, { override: req => void (req.kind === 'final' && (checked = true)) })
+    const direct = f.host.run!
+    f.host.run = async (command, cwd) => {
+      if (checked && command.includes('git rev-parse --verify HEAD')) return { code: 0, output: 'deadbee9\n' }
+      if (checked && command.includes('git status --porcelain') && ++reads > 1) return UNREADABLE
+      return direct(command, cwd)
+    }
+    const r = await runGranny(f.host, run({ checks: [TESTS] }))
+    expect(r.checks).toEqual([{ at: 'pr-ready', attempt: 1, head: 'deadbee9', results: [{ name: 'tests', passed: true, code: 0 }] }])
+    expect(r.recheck).toEqual({ passed: false, note: `working tree status unreadable after the checks at pr-ready (${WHY})` })
+    expect(f.logs).toContain('pr-ready check: could not read the working tree status after the checks - the branch is not PR-ready')
   })
 })

@@ -29,7 +29,8 @@ for each stage - independent stages at the same time (parallel, default on):
      ├─ no commit since that HEAD ─► one commit prompt when the tree is dirty; still no commit ─► stage no-changes,
      │  not reviewed; the stages that build on it are skipped
   checks (config checks, default none): granny runs them itself; red ones go back to the implementer for a repair, up to maxRepairs
-     never on uncommitted work: a dirty tree goes back to the implementer to commit, which spends a repair
+     never on uncommitted work: a dirty tree goes back to the implementer to commit, which spends a repair;
+     a status granny cannot read, also on one more read, fails the gate
      ├─ still red ─► stage checks-failed, not reviewed; the stages that build on it, and the later ones in its repo, are skipped
   every reviewer reviews it, in parallel (base = the HEAD granny read)
      ├─ a reviewer fails, then fails its one retry ─► stage review-failed

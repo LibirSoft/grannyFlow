@@ -96,7 +96,7 @@ describe('the plan review', () => {
     expect(f.commands[0]).toContain('codex exec --sandbox read-only -o .granny/review-plan-review-r1-codex.md ')
     expect(f.commands[0]).toContain(`Review the plan in ${PLAN} - a plan, not code changes - against the actual repo at ${WT}`)
     expect(f.cwds[0]).toBe(WT)
-    expect(f.commands[1]).toContain('codex exec review --base start1')
+    expect(f.commands[1]).toContain('codex exec review --base deadbee1')
     expect(f.logs).toContain('plan review r1: clean')
     expect(f.logs).toContain('plan review r1 codex: reviewer: codex CLI (codex exec, read-only)')
     expect(r.plan).toEqual({ outcome: 'clean', rounds: 1, residual: [], unresolved: [], history: [] })
@@ -206,7 +206,7 @@ describe('the plan review', () => {
     expect(r.plan).toMatchObject({ outcome: 'clean', rounds: 1 })
     expect(f.logs).toContain('plan review: reviewer diff-only skipped - its command has no {prompt}, so it cannot review a plan')
     expect(f.commands.some(planCommand)).toBe(false)
-    expect(f.commands.some(c => c.includes('my-review --base start1'))).toBe(true)
+    expect(f.commands.some(c => c.includes('my-review --base deadbee1'))).toBe(true)
     const agent = f.calls.find(c => c.label === 'review plan review r1 opus')!
     expect(agent).toMatchObject({ role: 'reviewer', kind: 'findings', phase: 'Plan review', access: 'read-only', model: 'opus' })
     expect(agent.prompt).toContain(`Review the plan in ${PLAN}`)

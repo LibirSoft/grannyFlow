@@ -16,8 +16,10 @@ export interface FakeOptions {
   commits?: number | 'git' | ((base: string) => number)
   /** Answers a command before the reviews do; undefined passes it on. */
   checks?: (command: string) => Review | undefined
-  /** What the engine's `git status --porcelain` probe prints, in order (the last one repeats; default clean); 'git' with commits runs it in a real shell. */
-  status?: string[]
+  /** What the engine's `git status --porcelain` probe prints, or a failed read, in order (the last one repeats; default clean); 'git' with commits runs it in a real shell. */
+  status?: Array<string | CommandResult>
+  /** A note the Claude Code helper adds to every command it reports (the worktree setup, the probes, checks and reviews). */
+  note?: string | ((command: string) => string | undefined)
 }
 
 export interface Setup {
@@ -67,12 +69,16 @@ export function fakeHost(opts: FakeOptions = {}) {
   const phases: string[] = []
   const probes: string[] = []
   let impl = 0
+  const noted = (command: string, r: CommandResult) => {
+    const note = typeof opts.note === 'function' ? opts.note(command) : opts.note
+    return { ran: r.code === 0, exitCode: r.code, output: r.output, ...(note === undefined ? {} : { note }) }
+  }
   const probe = async (command: string, cwd: string): Promise<CommandResult> => {
     probes.push(command)
     const c = opts.commits ?? 1
     if (c === 'git') return bash(command, cwd, opts.shell?.env)
-    if (STATUS_PROBE.test(command)) return { code: 0, output: (statuses.length > 1 ? statuses.shift() : statuses[0]) ?? '' }
-    if (command.includes(HEAD_PROBE)) return { code: 0, output: `start${impl + 1}\n` }
+    if (STATUS_PROBE.test(command)) return asResult((statuses.length > 1 ? statuses.shift() : statuses[0]) ?? '')
+    if (command.includes(HEAD_PROBE)) return { code: 0, output: `deadbee${impl + 1}\n` }
     const base = COMMITS_PROBE.exec(command)![1]!
     return { code: 0, output: `${typeof c === 'function' ? c(base) : c}\n` }
   }
@@ -99,12 +105,11 @@ export function fakeHost(opts: FakeOptions = {}) {
       if (req.label === 'worktree' || (req.kind === 'command' && req.label.startsWith('worktree '))) {
         const line = /Run exactly this:\n(.+)\n/.exec(req.prompt)?.[1] ?? ''
         setups.push({ command: line, cwd: '/', request: req })
-        const r = await setUp(line, '/', cdTarget(line))
-        return { ran: r.code === 0, exitCode: r.code, output: r.output }
+        return noted(line, await setUp(line, '/', cdTarget(line)))
       }
       if (req.kind === 'command' && isProbe(req.prompt)) {
-        const r = await probe(/Run exactly this:\n(.+)\n/.exec(req.prompt)?.[1] ?? '', req.cwd)
-        return { ran: r.code === 0, exitCode: r.code, output: r.output }
+        const line = /Run exactly this:\n(.+)\n/.exec(req.prompt)?.[1] ?? ''
+        return noted(line, await probe(line, req.cwd))
       }
       calls.push(req)
       const custom = await opts.override?.(req)
@@ -112,7 +117,7 @@ export function fakeHost(opts: FakeOptions = {}) {
       switch (req.kind) {
         case 'implementation':
           impl++
-          return { startSha: `start${impl}`, headSha: `head${impl}`, gatesGreen: true, gates: 'all green', commits: [`commit ${impl}`], untested: '' }
+          return { startSha: `deadbee${impl}`, headSha: `head${impl}`, gatesGreen: true, gates: 'all green', commits: [`commit ${impl}`], untested: '' }
         case 'draft':
           return { files: ['/work/repo/.granny/plans/feat-x.md'], stages: [{ name: 'core', task: 'WP-01' }], summary: 'one stage' }
         case 'planFix':
@@ -129,8 +134,7 @@ export function fakeHost(opts: FakeOptions = {}) {
         case 'command': {
           const script = /never cut it short\):\n(.+)\n/.exec(req.prompt)?.[1] ?? /Run exactly this:\n(.+)\n/.exec(req.prompt)?.[1] ?? ''
           commands.push(script)
-          const r = await nextReview(script, '/')
-          return { ran: r.code === 0, exitCode: r.code, output: r.output }
+          return noted(script, await nextReview(script, '/'))
         }
         case 'findings':
           return { findings: [] }

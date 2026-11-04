@@ -28,7 +28,7 @@ describe('runGranny', () => {
     expect(r.stages[0]).toMatchObject({ stage: 'core', outcome: 'clean', rounds: 1 })
     expect(f.calls.map(c => c.kind)).toEqual(['implementation', 'final'])
     expect(f.commands).toHaveLength(1)
-    expect(f.commands[0]).toContain('codex exec review --base start1 -o .granny/review-core-r1-codex.md')
+    expect(f.commands[0]).toContain('codex exec review --base deadbee1 -o .granny/review-core-r1-codex.md')
     expect(f.phases).toEqual(['Worktree', 'Implement', 'Review', 'PR ready'])
     expect(r.final?.gatesGreen).toBe(true)
   })
@@ -94,7 +94,7 @@ describe('runGranny', () => {
   })
 
   it('fails the review instead of reporting clean when the Codex plugin review printed nothing', async () => {
-    const render = '# Codex Review\n\nTarget: branch diff against start1\n\nCodex review completed without any stdout output.\n'
+    const render = '# Codex Review\n\nTarget: branch diff against deadbee1\n\nCodex review completed without any stdout output.\n'
     const f = fakeHost({ reviews: [render, render] })
     const r = await runGranny(f.host, input())
     expect(r.stages[0]).toMatchObject({ outcome: 'review-failed', rounds: 1 })
@@ -273,7 +273,7 @@ describe('runGranny', () => {
     const prose = 'I looked at the diff. The cache key ignores the locale in src/a.ts:3, so French users get English pages.'
 
     it('is clean without an extraction when it says No findings., also inside a Codex plugin render', async () => {
-      const plugin = '[granny] reviewer: codex-plugin adversarial-review (/c)\n# Codex Adversarial Review\n\nTarget: branch diff against start1\nVerdict: approve\n\nLooks right.\n\nNo material findings.\n'
+      const plugin = '[granny] reviewer: codex-plugin adversarial-review (/c)\n# Codex Adversarial Review\n\nTarget: branch diff against deadbee1\nVerdict: approve\n\nLooks right.\n\nNo material findings.\n'
       for (const output of ['No findings.', '  no findings  ', plugin]) {
         const f = fakeHost({ reviews: [output] })
         const r = await runGranny(f.host, input())
@@ -305,7 +305,7 @@ describe('runGranny', () => {
     })
 
     it("keeps a native Codex review that says in its own words it found nothing clean, through the extraction's confirmation", async () => {
-      const native = '# Codex Review\n\nTarget: branch diff against start1\n\nThe change threads the locale through the cache key and updates its tests; I did not find any discrete, actionable issues.\n'
+      const native = '# Codex Review\n\nTarget: branch diff against deadbee1\n\nThe change threads the locale through the cache key and updates its tests; I did not find any discrete, actionable issues.\n'
       for (const output of [native, 'The patch looks correct. No issues were found in the changed code.']) {
         const f = fakeHost({ reviews: [output], override: req => (req.kind === 'findings' ? { findings: [], clean: true } : undefined) })
         const r = await runGranny(f.host, input())
@@ -336,7 +336,7 @@ describe('runGranny', () => {
     expect(f.commands).toHaveLength(0)
     const rev = f.calls.find(c => c.role === 'reviewer')!
     expect(rev).toMatchObject({ kind: 'findings', access: 'read-only', model: 'zai/glm-5', label: 'review core r1 glm' })
-    expect(rev.prompt).toContain('git diff start1...HEAD')
+    expect(rev.prompt).toContain('git diff deadbee1...HEAD')
   })
 
   it('runs the review command through a granny agent on hosts without a shell', async () => {
@@ -349,8 +349,8 @@ describe('runGranny', () => {
       'cd /work/repo && mkdir -p .granny && rm -f .granny/review-core-r1-codex.md .granny/review-core-r1-codex.log && codex_plugins="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/plugins/cache/openai-codex/codex"; companion_version=$(',
     )
     expect(runner.prompt).not.toContain('sort -V')
-    expect(runner.prompt).toContain('node "$companion" review --wait --base start1 --scope branch > .granny/review-core-r1-codex.md 2> .granny/review-core-r1-codex.log;')
-    expect(runner.prompt).toContain('codex exec review --base start1 -o .granny/review-core-r1-codex.md > .granny/review-core-r1-codex.log 2>&1;')
+    expect(runner.prompt).toContain('node "$companion" review --wait --base deadbee1 --scope branch > .granny/review-core-r1-codex.md 2> .granny/review-core-r1-codex.log;')
+    expect(runner.prompt).toContain('codex exec review --base deadbee1 -o .granny/review-core-r1-codex.md > .granny/review-core-r1-codex.log 2>&1;')
     expect(runner.prompt).toContain(`never cut it short):\n${f.commands[0]}\n\nSet ran=true`)
   })
 
@@ -368,7 +368,7 @@ describe('runGranny', () => {
     expect(oc.calls).toHaveLength(0)
     const cc = fakeHost({ name: 'claude-code', direct: false })
     await runGranny(cc.host, input({ config }))
-    expect(cc.calls.find(c => c.kind === 'command')!.prompt).toContain('node "$companion" adversarial-review --wait --base start1 --scope branch >')
+    expect(cc.calls.find(c => c.kind === 'command')!.prompt).toContain('node "$companion" adversarial-review --wait --base deadbee1 --scope branch >')
   })
 
   it('shell-quotes the repo, the work dir and the base in every generated command', async () => {
@@ -382,7 +382,7 @@ describe('runGranny', () => {
     expect(direct.calls[0]!.prompt).toContain(`Prefix EVERY shell command with \`cd ${r} &&\``)
     expect(direct.calls.find(c => c.kind === 'final')!.prompt).toContain(`git log 'feat;main'..HEAD`)
     expect(direct.commands[0]).toBe(
-      `mkdir -p ${wd()} && rm -f ${wd('/review-core-r1-codex.md')} ${wd('/review-core-r1-codex.log')} && codex exec review --base start1 -o ${wd('/review-core-r1-codex.md')} > ${wd('/review-core-r1-codex.log')} 2>&1; code=$?; if [ -s ${wd('/review-core-r1-codex.md')} ]; then cat ${wd('/review-core-r1-codex.md')}; else cat ${wd('/review-core-r1-codex.log')}; fi; exit $code`,
+      `mkdir -p ${wd()} && rm -f ${wd('/review-core-r1-codex.md')} ${wd('/review-core-r1-codex.log')} && codex exec review --base deadbee1 -o ${wd('/review-core-r1-codex.md')} > ${wd('/review-core-r1-codex.log')} 2>&1; code=$?; if [ -s ${wd('/review-core-r1-codex.md')} ]; then cat ${wd('/review-core-r1-codex.md')}; else cat ${wd('/review-core-r1-codex.log')}; fi; exit $code`,
     )
 
     const runner = fakeHost({ name: 'claude-code', direct: false, reviews: ['No findings.'] })
@@ -467,17 +467,17 @@ describe('the base a stage review diffs against', () => {
     const f = fakeHost({ override: lying })
     const r = await runGranny(f.host, input())
     expect(f.probes[0]).toBe('git rev-parse --verify HEAD')
-    expect(f.probes[1]).toBe('git rev-list --count start1..HEAD')
-    expect(f.commands[0]).toContain('codex exec review --base start1 -o')
-    expect(f.logs).toContain('core: the implementer reported startSha made-up, but HEAD was start1 before it ran - reviewing start1...HEAD')
+    expect(f.probes[1]).toBe('git rev-list --count deadbee1..HEAD')
+    expect(f.commands[0]).toContain('codex exec review --base deadbee1 -o')
+    expect(f.logs).toContain('core: the implementer reported startSha made-up, but HEAD was deadbee1 before it ran - reviewing deadbee1...HEAD')
     expect(r.stages[0]).toMatchObject({ outcome: 'clean', implementation: { startSha: 'made-up' } })
   })
 
   it('reads HEAD through a granny helper agent on hosts without a shell', async () => {
     const f = fakeHost({ name: 'claude-code', direct: false, override: lying })
     await runGranny(f.host, input())
-    expect(f.probes).toEqual([`cd /work/repo && git rev-parse --verify HEAD`, `cd /work/repo && git rev-list --count start1..HEAD`, `cd /work/repo && git status --porcelain`])
-    expect(f.calls.find(c => c.label === 'review core r1 codex')!.prompt).toContain('--base start1')
+    expect(f.probes).toEqual([`cd /work/repo && git rev-parse --verify HEAD`, `cd /work/repo && git rev-list --count deadbee1..HEAD`, `cd /work/repo && git status --porcelain`])
+    expect(f.calls.find(c => c.label === 'review core r1 codex')!.prompt).toContain('--base deadbee1')
   })
 
   it('falls back to the base, and says so, when HEAD cannot be read', async () => {
@@ -495,8 +495,8 @@ describe('the base a stage review diffs against', () => {
     const f = fakeHost({ commits: 0 })
     const r = await runGranny(f.host, input())
     expect(r.stages[0]).toMatchObject({ stage: 'core', outcome: 'no-changes', rounds: 0, residual: [], unresolved: [], history: [] })
-    expect(r.stages[0]!.note).toBe('the implementer made no commit: start1..HEAD is empty, so there was nothing to review')
-    expect(f.probes).toEqual(['git rev-parse --verify HEAD', 'git rev-list --count start1..HEAD', 'git status --porcelain'])
+    expect(r.stages[0]!.note).toBe('the implementer made no commit: deadbee1..HEAD is empty, so there was nothing to review')
+    expect(f.probes).toEqual(['git rev-parse --verify HEAD', 'git rev-list --count deadbee1..HEAD', 'git status --porcelain'])
     expect(f.calls.filter(c => c.kind === 'implementation')).toHaveLength(1)
     expect(f.commands).toHaveLength(0)
     expect(f.calls.some(c => c.label.startsWith('review'))).toBe(false)
@@ -504,7 +504,7 @@ describe('the base a stage review diffs against', () => {
   })
 
   it('does not start the stages that build on a no-changes stage, and runs the others', async () => {
-    const f = fakeHost({ commits: base => (base === 'start1' ? 0 : 1) })
+    const f = fakeHost({ commits: base => (base === 'deadbee1' ? 0 : 1) })
     const r = await runGranny(
       f.host,
       input({ stages: [{ name: 'a', task: 'A' }, { name: 'b', task: 'B', after: [1] }, { name: 'c', task: 'C', after: [] }, { name: 'd', task: 'D', after: [2] }], config: { maxParallel: 1 } }),
@@ -516,7 +516,7 @@ describe('the base a stage review diffs against', () => {
   })
 
   it('keeps running the later stages of a sequential run that do not build on the no-changes stage', async () => {
-    const f = fakeHost({ commits: base => (base === 'start1' ? 0 : 1) })
+    const f = fakeHost({ commits: base => (base === 'deadbee1' ? 0 : 1) })
     const other = '/work/other'
     const r = await runGranny(
       f.host,
@@ -526,10 +526,67 @@ describe('the base a stage review diffs against', () => {
   })
 })
 
+describe("the Claude Code helper's note", () => {
+  const helper = (extra: FakeOptions = {}) => fakeHost({ name: 'claude-code', direct: false, ...extra })
+  const reviewBase = (f: ReturnType<typeof fakeHost>) => /--base (\S+)/.exec(f.calls.find(c => c.label === 'review core r1 codex')!.prompt)?.[1]
+  const printing = (f: ReturnType<typeof fakeHost>, edit: (prompt: string, output: string) => string) => {
+    const agent = f.host.agent.bind(f.host)
+    f.host.agent = async req => {
+      const r = (await agent(req)) as { output?: unknown } | null
+      return req.kind === 'command' && r && typeof r.output === 'string' ? { ...r, output: edit(req.prompt, r.output) } : r
+    }
+  }
+
+  it('stays out of the HEAD and commit-count reads when the command ran', async () => {
+    const f = helper({ note: 'Ran the command via the helper.' })
+    const r = await runGranny(f.host, input())
+    expect(reviewBase(f)).toBe('deadbee1')
+    expect(f.logs.filter(l => l.includes('could not'))).toEqual([])
+    expect(f.logs).toContain("head core: the helper's note, kept out of the command's output: Ran the command via the helper.")
+    expect(r.stages[0]!.outcome).toBe('clean')
+  })
+
+  it('does not hide an empty stage: no commit still ends it no-changes', async () => {
+    const f = helper({ note: 'Ran the command via the helper.', commits: 0 })
+    const r = await runGranny(f.host, input())
+    expect(r.stages[0]).toMatchObject({ outcome: 'no-changes', note: 'the implementer made no commit: deadbee1..HEAD is empty, so there was nothing to review' })
+    expect(f.calls.some(c => c.label.startsWith('review'))).toBe(false)
+  })
+
+  it('never becomes the review base when it is one word', async () => {
+    const f = helper({ note: 'Done' })
+    await runGranny(f.host, input())
+    expect(reviewBase(f)).toBe('deadbee1')
+  })
+
+  it('takes the SHA and the count from the line that has their shape, not the last line', async () => {
+    const f = helper({ commits: 0 })
+    printing(f, (prompt, output) => (prompt.includes('git rev-parse --verify HEAD') ? `${output}Done\n` : prompt.includes('git rev-list --count') ? `${output}that is the count\n` : output))
+    const r = await runGranny(f.host, input())
+    expect(r.stages[0]).toMatchObject({ outcome: 'no-changes', note: 'the implementer made no commit: deadbee1..HEAD is empty, so there was nothing to review' })
+  })
+
+  it('reads no SHA from a word that is not hex, and falls back to the base', async () => {
+    const f = helper()
+    printing(f, (prompt, output) => (prompt.includes('git rev-parse --verify HEAD') ? 'Done\n' : output))
+    await runGranny(f.host, input())
+    expect(reviewBase(f)).toBe('main')
+    expect(f.logs.some(l => l.startsWith('core: could not read HEAD before the implementer ran - reviewing main...HEAD instead'))).toBe(true)
+  })
+
+  it('is still in the output when the command did not run', async () => {
+    const f = helper()
+    const agent = f.host.agent.bind(f.host)
+    f.host.agent = async req => (req.kind === 'command' && req.prompt.includes('git rev-parse --verify HEAD') ? { ran: false, exitCode: 127, output: '', note: 'git is not installed' } : agent(req))
+    await runGranny(f.host, input())
+    expect(f.logs.some(l => l.startsWith('core: could not read HEAD before the implementer ran - reviewing main...HEAD instead (exit 127)') && l.endsWith('git is not installed'))).toBe(true)
+  })
+})
+
 describe('red gates', () => {
   const gates = (red: string[]) => (req: { kind: string; label: string }) =>
     req.kind === 'implementation'
-      ? { startSha: 'start1', headSha: 'h', gatesGreen: !red.includes(req.label), gates: red.includes(req.label) ? `${req.label}: 3 tests fail` : 'all green', commits: ['c'], untested: '' }
+      ? { startSha: 'deadbee1', headSha: 'h', gatesGreen: !red.includes(req.label), gates: red.includes(req.label) ? `${req.label}: 3 tests fail` : 'all green', commits: ['c'], untested: '' }
       : undefined
 
   it('end a stage gates-red, not clean, when the review finds nothing after an implementer left them red', async () => {
@@ -590,7 +647,7 @@ describe('the worktree', () => {
       expect(prompt).toContain(`Working repo: ${WT}, branch \`feat/x\``)
       expect(prompt).toContain(`Prefix EVERY shell command with \`cd ${WT} &&\``)
     }
-    expect(f.calls.find(c => c.label === 'review core r1 opus')!.prompt).toContain(`\`cd ${WT} && git diff start1...HEAD\``)
+    expect(f.calls.find(c => c.label === 'review core r1 opus')!.prompt).toContain(`\`cd ${WT} && git diff deadbee1...HEAD\``)
     expect(f.calls.find(c => c.label === 'judge core r1')!.prompt).toContain(`Repo ${WT}, branch feat/x`)
   })
 
@@ -598,7 +655,7 @@ describe('the worktree', () => {
     const f = fakeHost({ worktree: WT })
     await runGranny(f.host, input({ config: { reviewers: [GLM] } }))
     expect(f.commands[0]).toContain(`Repo ${WT}, branch`)
-    expect(f.commands[0]).toContain(`cd ${WT} && git diff start1...HEAD`)
+    expect(f.commands[0]).toContain(`cd ${WT} && git diff deadbee1...HEAD`)
     expect(f.commands[0]).not.toContain('/work/repo ')
   })
 
@@ -717,8 +774,8 @@ describe('several reviewers', () => {
     const f = fakeHost()
     await runGranny(f.host, input({ config: { reviewers: [{ name: 'codex' }, { name: 'cli-2', engine: 'codex', model: 'gpt-5.5' }, GLM] } }))
     expect(f.commands).toHaveLength(3)
-    expect(f.commands[0]).toContain('rm -f .granny/review-core-r1-codex.md .granny/review-core-r1-codex.log && codex exec review --base start1 -o .granny/review-core-r1-codex.md > .granny/review-core-r1-codex.log 2>&1;')
-    expect(f.commands[1]).toContain('codex exec review --base start1 -m gpt-5.5 -o .granny/review-core-r1-cli-2.md > .granny/review-core-r1-cli-2.log 2>&1;')
+    expect(f.commands[0]).toContain('rm -f .granny/review-core-r1-codex.md .granny/review-core-r1-codex.log && codex exec review --base deadbee1 -o .granny/review-core-r1-codex.md > .granny/review-core-r1-codex.log 2>&1;')
+    expect(f.commands[1]).toContain('codex exec review --base deadbee1 -m gpt-5.5 -o .granny/review-core-r1-cli-2.md > .granny/review-core-r1-cli-2.log 2>&1;')
     expect(f.commands[2]).toContain('rm -f .granny/review-core-r1-glm.md .granny/review-core-r1-glm.log && glm-review ')
     expect(f.logs).toContain('core r1 codex: reviewer: codex CLI (codex exec review)')
     expect(f.logs).toContain('core r1 cli-2: reviewer: codex CLI (codex exec review)')
@@ -731,11 +788,11 @@ describe('several reviewers', () => {
     const prompt = commandReviewPrompt(
       { repo: '/work/repo', branch: 'feat/x', base: 'main', context: 'Read plans/x.md first.\nThen plans/y.md.', config: resolveConfig([{ reviewers: [GLM] }]) },
       'core',
-      'start1',
+      'deadbee1',
       CORE_TASK,
     )
     expect(prompt).not.toContain('\n')
-    expect(prompt).toContain('git diff start1...HEAD')
+    expect(prompt).toContain('git diff deadbee1...HEAD')
     expect(prompt).toContain('- [P1] Title — path/to/file.ts:12')
     expect(prompt).toContain('Read plans/x.md first. Then plans/y.md.')
     expect(f.calls.find(c => c.kind === 'command')!.label).toBe('review core r1 glm')
@@ -1239,7 +1296,7 @@ describe('the review script in a real shell', () => {
       ['P1', 'Include the first item in the cart total'],
       ['P2', 'Restore discount percentage bounds validation'],
     ])
-    expect(companionCalls()).toEqual([{ version: '1.0.10', argv: ['review', '--wait', '--base', 'start1', '--scope', 'branch'], cwd: realpathSync(repo) }])
+    expect(companionCalls()).toEqual([{ version: '1.0.10', argv: ['review', '--wait', '--base', 'deadbee1', '--scope', 'branch'], cwd: realpathSync(repo) }])
     expect(f.logs).toContain(`core r1 codex: reviewer: codex-plugin review (${companionDir('1.0.10')}/codex-companion.mjs)`)
     expect(readFileSync(join(repo, workDir, 'review-core-r1-codex.md'), 'utf8')).toBe(readFileSync(join(FIXTURES, 'codex-plugin-review.md'), 'utf8'))
     expect(readFileSync(join(repo, workDir, 'review-core-r1-codex.log'), 'utf8')).toBe('[codex] progress\n')
@@ -1261,7 +1318,7 @@ describe('the review script in a real shell', () => {
     mkdirSync(config)
     const f = fakeHost({ name: 'claude-code', direct: false, shell: shell({ CLAUDE_CONFIG_DIR: config }), scores: [{ 'codex-F1': 90 }] })
     const r = await runGranny(f.host, input({ repo, config: { maxRounds: 1, workDir } }))
-    expect(titles(r)).toEqual([['P1', 'Reviewed start1']])
+    expect(titles(r)).toEqual([['P1', 'Reviewed deadbee1']])
     expect(companionCalls()).toEqual([])
     expect(f.logs).toContain(
       `core r1 codex: reviewer: codex CLI (codex exec review) - no Codex plugin companion at ${config}/plugins/cache/openai-codex/codex/<version>/scripts/codex-companion.mjs`,
@@ -1283,7 +1340,7 @@ describe('the review script in a real shell', () => {
   })
 
   it('fails the review when the companion exits 0 but Codex printed no review', async () => {
-    installCompanion('1.0.10', '# Codex Review\n\nTarget: branch diff against start1\n\nCodex review completed without any stdout output.\n')
+    installCompanion('1.0.10', '# Codex Review\n\nTarget: branch diff against deadbee1\n\nCodex review completed without any stdout output.\n')
     const f = fakeHost({ name: 'claude-code', direct: false, shell: shell() })
     const r = await runGranny(f.host, input({ repo, config: { maxRounds: 1, workDir } }))
     expect(r.stages[0]).toMatchObject({ outcome: 'review-failed', rounds: 1 })
@@ -1294,7 +1351,7 @@ describe('the review script in a real shell', () => {
   it('falls back to the Codex CLI on Claude Code with engine auto when no companion is installed, and says why', async () => {
     const f = fakeHost({ name: 'claude-code', direct: false, shell: shell(), scores: [{ 'codex-F1': 90 }] })
     const r = await runGranny(f.host, input({ repo, config: { maxRounds: 1, workDir } }))
-    expect(titles(r)).toEqual([['P1', 'Reviewed start1']])
+    expect(titles(r)).toEqual([['P1', 'Reviewed deadbee1']])
     expect(f.logs).toContain(`core r1 codex: reviewer: codex CLI (codex exec review) - ${missing()}`)
   })
 
@@ -1302,7 +1359,7 @@ describe('the review script in a real shell', () => {
     installCompanions()
     const f = fakeHost({ name: 'claude-code', direct: false, shell: withoutNode(), scores: [{ 'codex-F1': 90 }] })
     const r = await runGranny(f.host, input({ repo, config: { maxRounds: 1, workDir } }))
-    expect(titles(r)).toEqual([['P1', 'Reviewed start1']])
+    expect(titles(r)).toEqual([['P1', 'Reviewed deadbee1']])
     expect(companionCalls()).toEqual([])
     expect(f.logs).toContain(`core r1 codex: reviewer: codex CLI (codex exec review) - ${noNode()}`)
   })
@@ -1388,7 +1445,7 @@ describe('the review script in a real shell', () => {
       writeFileSync(join(companionDir('1.0.10'), 'session-lifecycle-hook.mjs'), sessionEndHook(record))
       const f = fakeHost({ name: 'claude-code', direct: false, shell: shell(), scores: [{ 'codex-F1': 90 }] })
       const r = await runGranny(f.host, input({ repo, config: { maxRounds: 1, workDir } }))
-      expect(titles(r)).toEqual([['P1', 'Reviewed start1']])
+      expect(titles(r)).toEqual([['P1', 'Reviewed deadbee1']])
       expect(records(record)).toEqual([])
     })
   })
@@ -1397,7 +1454,7 @@ describe('the review script in a real shell', () => {
     installCompanions()
     const f = fakeHost({ shell: shell(), scores: [{ 'codex-F1': 90 }] })
     const r = await runGranny(f.host, input({ repo, config: { maxRounds: 1, workDir } }))
-    expect(titles(r)).toEqual([['P1', 'Reviewed start1']])
+    expect(titles(r)).toEqual([['P1', 'Reviewed deadbee1']])
     expect(companionCalls()).toEqual([])
     expect(f.logs).toContain('core r1 codex: reviewer: codex CLI (codex exec review)')
   })
@@ -1407,7 +1464,7 @@ describe('the review script in a real shell', () => {
     const f = fakeHost({ shell: shell(), scores: [{ 'codex-F1': 90, 'codex-F2': 90 }] })
     const r = await runGranny(f.host, input({ repo, config: { maxRounds: 1, workDir, reviewers: [{ name: 'codex', engine: 'codex-plugin', model: 'gpt-5.5' }] } }))
     expect(titles(r).map(([, title]) => title)).toEqual(['Include the first item in the cart total', 'Restore discount percentage bounds validation'])
-    expect(companionCalls().map(c => [c.version, c.argv])).toEqual([['1.0.10', ['review', '--wait', '--base', 'start1', '--scope', 'branch', '-m', 'gpt-5.5']]])
+    expect(companionCalls().map(c => [c.version, c.argv])).toEqual([['1.0.10', ['review', '--wait', '--base', 'deadbee1', '--scope', 'branch', '-m', 'gpt-5.5']]])
   })
 
   for (const [label, host] of [['Claude Code', 'claude-code'], ['opencode', 'opencode']] as const) {
@@ -1428,7 +1485,7 @@ describe('the review script in a real shell', () => {
     const focus = "don't skip $HOME; -x `id`"
     const f = fakeHost({ name: 'claude-code', direct: false, shell: shell(), scores: [{ 'codex-F1': 90, 'codex-F2': 90 }] })
     const r = await runGranny(f.host, input({ repo, config: { maxRounds: 1, workDir, reviewers: [{ name: 'codex', mode: 'adversarial-review', focus, model: 'gpt-5.5' }] } }))
-    expect(companionCalls().map(c => c.argv)).toEqual([['adversarial-review', '--wait', '--base', 'start1', '--scope', 'branch', '-m', 'gpt-5.5', '--', focus]])
+    expect(companionCalls().map(c => c.argv)).toEqual([['adversarial-review', '--wait', '--base', 'deadbee1', '--scope', 'branch', '-m', 'gpt-5.5', '--', focus]])
     expect(titles(r)).toEqual([
       ['P1', 'Cart totals exclude the first item'],
       ['P1', 'Out-of-range discounts now produce invalid totals'],
@@ -1462,7 +1519,7 @@ describe('the review script in a real shell', () => {
       const glm = { name: 'glm', engine: 'command', command: 'fake-llm -m {model} {prompt}', model: 'opencode/glm-5.3-flash-free' }
       const f = fakeHost({ name: host, direct: host === 'opencode', shell: shell({ GRANNY_PROMPT_RECORD: promptFile }), scores: [{ 'glm-F1': 90 }] })
       const r = await runGranny(f.host, input({ repo, context, config: { maxRounds: 1, workDir, reviewers: [glm] } }))
-      const expected = commandReviewPrompt({ repo, branch: 'feat/x', base: 'main', context, config: resolveConfig([{ reviewers: [glm] }]) }, 'core', 'start1', CORE_TASK)
+      const expected = commandReviewPrompt({ repo, branch: 'feat/x', base: 'main', context, config: resolveConfig([{ reviewers: [glm] }]) }, 'core', 'deadbee1', CORE_TASK)
       expect(readFileSync(promptFile, 'utf8')).toBe(expected)
       expect(expected).toContain("It's `important`: $HOME and $(id).")
       expect(r.stages[0]!.history[0]!.findings.map(x => [x.id, x.reviewer, x.title])).toEqual([['glm-F1', 'glm', 'Reviewed with opencode/glm-5.3-flash-free']])
@@ -1473,8 +1530,8 @@ describe('the review script in a real shell', () => {
   it('runs the default codex command in a repo and work dir with spaces and a quote', async () => {
     const f = fakeHost({ shell: shell(), scores: [{ 'codex-F1': 90 }] })
     const r = await runGranny(f.host, input({ repo, config: { maxRounds: 1, workDir } }))
-    expect(r.stages[0]!.history[0]!.findings.map(x => x.title)).toEqual(['Reviewed start1'])
-    expect(readFileSync(join(repo, workDir, 'review-core-r1-codex.md'), 'utf8')).toContain('Reviewed start1')
+    expect(r.stages[0]!.history[0]!.findings.map(x => x.title)).toEqual(['Reviewed deadbee1'])
+    expect(readFileSync(join(repo, workDir, 'review-core-r1-codex.md'), 'utf8')).toContain('Reviewed deadbee1')
     expect(readFileSync(join(repo, workDir, 'review-core-r1-codex.log'), 'utf8')).toBe('codex progress\n')
   })
 
@@ -1482,7 +1539,7 @@ describe('the review script in a real shell', () => {
     const f = fakeHost({ name: 'claude-code', direct: false, shell: shell(), scores: [{ 'codex-F1': 90 }] })
     const r = await runGranny(f.host, input({ repo, config: { maxRounds: 1, workDir } }))
     expect(f.commands[0]!.startsWith('cd ')).toBe(true)
-    expect(r.stages[0]!.history[0]!.findings.map(x => x.title)).toEqual(['Reviewed start1'])
+    expect(r.stages[0]!.history[0]!.findings.map(x => x.title)).toEqual(['Reviewed deadbee1'])
     expect(existsSync(join(repo, workDir, 'review-core-r1-codex.md'))).toBe(true)
   })
 
