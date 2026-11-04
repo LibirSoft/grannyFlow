@@ -1,4 +1,5 @@
-import type { Declined, Finding } from './types'
+import { FIX_COSTS, IMPACTS, LIKELIHOODS, SCOPES, VERDICTS } from './types'
+import type { Decision, Declined, Finding, FixCost, Impact, Likelihood } from './types'
 
 const MARKER = /^\s*[-*]\s*\[(P[0-3]|[A-Za-z]+)\](.*)$/
 const WORD_SEVERITY = new Map([['critical', 'P0'], ['high', 'P1'], ['medium', 'P2'], ['low', 'P3']])
@@ -105,6 +106,12 @@ export function reviewFailure(text: string): string | undefined {
 export const isBlocker =(f: Pick<Finding, 'severity'>): boolean =>
   /^\s*(p0|p1|critical|high)\b/i.test(String(f.severity ?? ''))
 
+const JUDGED = ['verdict', 'impact', 'likelihood', 'fixCost', 'scope', 'evidence', 'score', 'priority', 'reason', 'decision'] as const
+
+const fixes = (f: Finding) => f.decision?.action !== 'residual'
+const rank = (f: Finding) => f.priority ?? f.score ?? -1
+
+/** Of merged copies the strongest one's judgement wins: a fix one first, then the higher priority. */
 export function mergeDuplicates(findings: Finding[], duplicateOf: Map<string, string>): { findings: Finding[]; merged: Array<{ id: string; into: string }> } {
   const ids = new Set(findings.map(f => f.id))
   const keeper = (id: string): string => {
@@ -127,29 +134,152 @@ export function mergeDuplicates(findings: Finding[], duplicateOf: Map<string, st
     .map(f => {
       const dups = findings.filter(d => into.get(d.id) === f.id)
       if (!dups.length) return f
-      const group = [f, ...dups]
+      const top = [f, ...dups].reduce((a, b) => (fixes(b) !== fixes(a) ? (fixes(b) ? b : a) : rank(b) > rank(a) ? b : a))
       const merged: Finding = { ...f, duplicates: dups.map(d => d.id) }
-      if (group.some(g => g.score === undefined)) {
-        delete merged.score
-        delete merged.reason
-      } else {
-        const top = group.reduce((a, b) => (b.score! > a.score! ? b : a))
-        merged.score = top.score
-        merged.reason = top.reason
+      for (const key of JUDGED) {
+        if (top[key] === undefined) delete merged[key]
+        else (merged as unknown as Record<string, unknown>)[key] = top[key]
       }
       return merged
     })
   return { findings: kept, merged: [...into].map(([id, k]) => ({ id, into: k })) }
 }
 
-export function triage(findings: Finding[], threshold: number, repeatsDeclined: (f: Finding) => boolean = () => false): { accepted: Finding[]; residual: Finding[] } {
-  const accepted: Finding[] = []
-  const residual: Finding[] = []
-  for (const f of findings) {
-    if ((isBlocker(f) && !repeatsDeclined(f)) || f.score === undefined || f.score > threshold) accepted.push(f)
-    else residual.push(f)
+export interface Policy {
+  threshold: number
+  alwaysFix: Impact[]
+}
+
+const PRIORITY: Record<Impact, Record<Likelihood, number>> = {
+  critical: { common: 100, edge: 95, rare: 90 },
+  major: { common: 90, edge: 80, rare: 65 },
+  moderate: { common: 75, edge: 55, rare: 35 },
+  minor: { common: 35, edge: 25, rare: 15 },
+  none: { common: 0, edge: 0, rare: 0 },
+}
+const COST: Record<FixCost, number> = { trivial: 15, small: 0, large: -15 }
+
+export function priorityOf(impact: Impact, likelihood: Likelihood, fixCost: FixCost): number {
+  if (impact === 'none') return 0
+  return Math.max(0, Math.min(100, PRIORITY[impact][likelihood] + COST[fixCost]))
+}
+
+const PATH_LINE = /\S+:\d+/
+const ENUMS = { verdict: VERDICTS, impact: IMPACTS, likelihood: LIKELIHOODS, fixCost: FIX_COSTS, scope: SCOPES } as const
+const lower = (impact: Impact): Impact => IMPACTS[Math.min(IMPACTS.indexOf(impact) + 1, IMPACTS.length - 1)]!
+
+type Classified =
+  | { kind: 'classified'; fields: Required<Pick<Finding, 'verdict' | 'impact' | 'likelihood' | 'fixCost' | 'scope' | 'evidence'>>; note: string }
+  | { kind: 'score'; score: number }
+  | { kind: 'none'; why: string }
+
+function classify(entry: Record<string, unknown> | undefined): Classified {
+  if (!entry) return { kind: 'none', why: 'not judged' }
+  const keys = [...Object.keys(ENUMS), 'evidence'] as const
+  if (keys.every(k => entry[k] === undefined)) {
+    return typeof entry.score === 'number' && Number.isFinite(entry.score) ? { kind: 'score', score: entry.score } : { kind: 'none', why: 'not judged' }
   }
-  return { accepted, residual }
+  const problems: string[] = []
+  for (const [key, values] of Object.entries(ENUMS)) {
+    const v = entry[key]
+    if (v === undefined) problems.push(`${key} missing`)
+    else if (!(values as readonly unknown[]).includes(v)) problems.push(`${key} ${JSON.stringify(v)}`)
+  }
+  const evidence = typeof entry.evidence === 'string' ? entry.evidence.trim() : ''
+  if (!evidence) problems.push(entry.evidence === undefined ? 'evidence missing' : `evidence ${JSON.stringify(entry.evidence)}`)
+  if (problems.length) return { kind: 'none', why: `invalid classification: ${problems.join(', ')}` }
+  const fields = { ...(entry as Required<Pick<Finding, 'verdict' | 'impact' | 'likelihood' | 'fixCost' | 'scope'>>), evidence }
+  let note = ''
+  if (fields.verdict !== 'unverified' && !PATH_LINE.test(evidence)) {
+    fields.verdict = 'unverified'
+    note = 'no path:line in the evidence, so unverified: '
+  }
+  if (fields.verdict === 'unverified' && fields.impact !== 'none') {
+    note = ` - ${note || 'unverified: '}impact lowered from ${fields.impact}`
+    fields.impact = lower(fields.impact)
+  } else note = ''
+  return {
+    kind: 'classified',
+    fields: { verdict: fields.verdict, impact: fields.impact, likelihood: fields.likelihood, fixCost: fields.fixCost, scope: fields.scope, evidence },
+    note,
+  }
+}
+
+/** The file:line spots evidence cites, by file name and line, so `a.ts:3`, src/a.ts:3 and src/a.ts:3:10 are one spot. */
+const pathLines = (evidence = ''): string[] =>
+  [...evidence.matchAll(/([^\s`'"()[\]{}<>,;:]+):(\d+)/g)].map(m => `${m[1]!.split('/').pop()}:${m[2]}`)
+
+/**
+ * A repeat cannot drop below the earlier entry's impact and likelihood (both lists run worst first) unless it is
+ * refuted with a path:line the earlier evidence did not have. Returns what it raised.
+ */
+function ratchet(fields: { verdict: string; impact: Impact; likelihood: Likelihood; evidence: string }, label: string, earlier: Finding): string | undefined {
+  if (!earlier.impact || !earlier.likelihood) return undefined
+  const before = pathLines(earlier.evidence)
+  if (fields.verdict === 'refuted' && pathLines(fields.evidence).some(p => !before.includes(p))) return undefined
+  const raised: string[] = []
+  if (IMPACTS.indexOf(fields.impact) > IMPACTS.indexOf(earlier.impact)) {
+    raised.push(`impact ${fields.impact} -> ${earlier.impact}`)
+    fields.impact = earlier.impact
+  }
+  if (LIKELIHOODS.indexOf(fields.likelihood) > LIKELIHOODS.indexOf(earlier.likelihood)) {
+    raised.push(`likelihood ${fields.likelihood} -> ${earlier.likelihood}`)
+    fields.likelihood = earlier.likelihood
+  }
+  return raised.length ? `repeat of ${label}: ${raised.join(', ')}` : undefined
+}
+
+/**
+ * Applies the judge's entry for a finding (undefined when the judge did not judge it) and the decision table: the first
+ * matching rule wins. A finding the judge scored the old way (a number, no classification) is cut by the threshold.
+ * earlierOf finds the ledger entry a repeat names, for the ratchet.
+ */
+export function decide(
+  f: Finding,
+  entry: Record<string, unknown> | undefined,
+  policy: Policy,
+  repeatsDeclined: (f: Finding) => boolean = () => false,
+  earlierOf: (f: Finding) => Finding | undefined = () => undefined,
+): Finding {
+  const out: Finding = { ...f }
+  for (const key of JUDGED) delete out[key]
+  if (typeof entry?.reason === 'string') out.reason = entry.reason
+  const c = classify(entry)
+  let raised: string | undefined
+  const done = (rule: number, action: Decision['action'], why: string, attention?: boolean): Finding => ({
+    ...out,
+    decision: { rule, action, why, ...(attention ? { attention: true as const } : {}), ...(raised ? { raised } : {}) },
+  })
+  if (c.kind === 'classified') {
+    const earlier = f.repeatOf === undefined ? undefined : earlierOf(f)
+    if (earlier) raised = ratchet(c.fields, f.repeatOf!, earlier)
+    Object.assign(out, c.fields)
+    out.priority = priorityOf(c.fields.impact, c.fields.likelihood, c.fields.fixCost)
+  } else if (c.kind === 'score') out.score = c.score
+  if (isBlocker(f) && !repeatsDeclined(out)) return done(1, 'fix', 'P0/P1')
+  if (c.kind === 'none') return done(2, 'fix', c.why)
+  if (c.kind === 'score') {
+    return c.score > policy.threshold
+      ? done(7, 'fix', `score ${c.score} > threshold ${policy.threshold} (numeric score, no classification)`)
+      : done(8, 'residual', `under the bar: score ${c.score} (numeric score, no classification)`)
+  }
+  const { verdict, impact, likelihood, fixCost, scope } = c.fields
+  const p = out.priority!
+  const classes = `${impact}/${likelihood}/${fixCost}`
+  if (verdict === 'refuted') return done(3, 'residual', 'refuted')
+  if (scope === 'other-stage') return done(4, 'residual', 'left to the stage that owns it')
+  if (scope === 'pre-existing') {
+    const attention = impact === 'critical' || impact === 'major'
+    return done(5, 'residual', attention ? `pre-existing - ATTENTION: impact ${impact}` : 'pre-existing', attention)
+  }
+  if (policy.alwaysFix.includes(impact)) return done(6, 'fix', `impact ${impact} is in alwaysFix (${classes} -> ${p})${c.note}`)
+  if (p > policy.threshold) return done(7, 'fix', `priority ${p} > threshold ${policy.threshold} (${classes})${c.note}`)
+  return done(8, 'residual', `under the bar: ${classes} -> ${p}${c.note}`)
+}
+
+/** Splits decided findings; one without a decision is fixed. */
+export function triage(findings: Finding[]): { accepted: Finding[]; residual: Finding[] } {
+  return { accepted: findings.filter(fixes), residual: findings.filter(f => !fixes(f)) }
 }
 
 export function declinedOf(value: unknown, sent: Finding[]): { declined: Declined[]; unknown: string[] } {

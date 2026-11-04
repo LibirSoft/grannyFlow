@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'bun:test'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { declinedOf, isBlocker, parseCodexReview, reviewFailure, saysNoFindings, triage } from '../src/core/review'
-import type { Finding } from '../src/core/types'
+import { decide, declinedOf, isBlocker, mergeDuplicates, parseCodexReview, priorityOf, reviewFailure, saysNoFindings, triage } from '../src/core/review'
+import type { Finding, Impact } from '../src/core/types'
 
 const fixture = (name: string) => readFileSync(join(import.meta.dir, 'fixtures', name), 'utf8')
 const crlf = (text: string) => text.replace(/\n/g, '\r\n')
@@ -261,20 +261,27 @@ Raw final message:
 })
 
 describe('triage', () => {
-  const f = (id: string, severity: string, score?: number): Finding => ({ id, severity, file: 'a', title: id, detail: '', score })
+  const policy = { threshold: 70, alwaysFix: ['critical', 'major'] as Impact[] }
+  const f = (id: string, severity: string, score?: number): Finding => ({ id, severity, file: 'a', title: id, detail: '', ...(score === undefined ? {} : { score }) })
+  const scored = (findings: Finding[], repeatsDeclined?: (f: Finding) => boolean) =>
+    triage(findings.map(x => decide(x, x.score === undefined ? undefined : { score: x.score }, policy, repeatsDeclined)))
 
-  it('sends P0/P1 regardless of score and others strictly above the threshold', () => {
-    const { accepted, residual } = triage(
-      [f('a', 'P1', 5), f('b', 'P2', 70), f('c', 'P2', 71), f('d', 'P3', undefined), f('e', 'critical', 0), f('g', 'P2', 69)],
-      70,
-    )
+  it('falls back to the numeric score: P0/P1 regardless of it, others strictly above the threshold', () => {
+    const { accepted, residual } = scored([f('a', 'P1', 5), f('b', 'P2', 70), f('c', 'P2', 71), f('d', 'P3', undefined), f('e', 'critical', 0), f('g', 'P2', 69)])
     expect(accepted.map(x => x.id)).toEqual(['a', 'c', 'd', 'e'])
     expect(residual.map(x => x.id)).toEqual(['b', 'g'])
+    expect(accepted.map(x => x.decision)).toEqual([
+      { rule: 1, action: 'fix', why: 'P0/P1' },
+      { rule: 7, action: 'fix', why: 'score 71 > threshold 70 (numeric score, no classification)' },
+      { rule: 2, action: 'fix', why: 'not judged' },
+      { rule: 1, action: 'fix', why: 'P0/P1' },
+    ])
+    expect(residual[0]!.decision).toEqual({ rule: 8, action: 'residual', why: 'under the bar: score 70 (numeric score, no classification)' })
   })
 
   it('keeps a P0/P1 at or below the threshold residual only when it repeats a declined finding', () => {
     const repeat = (id: string, of: string): Finding => ({ ...f(id, 'P1', 20), repeatOf: of })
-    const { accepted, residual } = triage([repeat('a', 'r1/x-F1'), repeat('b', 'r1/x-F2'), f('c', 'P1', 20)], 70, x => x.repeatOf === 'r1/x-F1')
+    const { accepted, residual } = scored([repeat('a', 'r1/x-F1'), repeat('b', 'r1/x-F2'), f('c', 'P1', 20)], x => x.repeatOf === 'r1/x-F1')
     expect(accepted.map(x => x.id)).toEqual(['b', 'c'])
     expect(residual.map(x => x.id)).toEqual(['a'])
   })
@@ -282,6 +289,255 @@ describe('triage', () => {
   it('recognises blocker severities case-insensitively', () => {
     expect(['P0', 'p1', 'High', 'CRITICAL: x'].every(severity => isBlocker({ severity }))).toBe(true)
     expect(['P2', 'P3', 'medium', ''].some(severity => isBlocker({ severity }))).toBe(false)
+  })
+})
+
+describe('the decision table', () => {
+  const policy = { threshold: 70, alwaysFix: ['critical', 'major'] as Impact[] }
+  const f = (id: string, severity = 'P2'): Finding => ({ id, severity, file: 'src/a.ts', line: 3, title: id, detail: '' })
+  const judge = (c: Record<string, unknown>) => ({
+    verdict: 'confirmed',
+    impact: 'moderate',
+    likelihood: 'common',
+    fixCost: 'small',
+    scope: 'in-scope',
+    evidence: 'src/a.ts:3 - call save twice',
+    reason: 'real',
+    ...c,
+  })
+  const decided = (c: Record<string, unknown>, opts: { severity?: string; policy?: typeof policy; declined?: boolean } = {}) =>
+    decide(f('x', opts.severity), judge(c), opts.policy ?? policy, () => opts.declined ?? false)
+
+  it('gives the four findings of the measured run their exact priority and outcome', () => {
+    const run = [
+      ['save race', { impact: 'critical', likelihood: 'edge', fixCost: 'small', evidence: 'Editor.tsx:225 - save, go back in history, the late response arrives, save again' }],
+      ['session lock', { impact: 'major', likelihood: 'edge', fixCost: 'small', evidence: 'Editor.tsx:252 - session expires, cancel the leave prompt, Save stays dead' }],
+      ['YAML merge', { impact: 'critical', likelihood: 'rare', fixCost: 'trivial', evidence: 'markdown.ts:108 - `<<: *defaults` drops published: false' }],
+      ['0 ay', { impact: 'minor', likelihood: 'edge', fixCost: 'trivial', evidence: 'format.ts:21 - exactly 30 days says 0 months' }],
+    ] as const
+    expect(run.map(([name, c]) => { const d = decided(c); return [name, d.priority, d.decision] })).toEqual([
+      ['save race', 95, { rule: 6, action: 'fix', why: 'impact critical is in alwaysFix (critical/edge/small -> 95)' }],
+      ['session lock', 80, { rule: 6, action: 'fix', why: 'impact major is in alwaysFix (major/edge/small -> 80)' }],
+      ['YAML merge', 100, { rule: 6, action: 'fix', why: 'impact critical is in alwaysFix (critical/rare/trivial -> 100)' }],
+      ['0 ay', 40, { rule: 8, action: 'residual', why: 'under the bar: minor/edge/trivial -> 40' }],
+    ])
+  })
+
+  it('computes the priority from the impact x likelihood table and the fix cost, clamped to 0..100', () => {
+    const table: Record<string, [number, number, number]> = {
+      critical: [100, 95, 90],
+      major: [90, 80, 65],
+      moderate: [75, 55, 35],
+      minor: [35, 25, 15],
+      none: [0, 0, 0],
+    }
+    for (const [impact, row] of Object.entries(table)) {
+      ;(['common', 'edge', 'rare'] as const).forEach((likelihood, i) => {
+        expect({ impact, likelihood, p: priorityOf(impact as Impact, likelihood, 'small') }).toEqual({ impact, likelihood, p: row[i]! })
+        expect(priorityOf(impact as Impact, likelihood, 'trivial')).toBe(impact === 'none' ? 0 : Math.min(100, row[i]! + 15))
+        expect(priorityOf(impact as Impact, likelihood, 'large')).toBe(impact === 'none' ? 0 : row[i]! - 15)
+      })
+    }
+  })
+
+  it('rule 1: a P0/P1 is fixed unless it repeats a finding the fixer declined', () => {
+    expect(decide(f('x', 'P1'), undefined, policy).decision).toEqual({ rule: 1, action: 'fix', why: 'P0/P1' })
+    expect(decided({ verdict: 'refuted' }, { severity: 'P0' }).decision).toEqual({ rule: 1, action: 'fix', why: 'P0/P1' })
+    expect(decided({ verdict: 'refuted' }, { severity: 'P1', declined: true }).decision).toEqual({ rule: 3, action: 'residual', why: 'refuted' })
+    expect(decided({ impact: 'critical' }, { severity: 'P1', declined: true }).decision!.rule).toBe(6)
+  })
+
+  it('rule 2: a finding without a classification, or with an invalid one, is fixed', () => {
+    expect(decide(f('x'), undefined, policy).decision).toEqual({ rule: 2, action: 'fix', why: 'not judged' })
+    expect(decide(f('x'), { reason: 'r' }, policy).decision).toEqual({ rule: 2, action: 'fix', why: 'not judged' })
+    expect(decided({ impact: 'severe', evidence: undefined }).decision).toEqual({
+      rule: 2,
+      action: 'fix',
+      why: 'invalid classification: impact "severe", evidence missing',
+    })
+    expect(decided({ scope: undefined, likelihood: 'never' }).decision).toEqual({ rule: 2, action: 'fix', why: 'invalid classification: likelihood "never", scope missing' })
+    expect(decided({ verdict: 'refuted', score: 10, fixCost: 'huge' }).decision!.rule).toBe(2)
+  })
+
+  it('rules 3 to 5: refuted, other-stage and pre-existing findings stay residual, a critical or major pre-existing one flagged', () => {
+    expect(decided({ verdict: 'refuted', impact: 'critical' }).decision).toEqual({ rule: 3, action: 'residual', why: 'refuted' })
+    expect(decided({ scope: 'other-stage', impact: 'critical' }).decision).toEqual({ rule: 4, action: 'residual', why: 'left to the stage that owns it' })
+    expect(decided({ scope: 'pre-existing', impact: 'moderate' }).decision).toEqual({ rule: 5, action: 'residual', why: 'pre-existing' })
+    expect(decided({ scope: 'pre-existing', impact: 'critical' }).decision).toEqual({ rule: 5, action: 'residual', why: 'pre-existing - ATTENTION: impact critical', attention: true })
+    expect(decided({ scope: 'pre-existing', impact: 'major' }).decision!.attention).toBe(true)
+  })
+
+  it('rule 6: an impact in alwaysFix is fixed whatever its likelihood, cost and the threshold', () => {
+    const d = decided({ impact: 'major', likelihood: 'rare', fixCost: 'large' }, { policy: { threshold: 99, alwaysFix: ['critical', 'major'] } })
+    expect([d.priority, d.decision]).toEqual([50, { rule: 6, action: 'fix', why: 'impact major is in alwaysFix (major/rare/large -> 50)' }])
+    expect(decided({ impact: 'moderate', likelihood: 'rare' }, { policy: { threshold: 70, alwaysFix: ['moderate'] } }).decision!.rule).toBe(6)
+  })
+
+  it('rules 7 and 8: the threshold cuts the priority strictly', () => {
+    expect(decided({ impact: 'moderate', likelihood: 'common', fixCost: 'small' }).decision).toEqual({ rule: 7, action: 'fix', why: 'priority 75 > threshold 70 (moderate/common/small)' })
+    expect(decided({ impact: 'moderate', likelihood: 'common' }, { policy: { threshold: 75, alwaysFix: [] } }).decision).toEqual({
+      rule: 8,
+      action: 'residual',
+      why: 'under the bar: moderate/common/small -> 75',
+    })
+  })
+
+  it('with alwaysFix [] only the threshold decides', () => {
+    const pure = { threshold: 70, alwaysFix: [] as Impact[] }
+    expect(decided({ impact: 'critical', likelihood: 'edge' }, { policy: pure }).decision!.rule).toBe(7)
+    expect(decided({ impact: 'major', likelihood: 'rare' }, { policy: pure }).decision).toEqual({ rule: 8, action: 'residual', why: 'under the bar: major/rare/small -> 65' })
+  })
+
+  it('keeps the fix-storm guards: minor never passes the default threshold, moderate only when common and not large', () => {
+    for (const likelihood of ['common', 'edge', 'rare']) {
+      for (const fixCost of ['trivial', 'small', 'large']) {
+        expect({ likelihood, fixCost, action: decided({ impact: 'minor', likelihood, fixCost }).decision!.action }).toEqual({ likelihood, fixCost, action: 'residual' })
+        const moderate = decided({ impact: 'moderate', likelihood, fixCost }).decision!.action
+        expect({ likelihood, fixCost, moderate }).toEqual({ likelihood, fixCost, moderate: likelihood === 'common' && fixCost !== 'large' ? 'fix' : 'residual' })
+      }
+    }
+    expect(decided({ impact: 'minor', likelihood: 'common', fixCost: 'trivial' }).priority).toBe(50)
+    expect(decided({ impact: 'moderate', likelihood: 'edge', fixCost: 'trivial' })).toMatchObject({ priority: 70, decision: { rule: 8, action: 'residual' } })
+    for (const c of [{ verdict: 'refuted' }, { scope: 'other-stage' }]) {
+      expect(decided({ impact: 'critical', likelihood: 'common', fixCost: 'trivial', ...c }).decision!.action).toBe('residual')
+    }
+  })
+
+  it('reads evidence without a path:line as unverified and lowers an unverified impact one class', () => {
+    const d = decided({ impact: 'critical', likelihood: 'edge', evidence: 'save twice and it breaks' })
+    expect([d.verdict, d.impact, d.priority, d.decision]).toEqual([
+      'unverified',
+      'major',
+      80,
+      { rule: 6, action: 'fix', why: 'impact major is in alwaysFix (major/edge/small -> 80) - no path:line in the evidence, so unverified: impact lowered from critical' },
+    ])
+    expect(decided({ verdict: 'unverified', impact: 'major', likelihood: 'edge' })).toMatchObject({ verdict: 'unverified', impact: 'moderate', priority: 55, decision: { rule: 8 } })
+    expect(decided({ verdict: 'refuted', impact: 'critical', likelihood: 'common', evidence: 'not real' })).toMatchObject({ verdict: 'unverified', impact: 'major', decision: { rule: 6, action: 'fix' } })
+    expect(decided({ verdict: 'unverified', impact: 'none' })).toMatchObject({ impact: 'none', priority: 0 })
+    expect(decided({ evidence: 'a.ts:12 - x' }).verdict).toBe('confirmed')
+  })
+
+  it('keeps the classification, the priority and the reason on the finding', () => {
+    expect(decided({ impact: 'minor' })).toMatchObject({
+      id: 'x',
+      verdict: 'confirmed',
+      impact: 'minor',
+      likelihood: 'common',
+      fixCost: 'small',
+      scope: 'in-scope',
+      evidence: 'src/a.ts:3 - call save twice',
+      reason: 'real',
+      priority: 35,
+    })
+  })
+})
+
+describe('the ratchet', () => {
+  const policy = { threshold: 70, alwaysFix: ['critical', 'major'] as Impact[] }
+  const earlier: Finding = {
+    id: 'codex-F1',
+    severity: 'P2',
+    file: 'src/a.ts',
+    line: 3,
+    title: 'late save',
+    detail: '',
+    verdict: 'confirmed',
+    impact: 'major',
+    likelihood: 'edge',
+    fixCost: 'small',
+    scope: 'in-scope',
+    evidence: 'src/a.ts:3 - save twice',
+    priority: 80,
+    decision: { rule: 6, action: 'fix', why: 'impact major is in alwaysFix (major/edge/small -> 80)' },
+  }
+  const repeat = (c: Record<string, unknown>, of: Finding | null = earlier) =>
+    decide(
+      { id: 'codex-F2', severity: 'P2', file: 'src/a.ts', line: 3, title: 'late save', detail: '', repeatOf: 'r1/codex-F1' },
+      { verdict: 'confirmed', impact: 'moderate', likelihood: 'rare', fixCost: 'small', scope: 'in-scope', evidence: 'src/a.ts:3 - save twice', ...c },
+      policy,
+      () => false,
+      f => (f.repeatOf === 'r1/codex-F1' ? (of ?? undefined) : undefined),
+    )
+
+  it('raises a repeat whose impact and likelihood dropped below the earlier entry back to it, before the priority', () => {
+    const d = repeat({})
+    expect([d.impact, d.likelihood, d.priority]).toEqual(['major', 'edge', 80])
+    expect(d.decision).toEqual({
+      rule: 6,
+      action: 'fix',
+      why: 'impact major is in alwaysFix (major/edge/small -> 80)',
+      raised: 'repeat of r1/codex-F1: impact moderate -> major, likelihood rare -> edge',
+    })
+  })
+
+  it('raises only the class that dropped, and leaves a repeat at or above the earlier entry alone', () => {
+    expect(repeat({ impact: 'critical', likelihood: 'rare' })).toMatchObject({ impact: 'critical', likelihood: 'edge', decision: { raised: 'repeat of r1/codex-F1: likelihood rare -> edge' } })
+    const same = repeat({ impact: 'major', likelihood: 'common' })
+    expect([same.impact, same.likelihood, same.decision!.raised]).toEqual(['major', 'common', undefined])
+  })
+
+  it('raises an unverified repeat after normalization lowered it', () => {
+    expect(repeat({ verdict: 'unverified', impact: 'major', likelihood: 'edge' })).toMatchObject({
+      verdict: 'unverified',
+      impact: 'major',
+      priority: 80,
+      decision: { rule: 6, raised: 'repeat of r1/codex-F1: impact moderate -> major' },
+    })
+  })
+
+  it('lets a repeat drop only when it is refuted with a path:line the earlier evidence did not have', () => {
+    const fresh = repeat({ verdict: 'refuted', impact: 'none', evidence: 'src/guard.ts:9 - the guard rejects a second save' })
+    expect([fresh.impact, fresh.likelihood, fresh.decision]).toEqual(['none', 'rare', { rule: 3, action: 'residual', why: 'refuted' }])
+    const stale = repeat({ verdict: 'refuted', impact: 'none', evidence: 'src/a.ts:3 - not a problem' })
+    expect([stale.impact, stale.likelihood, stale.decision]).toEqual([
+      'major',
+      'edge',
+      { rule: 3, action: 'residual', why: 'refuted', raised: 'repeat of r1/codex-F1: impact none -> major, likelihood rare -> edge' },
+    ])
+    expect(repeat({ verdict: 'refuted', impact: 'none', evidence: 'see `a.ts:3-4` (unchanged)' }).decision!.raised).toBe('repeat of r1/codex-F1: impact none -> major, likelihood rare -> edge')
+    expect(repeat({ verdict: 'refuted', impact: 'none', evidence: 'src/a.ts:3:10 - not a problem' }).decision!.raised).toBe('repeat of r1/codex-F1: impact none -> major, likelihood rare -> edge')
+  })
+
+  it('has no floor when the earlier entry carries no classification, or the repeat none', () => {
+    const unjudged: Finding = { id: 'codex-F1', severity: 'P1', file: 'src/a.ts', title: 'x', detail: '', decision: { rule: 1, action: 'fix', why: 'P0/P1' } }
+    expect(repeat({}, unjudged)).toMatchObject({ impact: 'moderate', likelihood: 'rare', priority: 35, decision: { rule: 8 } })
+    expect(repeat({}, null).decision!.raised).toBeUndefined()
+    const scored = decide({ id: 'codex-F2', severity: 'P2', file: 'a', title: 'x', detail: '', repeatOf: 'r1/codex-F1' }, { score: 20 }, policy, () => false, () => earlier)
+    expect(scored).toMatchObject({ score: 20, decision: { rule: 8 } })
+    expect(scored.impact).toBeUndefined()
+  })
+})
+
+describe('mergeDuplicates', () => {
+  const policy = { threshold: 70, alwaysFix: ['critical', 'major'] as Impact[] }
+  const judged = (id: string, c: Record<string, unknown>): Finding =>
+    decide(
+      { id, severity: 'P2', file: 'a.ts', line: 1, title: id, detail: '' },
+      { verdict: 'confirmed', impact: 'moderate', likelihood: 'common', fixCost: 'small', scope: 'in-scope', evidence: 'a.ts:1 - x', reason: `reason ${id}`, ...c },
+      policy,
+    )
+
+  it('keeps the strongest copy: a fix one first, then the higher priority', () => {
+    const { findings } = mergeDuplicates(
+      [judged('a', { impact: 'minor' }), judged('b', { impact: 'moderate', likelihood: 'common' }), judged('c', { impact: 'major', likelihood: 'rare', fixCost: 'large' })],
+      new Map([['b', 'a'], ['c', 'a']]),
+    )
+    expect(findings).toEqual([expect.objectContaining({ id: 'a', title: 'a', duplicates: ['b', 'c'], impact: 'moderate', priority: 75, reason: 'reason b', decision: expect.objectContaining({ rule: 7 }) })])
+  })
+
+  it('prefers a fix copy over a residual one with a higher priority', () => {
+    const { findings } = mergeDuplicates(
+      [judged('a', { impact: 'critical', scope: 'other-stage' }), judged('b', { impact: 'major', likelihood: 'rare' })],
+      new Map([['b', 'a']]),
+    )
+    expect(findings).toEqual([expect.objectContaining({ id: 'a', title: 'a', impact: 'major', priority: 65, decision: expect.objectContaining({ action: 'fix', rule: 6 }) })])
+  })
+
+  it('keeps a not-judged copy fixed and drops the stale fields of the keeper', () => {
+    const keeper = judged('a', { impact: 'minor' })
+    const unjudged = decide({ id: 'b', severity: 'P2', file: 'a.ts', title: 'b', detail: '' }, undefined, policy)
+    const { findings } = mergeDuplicates([keeper, unjudged], new Map([['b', 'a']]))
+    expect(findings[0]).toEqual({ id: 'a', severity: 'P2', file: 'a.ts', line: 1, title: 'a', detail: '', duplicates: ['b'], decision: { rule: 2, action: 'fix', why: 'not judged' } })
   })
 })
 

@@ -531,7 +531,7 @@ describe('opencode plugin', () => {
     expect(result.stages[0].history[0].findings[0].score).toBe(95)
   })
 
-  it('gives up on the role after the backoff budget, and the engine reports the unscored findings', async () => {
+  it('gives up on the role after the backoff budget, and the engine reports the unjudged findings', async () => {
     const slept: number[] = []
     const f = fakeContext({
       providerError: title => (title === 'granny · judge one r1' ? { type: 'provider.rate-limit', message: 'Too many requests', status: 429 } : undefined),
@@ -547,7 +547,7 @@ describe('opencode plugin', () => {
       expect.objectContaining({ type: 'agent-failed', label: 'judge one r1', error: expect.objectContaining({ type: 'provider.rate-limit' }) }),
     )
     expect(journal).toContainEqual(
-      expect.objectContaining({ type: 'log', message: 'one r1: judge returned nothing - all 1 finding(s) go to the implementer unscored' }),
+      expect.objectContaining({ type: 'log', message: 'one r1: judge returned nothing - all 1 finding(s) go to the implementer unjudged (rule 2)' }),
     )
     expect(result.stages[0]).toMatchObject({ outcome: 'clean', rounds: 2 })
     expect(result.stages[0].history[0].findings[0].score).toBeUndefined()

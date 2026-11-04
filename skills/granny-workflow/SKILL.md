@@ -1,6 +1,6 @@
 ---
 name: granny-workflow
-description: Run a planned implementation through the granny loop - an implementer agent builds each stage of a plan on a feature branch, any number of reviewers (the host's selected model by default; also Codex or any CLI) review the stage in parallel, every P0/P1 goes straight back to the implementer, a judge scores the other findings and merges duplicates, those above the threshold (default 70) go back too, and the loop repeats until the review is clean; ends PR-ready without pushing and waits for the user. The model of each role (granny, planner, implementer, judge), the reviewers, the threshold and the round cap are configurable. With no plan yet, a planner agent writes the plan and proposes the stages, the plan is reviewed, and the run stops for the user's approval. Use when the user says "implement this plan", "plan this with granny", "run granny", "granny workflow", "implement → review → fix", hands over a plan or work orders to build, or asks granny to plan a feature first.
+description: Run a planned implementation through the granny loop - an implementer agent builds each stage of a plan on a feature branch, any number of reviewers (the host's selected model by default; also Codex or any CLI) review the stage in parallel, every P0/P1 goes straight back to the implementer, a judge classifies the other findings and merges duplicates, the critical and major ones and those whose priority tops the threshold go back too, and the loop repeats until the review is clean; ends PR-ready without pushing and waits for the user. The model of each role (granny, planner, implementer, judge), the reviewers, the threshold and the round cap are configurable. With no plan yet, a planner agent writes the plan and proposes the stages, the plan is reviewed, and the run stops for the user's approval. Use when the user says "implement this plan", "plan this with granny", "run granny", "granny workflow", "implement → review → fix", hands over a plan or work orders to build, or asks granny to plan a feature first.
 ---
 
 # granny-workflow
@@ -33,8 +33,9 @@ for each stage - independent stages at the same time (config parallel, default o
   every reviewer reviews it, in parallel (base = the HEAD granny read)
      ├─ a reviewer fails, then fails its one retry ─► stage review-failed
      ├─ no reviewer reports a finding ─────────────► stage clean (without checks: gates-red when the last implementer or fix left gates red)
-     └─ P0/P1 findings go straight to the implementer; the judge scores the rest 0-100 and merges duplicates
-          ├─ any P0/P1, or score > threshold ─► implementer fixes those ─► checks again ─► review again
+     └─ P0/P1 findings go straight to the implementer; the judge classifies the rest and merges duplicates,
+        and a rule table decides: impact in alwaysFix, or priority > threshold, is fixed
+          ├─ any P0/P1 or finding to fix ─► implementer fixes those ─► checks again ─► review again
           └─ none ─► stage done; the rest are "residual" for the user, with the residual of earlier rounds
      cap: maxRounds reviews per stage
 after the last stage (none threw): the checks its stages selected on each repo's whole branch, repaired only when a final review follows - red: finalReview checks-failed, not PR-ready;
@@ -52,7 +53,7 @@ then: granny's final check in every repo (gates, clean tree, no AI trailers, PR 
 | planner | in a run with `goal`: explores the repo, writes the plan file and proposes the stages; writes nothing else | session model |
 | implementer | builds each stage, fixes accepted findings, repairs failed checks, commits; in the plan review, fixes the plan files in place without committing them | session model |
 | reviewers | config `reviewers`, a list; every reviewer reviews every stage, all at the same time. Engines: `agent` a host model (the default list is one `agent` reviewer on the session model); `auto` (an entry's engine when it names none) runs OpenAI's Codex plugin when it is installed on Claude Code and `node` is on `PATH`, otherwise the Codex CLI (`codex exec review`); `codex-plugin` forces the plugin (and allows `mode: "adversarial-review"`), `codex` the CLI, `command` any CLI | one reviewer, `reviewer`, engine `agent` on the session model |
-| judge | scores each finding that is not P0/P1 and merges duplicates; the overall review score is informational only | `sonnet` on Claude Code, session model on opencode |
+| judge | classifies each finding that is not P0/P1 and merges duplicates; the engine's decision table decides from the classes; it sees earlier rounds' decisions (in the final review, the stage reviews' too), and the engine holds a repeat to the classes it had before; the overall review score is informational only | `sonnet` on Claude Code, session model on opencode |
 
 ## Pick your host path
 

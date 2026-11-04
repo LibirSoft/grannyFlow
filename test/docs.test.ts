@@ -44,7 +44,7 @@ describe('skill docs', () => {
       ...Object.keys(DEFAULT_CONFIG).filter(k => k !== 'roles'),
     ]
     expect(rows.map(r => r.key).sort()).toEqual(expected.sort())
-    for (const key of ['threshold', 'maxRounds', 'planReview', 'base', 'gates', 'workDir', 'worktree', 'language', 'aiAttribution', 'reviewers'] as const) {
+    for (const key of ['threshold', 'alwaysFix', 'maxRounds', 'planReview', 'base', 'gates', 'workDir', 'worktree', 'language', 'aiAttribution', 'reviewers'] as const) {
       expect({ key, value: JSON.parse(rows.find(r => r.key === key)!.value.slice(1, -1)) }).toEqual({ key, value: DEFAULT_CONFIG[key] })
     }
     expect(() => resolveConfig([{ $schema: './granny.schema.json' }])).not.toThrow()
@@ -76,7 +76,7 @@ describe('skill docs', () => {
       expect({ file, stale }).toEqual({ file, stale: [] })
     }
     const config = read('references/config.md')
-    expect(config).toContain('A P2 that duplicates a P1 is scored on its own')
+    expect(config).toContain('A P2 that duplicates a P1 is classified on its own')
     expect(config).toContain('A reviewer that labels everything P0/P1 bypasses the judge')
     expect(read('references/claude-code.md')).toContain('Claude models only')
   })
@@ -105,6 +105,15 @@ describe('skill docs', () => {
     expect(read('references/opencode.md')).toContain('granny_run({ repo, branch, base, context, plan?, stages')
     expect(read('references/cursor.md')).toContain('## The plan review')
     expect(readRoot('README.md')).toMatch(/^\| `planReview` \| `false` \|/m)
+  })
+
+  it('has the Cursor protocol route and triage findings in the engine order', () => {
+    const cursor = read('references/cursor.md')
+    const route = cursor.slice(cursor.indexOf('3. **Route.**'), cursor.indexOf('4. **Judge**'))
+    expect(route).toContain('in the final review, a decline in a stage review of that repo counts too')
+    const triage = cursor.slice(cursor.indexOf('5. **Triage**'), cursor.indexOf('take the first rule that matches'))
+    expect(triage.indexOf('apply [the ratchet]')).toBeGreaterThan(-1)
+    expect(triage.indexOf('apply [the ratchet]')).toBeLessThan(triage.indexOf('compute the priority'))
   })
 
   it('releases 1.5.0 with a CHANGELOG entry for the package version', () => {

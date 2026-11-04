@@ -142,15 +142,15 @@ function loop(theme: Theme): string {
 
   c.path('M510,342 L630,342', 'amber')
   c.label(570, 334, 'P2 / P3', 'amber')
-  c.box(632, 304, 170, 76, 'amber', 'Judge', ['scores 0–100,', 'merges duplicates'])
+  c.box(632, 304, 170, 76, 'amber', 'Judge', ['classifies, dedupes;', 'a rule table decides'])
   c.path('M802,330 L852,330', 'muted')
-  c.label(827, 322, '≤ 70', 'muted')
+  c.label(827, 322, 'keep', 'muted')
   c.box(854, 304, 122, 52, 'muted', 'Residual', ['reported to you'])
 
   c.path('M510,412 L560,412 L560,530 L26,530 L26,290 L38,290', 'red')
   c.label(566, 430, 'P0 / P1: skip the judge', 'red', 'start')
   c.path('M722,380 L722,530 L560,530', 'amber', { head: false })
-  c.label(730, 410, '> 70', 'amber', 'start')
+  c.label(730, 410, 'critical · major · > 70', 'amber', 'start')
   c.text(300, 555, 'implementer fixes them → checks again → every reviewer reviews again · cap: maxRounds', { size: 12.5, fill: c.p.muted, anchor: 'middle' })
 
   c.path('M185,590 L185,632', 'neutral')
@@ -185,7 +185,7 @@ function hosts(theme: Theme): string {
     ['planner', 'writes the plan', 'green'],
     ['implementer', 'builds and fixes', 'blue'],
     ['reviewers', 'find issues, in parallel', 'purple'],
-    ['judge', 'scores and dedupes', 'amber'],
+    ['judge', 'classifies and dedupes', 'amber'],
   ]
   c.text(24, 384, 'ROLES · EACH WITH ITS OWN MODEL AND EFFORT', { size: 11.5, weight: 700, fill: c.p.muted, spacing: 1.2 })
   roles.forEach(([name, what, tone], i) => c.box(24 + i * 193, 398, 180, 58, tone, name, [what]))

@@ -270,3 +270,19 @@ describe('cliCommand', () => {
     expect(cliCommand(reviewer({ engine: 'codex' }), 'opencode', 'abc', 'my dir/r.md')).toBe(`codex exec review --base abc -o 'my dir/r.md'`)
   })
 })
+
+describe('alwaysFix', () => {
+  it('fixes critical and major findings by default and takes any list of impact classes from a layer', () => {
+    expect(resolveConfig([]).alwaysFix).toEqual(['critical', 'major'])
+    expect(resolveConfig([{ alwaysFix: [] }]).alwaysFix).toEqual([])
+    expect(resolveConfig([{ alwaysFix: ['critical'] }, { alwaysFix: ['critical', 'moderate'] }]).alwaysFix).toEqual(['critical', 'moderate'])
+  })
+
+  it.each([
+    ['an unknown impact class', ['critical', 'severe'], 'alwaysFix must be an array of impact classes (critical, major, moderate, minor, none)'],
+    ['a string', 'critical', 'alwaysFix must be an array of impact classes'],
+    ['a non-string entry', [1], 'alwaysFix must be an array of impact classes'],
+  ])('rejects %s', (_label, value, message) => {
+    expect(() => resolveConfig([{ alwaysFix: value }])).toThrow(message)
+  })
+})

@@ -135,3 +135,77 @@ describe('final review', () => {
     ])
   })
 })
+
+describe('the decision ledger across review loops', () => {
+  const sequential = (extra: Partial<RunInput> = {}) => parallelRun({ stages: [{ name: 'one', task: 'WP-01' }, { name: 'two', task: 'WP-02' }], ...extra })
+  const found = (...items: Array<[string, string, string, number]>) => ({
+    findings: items.map(([severity, title, file, line], n) => ({ id: `F${n + 1}`, severity, file, line, title, detail: 'd' })),
+  })
+  const judged = (impact: string, likelihood: string, evidence: string, extra: Record<string, unknown> = {}) => ({
+    verdict: 'confirmed',
+    impact,
+    likelihood,
+    fixCost: 'small',
+    scope: 'in-scope',
+    evidence,
+    ...extra,
+  })
+
+  it("shows the final review's judge a stage's fixed and residual decisions as EARLIER DECISIONS, and ratchets a repeat of one", async () => {
+    const f = fakeHost({
+      scores: [
+        { 'opus-F1': judged('major', 'edge', 'src/Editor.tsx:225 - save, go back, save again'), 'opus-F2': judged('minor', 'edge', 'src/format.ts:21 - exactly 30 days', { fixCost: 'trivial' }) },
+        { 'opus-F1': judged('moderate', 'rare', 'src/Editor.tsx:225 - only when the response is late', { repeatOf: 's1/r1/opus-F1' }) },
+      ],
+      override: req => {
+        if (req.label === 'review one r1 opus') return found(['P2', 'Late save re-binds the editor', 'src/Editor.tsx', 225], ['P3', 'Countdown says 0 months', 'src/format.ts', 21])
+        if (req.label === 'review final review r1 opus') return found(['P2', 'Late save still re-binds', 'src/Editor.tsx', 225])
+        return undefined
+      },
+    })
+    const r = await runGranny(f.host, sequential())
+    expect(r.stages[0]).toMatchObject({ outcome: 'clean', rounds: 2 })
+    const judge = f.calls.find(c => c.label === 'judge final review r1')!.prompt
+    expect(judge).toContain('EARLIER DECISIONS')
+    expect(judge).toContain('Stage 1 (one), round 1')
+    expect(judge).toContain('"label": "s1/r1/opus-F1"')
+    expect(judge).toContain('"label": "s1/r1/opus-F2"')
+    expect(judge).toContain('"decision": "residual - rule 8: under the bar: minor/edge/trivial -> 40"')
+    expect(r.finalReview?.history[0]!.findings[0]).toMatchObject({
+      repeatOf: 's1/r1/opus-F1',
+      impact: 'major',
+      likelihood: 'edge',
+      priority: 80,
+      decision: { rule: 6, action: 'fix', raised: 'repeat of s1/r1/opus-F1: impact moderate -> major, likelihood rare -> edge' },
+    })
+    expect(f.logs).toContain('final review r1: the ratchet raised opus-F1 - repeat of s1/r1/opus-F1: impact moderate -> major, likelihood rare -> edge')
+    expect(f.calls.some(c => c.label === 'fix final review r1')).toBe(true)
+  })
+
+  it('lets the final review keep a repeat of a P1 a stage fixer declined residual, when the judge refutes it', async () => {
+    const f = fakeHost({
+      scores: [{ 'opus-F1': judged('critical', 'edge', 'src/a.ts:3 - the guard in parse() at src/a.ts:1 stops it', { verdict: 'refuted', repeatOf: 's1/r1/opus-F1' }) }],
+      override: req => {
+        if (req.label === 'review one r1 opus' || req.label === 'review final review r1 opus') return found(['P1', 'Phantom crash', 'src/a.ts', 3])
+        if (req.label === 'fix one r1') {
+          return { startSha: 's', headSha: 'h', gatesGreen: true, gates: 'all green', commits: [], untested: '', declined: [{ id: 'opus-F1', reason: 'parse() checks it at src/a.ts:1' }] }
+        }
+        return undefined
+      },
+    })
+    const r = await runGranny(f.host, sequential())
+    expect(f.calls.find(c => c.label === 'judge final review r1')!.prompt).toContain('- s1/r1/opus-F1: parse() checks it at src/a.ts:1')
+    expect(r.finalReview).toMatchObject({ outcome: 'residual-only', rounds: 1 })
+    expect(r.finalReview!.residual[0]).toMatchObject({ title: 'Phantom crash', repeatOf: 's1/r1/opus-F1', decision: { rule: 3, action: 'residual' } })
+    expect(f.logs).toContain('final review r1: opus-F1 dropped as a repeat of s1/r1/opus-F1, which the fixer declined (rule 3: refuted) - kept as residual')
+  })
+
+  it('does not show one stage the decisions of another', async () => {
+    const f = fakeHost({
+      scores: [{ 'opus-F1': judged('minor', 'edge', 'src/format.ts:21 - x') }, { 'opus-F1': judged('minor', 'edge', 'src/format.ts:21 - x') }],
+      override: req => (req.label === 'review one r1 opus' || req.label === 'review two r1 opus' ? found(['P3', 'Nit', 'src/format.ts', 21]) : undefined),
+    })
+    await runGranny(f.host, sequential())
+    expect(f.calls.find(c => c.label === 'judge two r1')!.prompt).not.toContain('EARLIER DECISIONS')
+  })
+})

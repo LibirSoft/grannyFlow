@@ -112,7 +112,7 @@ describe('the plan review', () => {
     expect(f.calls.map(c => c.label)).toEqual(['judge plan review r1', 'fix plan review r1', 'implement core', 'pr-ready check'])
     const judge = f.calls[0]!
     expect(judge).toMatchObject({ role: 'judge', kind: 'score', phase: 'Plan review', access: 'read-only' })
-    expect(judge.prompt).toContain(`You are the JUDGE scoring a plan review. Repo ${WT}, branch feat/x, plan ${PLAN}, /plans/wo-2.md.`)
+    expect(judge.prompt).toContain(`You are the JUDGE classifying the findings of a plan review. Repo ${WT}, branch feat/x, plan ${PLAN}, /plans/wo-2.md.`)
     expect(judge.prompt).not.toContain('stage diff')
     const fix = f.calls[1]!
     expect(fix).toMatchObject({ role: 'implementer', kind: 'planFix', phase: 'Plan review', access: 'write', cwd: WT })
