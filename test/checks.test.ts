@@ -303,6 +303,57 @@ describe('checks', () => {
     expect((await runGranny(unchecked.host, run())).stages[0]!.outcome).toBe('gates-red')
   })
 
+  it('name the red gates the implementer reported in the note of a stage whose checks passed', async () => {
+    const lintRed = (req: AgentRequest) =>
+      req.label === 'implement core' ? { startSha: 'deadbee1', headSha: 'h', gatesGreen: false, gates: 'lint red', commits: ['c'], untested: '' } : undefined
+    const f = scripted({ 'run-tests': [green()] }, { override: lintRed })
+    const r = await runGranny(f.host, run({ checks: [TESTS] }))
+    expect(r.stages[0]).toMatchObject({ outcome: 'clean', note: 'the checks passed, but the implementer reported red gates: lint red' })
+    expect(f.logs).toContain('core: the checks passed, but the implementer reported red gates: lint red')
+  })
+
+  it('take the red gates from the last fix of a checked stage, and drop them when a later report is green', async () => {
+    const once = (req: AgentRequest) => (req.label === 'review core r1 reviewer' ? p1 : undefined)
+    const redFix = scripted({ 'run-tests': [green()] }, {
+      override: req => once(req) ?? (req.label === 'fix core r1' ? { startSha: 's', headSha: 'h', gatesGreen: false, gates: 'lint red', commits: ['c'], untested: '' } : undefined),
+    })
+    expect((await runGranny(redFix.host, run({ checks: [TESTS] }))).stages[0]).toMatchObject({
+      outcome: 'clean',
+      note: 'the checks passed, but the last fix (fix core r1) reported red gates: lint red',
+    })
+    const greenFix = scripted({ 'run-tests': [green()] }, {
+      override: req => once(req) ?? (req.label === 'implement core' ? { startSha: 'deadbee1', headSha: 'h', gatesGreen: false, gates: 'lint red', commits: ['c'], untested: '' } : undefined),
+    })
+    const r = await runGranny(greenFix.host, run({ checks: [TESTS] }))
+    expect(r.stages[0]!.outcome).toBe('clean')
+    expect(r.stages[0]).not.toHaveProperty('note')
+  })
+
+  it("take the gates report of a repair over the implementer's", async () => {
+    const lintRed = (req: AgentRequest) =>
+      req.label === 'implement core' ? { startSha: 'deadbee1', headSha: 'h', gatesGreen: false, gates: 'lint red', commits: ['c'], untested: '' } : undefined
+    const fixed = scripted({ 'run-tests': [red(), green()] }, { override: lintRed })
+    const r = await runGranny(fixed.host, run({ checks: [TESTS] }))
+    expect(r.stages[0]!.outcome).toBe('clean')
+    expect(r.stages[0]).not.toHaveProperty('note')
+    const stillRed = scripted({ 'run-tests': [red(), green()] }, {
+      override: req => (req.label === 'repair core implement #1' ? { startSha: 's', headSha: 'h', gatesGreen: false, gates: 'lint red', commits: ['c'], untested: '' } : undefined),
+    })
+    expect((await runGranny(stillRed.host, run({ checks: [TESTS] }))).stages[0]).toMatchObject({
+      outcome: 'clean',
+      note: 'the checks passed, but the last repair (repair core implement #1) reported red gates: lint red',
+    })
+  })
+
+  it('add no red-gates line to a stage whose checks failed', async () => {
+    const lintRed = (req: AgentRequest) =>
+      req.kind === 'implementation' ? { startSha: 'deadbee1', headSha: 'h', gatesGreen: false, gates: 'lint red', commits: ['c'], untested: '' } : undefined
+    const f = scripted({ 'run-tests': [red()] }, { override: lintRed })
+    const r = await runGranny(f.host, run({ maxRepairs: 0, checks: [TESTS] }))
+    expect(r.stages[0]!.outcome).toBe('checks-failed')
+    expect(r.stages[0]!.note).not.toContain('reported red gates')
+  })
+
   it('wrap a check with a timeout in timeout(1) and name a timeout in the note', async () => {
     const f = scripted({ 's slow': [{ code: 124, output: '' }] })
     const r = await runGranny(f.host, run({ maxRepairs: 0, checks: [{ name: 'slow', run: "echo it's slow", timeout: 30 }] }))

@@ -1354,11 +1354,17 @@ ${note}` : ""}` : missing };
     host.log(`${name}: ${note}`);
     return note;
   };
-  const checkGate = async (lane, name, at, checks, runs, stage) => {
+  const checkGate = async (lane, name, at, checks, runs, stage, gates) => {
     host.phase(CHECKS_PHASE);
     const budget = (c) => c.maxRepairs ?? config.maxRepairs;
     const most = Math.max(0, ...checks.map(budget));
     let deviations;
+    const step = async (label, by, prompt) => {
+      const impl = await implement(lane, label, prompt);
+      if (gates)
+        Object.assign(gates, { green: impl.gatesGreen, text: impl.gates, by: `${by} (${label})` });
+      return saidSomething(impl.deviations);
+    };
     for (let repairs = 0;; repairs++) {
       const dirty = await uncommitted(`status ${name} ${at}`, CHECKS_PHASE, lane.cwd);
       if (!Array.isArray(dirty)) {
@@ -1374,8 +1380,8 @@ the last repair's deviations: ${deviations}` : ""}`;
       }
       if (dirty.length) {
         host.log(`${name}: uncommitted changes before the checks at ${at} - repair ${repairs + 1}/${most}: ${listed(dirty)}`);
-        deviations = saidSomething((await implement(lane, `commit ${name} ${at} #${repairs + 1}`, commitPrompt(lane.p, name, at, dirty.join(`
-`), plansIn(lane.cwd), stage))).deviations);
+        deviations = await step(`commit ${name} ${at} #${repairs + 1}`, "the commit step", commitPrompt(lane.p, name, at, dirty.join(`
+`), plansIn(lane.cwd), stage));
         continue;
       }
       const results = [];
@@ -1405,7 +1411,7 @@ the last repair's deviations: ${deviations}` : ""}`;
       for (const r of failed)
         host.log(`${name}: check ${r.name} failed (${detail(r)}) - repair ${repairs + 1}/${budget(configOf(r))}`);
       const sent = failed.map((r) => ({ ...r, run: configOf(r).run }));
-      deviations = saidSomething((await implement(lane, `repair ${name} ${at} #${repairs + 1}`, repairPrompt(lane.p, name, at, repairs + 1, sent, stage))).deviations);
+      deviations = await step(`repair ${name} ${at} #${repairs + 1}`, "the last repair", repairPrompt(lane.p, name, at, repairs + 1, sent, stage));
     }
   };
   const attribute = (rv, findings) => findings.map((f, i) => ({ ...f, id: `${rv.name}-F${i + 1}`, reviewer: rv.name }));
@@ -1629,7 +1635,7 @@ the last repair's deviations: ${deviations}` : ""}`;
         history.at(-1).declined = refused;
       earlier.push({ round, sent: accepted, ...residual.length ? { residual } : {}, ...said ? { deviations: said } : {}, ...refused.length ? { declined: refused } : {} });
       if (subject.kind === "diff" && checks.length) {
-        const gate = await checkGate(lane, name, `fix r${round}`, checks, runs, subject.stage);
+        const gate = await checkGate(lane, name, `fix r${round}`, checks, runs, subject.stage, gates);
         if (!gate.passed)
           return { outcome: "checks-failed", rounds: round, residual: kept(), unresolved: [], history, note: gate.note };
         host.phase(phase);
@@ -1697,6 +1703,7 @@ the last repair's deviations: ${deviations}` : ""}`;
     const ran = () => runs.length ? { checks: runs } : {};
     const notes = [];
     let committed = {};
+    let gates;
     if (st.implement !== false) {
       host.phase("Implement");
       const head = await readHead(`head ${name}`, "Implement", lane.cwd);
@@ -1739,13 +1746,18 @@ the last repair's deviations: ${deviations}` : ""}`;
         host.log(`${name}: no-changes - ${note}`);
         return { stage: name, ...where, implementation: impl, outcome: "no-changes", rounds: 0, residual: [], unresolved: [], history: [], note };
       }
+      const last = committed.impl ?? impl;
+      gates = { green: last.gatesGreen, text: last.gates, by: committed.by ?? "the implementer" };
       if (checks.length) {
-        const gate = await checkGate(lane, name, "implement", checks, runs, task);
+        const gate = await checkGate(lane, name, "implement", checks, runs, task, gates);
         if (!gate.passed)
           return { stage: name, ...where, implementation: impl, outcome: "checks-failed", rounds: 0, residual: [], unresolved: [], history: [], note: gate.note, ...ran() };
       } else {
-        if (!committed.impl)
+        if (!committed.impl) {
           committed = await commitWork(lane, name, "implement", task);
+          if (committed.impl)
+            gates = { green: committed.impl.gatesGreen, text: committed.impl.gates, by: committed.by };
+        }
         const note = unreviewed(name, "implement", committed);
         if (note)
           notes.push(note);
@@ -1755,13 +1767,16 @@ the last repair's deviations: ${deviations}` : ""}`;
       host.log(`${name}: review-only stage - reviewing ${lane.base}...HEAD`);
     }
     host.phase("Review");
-    const last = committed.impl ?? impl;
-    const gates = last && !runs.length ? { green: last.gatesGreen, text: last.gates, by: committed.by ?? "the implementer" } : undefined;
     const loop = st.review === false ? { outcome: "review-skipped", rounds: 0, residual: [], unresolved: [], history: [] } : await reviewLoop(lane, name, { kind: "diff", base, ...task ? { stage: task } : {} }, undefined, { gates, checks, runs, notes });
-    if (gates && !gates.green && (loop.outcome === "clean" || loop.outcome === "residual-only")) {
+    if (gates && !gates.green && !runs.length && (loop.outcome === "clean" || loop.outcome === "residual-only")) {
       loop.outcome = "gates-red";
       loop.note = `the review found nothing to fix, but ${gates.by} left the gates red: ${gates.text}`;
       host.log(`${name}: gates-red - ${loop.note}`);
+    }
+    if (gates && !gates.green && runs.length && loop.outcome !== "checks-failed") {
+      const warned = `the checks passed, but ${gates.by} reported red gates: ${gates.text}`;
+      host.log(`${name}: ${warned}`);
+      notes.push(warned);
     }
     const note = [loop.note, ...notes].filter(Boolean).join(`
 `);
@@ -2184,7 +2199,9 @@ function summarize(result, worktree) {
     ].filter(Boolean).join(", ");
     const left = s.note?.split(`
 `).find((l) => l.startsWith("uncommitted changes after") || l.startsWith("working tree status unreadable after"));
-    return `- ${name}: ${s.outcome}, ${s.rounds} review round(s)${extra ? ` (${extra})` : ""}${left ? ` - ${left}` : ""}`;
+    const warned = s.note?.split(`
+`).find((l) => l.startsWith("the checks passed, but "));
+    return `- ${name}: ${s.outcome}, ${s.rounds} review round(s)${extra ? ` (${extra})` : ""}${left ? ` - ${left}` : ""}${warned ? ` - ${warned}` : ""}`;
   };
   const lines = result.stages.map((s) => `${line(s, s.repo ? `${s.stage} (${s.repo})` : s.stage)}${(s.outcome === "checks-failed" || s.outcome === "no-changes") && s.note ? ` - ${s.note.split(`
 `)[0]}` : ""}${s.note && s.note.includes("in parallel on") ? ` - ${s.note.split(`

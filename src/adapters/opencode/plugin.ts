@@ -137,7 +137,8 @@ export function summarize(result: RunResult, worktree: boolean): string {
       s.unresolved.length ? `${s.unresolved.length} unresolved` : '',
     ].filter(Boolean).join(', ')
     const left = s.note?.split('\n').find(l => l.startsWith('uncommitted changes after') || l.startsWith('working tree status unreadable after'))
-    return `- ${name}: ${s.outcome}, ${s.rounds} review round(s)${extra ? ` (${extra})` : ''}${left ? ` - ${left}` : ''}`
+    const warned = s.note?.split('\n').find(l => l.startsWith('the checks passed, but '))
+    return `- ${name}: ${s.outcome}, ${s.rounds} review round(s)${extra ? ` (${extra})` : ''}${left ? ` - ${left}` : ''}${warned ? ` - ${warned}` : ''}`
   }
   const lines = result.stages.map(
     s =>
