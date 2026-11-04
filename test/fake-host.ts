@@ -18,6 +18,8 @@ export interface FakeOptions {
   checks?: (command: string) => Review | undefined
   /** What the engine's `git status --porcelain` probe prints, or a failed read, in order (the last one repeats; default clean); 'git' with commits runs it in a real shell. */
   status?: Array<string | CommandResult>
+  /** What the engine's timeout probe prints (default `timeout`); with `shell` it runs in a real shell instead. */
+  timeoutProbe?: Review
   /** A note the Claude Code helper adds to every command it reports (the worktree setup, the probes, checks and reviews). */
   note?: string | ((command: string) => string | undefined)
 }
@@ -37,7 +39,8 @@ const isWorktreeSetup = (command: string) => command.includes('git worktree list
 const HEAD_PROBE = 'git rev-parse --verify HEAD'
 const COMMITS_PROBE = /git rev-list --count (\S+)\.\.HEAD/
 const STATUS_PROBE = /(^|&& )git status --porcelain( -- .*)?$/m
-const isProbe = (command: string) => command.includes(HEAD_PROBE) || COMMITS_PROBE.test(command) || STATUS_PROBE.test(command)
+const TIMEOUT_PROBE = 'command -v gtimeout'
+const isProbe = (command: string) => command.includes(HEAD_PROBE) || COMMITS_PROBE.test(command) || STATUS_PROBE.test(command) || command.includes(TIMEOUT_PROBE)
 
 const cdTarget = (line: string) => {
   const quoted = /^cd ((?:'[^']*'(?:\\''[^']*')*)|\S+) && /.exec(line)?.[1] ?? ''
@@ -75,6 +78,7 @@ export function fakeHost(opts: FakeOptions = {}) {
   }
   const probe = async (command: string, cwd: string): Promise<CommandResult> => {
     probes.push(command)
+    if (command.includes(TIMEOUT_PROBE)) return opts.shell ? bash(command, cwd, opts.shell.env) : asResult(opts.timeoutProbe ?? 'timeout\n')
     const c = opts.commits ?? 1
     if (c === 'git') return bash(command, cwd, opts.shell?.env)
     if (STATUS_PROBE.test(command)) return asResult((statuses.length > 1 ? statuses.shift() : statuses[0]) ?? '')
