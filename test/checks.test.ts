@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'bun:test'
+import { afterAll, describe, expect, it } from 'bun:test'
 import { spawnSync } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -311,13 +311,20 @@ describe('checks', () => {
   })
 
   describe('the timeout command', () => {
+    const temp: string[] = []
+    const tempDir = (prefix: string) => {
+      const dir = realpathSync(mkdtempSync(join(tmpdir(), prefix)))
+      temp.push(dir)
+      return dir
+    }
+    afterAll(() => temp.forEach(dir => rmSync(dir, { recursive: true, force: true })))
     const bin = (...tools: Array<[string, string]>) => {
-      const dir = mkdtempSync(join(tmpdir(), 'granny-bin-'))
+      const dir = tempDir('granny-bin-')
       for (const [name, target] of [['bash', Bun.which('bash')!] as [string, string], ...tools]) symlinkSync(target, join(dir, name))
       return dir
     }
     const timed = (timeout = 5) => ({ name: 'tests', run: 'true', timeout })
-    const inRepo = (config: Record<string, unknown>, extra: Partial<RunInput> = {}) => run(config, { repo: realpathSync(mkdtempSync(join(tmpdir(), 'granny-repo-'))), ...extra })
+    const inRepo = (config: Record<string, unknown>, extra: Partial<RunInput> = {}) => run(config, { repo: tempDir('granny-repo-'), ...extra })
 
     it('is gtimeout when only gtimeout is on PATH, probed once per run', async () => {
       const f = fakeHost({ shell: { env: { PATH: bin(['gtimeout', Bun.which('timeout')!]) } } })
