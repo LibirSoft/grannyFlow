@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'bun:test'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { buildClaudeCode, buildOpencode } from '../scripts/build'
+import { buildClaudeCode, buildOpencode, buildReadOnlyGuard } from '../scripts/build'
 import { CODEX_REVIEWER, finding, review } from './fake-host'
 
 const root = join(import.meta.dir, '..')
@@ -127,6 +127,13 @@ describe('claude-code workflow.js', () => {
     expect(fix.opts.phase).toBe('Plan review')
     expect(fix.prompt.startsWith('READ-ONLY ROLE')).toBe(false)
     expect(fix.prompt).toContain('Missing migration step')
+  })
+})
+
+describe('claude-code read-only guard hook', () => {
+  it('is committed in sync with src/', async () => {
+    const built = await buildReadOnlyGuard()
+    expect(readFileSync(join(root, 'skills/granny-workflow/engines/claude-code/hooks/granny-readonly-guard.mjs'), 'utf8')).toBe(built)
   })
 })
 
