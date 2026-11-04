@@ -36,7 +36,8 @@ function lex(command: string): Token[] | string {
     while (command[i] === ' ' || command[i] === '\t') i++
     const start = i
     while (i < command.length && !/[\s;&|<>()$`'"\\]/.test(command[i]!)) i++
-    return i > start ? command.slice(start, i) : undefined
+    if (i === start || /['"\\]/.test(command[i] ?? '')) return undefined
+    return command.slice(start, i)
   }
   while (i < command.length) {
     const c = command[i]!
@@ -77,7 +78,7 @@ function lex(command: string): Token[] | string {
         flush()
         i += command[i + 2] === '>' ? 3 : 2
         const target = readTarget()
-        if (target === undefined) return 'a redirection without a target'
+        if (target === undefined) return 'a redirection without a plain target'
         tokens.push({ op: '&>', target })
       } else if (two === '&&' || two === '||' || two === '|&') {
         flush()
@@ -102,7 +103,7 @@ function lex(command: string): Token[] | string {
         i++
       }
       const target = readTarget()
-      if (target === undefined) return 'a redirection without a target'
+      if (target === undefined) return 'a redirection without a plain target'
       tokens.push({ op: `${fd ?? ''}${op}`, target })
     } else {
       word += c

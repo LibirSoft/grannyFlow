@@ -128,6 +128,8 @@ describe('read-only command check', () => {
     'cat <<EOF > a.txt',
     'git log & git commit',
     'ls\nrm a.txt',
+    "cat a.ts >/dev/null'x'",
+    'cat a.ts 2>/dev/null\\x',
     '',
   ]
   for (const command of blocked) {

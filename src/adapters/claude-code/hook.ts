@@ -1,3 +1,4 @@
+import { writeSync } from 'node:fs'
 import { guard } from './readonly'
 
 let raw = ''
@@ -12,6 +13,6 @@ process.stdin.on('end', () => {
   }
   const reason = guard(input)
   if (!reason) process.exit(0)
-  process.stderr.write(`${reason}\n`)
+  writeSync(2, `${reason}\n`)
   process.exit(2)
 })
