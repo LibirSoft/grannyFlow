@@ -139,7 +139,7 @@ Three layers, later wins: `~/.config/granny/config.json`, `<repo>/granny.config.
 | `reviewers` | `[{ "name": "reviewer", "engine": "agent" }]` | all review every round, in parallel; each has a unique `name`, an `engine` and its own `model`/`effort` |
 | `reviewers[].engine` | `auto` | `auto`: the Codex plugin when installed and `node` is on `PATH` (Claude Code only), else the Codex CLI; `codex-plugin`: the plugin, required; `codex`: the CLI; `agent`: a host model (Claude models only on Claude Code); `command`: any CLI, with `{base}`, `{out}`, `{model}` and `{prompt}` placeholders |
 | `reviewers[].mode` | `review` | `adversarial-review` runs the Codex plugin's adversarial review, optionally steered by `focus` |
-| `threshold` | `70` | findings scoring strictly above it are fixed; P0/P1 always are, without the judge - except a repeat of a finding the fixer declined, which the judge scores like the rest |
+| `threshold` | `70` | findings scoring strictly above it are fixed; P0/P1 always are, without the judge - except a repeat of a finding the fixer listed in `declined`, which the judge scores like the rest |
 | `maxRounds` | `4` | review rounds per stage, and for the plan review; check repairs do not count |
 | `planReview` | `false` | `true` reviews the plan files before stage 1 when the run has a `plan` (extra tokens); skipped when it resumes with `fromStage` |
 | `finalReview` | `true` | after the last stage, review each repo's whole branch for cross-stage duplication, inconsistencies and merge resolutions; skipped for a repo with one stage and no lane merge |
