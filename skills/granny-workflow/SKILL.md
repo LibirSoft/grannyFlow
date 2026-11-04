@@ -53,7 +53,7 @@ then: granny's final check in every repo (gates, clean tree, no AI trailers, PR 
 | planner | in a run with `goal`: explores the repo, writes the plan file and proposes the stages; writes nothing else | session model |
 | implementer | builds each stage, fixes accepted findings, repairs failed checks, commits; in the plan review, fixes the plan files in place without committing them | session model |
 | reviewers | config `reviewers`, a list; every reviewer reviews every stage, all at the same time. Engines: `agent` a host model (the default list is one `agent` reviewer on the session model); `auto` (an entry's engine when it names none) runs OpenAI's Codex plugin when it is installed on Claude Code and `node` is on `PATH`, otherwise the Codex CLI (`codex exec review`); `codex-plugin` forces the plugin (and allows `mode: "adversarial-review"`), `codex` the CLI, `command` any CLI | one reviewer, `reviewer`, engine `agent` on the session model |
-| judge | classifies each finding that is not P0/P1 and merges duplicates; the engine's decision table decides from the classes; it sees earlier rounds' decisions (in the final review, the stage reviews' too), and the engine holds a repeat to the classes it had before; the overall review score is informational only | `haiku` on Claude Code (`sonnet` to switch back), session model on opencode |
+| judge | classifies each finding that is not P0/P1 and merges duplicates; the engine's decision table decides from the classes; it sees earlier rounds' decisions (in the final review, the stage reviews' too), and the engine holds a repeat to the classes it had before; the overall review score is informational only. Read-only, like `agent` reviewers and the extraction agent: on Claude Code by its prompt only, unless `readOnlyAgent` is on and the `granny-readonly` agent and its hook are installed ([config.md](references/config.md#read-only-roles)) | `haiku` on Claude Code (`sonnet` to switch back), session model on opencode |
 
 ## Pick your host path
 
@@ -132,7 +132,8 @@ Checks are off by default. When the project has commands that must pass - tests,
    - Engine `agent`: the model exists on this host - on Claude Code only Claude models; for any other provider there, the reviewer needs engine `command`.
    - Engine `command`: the CLI in the template is on `PATH` where the review runs (on opencode: the server's) and logged in to its provider.
    Tell the user which reviewers will run and what `auto` will pick. A reviewer that fails twice in a round ends the stage `review-failed`. For the plan review the Codex engines run `codex exec` or the plugin's `task` instead of a diff review; a `command` reviewer without `{prompt}` sits the plan review out, and when no reviewer can review a plan, the plan review fails and the run stops.
-5. No other session already runs the same job (other agents, `git reflog`).
+5. `"readOnlyAgent": true` on Claude Code: `ls "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/agents/granny-readonly.md "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/hooks/granny-readonly-guard.mjs` finds both files (or the agent is in the project's `.claude/agents/`), the settings have the PreToolUse hook that runs the guard, and `node --version` works ([references/config.md](references/config.md#read-only-roles)). Without the agent the run stops at the first reviewer; without the hook or `node`, the read-only roles' Bash is not limited - tell the user.
+6. No other session already runs the same job (other agents, `git reflog`).
 
 ## 4. Launch
 
