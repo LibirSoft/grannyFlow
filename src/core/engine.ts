@@ -16,7 +16,10 @@ import {
   planJudgePrompt,
   planReviewPrompt,
   repairPrompt,
-  reviewCommandPrompt,
+  reviewReadPrompt,
+  reviewStartPrompt,
+  reviewStopPrompt,
+  reviewWaitPrompt,
   gitCommandPrompt,
   timeoutProbePrompt,
   worktreeCommandPrompt,
@@ -29,7 +32,7 @@ import {
   WHOLE_BRANCH_NOTE,
 } from './prompts'
 import { declinedOf, isBlocker, mergeDuplicates, parseCodexReview, reviewFailure, saysNoFindings, triage } from './review'
-import { planReviewScript, reportedBackend, reviewPlan, reviewStem } from './reviewer'
+import { detachedReview, MAX_WAITS, planReviewScript, reportedBackend, reviewPlan, reviewStem, WAIT_SECONDS } from './reviewer'
 import { SCHEMAS } from './schemas'
 import { shellQuote } from './shell'
 import { branchSlug, reportedWorktree, worktreePath, worktreeScript } from './worktree'
@@ -493,8 +496,24 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
       output = r.output
       if (!ran) note = `review command exited ${r.code}: ${r.output.slice(-2000)}`
     } else {
-      const script = `cd ${shellQuote(cwd)} && ${plan.script}`
-      const r = await call('granny', 'command', `review ${tag}`, phase, reviewCommandPrompt(p, name, rv.name, script), 'read-only', config.roles.granny, cwd)
+      const job = detachedReview(plan, config, stem, cwd)
+      const step = (label: string, prompt: string) => call('granny', 'command', label, phase, prompt, 'read-only', config.roles.granny, cwd)
+      const started = await step(`review ${tag}`, reviewStartPrompt(p, name, rv.name, job.start))
+      if (!started?.ran) {
+        const said = String(started?.output ?? '')
+        return { ran: false, findings: [], note: started ? `review command did not start (exit ${started.exitCode ?? '?'})${started.note ? ` (${started.note})` : ''}: ${said.slice(-2000)}` : 'review runner returned nothing' }
+      }
+      let done = false
+      for (let n = 1; n <= MAX_WAITS && !done; n++) {
+        const w = await step(`review ${tag} wait ${n}`, reviewWaitPrompt(p, name, rv.name, n, MAX_WAITS, WAIT_SECONDS / 60, job.wait))
+        done = lineShaped(String(w?.output ?? ''), /^done$/) !== undefined
+      }
+      if (!done) {
+        await step(`review ${tag} stop`, reviewStopPrompt(p, name, rv.name, job.stop))
+        const limit = `${MAX_WAITS} waits of up to ${WAIT_SECONDS / 60} minutes (${(MAX_WAITS * WAIT_SECONDS) / 60} minutes)`
+        return { ran: false, findings: [], note: `review command still running after ${limit} - stopped it` }
+      }
+      const r = await step(`review ${tag} read`, reviewReadPrompt(p, name, rv.name, job.read))
       ran = Boolean(r?.ran)
       output = String(r?.output ?? '')
       if (!ran) note = r ? `review command exited ${r.exitCode ?? '?'}${r.note ? ` (${r.note})` : ''}: ${output.slice(-2000)}` : 'review runner returned nothing'

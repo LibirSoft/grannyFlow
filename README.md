@@ -68,7 +68,7 @@ The loop is code, not a prompt: on Claude Code and opencode an engine drives eve
 
 | host | engine | status |
 |---|---|---|
-| Claude Code | Workflow script (`engines/claude-code/workflow.js`): every role is an `agent()` call with its own model, effort and JSON schema; the reviewers are concurrent calls | full |
+| Claude Code | Workflow script (`engines/claude-code/workflow.js`): every role is an `agent()` call with its own model, effort and JSON schema; the reviewers are concurrent calls, and a Codex or `command` review runs detached while the engine waits for it in short helper calls | full |
 | opencode 2.x | server plugin (`engines/opencode/plugin/granny-workflow/`): every role is a child session with its own model and permissions; review commands run directly, concurrently with agent reviewers | full |
 | Cursor | none - the skill walks the agent through the same loop with four subagents | manual, not deterministic |
 

@@ -9,7 +9,33 @@ const COMPANION = 'scripts/codex-companion.mjs'
 
 export interface ReviewPlan {
   script: string
+  /** The script without its mkdir and rm, for a detached run whose start command clears the files. */
+  body: string
   backend?: string
+}
+
+export const WAIT_SECONDS = 540
+export const MAX_WAITS = 7
+
+export interface DetachedReview {
+  start: string
+  wait: string
+  read: string
+  stop: string
+}
+
+export function detachedReview(plan: ReviewPlan, c: GrannyConfig, stem: string, cwd: string): DetachedReview {
+  const [md, log, out, exit, pid] = ['md', 'log', 'out', 'exit', 'pid'].map(ext => shellQuote(`${stem}.${ext}`))
+  const cd = `cd ${shellQuote(cwd)} && `
+  const kill = `kill -TERM -- "-$(cat ${pid})" 2>/dev/null || kill -TERM "$(cat ${pid})" 2>/dev/null`
+  const job = shellQuote(`echo $$ > ${pid}; (${plan.body}) > ${out} 2>&1; echo $? > ${exit}`)
+  const until = shellQuote(`until [ -s ${exit} ] || [ "$SECONDS" -ge ${WAIT_SECONDS} ]; do sleep 5; done`)
+  return {
+    start: `${cd}if [ -s ${pid} ] && [ ! -s ${exit} ]; then ${kill}; fi; mkdir -p ${shellQuote(c.workDir)} && rm -f ${md} ${log} ${out} ${exit} ${pid} && { set -m; nohup bash -c ${job} > /dev/null 2>&1 < /dev/null & } && echo started`,
+    wait: `${cd}bash -c ${until}; if [ -s ${exit} ]; then echo done; else echo pending; fi`,
+    read: `${cd}code=$(cat ${exit}); cat ${out}; exit "\${code:-1}"`,
+    stop: `${cd}if [ -s ${pid} ]; then ${kill}; fi; rm -f ${pid}; echo stopped`,
+  }
 }
 
 export function cliCommand(rv: ReviewerConfig, host: HostName, base: string, out: string, prompt = ''): string {
@@ -39,12 +65,14 @@ interface Backends {
 function script(rv: ReviewerConfig, c: GrannyConfig, host: HostName, stem: string, b: Backends): ReviewPlan {
   const md = shellQuote(`${stem}.md`)
   const log = shellQuote(`${stem}.log`)
-  const wrap = (run: string) =>
-    `mkdir -p ${shellQuote(c.workDir)} && rm -f ${md} ${log} && ${run}; code=$?; if [ -s ${md} ]; then cat ${md}; else cat ${log}; fi; exit $code`
+  const wrap = (run: string, backend?: string): ReviewPlan => {
+    const body = `${run}; code=$?; if [ -s ${md} ]; then cat ${md}; else cat ${log}; fi; exit $code`
+    return { script: `mkdir -p ${shellQuote(c.workDir)} && rm -f ${md} ${log} && ${body}`, body, ...(backend ? { backend } : {}) }
+  }
 
   const cli = `${b.cli} > ${log} 2>&1`
-  if (rv.engine === 'command') return { script: wrap(cli), backend: 'custom command' }
-  if (rv.engine === 'codex' || (rv.engine === 'auto' && host !== 'claude-code')) return { script: wrap(cli), backend: b.cliLabel }
+  if (rv.engine === 'command') return wrap(cli, 'custom command')
+  if (rv.engine === 'codex' || (rv.engine === 'auto' && host !== 'claude-code')) return wrap(cli, b.cliLabel)
 
   const otherwise = (why: string, remedy: string) =>
     b.fallback
@@ -57,9 +85,7 @@ function script(rv: ReviewerConfig, c: GrannyConfig, host: HostName, stem: strin
   const stopBroker = `node "\${companion%/*}/session-lifecycle-hook.mjs" SessionEnd </dev/null >/dev/null 2>&1`
   const ownBroker = `export CLAUDE_PLUGIN_DATA="$PWD"/${shellQuote(`${c.workDir}/codex-plugin-${rv.name}`)} && trap '${stopBroker}' EXIT && trap 'exit 143' TERM && trap 'exit 130' INT && trap 'exit 129' HUP`
   const plugin = `echo "${SAID}codex-plugin ${b.pluginLabel} ($companion)" && ${ownBroker} && ${b.plugin} > ${md} 2> ${log}`
-  return {
-    script: wrap(`${find}; if [ -z "$companion_version" ]; then ${missing}; elif ! command -v node >/dev/null 2>&1; then ${noNode}; else ${plugin}; fi`),
-  }
+  return wrap(`${find}; if [ -z "$companion_version" ]; then ${missing}; elif ! command -v node >/dev/null 2>&1; then ${noNode}; else ${plugin}; fi`)
 }
 
 export function reviewPlan(rv: ReviewerConfig, c: GrannyConfig, host: HostName, base: string, stem: string, prompt = ''): ReviewPlan {

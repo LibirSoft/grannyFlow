@@ -163,7 +163,7 @@ On **opencode** granny executes the command itself. On **Claude Code** the Workf
 
 The run's `plan` input is one absolute path or a list of them (a relative path is rejected before anything runs). Every agent prompt, the judge's and a command reviewer's `{prompt}` name them: `Plan files - read them first: <paths>`. The plan review is optional and off by default; enable it with `"planReview": true`. It runs every reviewer, the judge and the implementer over the plan for up to `maxRounds` rounds before any code is written, so it costs extra tokens. With it on, the run reviews the plan files in phase "Plan review", after the worktree setup and before stage 1. It is skipped - and the result's `plan` says `skipped` - when the run resumes with `fromStage` > 1; with `planReview` off the result's `plan` says `review-skipped`. A run without `plan` has no `plan` in its result.
 
-The loop is a stage's review loop on the plan files instead of a diff: every reviewer in parallel, the one retry, P0/P1 straight to the implementer, the judge for the rest (with a plan-review judge prompt) and its duplicates, `threshold`, and the `maxRounds` cap. Labels and log lines read `plan review r<n> <name>`, the outputs are `<workDir>/review-plan-review-r<n>-<name>.md` and `.log`, and finding ids are `<name>-F<n>` as in a stage. Each reviewer gets a plan-review prompt asking, against the actual repo, for wrong assumptions about the code or its dependencies, missing steps, risky ordering, acceptance criteria that cannot be tested, and version drift, in the form `- [P1] Title — <absolute plan path>:<line>` ([prompts.md](prompts.md) shows it). Findings keep that absolute path.
+The loop is a stage's review loop on the plan files instead of a diff: every reviewer in parallel, the one retry, P0/P1 straight to the implementer, the judge for the rest (with a plan-review judge prompt) and its duplicates, `threshold`, and the `maxRounds` cap. Labels and log lines read `plan review r<n> <name>`, the outputs are `<workDir>/review-plan-review-r<n>-<name>.md` and `.log` (on Claude Code the command runs in the start, wait and read steps of [On Claude Code](#on-claude-code)), and finding ids are `<name>-F<n>` as in a stage. Each reviewer gets a plan-review prompt asking, against the actual repo, for wrong assumptions about the code or its dependencies, missing steps, risky ordering, acceptance criteria that cannot be tested, and version drift, in the form `- [P1] Title — <absolute plan path>:<line>` ([prompts.md](prompts.md) shows it). Findings keep that absolute path.
 
 | `engine` | plan review runs |
 |---|---|
@@ -228,14 +228,27 @@ On Claude Code it goes through `opencode run`, because a Claude Code agent runs 
 
 ### Each reviewer on its own
 
-- Output files: `<workDir>/review-<stage>-r<n>-<name>.md` and `.log`.
+- Output files: `<workDir>/review-<stage>-r<n>-<name>.md` and `.log`; on Claude Code also `.out` (what the script printed), `.exit` (its exit code) and `.pid` (its process group), see [On Claude Code](#on-claude-code).
 - Log line every round: `<stage> r<n> <name>: reviewer: <backend>`.
 - Finding ids: `<name>-F1`, `<name>-F2`, … Each finding also carries `reviewer: "<name>"` into the judge prompt, the fix prompt, the round history, residual and unresolved.
 - Codex plugin broker: `<workDir>/codex-plugin-<name>` (below).
 
+### On Claude Code
+
+The Workflow script has no shell, so a Codex or `command` reviewer's script runs in granny helper agents (role `granny`). A review can take longer than the 10 minutes a Claude Code Bash call may run, and a helper left to wait on its own in the background may return before the review is done or never stop waiting, so the engine runs the script in fixed steps, each a helper that runs one given command once:
+
+| step | label | command |
+|---|---|---|
+| start | `review <stage> r<n> <name>` | stops an earlier run of the same files still going (its `.pid`, when there is no `.exit`), deletes `.md`, `.log`, `.out`, `.exit` and `.pid`, then runs the review script detached - `{ set -m; nohup bash -c '<script>' > /dev/null 2>&1 < /dev/null & }` - and prints `started`. The detached script writes its process group id to `.pid`, what it prints to `.out` and its exit code to `.exit`. Every `rm` runs here, outside `bash -c`, where the helper's shell can check it |
+| wait | `review <stage> r<n> <name> wait <k>` | in the foreground, with the Bash timeout set to 600000 ms: `bash -c 'until [ -s <.exit> ] \|\| [ "$SECONDS" -ge 540 ]; do sleep 5; done'`, then `done` or `pending` |
+| read | `review <stage> r<n> <name> read` | prints `.out` and exits with the code in `.exit` |
+| stop | `review <stage> r<n> <name> stop` | only after the last wait: `kill -TERM` to the process group in `.pid` |
+
+The engine calls the next wait until one prints `done`; a wait that printed anything else, failed or returned nothing counts as `pending`. After 7 waits (63 minutes) without `done` it stops the review and the reviewer did not run (below), with the note `review command still running after 7 waits of up to 9 minutes (63 minutes) - stopped it`. A start the helper reports as failed is a reviewer that did not run too (`review command did not start (exit <code>): <output>`). The plan review uses the same steps; on opencode granny runs the script directly and waits for it itself. `set -m` and bash's `$SECONDS` stand in for `setsid` and `timeout`, which macOS does not ship.
+
 ### A reviewer that does not run
 
-A reviewer did not run when its command exits non-zero, when the Codex plugin says it got no usable result (below), when an agent reviewer returns nothing, when an extraction of its output stays short (below), when output without finding bullets and without `No findings.` yields no extracted finding and no confirmation that it is a clean review (below), or when a call it needs fails with an error (an opencode session request, the command runner, an extraction agent) - the note then reads `reviewer call failed: <error>`. The round waits for every reviewer before it ends, so one reviewer's error never cuts the others short. It is run once more, on its own - the other reviewers keep their results - with labels and log lines tagged `#2`, after the log line `<stage> r<n> <name>: did not run - retrying once. <why>`. If it fails again, the stage ends `review-failed`: the note names every reviewer that failed with its last error, and `unresolved` keeps the findings of the reviewers that did run (and the failed reviewer's findings from the round before, also those the judge merged into another reviewer's finding: a merged finding it kept stays merged, one it lost to another reviewer comes back under its own id), so nothing is lost. A stage is `clean` only when every reviewer ran and none reported a finding.
+A reviewer did not run when its command exits non-zero, when its command did not start or was still running after the last wait on Claude Code ([On Claude Code](#on-claude-code)), when the Codex plugin says it got no usable result (below), when an agent reviewer returns nothing, when an extraction of its output stays short (below), when output without finding bullets and without `No findings.` yields no extracted finding and no confirmation that it is a clean review (below), or when a call it needs fails with an error (an opencode session request, the command runner, an extraction agent) - the note then reads `reviewer call failed: <error>`. The round waits for every reviewer before it ends, so one reviewer's error never cuts the others short. It is run once more, on its own - the other reviewers keep their results - with labels and log lines tagged `#2`, after the log line `<stage> r<n> <name>: did not run - retrying once. <why>`. If it fails again, the stage ends `review-failed`: the note names every reviewer that failed with its last error, and `unresolved` keeps the findings of the reviewers that did run (and the failed reviewer's findings from the round before, also those the judge merged into another reviewer's finding: a merged finding it kept stays merged, one it lost to another reviewer comes back under its own id), so nothing is lost. A stage is `clean` only when every reviewer ran and none reported a finding.
 
 ### Judge routing
 
@@ -296,7 +309,7 @@ Engine `command` runs the entry's `command` from the worktree (`repo` with `work
 | `{model}` | the entry's `model` for this host; empty without one |
 | `{prompt}` | a review prompt the engine writes for the stage - one line, asking for the finding format below ("Reviewer - command engine" in [prompts.md](prompts.md)) |
 
-The template must contain `{base}` or `{prompt}`. Every value is substituted already shell-quoted, in one pass, so do not put quotes around a placeholder. The engine deletes `{out}` and the reviewer's log first, then reads `{out}` when the command left it non-empty, otherwise everything the command printed. A non-zero exit means the reviewer did not run.
+The template must contain `{base}` or `{prompt}`. Every value is substituted already shell-quoted, in one pass, so do not put quotes around a placeholder. On Claude Code the command runs detached and the engine waits for it ([On Claude Code](#on-claude-code)). The engine deletes `{out}` and the reviewer's log first, then reads `{out}` when the command left it non-empty, otherwise everything the command printed. A non-zero exit means the reviewer did not run.
 
 With `{prompt}`, any CLI that answers a prompt can review:
 

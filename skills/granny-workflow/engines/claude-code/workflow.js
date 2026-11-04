@@ -525,14 +525,25 @@ ${overruledSection(overruled)}
 FINDINGS (P0/P1 or score > ${p.config.threshold}):
 ${JSON.stringify(accepted, null, 2)}`;
 }
-function reviewCommandPrompt(p, name, reviewer, script) {
-  return `You run one shell command for a code review and return its output. Do not edit, stage or commit anything, and do not review the code yourself.
+var REPORT = "Set ran=true only if it exited 0, exitCode to its exit code, and output to everything it printed, verbatim and complete. If it failed, set ran=false and explain in note. Never invent output.";
+var reviewStep = (p, name, reviewer, step, run, script) => `You run one shell command for a code review - ${step} - and return its output. Run nothing else, do not edit, stage or commit anything, and do not review the code yourself.
 Stage "${name}" of repo ${p.repo}, branch \`${p.branch}\`, reviewer "${reviewer}".
 
-Run exactly this (it can take longer than 10 minutes - use your shell tool's background mode and wait for it to finish; never cut it short):
+${run}
 ${script}
 
-Set ran=true only if it exited 0, exitCode to its exit code, and output to everything it printed, verbatim and complete. If it failed, set ran=false and explain in note. Never invent output.`;
+${REPORT}`;
+function reviewStartPrompt(p, name, reviewer, script) {
+  return reviewStep(p, name, reviewer, "it starts the review detached and returns at once; granny waits for it in later steps", "Run exactly this, once, in the foreground - it detaches the review itself and returns at once:", script);
+}
+function reviewWaitPrompt(p, name, reviewer, n, max, minutes, script) {
+  return reviewStep(p, name, reviewer, `wait ${n} of at most ${max} for the review granny started; granny decides from what it prints whether to wait again`, `Run exactly this, once, in the foreground (never in the background), with your shell tool's timeout set to 600000 ms (10 minutes). It returns by itself within ${minutes} minutes and prints done or pending:`, script);
+}
+function reviewReadPrompt(p, name, reviewer, script) {
+  return reviewStep(p, name, reviewer, "it prints the output of the finished review and exits with its exit code", "Run exactly this, once:", script);
+}
+function reviewStopPrompt(p, name, reviewer, script) {
+  return reviewStep(p, name, reviewer, "it stops a review that ran past the wait limit", "Run exactly this, once:", script);
 }
 function worktreeCommandPrompt(repo, branch, script) {
   return `You run one shell command that sets up the git worktree of branch \`${branch}\` for a granny run, and return its output. Run nothing else, and do not edit, stage or commit anything yourself.
@@ -718,6 +729,21 @@ var SAID = "[granny] reviewer: ";
 var BACKEND_LINE = /^\[granny\] reviewer: (.*)$/m;
 var PLUGINS = 'codex_plugins="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/plugins/cache/openai-codex/codex"';
 var COMPANION = "scripts/codex-companion.mjs";
+var WAIT_SECONDS = 540;
+var MAX_WAITS = 7;
+function detachedReview(plan, c, stem, cwd) {
+  const [md, log, out, exit, pid] = ["md", "log", "out", "exit", "pid"].map((ext) => shellQuote(`${stem}.${ext}`));
+  const cd = `cd ${shellQuote(cwd)} && `;
+  const kill = `kill -TERM -- "-$(cat ${pid})" 2>/dev/null || kill -TERM "$(cat ${pid})" 2>/dev/null`;
+  const job = shellQuote(`echo $$ > ${pid}; (${plan.body}) > ${out} 2>&1; echo $? > ${exit}`);
+  const until = shellQuote(`until [ -s ${exit} ] || [ "$SECONDS" -ge ${WAIT_SECONDS} ]; do sleep 5; done`);
+  return {
+    start: `${cd}if [ -s ${pid} ] && [ ! -s ${exit} ]; then ${kill}; fi; mkdir -p ${shellQuote(c.workDir)} && rm -f ${md} ${log} ${out} ${exit} ${pid} && { set -m; nohup bash -c ${job} > /dev/null 2>&1 < /dev/null & } && echo started`,
+    wait: `${cd}bash -c ${until}; if [ -s ${exit} ]; then echo done; else echo pending; fi`,
+    read: `${cd}code=$(cat ${exit}); cat ${out}; exit "\${code:-1}"`,
+    stop: `${cd}if [ -s ${pid} ]; then ${kill}; fi; rm -f ${pid}; echo stopped`
+  };
+}
 function cliCommand(rv, host, base, out, prompt = "") {
   const model = resolveModel(rv.model, host);
   const template = rv.engine === "command" && rv.command ? rv.command : `codex exec review --base {base}${model ? " -m {model}" : ""} -o {out}`;
@@ -734,12 +760,15 @@ var reviewStem = (c, stage, round, rv) => `${c.workDir}/review-${stage}-r${round
 function script(rv, c, host, stem, b) {
   const md = shellQuote(`${stem}.md`);
   const log = shellQuote(`${stem}.log`);
-  const wrap = (run) => `mkdir -p ${shellQuote(c.workDir)} && rm -f ${md} ${log} && ${run}; code=$?; if [ -s ${md} ]; then cat ${md}; else cat ${log}; fi; exit $code`;
+  const wrap = (run, backend) => {
+    const body = `${run}; code=$?; if [ -s ${md} ]; then cat ${md}; else cat ${log}; fi; exit $code`;
+    return { script: `mkdir -p ${shellQuote(c.workDir)} && rm -f ${md} ${log} && ${body}`, body, ...backend ? { backend } : {} };
+  };
   const cli = `${b.cli} > ${log} 2>&1`;
   if (rv.engine === "command")
-    return { script: wrap(cli), backend: "custom command" };
+    return wrap(cli, "custom command");
   if (rv.engine === "codex" || rv.engine === "auto" && host !== "claude-code")
-    return { script: wrap(cli), backend: b.cliLabel };
+    return wrap(cli, b.cliLabel);
   const otherwise = (why, remedy) => b.fallback ? `echo "${SAID}${b.cliLabel} - ${why}" && ${cli}` : `{ echo "${SAID}codex-plugin ${b.pluginLabel} unavailable - ${why}; ${remedy}" > ${log}; false; }`;
   const missing = otherwise(`no Codex plugin companion at $codex_plugins/<version>/${COMPANION}`, "install OpenAI's Codex plugin for Claude Code");
   const noNode = otherwise("node is not on PATH for the Codex plugin companion at $companion", "install Node.js");
@@ -748,9 +777,7 @@ function script(rv, c, host, stem, b) {
   const stopBroker = `node "\${companion%/*}/session-lifecycle-hook.mjs" SessionEnd </dev/null >/dev/null 2>&1`;
   const ownBroker = `export CLAUDE_PLUGIN_DATA="$PWD"/${shellQuote(`${c.workDir}/codex-plugin-${rv.name}`)} && trap '${stopBroker}' EXIT && trap 'exit 143' TERM && trap 'exit 130' INT && trap 'exit 129' HUP`;
   const plugin = `echo "${SAID}codex-plugin ${b.pluginLabel} ($companion)" && ${ownBroker} && ${b.plugin} > ${md} 2> ${log}`;
-  return {
-    script: wrap(`${find}; if [ -z "$companion_version" ]; then ${missing}; elif ! command -v node >/dev/null 2>&1; then ${noNode}; else ${plugin}; fi`)
-  };
+  return wrap(`${find}; if [ -z "$companion_version" ]; then ${missing}; elif ! command -v node >/dev/null 2>&1; then ${noNode}; else ${plugin}; fi`);
 }
 function reviewPlan(rv, c, host, base, stem, prompt = "") {
   const mode = rv.mode ?? "review";
@@ -1350,8 +1377,24 @@ the last repair's deviations: ${deviations}` : ""}`;
       if (!ran)
         note = `review command exited ${r.code}: ${r.output.slice(-2000)}`;
     } else {
-      const script = `cd ${shellQuote(cwd)} && ${plan.script}`;
-      const r = await call("granny", "command", `review ${tag}`, phase, reviewCommandPrompt(p, name, rv.name, script), "read-only", config.roles.granny, cwd);
+      const job = detachedReview(plan, config, stem, cwd);
+      const step = (label, prompt) => call("granny", "command", label, phase, prompt, "read-only", config.roles.granny, cwd);
+      const started = await step(`review ${tag}`, reviewStartPrompt(p, name, rv.name, job.start));
+      if (!started?.ran) {
+        const said = String(started?.output ?? "");
+        return { ran: false, findings: [], note: started ? `review command did not start (exit ${started.exitCode ?? "?"})${started.note ? ` (${started.note})` : ""}: ${said.slice(-2000)}` : "review runner returned nothing" };
+      }
+      let done = false;
+      for (let n = 1;n <= MAX_WAITS && !done; n++) {
+        const w = await step(`review ${tag} wait ${n}`, reviewWaitPrompt(p, name, rv.name, n, MAX_WAITS, WAIT_SECONDS / 60, job.wait));
+        done = lineShaped(String(w?.output ?? ""), /^done$/) !== undefined;
+      }
+      if (!done) {
+        await step(`review ${tag} stop`, reviewStopPrompt(p, name, rv.name, job.stop));
+        const limit = `${MAX_WAITS} waits of up to ${WAIT_SECONDS / 60} minutes (${MAX_WAITS * WAIT_SECONDS / 60} minutes)`;
+        return { ran: false, findings: [], note: `review command still running after ${limit} - stopped it` };
+      }
+      const r = await step(`review ${tag} read`, reviewReadPrompt(p, name, rv.name, job.read));
       ran = Boolean(r?.ran);
       output = String(r?.output ?? "");
       if (!ran)

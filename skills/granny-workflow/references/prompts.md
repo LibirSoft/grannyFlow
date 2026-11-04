@@ -304,6 +304,54 @@ Also report clean-code and design problems - duplication, unclear naming, needle
 Return findings with id (F1, F2, ...), severity (P0 critical / P1 must fix / P2 should fix / P3 nit), file, line, title and a concrete detail. Zero findings means the stage is clean.
 ```
 
+## Granny - a review command, start: the helper agent on Claude Code for a Codex or command reviewer, in the diff review and the plan review (on opencode granny runs the review script itself and waits for it)
+
+```text
+You run one shell command for a code review - it starts the review detached and returns at once; granny waits for it in later steps - and return its output. Run nothing else, do not edit, stage or commit anything, and do not review the code yourself.
+Stage "<stage name>" of repo <repo>, branch `<branch>`, reviewer "<reviewer>".
+
+Run exactly this, once, in the foreground - it detaches the review itself and returns at once:
+cd '<repo>' && if [ -s '.granny/review-<stage>-r<n>-<name>.pid' ] && [ ! -s '.granny/review-<stage>-r<n>-<name>.exit' ]; then kill -TERM -- "-$(cat '.granny/review-<stage>-r<n>-<name>.pid')" 2>/dev/null || kill -TERM "$(cat '.granny/review-<stage>-r<n>-<name>.pid')" 2>/dev/null; fi; mkdir -p .granny && rm -f '.granny/review-<stage>-r<n>-<name>.md' '.granny/review-<stage>-r<n>-<name>.log' '.granny/review-<stage>-r<n>-<name>.out' '.granny/review-<stage>-r<n>-<name>.exit' '.granny/review-<stage>-r<n>-<name>.pid' && { set -m; nohup bash -c 'echo $$ > '\''.granny/review-<stage>-r<n>-<name>.pid'\''; (<review script>) > '\''.granny/review-<stage>-r<n>-<name>.out'\'' 2>&1; echo $? > '\''.granny/review-<stage>-r<n>-<name>.exit'\''' > /dev/null 2>&1 < /dev/null & } && echo started
+
+Set ran=true only if it exited 0, exitCode to its exit code, and output to everything it printed, verbatim and complete. If it failed, set ran=false and explain in note. Never invent output.
+```
+
+## Granny - a review command, wait <k> (k = 1 to 7; granny calls the next wait until one prints done)
+
+```text
+You run one shell command for a code review - wait 1 of at most 7 for the review granny started; granny decides from what it prints whether to wait again - and return its output. Run nothing else, do not edit, stage or commit anything, and do not review the code yourself.
+Stage "<stage name>" of repo <repo>, branch `<branch>`, reviewer "<reviewer>".
+
+Run exactly this, once, in the foreground (never in the background), with your shell tool's timeout set to 600000 ms (10 minutes). It returns by itself within 9 minutes and prints done or pending:
+cd '<repo>' && bash -c 'until [ -s '\''.granny/review-<stage>-r<n>-<name>.exit'\'' ] || [ "$SECONDS" -ge 540 ]; do sleep 5; done'; if [ -s '.granny/review-<stage>-r<n>-<name>.exit' ]; then echo done; else echo pending; fi
+
+Set ran=true only if it exited 0, exitCode to its exit code, and output to everything it printed, verbatim and complete. If it failed, set ran=false and explain in note. Never invent output.
+```
+
+## Granny - a review command, read (after a wait printed done)
+
+```text
+You run one shell command for a code review - it prints the output of the finished review and exits with its exit code - and return its output. Run nothing else, do not edit, stage or commit anything, and do not review the code yourself.
+Stage "<stage name>" of repo <repo>, branch `<branch>`, reviewer "<reviewer>".
+
+Run exactly this, once:
+cd '<repo>' && code=$(cat '.granny/review-<stage>-r<n>-<name>.exit'); cat '.granny/review-<stage>-r<n>-<name>.out'; exit "${code:-1}"
+
+Set ran=true only if it exited 0, exitCode to its exit code, and output to everything it printed, verbatim and complete. If it failed, set ran=false and explain in note. Never invent output.
+```
+
+## Granny - a review command, stop (after 7 waits without done)
+
+```text
+You run one shell command for a code review - it stops a review that ran past the wait limit - and return its output. Run nothing else, do not edit, stage or commit anything, and do not review the code yourself.
+Stage "<stage name>" of repo <repo>, branch `<branch>`, reviewer "<reviewer>".
+
+Run exactly this, once:
+cd '<repo>' && if [ -s '.granny/review-<stage>-r<n>-<name>.pid' ]; then kill -TERM -- "-$(cat '.granny/review-<stage>-r<n>-<name>.pid')" 2>/dev/null || kill -TERM "$(cat '.granny/review-<stage>-r<n>-<name>.pid')" 2>/dev/null; fi; rm -f '.granny/review-<stage>-r<n>-<name>.pid'; echo stopped
+
+Set ran=true only if it exited 0, exitCode to its exit code, and output to everything it printed, verbatim and complete. If it failed, set ran=false and explain in note. Never invent output.
+```
+
 ## Reviewer - command engine, the text {prompt} is filled with
 
 ```text

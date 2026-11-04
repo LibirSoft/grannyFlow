@@ -142,14 +142,45 @@ FINDINGS (P0/P1 or score > ${p.config.threshold}):
 ${JSON.stringify(accepted, null, 2)}`
 }
 
-export function reviewCommandPrompt(p: PromptContext, name: string, reviewer: string, script: string): string {
-  return `You run one shell command for a code review and return its output. Do not edit, stage or commit anything, and do not review the code yourself.
+const REPORT = 'Set ran=true only if it exited 0, exitCode to its exit code, and output to everything it printed, verbatim and complete. If it failed, set ran=false and explain in note. Never invent output.'
+
+const reviewStep = (p: PromptContext, name: string, reviewer: string, step: string, run: string, script: string) =>
+  `You run one shell command for a code review - ${step} - and return its output. Run nothing else, do not edit, stage or commit anything, and do not review the code yourself.
 Stage "${name}" of repo ${p.repo}, branch \`${p.branch}\`, reviewer "${reviewer}".
 
-Run exactly this (it can take longer than 10 minutes - use your shell tool's background mode and wait for it to finish; never cut it short):
+${run}
 ${script}
 
-Set ran=true only if it exited 0, exitCode to its exit code, and output to everything it printed, verbatim and complete. If it failed, set ran=false and explain in note. Never invent output.`
+${REPORT}`
+
+export function reviewStartPrompt(p: PromptContext, name: string, reviewer: string, script: string): string {
+  return reviewStep(
+    p,
+    name,
+    reviewer,
+    'it starts the review detached and returns at once; granny waits for it in later steps',
+    'Run exactly this, once, in the foreground - it detaches the review itself and returns at once:',
+    script,
+  )
+}
+
+export function reviewWaitPrompt(p: PromptContext, name: string, reviewer: string, n: number, max: number, minutes: number, script: string): string {
+  return reviewStep(
+    p,
+    name,
+    reviewer,
+    `wait ${n} of at most ${max} for the review granny started; granny decides from what it prints whether to wait again`,
+    `Run exactly this, once, in the foreground (never in the background), with your shell tool's timeout set to 600000 ms (10 minutes). It returns by itself within ${minutes} minutes and prints done or pending:`,
+    script,
+  )
+}
+
+export function reviewReadPrompt(p: PromptContext, name: string, reviewer: string, script: string): string {
+  return reviewStep(p, name, reviewer, 'it prints the output of the finished review and exits with its exit code', 'Run exactly this, once:', script)
+}
+
+export function reviewStopPrompt(p: PromptContext, name: string, reviewer: string, script: string): string {
+  return reviewStep(p, name, reviewer, 'it stops a review that ran past the wait limit', 'Run exactly this, once:', script)
 }
 
 export function worktreeCommandPrompt(repo: string, branch: string, script: string): string {
