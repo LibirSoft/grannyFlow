@@ -493,18 +493,42 @@ function classify(entry) {
     note
   };
 }
-function decide(f, entry, policy, repeatsDeclined = () => false) {
+var pathLines = (evidence = "") => (evidence.match(/[^\s`'"()[\]{}<>,;]+:\d+/g) ?? []).map((t) => t.split("/").pop());
+function ratchet(fields, label, earlier) {
+  if (!earlier.impact || !earlier.likelihood)
+    return;
+  const before = pathLines(earlier.evidence);
+  if (fields.verdict === "refuted" && pathLines(fields.evidence).some((p) => !before.includes(p)))
+    return;
+  const raised = [];
+  if (IMPACTS.indexOf(fields.impact) > IMPACTS.indexOf(earlier.impact)) {
+    raised.push(`impact ${fields.impact} -> ${earlier.impact}`);
+    fields.impact = earlier.impact;
+  }
+  if (LIKELIHOODS.indexOf(fields.likelihood) > LIKELIHOODS.indexOf(earlier.likelihood)) {
+    raised.push(`likelihood ${fields.likelihood} -> ${earlier.likelihood}`);
+    fields.likelihood = earlier.likelihood;
+  }
+  return raised.length ? `repeat of ${label}: ${raised.join(", ")}` : undefined;
+}
+function decide(f, entry, policy, repeatsDeclined = () => false, earlierOf = () => {
+  return;
+}) {
   const out = { ...f };
   for (const key of JUDGED)
     delete out[key];
   if (typeof entry?.reason === "string")
     out.reason = entry.reason;
   const c = classify(entry);
+  let raised;
   const done = (rule, action, why, attention) => ({
     ...out,
-    decision: { rule, action, why, ...attention ? { attention: true } : {} }
+    decision: { rule, action, why, ...attention ? { attention: true } : {}, ...raised ? { raised } : {} }
   });
   if (c.kind === "classified") {
+    const earlier = f.repeatOf === undefined ? undefined : earlierOf(f);
+    if (earlier)
+      raised = ratchet(c.fields, f.repeatOf, earlier);
     Object.assign(out, c.fields);
     out.priority = priorityOf(c.fields.impact, c.fields.likelihood, c.fields.fixCost);
   } else if (c.kind === "score")
@@ -557,7 +581,7 @@ function shellQuote(value) {
 }
 
 // src/core/prompts.ts
-var roundLabel = (round, f) => `r${round}/${f.id}`;
+var roundLabel = (round, f, loop) => `${loop ? `${loop.id}/` : ""}r${round}/${f.id}`;
 var judgeRouting = (findings) => findings.some(isBlocker) ? "P0/P1 findings are in this list only because a fixer declined findings in an earlier round: classify them like the rest. A P0/P1 goes to the implementer whatever you classify, unless its repeatOf names a finding the fixer declined - then your classification decides it like any other finding." : "P0/P1 findings are not in this list: they go to the implementer without the judge.";
 var rubric = (task) => `Classify every finding below - do not score it. The engine computes a priority from your classes and decides what goes to the implementer, so give each finding exactly these fields:
 - verdict: confirmed (the code shows the problem) | refuted (the code shows it is not there or not a problem) | unverified (you could not confirm it either way).
@@ -574,29 +598,50 @@ var rubric = (task) => `Classify every finding below - do not score it. The engi
 - evidence: path:line plus the concrete trigger steps, e.g. \`Editor.tsx:225\` + "save -> go back in history -> the late response arrives -> save again". Always give a path:line: evidence without one counts as unverified, and an unverified finding's impact is lowered one class.
 - reason: one line.
 Example: a late save response re-binds the editor to another post's id, so the next save can overwrite the wrong post - confirmed, critical, edge, small, in-scope, even though the window is narrow.`;
+var decided = (f) => f.decision ? `${f.decision.action} - rule ${f.decision.rule}: ${f.decision.why}${f.decision.raised ? ` (ratchet raised ${f.decision.raised})` : ""}` : undefined;
 function judgeHistory(earlier) {
   if (!earlier.length)
     return "";
-  const labelled = (round, findings) => JSON.stringify(findings.map((f) => ({ label: roundLabel(round, f), severity: f.severity, file: f.file, line: f.line, title: f.title, detail: f.detail })), null, 2);
+  const labelled = (e, findings) => JSON.stringify(findings.map((f) => ({
+    label: roundLabel(e.round, f, e.loop),
+    decision: decided(f),
+    severity: f.severity,
+    file: f.file,
+    line: f.line,
+    title: f.title,
+    detail: f.detail,
+    verdict: f.verdict,
+    impact: f.impact,
+    likelihood: f.likelihood,
+    fixCost: f.fixCost,
+    scope: f.scope,
+    priority: f.priority,
+    score: f.score,
+    evidence: f.evidence
+  })), null, 2);
   const rounds = earlier.map((e) => {
+    const title = e.loop ? `${e.loop.name}, round ${e.round}` : `Round ${e.round}`;
     const kept = e.residual?.length ? `
-Round ${e.round} kept as residual (not sent to the fixer):
-${labelled(e.round, e.residual)}` : "";
+${title} kept as residual (not sent to the fixer):
+${labelled(e, e.residual)}` : "";
+    if (!e.sent.length)
+      return kept.slice(1);
     const declined = e.declined?.length ? e.declined.map((d) => `
-- ${roundLabel(e.round, d)}: ${d.reason || "no reason given"}`).join("") : " none - it fixed all of them";
+- ${roundLabel(e.round, d, e.loop)}: ${d.reason || "no reason given"}`).join("") : " none - it fixed all of them";
     const notes = e.deviations?.trim() ? `
 The fixer's other notes: ${e.deviations.trim()}` : "";
-    return `Round ${e.round} sent to the fixer:
-${labelled(e.round, e.sent)}
+    return `${title} sent to the fixer:
+${labelled(e, e.sent)}
 The findings the fixer declined (did not fix), and why:${declined}${notes}${kept}`;
   });
   return `
-EARLIER ROUNDS of this review - the findings already sent to the fixer, under round-qualified labels, the ones the fixer declined with its reasons, and the findings kept as residual for the user:
+EARLIER DECISIONS - every finding an earlier review round sent to the fixer or kept as residual for the user, under its label, with its classification, priority and the rule that decided it, and the ones the fixer declined with its reasons${earlier.some((e) => e.loop) ? ". Rounds named after a stage are that stage's own review; this review covers its code too" : ""}:
 ${rounds.join(`
 
 `)}
 
 When a finding below repeats one of those earlier findings, set its repeatOf to that label. A repeat of a finding the fixer declined with a convincing reason that the code backs: classify it refuted, or by its scope when it belongs elsewhere, and cite the label and the fixer's reason in your reason. When the fixer's reason is wrong, classify the repeat on its merits and say in reason why the fixer's reason does not hold. A repeat of a finding the fixer applied: check the fix in the code and classify what is still wrong. A repeat of a residual finding: the fixer never saw it - classify it on its merits.
+A repeat cannot drop below the impact and likelihood of the finding it repeats: the engine raises them back, unless you classify the repeat refuted with path:line evidence the earlier finding did not cite.
 `;
 }
 function overruledSection(overruled) {
@@ -1067,7 +1112,7 @@ var SCHEMAS = {
             evidence: { type: "string", description: "path:line plus the concrete trigger steps" },
             reason: { type: "string", description: "one line" },
             duplicateOf: { type: "string", description: "id of another finding in this list that reports the same problem; omit when there is none" },
-            repeatOf: { type: "string", description: "label of the earlier-round finding this one repeats, exactly as listed under EARLIER ROUNDS (e.g. r1/codex-F2); omit when it repeats none" }
+            repeatOf: { type: "string", description: "label of the earlier finding this one repeats, exactly as listed under EARLIER DECISIONS (e.g. r1/codex-F2, or s1/r2/codex-F1 from a stage review); omit when it repeats none" }
           },
           required: ["id", "verdict", "impact", "likelihood", "fixCost", "scope", "evidence", "reason"]
         }
@@ -1412,7 +1457,7 @@ ${note}` : ""}` : missing };
   const repoState = new Map(used.map((r) => {
     const cwd = cwdOf.get(r);
     const others = used.filter((o) => o !== r).map((o) => cwdOf.get(o));
-    return [r, { lane: { repo: r, base: baseOf(r), branch: input.branch, cwd, p: promptFor(r, cwd, input.branch, others) }, locked: false, waiters: [], setup: Promise.resolve(), merges: 0 }];
+    return [r, { lane: { repo: r, base: baseOf(r), branch: input.branch, cwd, p: promptFor(r, cwd, input.branch, others) }, locked: false, waiters: [], setup: Promise.resolve(), merges: 0, ledger: new Map }];
   }));
   const primaryLane = repoState.get(primary).lane;
   const implement = async (lane, label, prompt) => {
@@ -1643,11 +1688,11 @@ the last repair's deviations: ${deviations}` : ""}`;
     return { reviewer, ...r, findings: attribute(reviewer, r.findings) };
   }));
   const reviewLoop = async (lane, name, subject, reviewers = config.reviewers, opts = {}) => {
-    const { gates, checks = [], runs = [], notes = [] } = opts;
+    const { gates, checks = [], runs = [], notes = [], prior = [], record } = opts;
     const { p } = lane;
     const phase = phaseOf(subject);
     const history = [];
-    const earlier = [];
+    const earlier = [...prior];
     let unmerged = [];
     let carried = [];
     const kept = () => carried.map((c) => c.finding);
@@ -1668,9 +1713,9 @@ the last repair's deviations: ${deviations}` : ""}`;
         host.log(`${name} r${round}: clean`);
         return { outcome: "clean", rounds: round, residual: kept(), unresolved: [], history };
       }
-      const declined = new Map(earlier.flatMap((e) => (e.declined ?? []).map((d) => [roundLabel(e.round, d), d.reason])));
-      const labels = new Set(earlier.flatMap((e) => e.sent.map((f) => roundLabel(e.round, f))));
-      const residualLabels = new Set(earlier.flatMap((e) => (e.residual ?? []).map((f) => roundLabel(e.round, f))));
+      const declined = new Map(earlier.flatMap((e) => (e.declined ?? []).map((d) => [roundLabel(e.round, d, e.loop), d.reason])));
+      const ledger = new Map(earlier.flatMap((e) => [...e.sent, ...e.residual ?? []].map((f) => [roundLabel(e.round, f, e.loop), f])));
+      const earlierOf = (f) => f.repeatOf === undefined ? undefined : ledger.get(f.repeatOf);
       const blockers = found.filter(isBlocker);
       const judged = declined.size ? found : found.filter((f) => !isBlocker(f));
       if (blockers.length && declined.size) {
@@ -1694,8 +1739,8 @@ the last repair's deviations: ${deviations}` : ""}`;
         const duplicateOf = new Map(per.filter((x) => judgedIds.has(x.id) && typeof x.duplicateOf === "string" && judgedIds.has(x.duplicateOf)).filter((x) => !blockerIds.has(x.id) || blockerIds.has(x.duplicateOf)).map((x) => [x.id, x.duplicateOf]));
         const withScores = found.map((f) => {
           const s = judgedIds.has(f.id) ? per.find((x) => x.id === f.id) : undefined;
-          const repeat = typeof s?.repeatOf === "string" && (labels.has(s.repeatOf) || residualLabels.has(s.repeatOf)) ? { repeatOf: s.repeatOf } : {};
-          return decide({ ...f, ...repeat }, s, policy, declinedBefore);
+          const repeat = typeof s?.repeatOf === "string" && ledger.has(s.repeatOf) ? { repeatOf: s.repeatOf } : {};
+          return decide({ ...f, ...repeat }, s, policy, declinedBefore, earlierOf);
         });
         const merge = mergeDuplicates(withScores, duplicateOf);
         for (const m of merge.merged)
@@ -1707,7 +1752,13 @@ the last repair's deviations: ${deviations}` : ""}`;
       history.push({ round, score, findings });
       host.log(`${name} r${round}: ${findings.length} finding(s), review score ${score} (informational)`);
       const { accepted, residual } = triage(findings);
+      const entry = { round, sent: accepted, ...residual.length ? { residual } : {} };
+      const recorded = record ? { ...entry, loop: record.loop } : undefined;
+      if (recorded)
+        record.into.push(recorded);
       const ruled = (f) => `rule ${f.decision.rule}: ${f.decision.why}`;
+      for (const f of findings.filter((f) => f.decision.raised))
+        host.log(`${name} r${round}: the ratchet raised ${f.id} - ${f.decision.raised}`);
       if (accepted.length)
         host.log(`${name} r${round}: to the implementer: ${accepted.map((f) => `${f.id} (${ruled(f)})`).join(", ")}`);
       for (const f of residual.filter(declinedBefore)) {
@@ -1757,7 +1808,10 @@ the last repair's deviations: ${deviations}` : ""}`;
         history.at(-1).deviations = said;
       if (refused.length)
         history.at(-1).declined = refused;
-      earlier.push({ round, sent: accepted, ...residual.length ? { residual } : {}, ...said ? { deviations: said } : {}, ...refused.length ? { declined: refused } : {} });
+      const reply = { ...said ? { deviations: said } : {}, ...refused.length ? { declined: refused } : {} };
+      earlier.push({ ...entry, ...reply });
+      if (recorded)
+        Object.assign(recorded, reply);
       if (subject.kind === "diff" && checks.length) {
         const gate = await checkGate(lane, name, `fix r${round}`, checks, runs, subject.stage, gates);
         if (!gate.passed)
@@ -1816,6 +1870,12 @@ the last repair's deviations: ${deviations}` : ""}`;
       next();
     else
       s.locked = false;
+  };
+  const ledgerOf = (st, i) => {
+    const ledger = repoState.get(repoOf(st)).ledger;
+    if (!ledger.has(i))
+      ledger.set(i, []);
+    return ledger.get(i);
   };
   const runStage = async (lane, st, i, name, began) => {
     let impl;
@@ -1891,7 +1951,7 @@ the last repair's deviations: ${deviations}` : ""}`;
       host.log(`${name}: review-only stage - reviewing ${lane.base}...HEAD`);
     }
     host.phase("Review");
-    const loop = st.review === false ? { outcome: "review-skipped", rounds: 0, residual: [], unresolved: [], history: [] } : await reviewLoop(lane, name, { kind: "diff", base, ...task ? { stage: task } : {} }, undefined, { gates, checks, runs, notes });
+    const loop = st.review === false ? { outcome: "review-skipped", rounds: 0, residual: [], unresolved: [], history: [] } : await reviewLoop(lane, name, { kind: "diff", base, ...task ? { stage: task } : {} }, undefined, { gates, checks, runs, notes, record: { loop: { id: `s${i + 1}`, name: `Stage ${i + 1} (${name})` }, into: ledgerOf(st, i) } });
     if (gates && !gates.green && !runs.length && (loop.outcome === "clean" || loop.outcome === "residual-only")) {
       loop.outcome = "gates-red";
       loop.note = `the review found nothing to fix, but ${gates.by} left the gates red: ${gates.text}`;
@@ -2135,7 +2195,8 @@ ${note}` : note } : result;
     host.phase(FINAL_REVIEW_PHASE);
     host.log(`${name}: reviewing ${s.lane.base}...HEAD across ${stages} stage(s)${s.merges ? ` and ${s.merges} lane merge(s)` : ""}`);
     const notes = [];
-    const looped = await reviewLoop(s.lane, name, { kind: "diff", base: s.lane.base, note: WHOLE_BRANCH_NOTE }, undefined, { checks, runs, notes });
+    const prior = [...s.ledger].sort(([a], [b]) => a - b).flatMap(([, rounds]) => rounds);
+    const looped = await reviewLoop(s.lane, name, { kind: "diff", base: s.lane.base, note: WHOLE_BRANCH_NOTE }, undefined, { checks, runs, notes, prior });
     const note = [looped.note, ...notes].filter(Boolean).join(`
 `);
     const r = note ? { ...looped, note } : looped;

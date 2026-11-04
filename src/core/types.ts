@@ -19,6 +19,8 @@ export interface Decision {
   action: 'fix' | 'residual'
   why: string
   attention?: true
+  /** What the ratchet raised on a repeat whose classes dropped below the earlier entry's. */
+  raised?: string
 }
 
 export type ResultKind = 'draft' | 'implementation' | 'planFix' | 'findings' | 'score' | 'command' | 'final'

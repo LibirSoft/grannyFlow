@@ -3,12 +3,14 @@ import { isBlocker } from './review'
 import { shellQuote } from './shell'
 import type { Declined, Finding, StageSpec } from './types'
 
+/** One review round's decisions in the ledger; loop is set on a round of an earlier review loop (a stage's review). */
 export interface EarlierRound {
   round: number
   sent: Finding[]
   residual?: Finding[]
   deviations?: string
   declined?: Declined[]
+  loop?: { id: string; name: string }
 }
 
 export interface Overruled {
@@ -18,7 +20,7 @@ export interface Overruled {
   said: string
 }
 
-export const roundLabel = (round: number, f: Pick<Finding, 'id'>) => `r${round}/${f.id}`
+export const roundLabel = (round: number, f: Pick<Finding, 'id'>, loop?: EarlierRound['loop']) => `${loop ? `${loop.id}/` : ''}r${round}/${f.id}`
 
 const judgeRouting = (findings: Finding[]): string =>
   findings.some(isBlocker)
@@ -41,23 +43,48 @@ const rubric = (task: string) => `Classify every finding below - do not score it
 - reason: one line.
 Example: a late save response re-binds the editor to another post's id, so the next save can overwrite the wrong post - confirmed, critical, edge, small, in-scope, even though the window is narrow.`
 
+const decided = (f: Finding) => (f.decision ? `${f.decision.action} - rule ${f.decision.rule}: ${f.decision.why}${f.decision.raised ? ` (ratchet raised ${f.decision.raised})` : ''}` : undefined)
+
 function judgeHistory(earlier: EarlierRound[]): string {
   if (!earlier.length) return ''
-  const labelled = (round: number, findings: Finding[]) =>
-    JSON.stringify(findings.map(f => ({ label: roundLabel(round, f), severity: f.severity, file: f.file, line: f.line, title: f.title, detail: f.detail })), null, 2)
+  const labelled = (e: EarlierRound, findings: Finding[]) =>
+    JSON.stringify(
+      findings.map(f => ({
+        label: roundLabel(e.round, f, e.loop),
+        decision: decided(f),
+        severity: f.severity,
+        file: f.file,
+        line: f.line,
+        title: f.title,
+        detail: f.detail,
+        verdict: f.verdict,
+        impact: f.impact,
+        likelihood: f.likelihood,
+        fixCost: f.fixCost,
+        scope: f.scope,
+        priority: f.priority,
+        score: f.score,
+        evidence: f.evidence,
+      })),
+      null,
+      2,
+    )
   const rounds = earlier.map(e => {
-    const kept = e.residual?.length ? `\nRound ${e.round} kept as residual (not sent to the fixer):\n${labelled(e.round, e.residual)}` : ''
-    const declined = e.declined?.length ? e.declined.map(d => `\n- ${roundLabel(e.round, d)}: ${d.reason || 'no reason given'}`).join('') : ' none - it fixed all of them'
+    const title = e.loop ? `${e.loop.name}, round ${e.round}` : `Round ${e.round}`
+    const kept = e.residual?.length ? `\n${title} kept as residual (not sent to the fixer):\n${labelled(e, e.residual)}` : ''
+    if (!e.sent.length) return kept.slice(1)
+    const declined = e.declined?.length ? e.declined.map(d => `\n- ${roundLabel(e.round, d, e.loop)}: ${d.reason || 'no reason given'}`).join('') : ' none - it fixed all of them'
     const notes = e.deviations?.trim() ? `\nThe fixer's other notes: ${e.deviations.trim()}` : ''
-    return `Round ${e.round} sent to the fixer:
-${labelled(e.round, e.sent)}
+    return `${title} sent to the fixer:
+${labelled(e, e.sent)}
 The findings the fixer declined (did not fix), and why:${declined}${notes}${kept}`
   })
   return `
-EARLIER ROUNDS of this review - the findings already sent to the fixer, under round-qualified labels, the ones the fixer declined with its reasons, and the findings kept as residual for the user:
+EARLIER DECISIONS - every finding an earlier review round sent to the fixer or kept as residual for the user, under its label, with its classification, priority and the rule that decided it, and the ones the fixer declined with its reasons${earlier.some(e => e.loop) ? ". Rounds named after a stage are that stage's own review; this review covers its code too" : ''}:
 ${rounds.join('\n\n')}
 
 When a finding below repeats one of those earlier findings, set its repeatOf to that label. A repeat of a finding the fixer declined with a convincing reason that the code backs: classify it refuted, or by its scope when it belongs elsewhere, and cite the label and the fixer's reason in your reason. When the fixer's reason is wrong, classify the repeat on its merits and say in reason why the fixer's reason does not hold. A repeat of a finding the fixer applied: check the fix in the code and classify what is still wrong. A repeat of a residual finding: the fixer never saw it - classify it on its merits.
+A repeat cannot drop below the impact and likelihood of the finding it repeats: the engine raises them back, unless you classify the repeat refuted with path:line evidence the earlier finding did not cite.
 `
 }
 

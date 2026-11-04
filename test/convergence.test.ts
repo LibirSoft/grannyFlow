@@ -65,9 +65,9 @@ describe('a finding the fixer declined', () => {
     expect(f.calls.filter(c => c.label.startsWith('fix ')).map(c => c.label)).toEqual(['fix core r1'])
 
     const r1 = prompt(f.calls, 'judge core r1')!
-    expect(r1).not.toContain('EARLIER ROUNDS')
+    expect(r1).not.toContain('EARLIER DECISIONS')
     const r2 = prompt(f.calls, 'judge core r2')!
-    expect(r2).toContain('EARLIER ROUNDS')
+    expect(r2).toContain('EARLIER DECISIONS')
     expect(r2).toContain('r1/codex-F1')
     expect(r2).toContain(DECLINE)
     expect(r2).toContain('repeatOf')
@@ -230,7 +230,7 @@ describe('a finding the fixer declined', () => {
     const r = await runGranny(f.host, input({ plan: PLAN, config: { planReview: true, maxRounds: 3 } }))
     expect(r.plan).toMatchObject({ outcome: 'residual-only', rounds: 2 })
     const r2 = prompt(f.calls, 'judge plan review r2')!
-    expect(r2).toContain('EARLIER ROUNDS')
+    expect(r2).toContain('EARLIER DECISIONS')
     expect(r2).toContain(DECLINE)
     expect(r.stages[0]).toMatchObject({ stage: 'core' })
   })

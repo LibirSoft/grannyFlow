@@ -205,20 +205,53 @@ function classify(entry: Record<string, unknown> | undefined): Classified {
   }
 }
 
+/** The file:line spots evidence cites, by file name, so `a.ts:3` and src/a.ts:3 are one spot. */
+const pathLines = (evidence = ''): string[] => (evidence.match(/[^\s`'"()[\]{}<>,;]+:\d+/g) ?? []).map(t => t.split('/').pop()!)
+
+/**
+ * A repeat cannot drop below the earlier entry's impact and likelihood (both lists run worst first) unless it is
+ * refuted with a path:line the earlier evidence did not have. Returns what it raised.
+ */
+function ratchet(fields: { verdict: string; impact: Impact; likelihood: Likelihood; evidence: string }, label: string, earlier: Finding): string | undefined {
+  if (!earlier.impact || !earlier.likelihood) return undefined
+  const before = pathLines(earlier.evidence)
+  if (fields.verdict === 'refuted' && pathLines(fields.evidence).some(p => !before.includes(p))) return undefined
+  const raised: string[] = []
+  if (IMPACTS.indexOf(fields.impact) > IMPACTS.indexOf(earlier.impact)) {
+    raised.push(`impact ${fields.impact} -> ${earlier.impact}`)
+    fields.impact = earlier.impact
+  }
+  if (LIKELIHOODS.indexOf(fields.likelihood) > LIKELIHOODS.indexOf(earlier.likelihood)) {
+    raised.push(`likelihood ${fields.likelihood} -> ${earlier.likelihood}`)
+    fields.likelihood = earlier.likelihood
+  }
+  return raised.length ? `repeat of ${label}: ${raised.join(', ')}` : undefined
+}
+
 /**
  * Applies the judge's entry for a finding (undefined when the judge did not judge it) and the decision table: the first
  * matching rule wins. A finding the judge scored the old way (a number, no classification) is cut by the threshold.
+ * earlierOf finds the ledger entry a repeat names, for the ratchet.
  */
-export function decide(f: Finding, entry: Record<string, unknown> | undefined, policy: Policy, repeatsDeclined: (f: Finding) => boolean = () => false): Finding {
+export function decide(
+  f: Finding,
+  entry: Record<string, unknown> | undefined,
+  policy: Policy,
+  repeatsDeclined: (f: Finding) => boolean = () => false,
+  earlierOf: (f: Finding) => Finding | undefined = () => undefined,
+): Finding {
   const out: Finding = { ...f }
   for (const key of JUDGED) delete out[key]
   if (typeof entry?.reason === 'string') out.reason = entry.reason
   const c = classify(entry)
+  let raised: string | undefined
   const done = (rule: number, action: Decision['action'], why: string, attention?: boolean): Finding => ({
     ...out,
-    decision: { rule, action, why, ...(attention ? { attention: true as const } : {}) },
+    decision: { rule, action, why, ...(attention ? { attention: true as const } : {}), ...(raised ? { raised } : {}) },
   })
   if (c.kind === 'classified') {
+    const earlier = f.repeatOf === undefined ? undefined : earlierOf(f)
+    if (earlier) raised = ratchet(c.fields, f.repeatOf!, earlier)
     Object.assign(out, c.fields)
     out.priority = priorityOf(c.fields.impact, c.fields.likelihood, c.fields.fixCost)
   } else if (c.kind === 'score') out.score = c.score

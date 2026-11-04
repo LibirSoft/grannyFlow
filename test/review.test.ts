@@ -432,6 +432,81 @@ describe('the decision table', () => {
   })
 })
 
+describe('the ratchet', () => {
+  const policy = { threshold: 70, alwaysFix: ['critical', 'major'] as Impact[] }
+  const earlier: Finding = {
+    id: 'codex-F1',
+    severity: 'P2',
+    file: 'src/a.ts',
+    line: 3,
+    title: 'late save',
+    detail: '',
+    verdict: 'confirmed',
+    impact: 'major',
+    likelihood: 'edge',
+    fixCost: 'small',
+    scope: 'in-scope',
+    evidence: 'src/a.ts:3 - save twice',
+    priority: 80,
+    decision: { rule: 6, action: 'fix', why: 'impact major is in alwaysFix (major/edge/small -> 80)' },
+  }
+  const repeat = (c: Record<string, unknown>, of: Finding | null = earlier) =>
+    decide(
+      { id: 'codex-F2', severity: 'P2', file: 'src/a.ts', line: 3, title: 'late save', detail: '', repeatOf: 'r1/codex-F1' },
+      { verdict: 'confirmed', impact: 'moderate', likelihood: 'rare', fixCost: 'small', scope: 'in-scope', evidence: 'src/a.ts:3 - save twice', ...c },
+      policy,
+      () => false,
+      f => (f.repeatOf === 'r1/codex-F1' ? (of ?? undefined) : undefined),
+    )
+
+  it('raises a repeat whose impact and likelihood dropped below the earlier entry back to it, before the priority', () => {
+    const d = repeat({})
+    expect([d.impact, d.likelihood, d.priority]).toEqual(['major', 'edge', 80])
+    expect(d.decision).toEqual({
+      rule: 6,
+      action: 'fix',
+      why: 'impact major is in alwaysFix (major/edge/small -> 80)',
+      raised: 'repeat of r1/codex-F1: impact moderate -> major, likelihood rare -> edge',
+    })
+  })
+
+  it('raises only the class that dropped, and leaves a repeat at or above the earlier entry alone', () => {
+    expect(repeat({ impact: 'critical', likelihood: 'rare' })).toMatchObject({ impact: 'critical', likelihood: 'edge', decision: { raised: 'repeat of r1/codex-F1: likelihood rare -> edge' } })
+    const same = repeat({ impact: 'major', likelihood: 'common' })
+    expect([same.impact, same.likelihood, same.decision!.raised]).toEqual(['major', 'common', undefined])
+  })
+
+  it('raises an unverified repeat after normalization lowered it', () => {
+    expect(repeat({ verdict: 'unverified', impact: 'major', likelihood: 'edge' })).toMatchObject({
+      verdict: 'unverified',
+      impact: 'major',
+      priority: 80,
+      decision: { rule: 6, raised: 'repeat of r1/codex-F1: impact moderate -> major' },
+    })
+  })
+
+  it('lets a repeat drop only when it is refuted with a path:line the earlier evidence did not have', () => {
+    const fresh = repeat({ verdict: 'refuted', impact: 'none', evidence: 'src/guard.ts:9 - the guard rejects a second save' })
+    expect([fresh.impact, fresh.likelihood, fresh.decision]).toEqual(['none', 'rare', { rule: 3, action: 'residual', why: 'refuted' }])
+    const stale = repeat({ verdict: 'refuted', impact: 'none', evidence: 'src/a.ts:3 - not a problem' })
+    expect([stale.impact, stale.likelihood, stale.decision]).toEqual([
+      'major',
+      'edge',
+      { rule: 3, action: 'residual', why: 'refuted', raised: 'repeat of r1/codex-F1: impact none -> major, likelihood rare -> edge' },
+    ])
+    expect(repeat({ verdict: 'refuted', impact: 'none', evidence: 'see `a.ts:3-4` (unchanged)' }).decision!.raised).toBe('repeat of r1/codex-F1: impact none -> major, likelihood rare -> edge')
+  })
+
+  it('has no floor when the earlier entry carries no classification, or the repeat none', () => {
+    const unjudged: Finding = { id: 'codex-F1', severity: 'P1', file: 'src/a.ts', title: 'x', detail: '', decision: { rule: 1, action: 'fix', why: 'P0/P1' } }
+    expect(repeat({}, unjudged)).toMatchObject({ impact: 'moderate', likelihood: 'rare', priority: 35, decision: { rule: 8 } })
+    expect(repeat({}, null).decision!.raised).toBeUndefined()
+    const scored = decide({ id: 'codex-F2', severity: 'P2', file: 'a', title: 'x', detail: '', repeatOf: 'r1/codex-F1' }, { score: 20 }, policy, () => false, () => earlier)
+    expect(scored).toMatchObject({ score: 20, decision: { rule: 8 } })
+    expect(scored.impact).toBeUndefined()
+  })
+})
+
 describe('mergeDuplicates', () => {
   const policy = { threshold: 70, alwaysFix: ['critical', 'major'] as Impact[] }
   const judged = (id: string, c: Record<string, unknown>): Finding =>

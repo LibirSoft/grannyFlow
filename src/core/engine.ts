@@ -110,6 +110,8 @@ interface RepoState {
   merges: number
   red?: number
   started?: Promise<string | undefined>
+  /** Each stage's review decisions, by stage index, for the final review's judge. */
+  ledger: Map<number, EarlierRound[]>
 }
 
 const saidSomething = (d: unknown): string | undefined =>
@@ -348,7 +350,7 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
     used.map(r => {
       const cwd = cwdOf.get(r)!
       const others = used.filter(o => o !== r).map(o => cwdOf.get(o)!)
-      return [r, { lane: { repo: r, base: baseOf(r), branch: input.branch, cwd, p: promptFor(r, cwd, input.branch, others) }, locked: false, waiters: [], setup: Promise.resolve(), merges: 0 }]
+      return [r, { lane: { repo: r, base: baseOf(r), branch: input.branch, cwd, p: promptFor(r, cwd, input.branch, others) }, locked: false, waiters: [], setup: Promise.resolve(), merges: 0, ledger: new Map() }]
     }),
   )
   const primaryLane = repoState.get(primary)!.lane
@@ -582,13 +584,13 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
     name: string,
     subject: Subject,
     reviewers = config.reviewers,
-    opts: { gates?: Gates; checks?: CheckConfig[]; runs?: CheckRun[]; notes?: string[] } = {},
+    opts: { gates?: Gates; checks?: CheckConfig[]; runs?: CheckRun[]; notes?: string[]; prior?: EarlierRound[]; record?: { loop: NonNullable<EarlierRound['loop']>; into: EarlierRound[] } } = {},
   ): Promise<PlanResult> => {
-    const { gates, checks = [], runs = [], notes = [] } = opts
+    const { gates, checks = [], runs = [], notes = [], prior = [], record } = opts
     const { p } = lane
     const phase = phaseOf(subject)
     const history: RoundRecord[] = []
-    const earlier: EarlierRound[] = []
+    const earlier: EarlierRound[] = [...prior]
     let unmerged: Finding[] = []
     let carried: Array<{ round: number; labels: string[]; finding: Finding }> = []
     const kept = () => carried.map(c => c.finding)
@@ -611,9 +613,9 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
         return { outcome: 'clean', rounds: round, residual: kept(), unresolved: [], history }
       }
 
-      const declined = new Map(earlier.flatMap(e => (e.declined ?? []).map(d => [roundLabel(e.round, d), d.reason] as const)))
-      const labels = new Set(earlier.flatMap(e => e.sent.map(f => roundLabel(e.round, f))))
-      const residualLabels = new Set(earlier.flatMap(e => (e.residual ?? []).map(f => roundLabel(e.round, f))))
+      const declined = new Map(earlier.flatMap(e => (e.declined ?? []).map(d => [roundLabel(e.round, d, e.loop), d.reason] as const)))
+      const ledger = new Map(earlier.flatMap(e => [...e.sent, ...(e.residual ?? [])].map(f => [roundLabel(e.round, f, e.loop), f] as const)))
+      const earlierOf = (f: Finding) => (f.repeatOf === undefined ? undefined : ledger.get(f.repeatOf))
       const blockers = found.filter(isBlocker)
       const judged = declined.size ? found : found.filter(f => !isBlocker(f))
       if (blockers.length && declined.size) {
@@ -643,8 +645,8 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
         )
         const withScores = found.map(f => {
           const s = judgedIds.has(f.id) ? per.find(x => x.id === f.id) : undefined
-          const repeat = typeof s?.repeatOf === 'string' && (labels.has(s.repeatOf) || residualLabels.has(s.repeatOf)) ? { repeatOf: s.repeatOf } : {}
-          return decide({ ...f, ...repeat }, s, policy, declinedBefore)
+          const repeat = typeof s?.repeatOf === 'string' && ledger.has(s.repeatOf) ? { repeatOf: s.repeatOf } : {}
+          return decide({ ...f, ...repeat }, s, policy, declinedBefore, earlierOf)
         })
         const merge = mergeDuplicates(withScores, duplicateOf)
         for (const m of merge.merged) host.log(`${name} r${round}: judge merged ${m.id} into ${m.into} (duplicate)`)
@@ -656,7 +658,11 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
       host.log(`${name} r${round}: ${findings.length} finding(s), review score ${score} (informational)`)
 
       const { accepted, residual } = triage(findings)
+      const entry: EarlierRound = { round, sent: accepted, ...(residual.length ? { residual } : {}) }
+      const recorded = record ? { ...entry, loop: record.loop } : undefined
+      if (recorded) record!.into.push(recorded)
       const ruled = (f: Finding) => `rule ${f.decision!.rule}: ${f.decision!.why}`
+      for (const f of findings.filter(f => f.decision!.raised)) host.log(`${name} r${round}: the ratchet raised ${f.id} - ${f.decision!.raised}`)
       if (accepted.length) host.log(`${name} r${round}: to the implementer: ${accepted.map(f => `${f.id} (${ruled(f)})`).join(', ')}`)
       for (const f of residual.filter(declinedBefore)) {
         host.log(`${name} r${round}: ${f.id} dropped as a repeat of ${f.repeatOf}, which the fixer declined (${ruled(f)}) - kept as residual`)
@@ -700,7 +706,9 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
       if (refused.length) host.log(`${name} r${round}: the fixer declined ${refused.map(d => d.id).join(', ')}`)
       if (said) history.at(-1)!.deviations = said
       if (refused.length) history.at(-1)!.declined = refused
-      earlier.push({ round, sent: accepted, ...(residual.length ? { residual } : {}), ...(said ? { deviations: said } : {}), ...(refused.length ? { declined: refused } : {}) })
+      const reply = { ...(said ? { deviations: said } : {}), ...(refused.length ? { declined: refused } : {}) }
+      earlier.push({ ...entry, ...reply })
+      if (recorded) Object.assign(recorded, reply)
       if (subject.kind === 'diff' && checks.length) {
         const gate = await checkGate(lane, name, `fix r${round}`, checks, runs, subject.stage, gates)
         if (!gate.passed) return { outcome: 'checks-failed', rounds: round, residual: kept(), unresolved: [], history, note: gate.note }
@@ -754,6 +762,12 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
     const next = s.waiters.shift()
     if (next) next()
     else s.locked = false
+  }
+
+  const ledgerOf = (st: StageSpec, i: number): EarlierRound[] => {
+    const ledger = repoState.get(repoOf(st))!.ledger
+    if (!ledger.has(i)) ledger.set(i, [])
+    return ledger.get(i)!
   }
 
   const runStage = async (lane: Lane, st: StageSpec, i: number, name: string, began?: (start?: string) => void): Promise<StageResult> => {
@@ -831,7 +845,7 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
           name,
           { kind: 'diff', base, ...(task ? { stage: task } : {}) },
           undefined,
-          { gates, checks, runs, notes },
+          { gates, checks, runs, notes, record: { loop: { id: `s${i + 1}`, name: `Stage ${i + 1} (${name})` }, into: ledgerOf(st, i) } },
         )
     if (gates && !gates.green && !runs.length && (loop.outcome === 'clean' || loop.outcome === 'residual-only')) {
       loop.outcome = 'gates-red'
@@ -1069,7 +1083,8 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
     host.phase(FINAL_REVIEW_PHASE)
     host.log(`${name}: reviewing ${s.lane.base}...HEAD across ${stages} stage(s)${s.merges ? ` and ${s.merges} lane merge(s)` : ''}`)
     const notes: string[] = []
-    const looped = await reviewLoop(s.lane, name, { kind: 'diff', base: s.lane.base, note: WHOLE_BRANCH_NOTE }, undefined, { checks, runs, notes })
+    const prior = [...s.ledger].sort(([a], [b]) => a - b).flatMap(([, rounds]) => rounds)
+    const looped = await reviewLoop(s.lane, name, { kind: 'diff', base: s.lane.base, note: WHOLE_BRANCH_NOTE }, undefined, { checks, runs, notes, prior })
     const note = [looped.note, ...notes].filter(Boolean).join('\n')
     const r = note ? { ...looped, note } : looped
     if (r.outcome === 'checks-failed') host.log(`${name} ended checks-failed - the final check still runs, but the branch is not PR-ready`)

@@ -1970,3 +1970,47 @@ describe('the judge rubric', () => {
     })
   })
 })
+
+describe('the decision ledger', () => {
+  const judged = (impact: string, likelihood: string, extra: Record<string, unknown> = {}) => ({
+    verdict: 'confirmed',
+    impact,
+    likelihood,
+    fixCost: 'small',
+    scope: 'in-scope',
+    evidence: 'src/a.ts:3 - save twice',
+    ...extra,
+  })
+
+  it('shows later rounds every earlier decision with its classes, priority and rule', async () => {
+    const f = fakeHost({
+      reviews: [review(finding('P2', 'Late save'), finding('P3', 'Odd name')), review(finding('P3', 'Still odd')), 'No findings.'],
+      scores: [{ 'codex-F1': judged('major', 'edge'), 'codex-F2': judged('minor', 'common') }, { 'codex-F1': judged('minor', 'common', { repeatOf: 'r1/codex-F2' }) }],
+    })
+    await runGranny(f.host, input({ config: { maxRounds: 3 } }))
+    const r2 = f.calls.find(c => c.label === 'judge core r2')!.prompt
+    expect(r2).toContain('EARLIER DECISIONS')
+    expect(r2).toContain('"label": "r1/codex-F1"')
+    expect(r2).toContain('"decision": "fix - rule 6: impact major is in alwaysFix (major/edge/small -> 80)"')
+    expect(r2).toContain('"decision": "residual - rule 8: under the bar: minor/common/small -> 35"')
+    expect(r2).toContain('"impact": "major"')
+    expect(r2).toContain('"priority": 80')
+  })
+
+  it('raises a repeat the judge classified lower than the earlier round, and logs it', async () => {
+    const f = fakeHost({
+      reviews: [review(finding('P2', 'Late save')), review(finding('P2', 'Late save, rarely')), 'No findings.'],
+      scores: [{ 'codex-F1': judged('major', 'edge') }, { 'codex-F1': judged('moderate', 'rare', { repeatOf: 'r1/codex-F1' }) }],
+    })
+    const r = await runGranny(f.host, input({ config: { maxRounds: 3 } }))
+    expect(r.stages[0]).toMatchObject({ outcome: 'clean', rounds: 3 })
+    expect(r.stages[0]!.history[1]!.findings[0]).toMatchObject({
+      impact: 'major',
+      likelihood: 'edge',
+      priority: 80,
+      decision: { rule: 6, action: 'fix', raised: 'repeat of r1/codex-F1: impact moderate -> major, likelihood rare -> edge' },
+    })
+    expect(f.logs).toContain('core r2: the ratchet raised codex-F1 - repeat of r1/codex-F1: impact moderate -> major, likelihood rare -> edge')
+    expect(f.calls.some(c => c.label === 'fix core r2')).toBe(true)
+  })
+})

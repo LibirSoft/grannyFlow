@@ -405,7 +405,7 @@ REVIEW:
 <findings as JSON>
 ```
 
-## Judge - from round 2 on (the plan judge gets the same EARLIER ROUNDS block; one "Round N sent" entry per earlier fix round, followed by its "kept as residual" list when that round left residual findings, and P0/P1 findings join the list once a fixer declined findings)
+## Judge - from round 2 on (the plan judge gets the same EARLIER DECISIONS block; one "Round N sent" entry per earlier fix round, followed by its "kept as residual" list when that round left residual findings, and P0/P1 findings join the list once a fixer declined findings; a field the finding does not have, such as the classes of an unjudged P0/P1, is left out, and `score` replaces them for a numeric-score judge answer; `(ratchet raised <what>)` follows the why when the ratchet raised the finding)
 
 ```text
 You are the JUDGE classifying the findings of a code review. Repo <repo>, branch <branch>, stage diff `'<stage start sha>'...HEAD`. Do not edit anything.
@@ -433,15 +433,23 @@ Classify every finding below - do not score it. The engine computes a priority f
 - reason: one line.
 Example: a late save response re-binds the editor to another post's id, so the next save can overwrite the wrong post - confirmed, critical, edge, small, in-scope, even though the window is narrow.
 
-EARLIER ROUNDS of this review - the findings already sent to the fixer, under round-qualified labels, the ones the fixer declined with its reasons, and the findings kept as residual for the user:
+EARLIER DECISIONS - every finding an earlier review round sent to the fixer or kept as residual for the user, under its label, with its classification, priority and the rule that decided it, and the ones the fixer declined with its reasons:
 Round 1 sent to the fixer:
 [
   {
     "label": "r1/<reviewer>-F<n>",
+    "decision": "fix - rule 6: <why>",
     "severity": "<severity>",
     "file": "<file>",
     "title": "<title>",
-    "detail": "<detail>"
+    "detail": "<detail>",
+    "verdict": "confirmed",
+    "impact": "major",
+    "likelihood": "edge",
+    "fixCost": "small",
+    "scope": "in-scope",
+    "priority": 80,
+    "evidence": "<path:line + trigger steps>"
   }
 ]
 The findings the fixer declined (did not fix), and why:
@@ -451,14 +459,98 @@ Round 1 kept as residual (not sent to the fixer):
 [
   {
     "label": "r1/<reviewer>-F<m>",
+    "decision": "residual - rule 8: <why>",
     "severity": "<severity>",
     "file": "<file>",
     "title": "<title>",
-    "detail": "<detail>"
+    "detail": "<detail>",
+    "verdict": "confirmed",
+    "impact": "major",
+    "likelihood": "edge",
+    "fixCost": "small",
+    "scope": "in-scope",
+    "priority": 80,
+    "evidence": "<path:line + trigger steps>"
   }
 ]
 
 When a finding below repeats one of those earlier findings, set its repeatOf to that label. A repeat of a finding the fixer declined with a convincing reason that the code backs: classify it refuted, or by its scope when it belongs elsewhere, and cite the label and the fixer's reason in your reason. When the fixer's reason is wrong, classify the repeat on its merits and say in reason why the fixer's reason does not hold. A repeat of a finding the fixer applied: check the fix in the code and classify what is still wrong. A repeat of a residual finding: the fixer never saw it - classify it on its merits.
+A repeat cannot drop below the impact and likelihood of the finding it repeats: the engine raises them back, unless you classify the repeat refuted with path:line evidence the earlier finding did not cite.
+
+REVIEW:
+<findings as JSON>
+```
+
+## Judge - final review (from round 1 on, its EARLIER DECISIONS block starts with the decisions of every stage review in the repo, in stage order, one entry per stage review round under `s<k>/r<N>/<id>` labels - a stage's last round has no "sent" part when it sent nothing - followed by the final review's own earlier rounds as above)
+
+```text
+You are the JUDGE classifying the findings of a code review. Repo <repo>, branch <branch>, stage diff `'<base>'...HEAD`. Do not edit anything.
+This is the whole-branch review: every stage was already reviewed on its own, so look across them - duplicated code or helpers that several stages added, inconsistencies between stages (naming, contracts, config, docs, tests) - and check the merge commits and their conflict resolutions especially (`git log --merges` and `git show <merge>`): both sides' intent must survive.
+Design context:
+Plan files - read them first: <plan files>
+<context: work-order files and override notes>
+
+The findings come from one or more reviewers; each names its reviewer. P0/P1 findings are not in this list: they go to the implementer without the judge.
+For each finding below, open the cited code and check whether it is real and correctly described. When a finding reports the same problem as another finding in this list, classify it too and set its duplicateOf to the id of the finding to keep. Then score the whole review 0-100 (correctness + actionability; mostly wrong or trivial findings = low) - that score is informational only.
+Classify every finding below - do not score it. The engine computes a priority from your classes and decides what goes to the implementer, so give each finding exactly these fields:
+- verdict: confirmed (the code shows the problem) | refuted (the code shows it is not there or not a problem) | unverified (you could not confirm it either way).
+- impact: how bad it is IF it triggers - critical | major | moderate | minor | none.
+  Judge impact assuming the trigger happens. Likelihood never lowers impact; it is its own field.
+  - critical: data loss or corruption, writing to the wrong record, a security or authorization bypass, a secret or personal data leak, a draft going public, an irreversible operation, stored data silently read differently.
+  - major: the user cannot get out from inside the app (a lock only a reload clears, endless loading, a crash); something that worked silently breaks; an API or contract break; a required part of what the change set out to do is missing.
+  - moderate: wrong behaviour with an easy workaround; a wrong or missing error message; a missing test for changed behaviour; duplicated logic.
+  - minor: a visual defect, naming, style.
+  - none: not a problem at all.
+- likelihood: common (the normal flow) | edge (special timing or state: a race, an expired session, a boundary value) | rare (forced input, a rarely used feature).
+- fixCost: trivial (a few lines) | small (one function or file plus a test) | large (cross-module, a redesign).
+- scope: in-scope | pre-existing (it was already there before this change) | other-stage (another stage's job).
+- evidence: path:line plus the concrete trigger steps, e.g. `Editor.tsx:225` + "save -> go back in history -> the late response arrives -> save again". Always give a path:line: evidence without one counts as unverified, and an unverified finding's impact is lowered one class.
+- reason: one line.
+Example: a late save response re-binds the editor to another post's id, so the next save can overwrite the wrong post - confirmed, critical, edge, small, in-scope, even though the window is narrow.
+
+EARLIER DECISIONS - every finding an earlier review round sent to the fixer or kept as residual for the user, under its label, with its classification, priority and the rule that decided it, and the ones the fixer declined with its reasons. Rounds named after a stage are that stage's own review; this review covers its code too:
+Stage <k> (<stage name>), round 1 sent to the fixer:
+[
+  {
+    "label": "s<k>/r1/<reviewer>-F<n>",
+    "decision": "fix - rule 6: <why>",
+    "severity": "<severity>",
+    "file": "<file>",
+    "title": "<title>",
+    "detail": "<detail>",
+    "verdict": "confirmed",
+    "impact": "major",
+    "likelihood": "edge",
+    "fixCost": "small",
+    "scope": "in-scope",
+    "priority": 80,
+    "evidence": "<path:line + trigger steps>"
+  }
+]
+The findings the fixer declined (did not fix), and why:
+- s<k>/r1/<reviewer>-F<n>: <the fixer's reason>
+The fixer's other notes: <the fixer's deviations>
+Stage <k> (<stage name>), round 1 kept as residual (not sent to the fixer):
+[
+  {
+    "label": "s<k>/r1/<reviewer>-F<m>",
+    "decision": "residual - rule 8: <why>",
+    "severity": "<severity>",
+    "file": "<file>",
+    "title": "<title>",
+    "detail": "<detail>",
+    "verdict": "confirmed",
+    "impact": "major",
+    "likelihood": "edge",
+    "fixCost": "small",
+    "scope": "in-scope",
+    "priority": 80,
+    "evidence": "<path:line + trigger steps>"
+  }
+]
+
+When a finding below repeats one of those earlier findings, set its repeatOf to that label. A repeat of a finding the fixer declined with a convincing reason that the code backs: classify it refuted, or by its scope when it belongs elsewhere, and cite the label and the fixer's reason in your reason. When the fixer's reason is wrong, classify the repeat on its merits and say in reason why the fixer's reason does not hold. A repeat of a finding the fixer applied: check the fix in the code and classify what is still wrong. A repeat of a residual finding: the fixer never saw it - classify it on its merits.
+A repeat cannot drop below the impact and likelihood of the finding it repeats: the engine raises them back, unless you classify the repeat refuted with path:line evidence the earlier finding did not cite.
 
 REVIEW:
 <findings as JSON>

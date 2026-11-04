@@ -75,15 +75,26 @@ export function renderPrompts(): string {
   }
   const plans = ['<plan files>']
   const stage = { number: 2, total: 2, name: '<stage name>', task: '<stage task>' }
+  const classes = { verdict: 'confirmed', impact: 'major', likelihood: 'edge', fixCost: 'small', scope: 'in-scope', priority: 80, evidence: '<path:line + trigger steps>' } as const
+  const decided = (id: string, action: 'fix' | 'residual', rule: number) => ({
+    id,
+    severity: '<severity>',
+    file: '<file>',
+    title: '<title>',
+    detail: '<detail>',
+    ...classes,
+    decision: { rule, action, why: '<why>' },
+  })
   const earlier: EarlierRound[] = [
     {
       round: 1,
-      sent: [{ id: '<reviewer>-F<n>', severity: '<severity>', file: '<file>', title: '<title>', detail: '<detail>' }],
-      residual: [{ id: '<reviewer>-F<m>', severity: '<severity>', file: '<file>', title: '<title>', detail: '<detail>' }],
+      sent: [decided('<reviewer>-F<n>', 'fix', 6)],
+      residual: [decided('<reviewer>-F<m>', 'residual', 8)],
       deviations: "<the fixer's deviations>",
       declined: [{ id: '<reviewer>-F<n>', reason: "<the fixer's reason>" }],
     },
   ]
+  const stageLedger: EarlierRound[] = [{ ...earlier[0]!, loop: { id: 's<k>', name: 'Stage <k> (<stage name>)' } }]
   const overruled = [{ id: '<id>', repeatOf: 'r1/<reviewer>-F<n>', reason: "<the judge's reason>", said: "<the fixer's reason>" }]
   const setup = `cd '<repo>' && ${worktreeScript(p.config, '<branch>', '<base>', '<worktreeDir>/<branch-slug>')}`
   const job = detachedReview({ script: '', body: '<review script>' }, p.config, '.granny/review-<stage>-r<n>-<name>', '<repo>')
@@ -124,8 +135,12 @@ export function renderPrompts(): string {
     ['Reviewer - command engine, the text {prompt} is filled with', commandReviewPrompt(p, '<stage name>', '<stage start sha>', stage)],
     ['Judge', judgePrompt(p, '<stage start sha>', [], [], stage).replace(/\[\]$/, '<findings as JSON>')],
     [
-      'Judge - from round 2 on (the plan judge gets the same EARLIER ROUNDS block; one "Round N sent" entry per earlier fix round, followed by its "kept as residual" list when that round left residual findings, and P0/P1 findings join the list once a fixer declined findings)',
+      'Judge - from round 2 on (the plan judge gets the same EARLIER DECISIONS block; one "Round N sent" entry per earlier fix round, followed by its "kept as residual" list when that round left residual findings, and P0/P1 findings join the list once a fixer declined findings; a field the finding does not have, such as the classes of an unjudged P0/P1, is left out, and `score` replaces them for a numeric-score judge answer; `(ratchet raised <what>)` follows the why when the ratchet raised the finding)',
       judgePrompt(p, '<stage start sha>', [], earlier, stage).replace(/\[\]$/, '<findings as JSON>'),
+    ],
+    [
+      "Judge - final review (from round 1 on, its EARLIER DECISIONS block starts with the decisions of every stage review in the repo, in stage order, one entry per stage review round under `s<k>/r<N>/<id>` labels - a stage's last round has no \"sent\" part when it sent nothing - followed by the final review's own earlier rounds as above)",
+      judgePrompt(p, '<base>', [], stageLedger, undefined, WHOLE_BRANCH_NOTE).replace(/\[\]$/, '<findings as JSON>'),
     ],
     ['Final review - the note every reviewer prompt (after its first line naming the diff) and the judge prompt (after its first line) carry, with name `final review` and diff base `<base>`', WHOLE_BRANCH_NOTE],
     ['Extraction fallback', extractPrompt('<stage name>', '<raw review output>')],
