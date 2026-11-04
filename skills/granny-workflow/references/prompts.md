@@ -186,7 +186,7 @@ FINDINGS (P0/P1 or score > 70):
 <accepted findings as JSON>
 ```
 
-## Granny - a check command, the helper agent on Claude Code (on opencode granny runs it itself; a check with timeout runs as `timeout <s> bash -c '<run>'`; for a check without a metric the parenthesis reads `when it is very long, the last 3000 characters are enough`)
+## Granny - a check command, the helper agent on Claude Code (on opencode granny runs it itself; a check with timeout runs as `timeout <s> bash -c '<run>'`, or `gtimeout` where only that is on PATH; for a check without a metric the parenthesis reads `when it is very long, the last 3000 characters are enough`)
 
 ```text
 You run one check command for the "check <stage name> <check name>" step of a granny run, and return its output and exit code. Run nothing else, do not fix anything, and do not edit, stage or commit anything yourself.
