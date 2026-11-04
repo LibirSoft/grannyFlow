@@ -435,11 +435,11 @@ describe('runGranny', () => {
     expect(rev.prompt).toContain('git diff deadbee1...HEAD')
   })
 
-  it('runs the review command through a granny agent on hosts without a shell', async () => {
+  it('runs the review command through a helper agent on hosts without a shell', async () => {
     const f = fakeHost({ name: 'claude-code', direct: false, reviews: ['No findings.'] })
     await runGranny(f.host, input())
     const runner = f.calls.find(c => c.kind === 'command')!
-    expect(runner.role).toBe('granny')
+    expect(runner.role).toBe('helper')
     expect(runner.label).toBe('review core r1 codex')
     expect(runner.prompt).toContain(
       '; mkdir -p .granny && rm -f .granny/review-core-r1-codex.md .granny/review-core-r1-codex.log .granny/review-core-r1-codex.out .granny/review-core-r1-codex.exit .granny/review-core-r1-codex.pid && { set -m; nohup bash -c \'echo $$ > .granny/review-core-r1-codex.pid; (codex_plugins="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/plugins/cache/openai-codex/codex"; companion_version=$(',
@@ -901,12 +901,12 @@ describe('the worktree', () => {
     expect(runner.prompt).toContain(`Stage "core" of repo ${WT}, branch`)
   })
 
-  it('runs the setup script on Claude Code through a granny helper agent that may write', async () => {
+  it('runs the setup script on Claude Code through a helper agent that may write', async () => {
     const f = fakeHost({ name: 'claude-code', direct: false, worktree: WT })
-    const r = await runGranny(f.host, input({ config: { roles: { granny: { model: 'haiku' } } } }))
+    const r = await runGranny(f.host, input({ config: { roles: { helper: { model: 'sonnet' } } } }))
     expect(r.worktree).toBe(WT)
     expect(f.setups).toHaveLength(1)
-    expect(f.setups[0]!.request).toMatchObject({ role: 'granny', kind: 'command', label: 'worktree', phase: 'Worktree', access: 'write', model: 'haiku', cwd: '/work/repo' })
+    expect(f.setups[0]!.request).toMatchObject({ role: 'helper', kind: 'command', label: 'worktree', phase: 'Worktree', access: 'write', model: 'sonnet', effort: 'low', cwd: '/work/repo' })
     expect(f.setups[0]!.request!.prompt).toContain('branch `feat/x`')
     expect(f.setups[0]!.command.startsWith('cd /work/repo && ')).toBe(true)
     expect(f.phases[0]).toBe('Worktree')
@@ -1828,5 +1828,49 @@ describe('the default reviewer', () => {
       expect(rv.prompt).toContain('TASK:\nDo WP-01.')
       expect(f.commands.some(c => c.includes('codex'))).toBe(false)
     }
+  })
+})
+
+describe('the helper role', () => {
+  const WT = '/work/repo-worktrees/feat-x'
+  const asked = (q: { label: string; role: string; model?: string; effort?: string }) => ({ label: q.label, role: q.role, model: q.model, effort: q.effort })
+
+  it("runs every shell relay on Claude Code on roles.helper, and the extraction and the final check on roles.granny's", async () => {
+    const f = fakeHost({
+      name: 'claude-code',
+      direct: false,
+      worktree: WT,
+      reviews: ['- [P1] no location here\n  detail', 'No findings.'],
+      checks: c => (c.includes('run-tests') ? '1 pass' : undefined),
+      override: req => (req.kind === 'findings' ? { findings: [{ id: 'F1', severity: 'P1', file: 'x.ts', title: 'Extracted', detail: 'd' }] } : undefined),
+    })
+    const config = { roles: { helper: { model: 'sonnet', effort: 'medium' }, granny: { model: 'opus', effort: 'high' } }, checks: [{ name: 'tests', run: 'run-tests', timeout: 60 }] }
+    const r = await runGranny(f.host, input({ config }))
+    expect(r.stages[0]).toMatchObject({ outcome: 'clean', rounds: 2 })
+    const helpers = f.requests.filter(q => q.kind === 'command')
+    expect(helpers.map(q => q.label)).toEqual(
+      expect.arrayContaining(['timeout probe', 'worktree', 'head core', 'commits core', 'check core tests', 'review core r1 codex', 'review core r1 codex wait 1', 'review core r1 codex read']),
+    )
+    expect(helpers.some(q => q.label.startsWith('status core'))).toBe(true)
+    for (const q of helpers) expect(asked(q)).toEqual({ label: q.label, role: 'helper', model: 'sonnet', effort: 'medium' })
+    expect(f.requests.filter(q => q.role === 'granny').map(q => [q.kind, q.label, q.model, q.effort])).toEqual([
+      ['findings', 'extract core r1 codex', 'opus', 'high'],
+      ['final', 'pr-ready check', 'opus', 'high'],
+    ])
+  })
+
+  it('runs the helper steps on haiku at low effort by default, the stop of a review too', async () => {
+    const f = fakeHost({ name: 'claude-code', direct: false, wait: () => 'pending\n' })
+    await runGranny(f.host, input())
+    const helpers = f.requests.filter(q => q.kind === 'command')
+    expect(helpers.map(q => q.label)).toEqual(expect.arrayContaining(['worktree', 'head core', 'commits core', 'review core r1 codex stop']))
+    for (const q of helpers) expect(asked(q)).toEqual({ label: q.label, role: 'helper', model: 'haiku', effort: 'low' })
+    expect(f.requests.find(q => q.kind === 'final')).toMatchObject({ role: 'granny', model: undefined, effort: undefined })
+  })
+
+  it('starts no helper agent on opencode, where granny runs the commands itself', async () => {
+    const f = fakeHost({ reviews: ['No findings.'] })
+    await runGranny(f.host, input({ config: { checks: [{ name: 'tests', run: 'run-tests' }] } }))
+    expect(f.requests.filter(q => q.role === 'helper' || q.kind === 'command')).toEqual([])
   })
 })

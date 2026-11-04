@@ -238,7 +238,7 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
       return { ran: r.code === 0, code: r.code, output: r.output }
     }
     const prompt = ask(cwd, label, `cd ${shellQuote(cwd)} && ${script}`)
-    return helped(label, await call('granny', 'command', label, phase, prompt, 'write', config.roles.granny, cwd), `the ${label} runner returned nothing`)
+    return helped(label, await call('helper', 'command', label, phase, prompt, 'write', config.roles.helper, cwd), `the ${label} runner returned nothing`)
   }
 
   const readHead = async (label: string, phase: string, cwd: string) => {
@@ -271,7 +271,7 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
     if (host.run) r = await shell(label, 'Worktree', script, repo)
     else {
       const prompt = worktreeCommandPrompt(repo, branch, `cd ${shellQuote(repo)} && ${script}`)
-      r = helped(label, await call('granny', 'command', label, 'Worktree', prompt, 'write', config.roles.granny, repo), 'the worktree runner returned nothing')
+      r = helped(label, await call('helper', 'command', label, 'Worktree', prompt, 'write', config.roles.helper, repo), 'the worktree runner returned nothing')
     }
     const path = r.ran ? reportedWorktree(r.output) : undefined
     if (!path) throw new Error(`worktree setup failed${repo === primary && branch === input.branch ? '' : ` for ${repo} ${branch}`} (exit ${r.code}): ${r.output.slice(-2000)}`)
@@ -502,7 +502,7 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
       if (!ran) note = `review command exited ${r.code}: ${r.output.slice(-2000)}`
     } else {
       const job = detachedReview(plan, config, stem, cwd)
-      const step = (label: string, prompt: string) => call('granny', 'command', label, phase, prompt, 'read-only', config.roles.granny, cwd)
+      const step = (label: string, prompt: string) => call('helper', 'command', label, phase, prompt, 'read-only', config.roles.helper, cwd)
       const started = await step(`review ${tag}`, reviewStartPrompt(p, name, rv.name, job.start))
       if (!started?.ran) {
         const said = String(started?.output ?? '')

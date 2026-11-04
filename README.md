@@ -73,6 +73,11 @@ The loop is code, not a prompt: on Claude Code and opencode an engine drives eve
 | opencode 2.x | server plugin (`engines/opencode/plugin/granny-workflow/`): every role is a child session with its own model and permissions; review commands run directly, concurrently with agent reviewers | full |
 | Cursor | none - the skill walks the agent through the same loop with four subagents | manual, not deterministic |
 
+> [!NOTE]
+> Claude Code Workflow scripts have no shell or filesystem access, so on Claude Code every plain command granny runs - the worktree setup, the HEAD read, the commit count, the checks, a merge - runs inside a `helper` agent (`roles.helper`, Haiku at low effort by default). These steps cost tokens, and their exit codes and output are relayed by a model, not read directly. On opencode the engine runs them as real commands and needs no helper.
+>
+> This is a stopgap: [claude-code#98566](https://github.com/anthropics/claude-code/issues/98566) asks for a deterministic `run(cmd)` Workflow primitive, and once Claude Code ships one granny will run these steps through it and drop the helper agents.
+
 ## Install
 
 ```sh
@@ -135,7 +140,7 @@ Three layers, later wins: `~/.config/granny/config.json`, `<repo>/granny.config.
 
 | key | default | |
 |---|---|---|
-| `roles.<role>.model` | session model; judge `sonnet` on Claude Code | one string for every host, or `{ "claude-code": …, "opencode": … }` |
+| `roles.<role>.model` | session model; judge `sonnet` and helper `haiku` (effort `low`) on Claude Code | one string for every host, or `{ "claude-code": …, "opencode": … }` |
 | `roles.<role>.effort` | inherit | Claude Code only; on opencode use a `#variant` model suffix |
 | `reviewers` | `[{ "name": "reviewer", "engine": "agent" }]` | all review every round, in parallel; each has a unique `name`, an `engine` and its own `model`/`effort` |
 | `reviewers[].engine` | `auto` | `auto`: the Codex plugin when installed and `node` is on `PATH` (Claude Code only), else the Codex CLI; `codex-plugin`: the plugin, required; `codex`: the CLI; `agent`: a host model (Claude models only on Claude Code); `command`: any CLI, with `{base}`, `{out}`, `{model}` and `{prompt}` placeholders |

@@ -22,6 +22,17 @@ describe('resolveConfig', () => {
     expect(DEFAULT_CONFIG.threshold).toBe(70)
   })
 
+  it('gives the helper role haiku at low effort on Claude Code, which a layer overrides', () => {
+    const helper = resolveConfig([]).roles.helper
+    expect(helper).toEqual({ model: { 'claude-code': 'haiku' }, effort: 'low' })
+    expect(resolveModel(helper.model, 'claude-code')).toBe('haiku')
+    expect(resolveModel(helper.model, 'opencode')).toBeUndefined()
+    expect(resolveConfig([{ roles: { helper: { model: 'sonnet', effort: 'medium' } } }]).roles.helper).toEqual({ model: 'sonnet', effort: 'medium' })
+    expect(resolveConfig([{ roles: { helper: { effort: null } } }]).roles.helper).toEqual({ model: { 'claude-code': 'haiku' } })
+    expect(() => resolveConfig([{ roles: { helper: { modle: 'haiku' } } }])).toThrow('unknown key "roles.helper.modle"')
+    expect(() => resolveConfig([{ roles: { helper: { effort: 'tiny' } } }])).toThrow('roles.helper.effort must be one of')
+  })
+
   it('drops a role key set to null', () => {
     expect(resolveConfig([{ roles: { judge: { model: null } } }]).roles.judge).toEqual({})
   })
@@ -38,7 +49,7 @@ describe('resolveConfig', () => {
     } catch (e) {
       const message = (e as Error).message
       for (const part of [
-        'unknown role "jduge" (expected granny, planner, implementer, judge)',
+        'unknown role "jduge" (expected granny, helper, planner, implementer, judge)',
         'threshold must be',
         'maxRounds must be',
         'gates must be',

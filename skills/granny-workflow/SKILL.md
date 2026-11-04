@@ -24,7 +24,7 @@ for each stage - independent stages at the same time (config parallel, default o
      │  not reviewed; the stages that build on it are skipped
      │  (the first stage of a fromStage resume reviews base...HEAD instead; no-changes only when that is empty too)
   checks (config checks, default none): granny runs them itself; red ones go back to the implementer for a repair, up to maxRepairs
-     (on Claude Code a granny helper agent runs each command and reports the exit code; on opencode granny runs it directly)
+     (on Claude Code a helper agent, roles.helper, runs each command and reports the exit code; on opencode granny runs it directly)
      never on uncommitted work: git status --porcelain first (the plan files do not count); dirty ─► the implementer commits it, which spends a repair;
      unreadable, also on one more read ─► the gate fails
      (without checks: one commit prompt after the implementer and after each fix; still dirty ─► said in the stage note)
@@ -47,7 +47,8 @@ then: granny's final check in every repo (gates, clean tree, no AI trailers, PR 
 
 | role | does | default model |
 |---|---|---|
-| granny | you; plus the engine's helper steps: worktree setup, the HEAD reads (before a stage, after each check gate), commit-count reads and working-tree status reads (before each check gate; without checks after the implementer and each fix), the check runner and the review-command runner (Claude Code), extraction fallback, final PR-ready check | session model |
+| granny | you; plus the engine's extraction fallback and the final PR-ready check | session model |
+| helper | Claude Code only, because a Workflow script has no shell: runs one given command and reports its exit code and output - worktree setup, the HEAD reads (before a stage, after each check gate), commit-count reads and working-tree status reads (before each check gate; without checks after the implementer and each fix), the timeout probe, the checks, a lane's merge and cleanup, and the start, wait, read and stop steps of a review command. On opencode granny runs these commands itself | `haiku`, effort `low`, on Claude Code |
 | planner | in a run with `goal`: explores the repo, writes the plan file and proposes the stages; writes nothing else | session model |
 | implementer | builds each stage, fixes accepted findings, repairs failed checks, commits; in the plan review, fixes the plan files in place without committing them | session model |
 | reviewers | config `reviewers`, a list; every reviewer reviews every stage, all at the same time. Engines: `agent` a host model (the default list is one `agent` reviewer on the session model); `auto` (an entry's engine when it names none) runs OpenAI's Codex plugin when it is installed on Claude Code and `node` is on `PATH`, otherwise the Codex CLI (`codex exec review`); `codex-plugin` forces the plugin (and allows `mode: "adversarial-review"`), `codex` the CLI, `command` any CLI | one reviewer, `reviewer`, engine `agent` on the session model |

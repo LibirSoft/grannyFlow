@@ -62,11 +62,11 @@ describe('claude-code workflow.js', () => {
     expect(result.worktree).toBe('/r-worktrees/feat-x')
     expect(phases).toEqual(['Worktree', 'Implement', 'Review', 'PR ready'])
     const setup = calls[0]!
-    expect(setup.opts).toMatchObject({ label: 'worktree', phase: 'Worktree' })
+    expect(setup.opts).toMatchObject({ label: 'worktree', phase: 'Worktree', model: 'haiku', effort: 'low' })
     expect(setup.prompt.startsWith('READ-ONLY ROLE')).toBe(false)
     expect(setup.prompt).toContain('\ncd /r && ex="$(git rev-parse --git-common-dir)/info/exclude"')
     expect(setup.prompt).toContain('wt=/r-worktrees/feat-x;')
-    expect(calls[1]!.opts).toMatchObject({ label: 'head one', phase: 'Implement' })
+    expect(calls[1]!.opts).toMatchObject({ label: 'head one', phase: 'Implement', model: 'haiku', effort: 'low' })
     expect(calls[1]!.prompt).toContain('\ncd /r-worktrees/feat-x && git rev-parse --verify HEAD\n')
     const impl = calls[2]!
     expect(impl.opts).toMatchObject({ label: 'implement one', phase: 'Implement', model: 'opus', effort: 'high' })
@@ -75,7 +75,8 @@ describe('claude-code workflow.js', () => {
     expect(runner.prompt).toContain('\ncd /r-worktrees/feat-x && if [ -s .granny/review-one-r1-codex.pid ]')
     expect(calls.filter(c => c.opts.label.startsWith('review one r1 codex')).map(c => c.opts.label)).toEqual(['review one r1 codex', 'review one r1 codex wait 1', 'review one r1 codex read'])
     expect(runner.prompt.startsWith('READ-ONLY ROLE')).toBe(true)
-    expect(runner.opts.model).toBeUndefined()
+    expect(runner.opts).toMatchObject({ model: 'haiku', effort: 'low' })
+    expect(calls.find(c => c.opts.label === 'pr-ready check')!.opts.model).toBeUndefined()
     const judge = calls.find(c => c.opts.label === 'judge one r1')!
     expect(judge.opts.model).toBe('sonnet')
     expect(calls.some(c => c.opts.label === 'fix one r1' && c.prompt.includes('Off by one'))).toBe(true)

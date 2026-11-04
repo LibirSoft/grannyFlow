@@ -1,6 +1,6 @@
 export type HostName = 'claude-code' | 'opencode'
 
-export type Role = 'granny' | 'planner' | 'implementer' | 'reviewer' | 'judge'
+export type Role = 'granny' | 'helper' | 'planner' | 'implementer' | 'reviewer' | 'judge'
 
 export type ResultKind = 'draft' | 'implementation' | 'planFix' | 'findings' | 'score' | 'command' | 'final'
 

@@ -7,7 +7,7 @@ export interface RoleConfig {
   effort?: string
 }
 
-export type ConfigRole = 'granny' | 'planner' | 'implementer' | 'judge'
+export type ConfigRole = 'granny' | 'helper' | 'planner' | 'implementer' | 'judge'
 export type ReviewerEngine = 'auto' | 'codex' | 'codex-plugin' | 'agent' | 'command'
 export type ReviewMode = 'review' | 'adversarial-review'
 
@@ -57,6 +57,7 @@ export interface GrannyConfig {
 export const DEFAULT_CONFIG: GrannyConfig = {
   roles: {
     granny: {},
+    helper: { model: { 'claude-code': 'haiku' }, effort: 'low' },
     planner: {},
     implementer: {},
     judge: { model: { 'claude-code': 'sonnet' } },
@@ -82,7 +83,7 @@ export const DEFAULT_CONFIG: GrannyConfig = {
   maxRepairs: 2,
 }
 
-const ROLES: ConfigRole[] = ['granny', 'planner', 'implementer', 'judge']
+const ROLES: ConfigRole[] = ['granny', 'helper', 'planner', 'implementer', 'judge']
 const TOP_KEYS = new Set(['$schema', 'roles', 'worktreeDir', ...Object.keys(DEFAULT_CONFIG).filter(k => k !== 'roles')])
 const ROLE_KEYS = new Set(['model', 'effort'])
 const REVIEWER_KEYS = new Set(['name', 'engine', 'model', 'effort', 'mode', 'focus', 'command'])

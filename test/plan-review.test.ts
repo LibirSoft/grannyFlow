@@ -255,7 +255,7 @@ describe('the plan review', () => {
     const r = await runGranny(f.host, input({ plan: PLAN, config: { planReview: true } }))
     expect(r.plan).toMatchObject({ outcome: 'clean' })
     const runner = f.calls.find(c => c.label === 'review plan review r1 codex')!
-    expect(runner).toMatchObject({ role: 'granny', kind: 'command', phase: 'Plan review', access: 'read-only' })
+    expect(runner).toMatchObject({ role: 'helper', kind: 'command', phase: 'Plan review', access: 'read-only' })
     expect(runner.prompt).toContain(`; mkdir -p .granny && rm -f .granny/review-plan-review-r1-codex.md .granny/review-plan-review-r1-codex.log`)
     expect(runner.prompt).toContain('{ set -m; nohup bash -c ')
     expect(runner.prompt).toContain('node "$companion" task')

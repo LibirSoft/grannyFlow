@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Added
+
+- Claude Code: a `helper` role (`roles.helper`, default `{ "model": { "claude-code": "haiku" }, "effort": "low" }`) runs granny's plain commands - the worktree setup, the HEAD, commit-count and status reads, the timeout probe, the checks, a lane's merge and cleanup, and the start, wait, read and stop steps of a Codex or `command` review. A Workflow script has no shell, so each of these is an agent that runs one given command; they ran on `roles.granny`, which defaults to the session model, and on one real run about a third of the tokens went to Opus agents relaying commands such as `git rev-parse HEAD` (about 34k tokens each). `roles.granny` now covers only the extraction fallback and the final PR-ready check, so a `roles.granny.model` set to keep the helper steps cheap does not reach them now - set `roles.helper` for them. The review steps are safe on Haiku because the engine owns the wait loop. opencode runs these commands itself and starts no helper.
+
 ### Fixed
 
 - Checks: every check run records the HEAD it ran on (`checks[].head`). The final gate of a one-stage repo reuses the stage's last result only when HEAD is still that commit, and its log names the SHA; when a reviewer or the judge committed after the last gate, or HEAD could not be read, the checks run again. When the final check moves HEAD, the checks run once more without repairs (gate `pr-ready`); a red result sets `recheck: { passed: false, note }` and the branch is not PR-ready.
