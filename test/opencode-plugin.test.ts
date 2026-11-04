@@ -26,7 +26,10 @@ function makeRepo(): string {
 
 const CANNED: Record<string, unknown> = {
   granny_submit_implementation: { startSha: 'aaa', headSha: 'bbb', gatesGreen: true, gates: 'ok', commits: ['c1'], untested: '' },
-  granny_submit_score: { score: 90, perFinding: [{ id: 'codex-F1', score: 95, reason: 'real' }], rationale: 'ok' },
+  granny_submit_score: {
+    perFinding: [{ id: 'codex-F1', verdict: 'confirmed', impact: 'critical', likelihood: 'edge', fixCost: 'small', scope: 'in-scope', evidence: 'a.txt:1 - real', reason: 'real' }],
+    rationale: 'ok',
+  },
   granny_submit_final: { gatesGreen: true, gates: 'ok', commits: ['c1'], prBodyPath: '.granny/PR-BODY.md', issues: '' },
   granny_submit_findings: { findings: [] },
   granny_submit_plan_fix: { files: ['/plan.md'], changes: 'fixed' },
@@ -353,7 +356,7 @@ describe('opencode plugin', () => {
       const result = await finished(dir)
       delete process.env.PLAN_FILE
       expect(result.plan).toMatchObject({ outcome: 'clean', rounds: 2 })
-      expect(result.plan.history[0].findings[0]).toMatchObject({ id: 'codex-F1', file: plan, line: 2, score: 95 })
+      expect(result.plan.history[0].findings[0]).toMatchObject({ id: 'codex-F1', file: plan, line: 2, priority: 95 })
       expect(f.created.map(s => s.title)).toEqual([
         'granny · judge plan review r1',
         'granny · fix plan review r1',
@@ -453,7 +456,7 @@ describe('opencode plugin', () => {
     })
     const result = JSON.parse(readFileSync(join(dir, 'result.json'), 'utf8'))
     expect(result.stages[0]).toMatchObject({ stage: 'one', outcome: 'clean', rounds: 2 })
-    expect(result.stages[0].history[0].findings[0]).toMatchObject({ id: 'codex-F1', reviewer: 'codex', severity: 'P2', file: 'a.txt', line: 1, score: 95 })
+    expect(result.stages[0].history[0].findings[0]).toMatchObject({ id: 'codex-F1', reviewer: 'codex', severity: 'P2', file: 'a.txt', line: 1, priority: 95 })
 
     expect(f.created.map(s => s.title)).toEqual(['granny · implement one', 'granny · judge one r1', 'granny · fix one r1', 'granny · pr-ready check'])
     expect(f.created[0]).toMatchObject({ agent: 'build', model: { providerID: 'opencode', id: 'parent-model' }, location: { directory: repo } })
@@ -528,7 +531,7 @@ describe('opencode plugin', () => {
     expect(journalOf(dir)).toContainEqual(
       expect.objectContaining({ type: 'provider-error', label: 'judge one r1', error: quota, transient: true, backoffMs: 30_000 }),
     )
-    expect(result.stages[0].history[0].findings[0].score).toBe(95)
+    expect(result.stages[0].history[0].findings[0].priority).toBe(95)
   })
 
   it('gives up on the role after the backoff budget, and the engine reports the unjudged findings after its one retry', async () => {
@@ -552,7 +555,7 @@ describe('opencode plugin', () => {
       expect.objectContaining({ type: 'log', message: 'one r1: judge returned nothing, also on a retry - all 1 finding(s) go to the implementer unjudged (rule 2)' }),
     )
     expect(result.stages[0]).toMatchObject({ outcome: 'clean', rounds: 2 })
-    expect(result.stages[0].history[0].findings[0].score).toBeUndefined()
+    expect(result.stages[0].history[0].findings[0].priority).toBeUndefined()
   })
 
   it('does not retry a provider error that waiting cannot fix', async () => {

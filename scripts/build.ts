@@ -141,7 +141,7 @@ export function renderPrompts(): string {
     ['Reviewer - command engine, the text {prompt} is filled with', commandReviewPrompt(p, '<stage name>', '<stage start sha>', stage)],
     ['Judge', judgePrompt(p, '<stage start sha>', [], [], stage).replace(/\[\]$/, '<findings as JSON>')],
     [
-      'Judge - from round 2 on (the plan judge gets the same EARLIER DECISIONS block; one "Round N sent" entry per earlier fix round, followed by its "kept as residual" list when that round left residual findings, and P0/P1 findings join the list once a fixer declined findings; a field the finding does not have, such as the classes of an unjudged P0/P1, is left out, and `score` replaces them for a numeric-score judge answer; `(ratchet raised <what>)` follows the why when the ratchet raised the finding)',
+      'Judge - from round 2 on (the plan judge gets the same EARLIER DECISIONS block; one "Round N sent" entry per earlier fix round, followed by its "kept as residual" list when that round left residual findings, and P0/P1 findings join the list once a fixer declined findings; a field the finding does not have, such as the classes of an unjudged P0/P1, is left out; `(ratchet raised <what>)` follows the why when the ratchet raised the finding)',
       judgePrompt(p, '<stage start sha>', [], earlier, stage).replace(/\[\]$/, '<findings as JSON>'),
     ],
     [

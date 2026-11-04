@@ -74,7 +74,7 @@ Plan files - read them first: <plan files>
 
 P0/P1 findings are not in this list: they go to the implementer without you.
 For each finding, open the cited plan line and the code, config or dependency it names, and check that it is real and correctly described. Classify impact by what the plan would cause if implemented as written; evidence is the plan's path:line plus the repo path:line that shows the problem. If a finding reports the same problem as another one in this list (reviewers overlap), classify it too and set its duplicateOf to the id of the one to keep.
-Classify every finding with exactly these fields - classes, not a per-finding score:
+Classify every finding with exactly these fields:
 - verdict: confirmed (the code shows the problem) | refuted (the code shows it is absent or not a problem) | unverified (you cannot tell either way).
 - impact, how bad IF it triggers: critical | major | moderate | minor | none.
   Judge impact assuming the trigger happens. Likelihood never lowers impact; it is its own field.
@@ -89,7 +89,6 @@ Classify every finding with exactly these fields - classes, not a per-finding sc
 - evidence: path:line plus the concrete trigger steps, e.g. `Editor.tsx:225` + "save -> go back -> late response arrives -> save again". Always give a path:line: without one the finding counts as unverified, which lowers its impact one class.
 - reason: one line.
 Example: a late save response re-binds the editor to another post's id, so the next save can overwrite the wrong post: confirmed, critical, edge, small, in-scope, though the window is narrow.
-Separately, rate the review as a whole in score: one 0-100 quality number for correctness and actionability (mostly wrong or trivial findings = low). It is only logged and decides nothing.
 
 REVIEW:
 <findings as JSON>
@@ -377,7 +376,7 @@ Stage 2/2 "<stage name>" - its TASK:
 
 P0/P1 findings are not in this list: they go to the implementer without you.
 For each finding, open the cited code and check that it is real and correctly described. Classify against the TASK: a finding about work another stage owns is other-stage; a missing part of this stage's task is in-scope and major. If a finding reports the same problem as another one in this list (reviewers overlap), classify it too and set its duplicateOf to the id of the one to keep.
-Classify every finding with exactly these fields - classes, not a per-finding score:
+Classify every finding with exactly these fields:
 - verdict: confirmed (the code shows the problem) | refuted (the code shows it is absent or not a problem) | unverified (you cannot tell either way).
 - impact, how bad IF it triggers: critical | major | moderate | minor | none.
   Judge impact assuming the trigger happens. Likelihood never lowers impact; it is its own field.
@@ -392,13 +391,12 @@ Classify every finding with exactly these fields - classes, not a per-finding sc
 - evidence: path:line plus the concrete trigger steps, e.g. `Editor.tsx:225` + "save -> go back -> late response arrives -> save again". Always give a path:line: without one the finding counts as unverified, which lowers its impact one class.
 - reason: one line.
 Example: a late save response re-binds the editor to another post's id, so the next save can overwrite the wrong post: confirmed, critical, edge, small, in-scope, though the window is narrow.
-Separately, rate the review as a whole in score: one 0-100 quality number for correctness and actionability (mostly wrong or trivial findings = low). It is only logged and decides nothing.
 
 REVIEW:
 <findings as JSON>
 ```
 
-## Judge - from round 2 on (the plan judge gets the same EARLIER DECISIONS block; one "Round N sent" entry per earlier fix round, followed by its "kept as residual" list when that round left residual findings, and P0/P1 findings join the list once a fixer declined findings; a field the finding does not have, such as the classes of an unjudged P0/P1, is left out, and `score` replaces them for a numeric-score judge answer; `(ratchet raised <what>)` follows the why when the ratchet raised the finding)
+## Judge - from round 2 on (the plan judge gets the same EARLIER DECISIONS block; one "Round N sent" entry per earlier fix round, followed by its "kept as residual" list when that round left residual findings, and P0/P1 findings join the list once a fixer declined findings; a field the finding does not have, such as the classes of an unjudged P0/P1, is left out; `(ratchet raised <what>)` follows the why when the ratchet raised the finding)
 
 ```text
 You are the JUDGE classifying the findings of a code review. Repo <repo>, branch <branch>, stage diff `'<stage start sha>'...HEAD`. Do not edit anything.
@@ -410,7 +408,7 @@ Stage 2/2 "<stage name>" - its TASK:
 
 P0/P1 findings are not in this list: they go to the implementer without you.
 For each finding, open the cited code and check that it is real and correctly described. Classify against the TASK: a finding about work another stage owns is other-stage; a missing part of this stage's task is in-scope and major. If a finding reports the same problem as another one in this list (reviewers overlap), classify it too and set its duplicateOf to the id of the one to keep.
-Classify every finding with exactly these fields - classes, not a per-finding score:
+Classify every finding with exactly these fields:
 - verdict: confirmed (the code shows the problem) | refuted (the code shows it is absent or not a problem) | unverified (you cannot tell either way).
 - impact, how bad IF it triggers: critical | major | moderate | minor | none.
   Judge impact assuming the trigger happens. Likelihood never lowers impact; it is its own field.
@@ -425,7 +423,6 @@ Classify every finding with exactly these fields - classes, not a per-finding sc
 - evidence: path:line plus the concrete trigger steps, e.g. `Editor.tsx:225` + "save -> go back -> late response arrives -> save again". Always give a path:line: without one the finding counts as unverified, which lowers its impact one class.
 - reason: one line.
 Example: a late save response re-binds the editor to another post's id, so the next save can overwrite the wrong post: confirmed, critical, edge, small, in-scope, though the window is narrow.
-Separately, rate the review as a whole in score: one 0-100 quality number for correctness and actionability (mostly wrong or trivial findings = low). It is only logged and decides nothing.
 
 EARLIER DECISIONS - the findings earlier rounds sent to the fixer or kept as residual for the user, by label, with classification, priority and deciding rule, and the fixer's declines with its reasons:
 Round 1 sent to the fixer:
@@ -465,7 +462,7 @@ Plan files - read them first: <plan files>
 
 P0/P1 findings are not in this list: they go to the implementer without you.
 For each finding, open the cited code and check that it is real and correctly described. If a finding reports the same problem as another one in this list (reviewers overlap), classify it too and set its duplicateOf to the id of the one to keep.
-Classify every finding with exactly these fields - classes, not a per-finding score:
+Classify every finding with exactly these fields:
 - verdict: confirmed (the code shows the problem) | refuted (the code shows it is absent or not a problem) | unverified (you cannot tell either way).
 - impact, how bad IF it triggers: critical | major | moderate | minor | none.
   Judge impact assuming the trigger happens. Likelihood never lowers impact; it is its own field.
@@ -480,7 +477,6 @@ Classify every finding with exactly these fields - classes, not a per-finding sc
 - evidence: path:line plus the concrete trigger steps, e.g. `Editor.tsx:225` + "save -> go back -> late response arrives -> save again". Always give a path:line: without one the finding counts as unverified, which lowers its impact one class.
 - reason: one line.
 Example: a late save response re-binds the editor to another post's id, so the next save can overwrite the wrong post: confirmed, critical, edge, small, in-scope, though the window is narrow.
-Separately, rate the review as a whole in score: one 0-100 quality number for correctness and actionability (mostly wrong or trivial findings = low). It is only logged and decides nothing.
 
 EARLIER DECISIONS - the findings earlier rounds sent to the fixer or kept as residual for the user, by label, with classification, priority and deciding rule, and the fixer's declines with its reasons. A round named after a stage is that stage's own review; this review covers its code too:
 Stage <k> (<stage name>), round 1 sent to the fixer:

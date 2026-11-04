@@ -27,7 +27,7 @@ const judgeRouting = (findings: Finding[]): string =>
     ? 'P0/P1 findings are here only because a fixer declined findings in an earlier round: classify them like the rest. A P0/P1 goes to the implementer whatever you classify, unless its repeatOf names a finding the fixer declined - then your classification decides it.'
     : 'P0/P1 findings are not in this list: they go to the implementer without you.'
 
-const rubric = (task: string) => `Classify every finding with exactly these fields - classes, not a per-finding score:
+const rubric = (task: string) => `Classify every finding with exactly these fields:
 - verdict: confirmed (the code shows the problem) | refuted (the code shows it is absent or not a problem) | unverified (you cannot tell either way).
 - impact, how bad IF it triggers: critical | major | moderate | minor | none.
   Judge impact assuming the trigger happens. Likelihood never lowers impact; it is its own field.
@@ -41,8 +41,7 @@ const rubric = (task: string) => `Classify every finding with exactly these fiel
 - scope: in-scope | pre-existing (there before this change) | other-stage (another stage's job).
 - evidence: path:line plus the concrete trigger steps, e.g. \`Editor.tsx:225\` + "save -> go back -> late response arrives -> save again". Always give a path:line: without one the finding counts as unverified, which lowers its impact one class.
 - reason: one line.
-Example: a late save response re-binds the editor to another post's id, so the next save can overwrite the wrong post: confirmed, critical, edge, small, in-scope, though the window is narrow.
-Separately, rate the review as a whole in score: one 0-100 quality number for correctness and actionability (mostly wrong or trivial findings = low). It is only logged and decides nothing.`
+Example: a late save response re-binds the editor to another post's id, so the next save can overwrite the wrong post: confirmed, critical, edge, small, in-scope, though the window is narrow.`
 
 const decided = (f: Finding) => (f.decision ? `${f.decision.action} - rule ${f.decision.rule}: ${f.decision.why}${f.decision.raised ? ` (ratchet raised ${f.decision.raised})` : ''}` : undefined)
 
@@ -64,7 +63,6 @@ function judgeHistory(earlier: EarlierRound[]): string {
         fixCost: f.fixCost,
         scope: f.scope,
         priority: f.priority,
-        score: f.score,
         evidence: f.evidence,
       })),
     )

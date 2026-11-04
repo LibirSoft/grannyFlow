@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import { resolveConfig } from '../src/core/config'
 import { runGranny, type RunInput } from '../src/core/engine'
 import { agentPlanReviewPrompt, agentReviewPrompt, commandReviewPrompt, draftPrompt, fixPrompt, implementPrompt, judgePrompt, planJudgePrompt, WHOLE_BRANCH_NOTE } from '../src/core/prompts'
+import { SCHEMAS } from '../src/core/schemas'
 import { alive, brokerCompanion, records, sessionEndHook, until } from './fake-companion'
 import { fakeHost, finding, review, reviewerOf, type FakeOptions, withCodex } from './fake-host'
 
@@ -36,7 +37,7 @@ describe('runGranny', () => {
   it('sends P0/P1 unjudged and others above the threshold, keeps the rest as residual', async () => {
     const f = fakeHost({
       reviews: [review(finding('P1', 'Blocker bug'), finding('P2', 'Borderline'), finding('P2', 'Real issue')), 'No findings.'],
-      scores: [{ 'codex-F2': 70, 'codex-F3': 71 }],
+      scores: [{ 'codex-F2': 70, 'codex-F3': 75 }],
     })
     const r = await runGranny(f.host, input())
     expect(r.stages[0]).toMatchObject({ outcome: 'clean', rounds: 2 })
@@ -44,21 +45,21 @@ describe('runGranny', () => {
     expect(fix.prompt).toContain('Blocker bug')
     expect(fix.prompt).toContain('Real issue')
     expect(fix.prompt).not.toContain('Borderline')
-    expect(f.logs.some(l => l.includes('not sent: codex-F2 (rule 8: under the bar: score 70 (numeric score, no classification))'))).toBe(true)
-    expect(r.stages[0]!.history[0]!.findings.map(x => x.score)).toEqual([undefined, 70, 71])
+    expect(f.logs.some(l => l.includes('not sent: codex-F2 (rule 8: under the bar: moderate/edge/trivial -> 70)'))).toBe(true)
+    expect(r.stages[0]!.history[0]!.findings.map(x => x.priority)).toEqual([undefined, 70, 75])
     expect(r.stages[0]!.residual).toHaveLength(1)
-    expect(r.stages[0]!.residual[0]).toMatchObject({ id: 'codex-F2', title: 'Borderline', score: 70 })
+    expect(r.stages[0]!.residual[0]).toMatchObject({ id: 'codex-F2', title: 'Borderline', priority: 70 })
   })
 
   it('keeps an earlier round\'s residual when a later round repeats it, once and in its latest version', async () => {
     const f = fakeHost({
       reviews: [review(finding('P2', 'Real issue'), finding('P3', 'Nit')), review(finding('P3', 'Nit again'))],
-      scores: [{ 'codex-F1': 90, 'codex-F2': 20 }, { 'codex-F1': { score: 15, repeatOf: 'r1/codex-F2' } }],
+      scores: [{ 'codex-F1': 90, 'codex-F2': 20 }, { 'codex-F1': { score: 20, repeatOf: 'r1/codex-F2' } }],
     })
     const r = await runGranny(f.host, input())
     expect(r.stages[0]).toMatchObject({ outcome: 'residual-only', rounds: 2 })
     expect(r.stages[0]!.residual).toHaveLength(1)
-    expect(r.stages[0]!.residual[0]).toMatchObject({ title: 'Nit again', score: 15, repeatOf: 'r1/codex-F2' })
+    expect(r.stages[0]!.residual[0]).toMatchObject({ title: 'Nit again', priority: 20, repeatOf: 'r1/codex-F2' })
     const judge = f.calls.find(c => c.label === 'judge core r2')!.prompt
     expect(judge).toContain('Round 1 kept as residual')
     expect(judge).toContain('"label":"r1/codex-F2"')
@@ -99,7 +100,7 @@ describe('runGranny', () => {
   it('drops an earlier residual finding once a later round sent its repeat to the fixer', async () => {
     const f = fakeHost({
       reviews: [review(finding('P2', 'Real issue'), finding('P3', 'Nit')), review(finding('P2', 'Nit, worse')), 'No findings.'],
-      scores: [{ 'codex-F1': 90, 'codex-F2': 60 }, { 'codex-F1': { score: 80, repeatOf: 'r1/codex-F2' } }],
+      scores: [{ 'codex-F1': 90, 'codex-F2': 60 }, { 'codex-F1': { score: 90, repeatOf: 'r1/codex-F2' } }],
     })
     const r = await runGranny(f.host, input())
     expect(r.stages[0]).toMatchObject({ outcome: 'clean', rounds: 3, residual: [] })
@@ -505,7 +506,7 @@ describe('runGranny', () => {
     expect(cc.calls.find(c => c.role === 'implementer')).toMatchObject({ model: 'opus', effort: 'high' })
     expect(cc.calls.find(c => c.kind === 'final')).toMatchObject({ role: 'granny', model: 'haiku', access: 'write' })
 
-    const oc = fakeHost({ reviews: [review(finding('P2', 'x')), 'No findings.'], scores: [{ 'codex-F1': 99 }] })
+    const oc = fakeHost({ reviews: [review(finding('P2', 'x')), 'No findings.'], scores: [{ 'codex-F1': 90 }] })
     await runGranny(oc.host, input({ config }))
     expect(oc.calls.find(c => c.role === 'implementer')!.model).toBe('anthropic/claude-opus-5-5')
     expect(oc.calls.find(c => c.role === 'judge')!.model).toBeUndefined()
@@ -513,13 +514,13 @@ describe('runGranny', () => {
   })
 
   it('defaults the judge to haiku on claude-code', async () => {
-    const f = fakeHost({ name: 'claude-code', direct: false, reviews: [review(finding('P2', 'x')), 'No findings.'], scores: [{ 'codex-F1': 99 }] })
+    const f = fakeHost({ name: 'claude-code', direct: false, reviews: [review(finding('P2', 'x')), 'No findings.'], scores: [{ 'codex-F1': 90 }] })
     await runGranny(f.host, input())
     expect(f.calls.find(c => c.role === 'judge')).toMatchObject({ model: 'haiku', access: 'read-only' })
   })
 
   it('runs the judge on the model a user config sets, over the haiku default', async () => {
-    const f = fakeHost({ name: 'claude-code', direct: false, reviews: [review(finding('P2', 'x')), 'No findings.'], scores: [{ 'codex-F1': 99 }] })
+    const f = fakeHost({ name: 'claude-code', direct: false, reviews: [review(finding('P2', 'x')), 'No findings.'], scores: [{ 'codex-F1': 90 }] })
     await runGranny(f.host, input({ config: { roles: { judge: { model: 'sonnet' } } } }))
     expect(f.calls.find(c => c.role === 'judge')).toMatchObject({ model: 'sonnet', access: 'read-only' })
   })
@@ -579,13 +580,13 @@ describe('runGranny', () => {
       }
     })
 
-    it('tells the judge the findings are classified and the review gets one score that decides nothing, and names the diff it judges', () => {
+    it('asks the judge only for classes, no score, and names the diff it judges', () => {
       for (const prompt of [judgePrompt(p, 'abc', [], [], stage), planJudgePrompt(p, ['/r/plan.md'], [])]) {
-        expect(prompt).toContain('Classify every finding with exactly these fields - classes, not a per-finding score:')
-        expect(prompt).toContain('rate the review as a whole in score: one 0-100 quality number')
-        expect(prompt).toContain('It is only logged and decides nothing.')
-        expect(prompt).not.toContain('do not score it')
+        expect(prompt).toContain('Classify every finding with exactly these fields:')
+        for (const gone of ['score', '0-100', 'rate the review']) expect(prompt).not.toContain(gone)
       }
+      expect(SCHEMAS.score.properties).not.toHaveProperty('score')
+      expect(SCHEMAS.score.required).toEqual(['perFinding', 'rationale'])
       expect(judgePrompt(p, 'abc', [], [], stage)).toContain("stage diff `abc...HEAD`")
       const final = judgePrompt(p, 'main', [], [], undefined, WHOLE_BRANCH_NOTE)
       expect(final).toContain('branch diff `main...HEAD`')
@@ -1142,14 +1143,14 @@ describe('several reviewers', () => {
   it('prefixes finding ids with the reviewer and keeps the attribution through the judge, the fix and the residual', async () => {
     const f = fakeHost({
       reviews: { codex: [review(finding('P2', 'From codex'), finding('P3', 'Second from codex')), 'No findings.'], glm: [review(finding('P2', 'From glm')), 'No findings.'] },
-      scores: [{ 'codex-F1': 90, 'codex-F2': 10, 'glm-F1': 95 }],
+      scores: [{ 'codex-F1': 90, 'codex-F2': 10, 'glm-F1': 75 }],
     })
     const r = await runGranny(f.host, input({ config: { reviewers: [{ name: 'codex' }, GLM] } }))
     expect(r.stages[0]).toMatchObject({ outcome: 'clean', rounds: 2 })
-    expect(r.stages[0]!.history[0]!.findings.map(x => [x.id, x.reviewer, x.title, x.score])).toEqual([
+    expect(r.stages[0]!.history[0]!.findings.map(x => [x.id, x.reviewer, x.title, x.priority])).toEqual([
       ['codex-F1', 'codex', 'From codex', 90],
       ['codex-F2', 'codex', 'Second from codex', 10],
-      ['glm-F1', 'glm', 'From glm', 95],
+      ['glm-F1', 'glm', 'From glm', 75],
     ])
     const judge = f.calls.find(c => c.role === 'judge')!.prompt
     expect(judge).toContain('"id":"glm-F1"')
@@ -1159,7 +1160,7 @@ describe('several reviewers', () => {
     expect(fix).toContain('"id":"glm-F1"')
     expect(fix).toContain('"reviewer":"glm"')
     expect(fix).not.toContain('codex-F2')
-    expect(f.logs.some(l => l.includes('not sent: codex-F2 (rule 8: under the bar: score 10 (numeric score, no classification))'))).toBe(true)
+    expect(f.logs.some(l => l.includes('not sent: codex-F2 (rule 8: under the bar: minor/edge/large -> 10)'))).toBe(true)
   })
 
   it('numbers an agent reviewer\'s findings under its own name, whatever ids it chose', async () => {
@@ -1364,13 +1365,13 @@ describe('several reviewers', () => {
     for (const title of ['Codex blocker', 'Glm crash', 'Codex nit']) expect(fix).toContain(title)
     expect(fix).not.toContain('Glm style')
     expect(f.logs).toContain('core r1: 2 P0/P1 finding(s) go to the implementer without the judge: codex-F1, glm-F1')
-    expect(r.stages[0]!.history[0]!.findings.map(x => [x.id, x.score])).toEqual([
+    expect(r.stages[0]!.history[0]!.findings.map(x => [x.id, x.priority])).toEqual([
       ['codex-F1', undefined],
       ['codex-F2', 90],
       ['glm-F1', undefined],
       ['glm-F2', 10],
     ])
-    expect(f.logs).toContain('core r1: 1 finding(s) kept as residual, not sent: glm-F2 (rule 8: under the bar: score 10 (numeric score, no classification))')
+    expect(f.logs).toContain('core r1: 1 finding(s) kept as residual, not sent: glm-F2 (rule 8: under the bar: minor/edge/large -> 10)')
   })
 
   it('does not call the judge when every finding is P0/P1', async () => {
@@ -1379,7 +1380,8 @@ describe('several reviewers', () => {
     expect(r.stages[0]).toMatchObject({ outcome: 'clean', rounds: 2 })
     expect(f.calls.some(c => c.role === 'judge')).toBe(false)
     expect(f.calls.find(c => c.label === 'fix core r1')!.prompt).toContain('Auth bypass')
-    expect(r.stages[0]!.history[0]).toMatchObject({ round: 1, score: null })
+    expect(r.stages[0]!.history[0]).toMatchObject({ round: 1 })
+    expect(r.stages[0]!.history[0]).not.toHaveProperty('score')
   })
 
   it('merges the duplicates the judge marks and reports each problem once, with every reviewer that found it', async () => {
@@ -1389,12 +1391,12 @@ describe('several reviewers', () => {
         opus: [review(finding('P2', 'Totals skip the first item')), 'No findings.'],
         glm: [review(finding('P3', 'First cart item ignored')), 'No findings.'],
       },
-      scores: [{ 'codex-F1': 90, 'codex-F2': 20, 'opus-F1': { score: 88, duplicateOf: 'codex-F1' }, 'glm-F1': { score: 60, duplicateOf: 'opus-F1' } }],
+      scores: [{ 'codex-F1': 90, 'codex-F2': 20, 'opus-F1': { score: 75, duplicateOf: 'codex-F1' }, 'glm-F1': { score: 60, duplicateOf: 'opus-F1' } }],
     })
     const reviewers = [{ name: 'codex' }, { name: 'opus', engine: 'command', command: 'opus-review {prompt}' }, GLM]
     const r = await runGranny(f.host, input({ config: { reviewers } }))
     expect(r.stages[0]).toMatchObject({ outcome: 'clean', rounds: 2 })
-    expect(r.stages[0]!.history[0]!.findings.map(x => [x.id, x.score, x.duplicates])).toEqual([
+    expect(r.stages[0]!.history[0]!.findings.map(x => [x.id, x.priority, x.duplicates])).toEqual([
       ['codex-F1', 90, ['opus-F1', 'glm-F1']],
       ['codex-F2', 20, undefined],
     ])
@@ -1404,16 +1406,16 @@ describe('several reviewers', () => {
     expect(fix).toContain('Off by one in totals')
     expect(fix).toContain('"duplicates":[')
     expect(fix).not.toContain('"title":"Totals skip the first item"')
-    expect(f.logs).toContain('core r1: 1 finding(s) kept as residual, not sent: codex-F2 (rule 8: under the bar: score 20 (numeric score, no classification))')
+    expect(f.logs).toContain('core r1: 1 finding(s) kept as residual, not sent: codex-F2 (rule 8: under the bar: minor/common/large -> 20)')
   })
 
-  it('keeps a finding the judge scored low when a duplicate merged into it scored high', async () => {
+  it('keeps a finding the judge classified low when a duplicate merged into it was classified high', async () => {
     const f = fakeHost({
       reviews: { codex: [review(finding('P2', 'Weakly worded')), 'No findings.'], glm: [review(finding('P2', 'Same, well argued')), 'No findings.'] },
-      scores: [{ 'codex-F1': 30, 'glm-F1': { score: 85, duplicateOf: 'codex-F1' } }],
+      scores: [{ 'codex-F1': 30, 'glm-F1': { score: 90, duplicateOf: 'codex-F1' } }],
     })
     const r = await runGranny(f.host, input({ config: { reviewers: [{ name: 'codex' }, GLM] } }))
-    expect(r.stages[0]!.history[0]!.findings).toEqual([expect.objectContaining({ id: 'codex-F1', score: 85, reason: 'reason glm-F1', duplicates: ['glm-F1'] })])
+    expect(r.stages[0]!.history[0]!.findings).toEqual([expect.objectContaining({ id: 'codex-F1', priority: 90, reason: 'reason glm-F1', duplicates: ['glm-F1'] })])
     expect(f.calls.some(c => c.label === 'fix core r1')).toBe(true)
   })
 
@@ -1425,11 +1427,11 @@ describe('several reviewers', () => {
       },
       scores: [
         {
-          'codex-F2': { score: 80, duplicateOf: 'codex-F3' },
-          'codex-F3': { score: 80, duplicateOf: 'codex-F2' },
-          'glm-F1': { score: 80, duplicateOf: 'codex-F1' },
-          'glm-F2': { score: 80, duplicateOf: 'glm-F9' },
-          'glm-F3': { score: 80, duplicateOf: 'glm-F3' },
+          'codex-F2': { score: 75, duplicateOf: 'codex-F3' },
+          'codex-F3': { score: 75, duplicateOf: 'codex-F2' },
+          'glm-F1': { score: 75, duplicateOf: 'codex-F1' },
+          'glm-F2': { score: 75, duplicateOf: 'glm-F9' },
+          'glm-F3': { score: 75, duplicateOf: 'glm-F3' },
         },
       ],
     })
@@ -1480,12 +1482,12 @@ describe('several reviewers', () => {
         codex: [review(finding('P2', 'Totals off by one')), 'No findings.'],
         glm: [review(finding('P2', 'Totals skip the first item')), crashed, crashed],
       },
-      scores: [{ 'codex-F1': 90, 'glm-F1': { score: 80, duplicateOf: 'codex-F1' } }],
+      scores: [{ 'codex-F1': 90, 'glm-F1': { score: 75, duplicateOf: 'codex-F1' } }],
     })
     const r = await runGranny(f.host, input({ config: { reviewers: [{ name: 'codex' }, GLM] } }))
     expect(r.stages[0]).toMatchObject({ outcome: 'review-failed', rounds: 2 })
     expect(r.stages[0]!.history[0]!.findings.map(x => [x.id, x.duplicates])).toEqual([['codex-F1', ['glm-F1']]])
-    expect(r.stages[0]!.unresolved).toEqual([expect.objectContaining({ id: 'glm-F1', reviewer: 'glm', title: 'Totals skip the first item', score: 80 })])
+    expect(r.stages[0]!.unresolved).toEqual([expect.objectContaining({ id: 'glm-F1', reviewer: 'glm', title: 'Totals skip the first item', priority: 75 })])
   })
 
   it('reports the merged findings of a failed reviewer under its own ids, next to what the others found this round', async () => {
@@ -1499,7 +1501,7 @@ describe('several reviewers', () => {
         {
           'codex-F1': 90,
           'codex-F2': { score: 75, duplicateOf: 'glm-F2' },
-          'glm-F1': { score: 80, duplicateOf: 'codex-F1' },
+          'glm-F1': { score: 75, duplicateOf: 'codex-F1' },
           'glm-F2': 90,
         },
       ],
@@ -2115,14 +2117,32 @@ describe('the judge retry', () => {
     expect(f.logs.some(l => l.includes('unjudged (rule 2)'))).toBe(false)
   })
 
-  it('does not retry a judge that classified every finding, or scored one the old way', async () => {
+  it('does not retry a judge that classified every finding', async () => {
     const f = fakeHost({
       reviews: [review(finding('P2', 'Lost write'), finding('P3', 'Odd name')), 'No findings.'],
-      scores: [{ 'codex-F1': judged('major', 'edge'), 'codex-F2': 40 }],
+      scores: [{ 'codex-F1': judged('major', 'edge'), 'codex-F2': judged('minor', 'rare') }],
     })
     await runGranny(f.host, input())
     expect(judges(f)).toHaveLength(1)
     expect(f.logs.some(l => l.includes('retrying once'))).toBe(false)
+  })
+
+  it('takes a finding with only a number and no classes for not judged: it gets the retry, then rule 2', async () => {
+    const numberOnly = { perFinding: [{ id: 'codex-F1', score: 10, reason: 'looks minor' }], rationale: 'r' }
+    const f = fakeHost({
+      reviews: [review(finding('P2', 'Lost write')), 'No findings.'],
+      override: req => (req.role === 'judge' ? numberOnly : undefined),
+    })
+    const r = await runGranny(f.host, input())
+    expect(judges(f).map(c => c.label)).toEqual(['judge core r1', 'judge core r1 retry'])
+    expect(judges(f)[1]!.prompt).toContain('- codex-F1: no classification in your answer')
+    expect(f.logs).toContain('core r1: judge left 1 finding(s) unclassified - retrying once: codex-F1 (not judged)')
+    expect(f.logs).toContain('core r1: judge left 1 finding(s) unclassified, also on a retry - to the implementer unjudged (rule 2): codex-F1 (not judged)')
+    const judgedFinding = r.stages[0]!.history[0]!.findings[0]!
+    expect(judgedFinding.decision).toEqual({ rule: 2, action: 'fix', why: 'not judged' })
+    expect(judgedFinding.priority).toBeUndefined()
+    expect(judgedFinding).not.toHaveProperty('score')
+    expect(f.calls.find(c => c.label === 'fix core r1')!.prompt).toContain('Lost write')
   })
 })
 

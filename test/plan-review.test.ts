@@ -108,7 +108,7 @@ describe('the plan review', () => {
     const f = fakeHost({ worktree: WT, reviews: [review(planFinding('P2', 'Step 2 uses a removed flag')), 'No findings.'], scores: [{ 'codex-F1': 90 }] })
     const r = await runGranny(f.host, input({ plan: [PLAN, '/plans/wo-2.md'], config: { planReview: true } }))
     expect(r.plan).toMatchObject({ outcome: 'clean', rounds: 2 })
-    expect(r.plan!.history[0]!.findings[0]).toMatchObject({ id: 'codex-F1', file: PLAN, line: 3, score: 90, title: 'Step 2 uses a removed flag' })
+    expect(r.plan!.history[0]!.findings[0]).toMatchObject({ id: 'codex-F1', file: PLAN, line: 3, priority: 90, title: 'Step 2 uses a removed flag' })
     expect(f.calls.map(c => c.label)).toEqual(['judge plan review r1', 'fix plan review r1', 'implement core', 'pr-ready check'])
     const judge = f.calls[0]!
     expect(judge).toMatchObject({ role: 'judge', kind: 'score', phase: 'Plan review', access: 'read-only' })

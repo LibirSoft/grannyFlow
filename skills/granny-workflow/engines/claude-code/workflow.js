@@ -408,9 +408,9 @@ function reviewFailure(text) {
   return FAILED_RENDER.exec(text)?.[0];
 }
 var isBlocker = (f) => /^\s*(p0|p1|critical|high)\b/i.test(String(f.severity ?? ""));
-var JUDGED = ["verdict", "impact", "likelihood", "fixCost", "scope", "evidence", "score", "priority", "reason", "decision"];
+var JUDGED = ["verdict", "impact", "likelihood", "fixCost", "scope", "evidence", "priority", "reason", "decision"];
 var fixes = (f) => f.decision?.action !== "residual";
-var rank = (f) => f.priority ?? f.score ?? -1;
+var rank = (f) => f.priority ?? -1;
 function mergeDuplicates(findings, duplicateOf) {
   const ids = new Set(findings.map((f) => f.id));
   const keeper = (id) => {
@@ -467,9 +467,8 @@ function classify(entry) {
   if (!entry)
     return { kind: "none", why: "not judged" };
   const keys = [...Object.keys(ENUMS), "evidence"];
-  if (keys.every((k) => entry[k] === undefined)) {
-    return typeof entry.score === "number" && Number.isFinite(entry.score) ? { kind: "score", score: entry.score } : { kind: "none", why: "not judged" };
-  }
+  if (keys.every((k) => entry[k] === undefined))
+    return { kind: "none", why: "not judged" };
   const problems = [];
   for (const [key, values] of Object.entries(ENUMS)) {
     const v = entry[key];
@@ -538,15 +537,11 @@ function decide(f, entry, policy, repeatsDeclined = () => false, earlierOf = () 
       raised = ratchet(c.fields, f.repeatOf, earlier);
     Object.assign(out, c.fields);
     out.priority = priorityOf(c.fields.impact, c.fields.likelihood, c.fields.fixCost);
-  } else if (c.kind === "score")
-    out.score = c.score;
+  }
   if (isBlocker(f) && !repeatsDeclined(out))
     return done(1, "fix", "P0/P1");
   if (c.kind === "none")
     return done(2, "fix", c.why);
-  if (c.kind === "score") {
-    return c.score > policy.threshold ? done(7, "fix", `score ${c.score} > threshold ${policy.threshold} (numeric score, no classification)`) : done(8, "residual", `under the bar: score ${c.score} (numeric score, no classification)`);
-  }
   const { verdict, impact, likelihood, fixCost, scope } = c.fields;
   const p = out.priority;
   const classes = `${impact}/${likelihood}/${fixCost}`;
@@ -588,7 +583,7 @@ function shellQuote(value) {
 
 var roundLabel = (round, f, loop) => `${loop ? `${loop.id}/` : ""}r${round}/${f.id}`;
 var judgeRouting = (findings) => findings.some(isBlocker) ? "P0/P1 findings are here only because a fixer declined findings in an earlier round: classify them like the rest. A P0/P1 goes to the implementer whatever you classify, unless its repeatOf names a finding the fixer declined - then your classification decides it." : "P0/P1 findings are not in this list: they go to the implementer without you.";
-var rubric = (task) => `Classify every finding with exactly these fields - classes, not a per-finding score:
+var rubric = (task) => `Classify every finding with exactly these fields:
 - verdict: confirmed (the code shows the problem) | refuted (the code shows it is absent or not a problem) | unverified (you cannot tell either way).
 - impact, how bad IF it triggers: critical | major | moderate | minor | none.
   Judge impact assuming the trigger happens. Likelihood never lowers impact; it is its own field.
@@ -602,8 +597,7 @@ var rubric = (task) => `Classify every finding with exactly these fields - class
 - scope: in-scope | pre-existing (there before this change) | other-stage (another stage's job).
 - evidence: path:line plus the concrete trigger steps, e.g. \`Editor.tsx:225\` + "save -> go back -> late response arrives -> save again". Always give a path:line: without one the finding counts as unverified, which lowers its impact one class.
 - reason: one line.
-Example: a late save response re-binds the editor to another post's id, so the next save can overwrite the wrong post: confirmed, critical, edge, small, in-scope, though the window is narrow.
-Separately, rate the review as a whole in score: one 0-100 quality number for correctness and actionability (mostly wrong or trivial findings = low). It is only logged and decides nothing.`;
+Example: a late save response re-binds the editor to another post's id, so the next save can overwrite the wrong post: confirmed, critical, edge, small, in-scope, though the window is narrow.`;
 var decided = (f) => f.decision ? `${f.decision.action} - rule ${f.decision.rule}: ${f.decision.why}${f.decision.raised ? ` (ratchet raised ${f.decision.raised})` : ""}` : undefined;
 function judgeHistory(earlier) {
   if (!earlier.length)
@@ -622,7 +616,6 @@ function judgeHistory(earlier) {
     fixCost: f.fixCost,
     scope: f.scope,
     priority: f.priority,
-    score: f.score,
     evidence: f.evidence
   })));
   const rounds = earlier.map((e) => {
@@ -1101,7 +1094,6 @@ var SCHEMAS = {
   score: {
     type: "object",
     properties: {
-      score: { type: "number", description: "0-100 overall, informational only: how correct, verified and actionable this review is" },
       perFinding: {
         type: "array",
         items: {
@@ -1123,7 +1115,7 @@ var SCHEMAS = {
       },
       rationale: { type: "string" }
     },
-    required: ["score", "perFinding", "rationale"]
+    required: ["perFinding", "rationale"]
   },
   final: {
     type: "object",
@@ -1705,7 +1697,6 @@ the last repair's deviations: ${deviations}` : ""}`;
       const policy = { threshold: config.threshold, alwaysFix: config.alwaysFix };
       let findings = found.map((f) => decide(f, undefined, policy, declinedBefore));
       unmerged = findings;
-      let score = null;
       if (judged.length) {
         const prompt = subject.kind === "plan" ? planJudgePrompt(p, subject.files, judged, earlier) : judgePrompt(p, subject.base, judged, earlier, subject.stage, subject.note);
         const label = `judge ${name} r${round}`;
@@ -1746,10 +1737,9 @@ ${judgeRetryNote(problems)}`, "read-only", config.roles.judge, lane.cwd);
           host.log(`${name} r${round}: judge merged ${m.id} into ${m.into} (duplicate)`);
         unmerged = withScores;
         findings = merge.findings;
-        score = typeof scored?.score === "number" ? scored.score : typeof retried?.score === "number" ? retried.score : null;
       }
-      history.push({ round, score, findings });
-      host.log(`${name} r${round}: ${findings.length} finding(s), review score ${score} (informational)`);
+      history.push({ round, findings });
+      host.log(`${name} r${round}: ${findings.length} finding(s)`);
       const { accepted, residual } = triage(findings);
       const entry = { round, sent: accepted, ...residual.length ? { residual } : {} };
       const recorded = record ? { ...entry, loop: record.loop } : undefined;

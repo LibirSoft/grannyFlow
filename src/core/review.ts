@@ -106,10 +106,10 @@ export function reviewFailure(text: string): string | undefined {
 export const isBlocker =(f: Pick<Finding, 'severity'>): boolean =>
   /^\s*(p0|p1|critical|high)\b/i.test(String(f.severity ?? ''))
 
-const JUDGED = ['verdict', 'impact', 'likelihood', 'fixCost', 'scope', 'evidence', 'score', 'priority', 'reason', 'decision'] as const
+const JUDGED = ['verdict', 'impact', 'likelihood', 'fixCost', 'scope', 'evidence', 'priority', 'reason', 'decision'] as const
 
 const fixes = (f: Finding) => f.decision?.action !== 'residual'
-const rank = (f: Finding) => f.priority ?? f.score ?? -1
+const rank = (f: Finding) => f.priority ?? -1
 
 /** Of merged copies the strongest one's judgement wins: a fix one first, then the higher priority. */
 export function mergeDuplicates(findings: Finding[], duplicateOf: Map<string, string>): { findings: Finding[]; merged: Array<{ id: string; into: string }> } {
@@ -170,15 +170,12 @@ const lower = (impact: Impact): Impact => IMPACTS[Math.min(IMPACTS.indexOf(impac
 
 type Classified =
   | { kind: 'classified'; fields: Required<Pick<Finding, 'verdict' | 'impact' | 'likelihood' | 'fixCost' | 'scope' | 'evidence'>>; note: string }
-  | { kind: 'score'; score: number }
   | { kind: 'none'; why: string }
 
 function classify(entry: Record<string, unknown> | undefined): Classified {
   if (!entry) return { kind: 'none', why: 'not judged' }
   const keys = [...Object.keys(ENUMS), 'evidence'] as const
-  if (keys.every(k => entry[k] === undefined)) {
-    return typeof entry.score === 'number' && Number.isFinite(entry.score) ? { kind: 'score', score: entry.score } : { kind: 'none', why: 'not judged' }
-  }
+  if (keys.every(k => entry[k] === undefined)) return { kind: 'none', why: 'not judged' }
   const problems: string[] = []
   for (const [key, values] of Object.entries(ENUMS)) {
     const v = entry[key]
@@ -231,7 +228,7 @@ function ratchet(fields: { verdict: string; impact: Impact; likelihood: Likeliho
 
 /**
  * Applies the judge's entry for a finding (undefined when the judge did not judge it) and the decision table: the first
- * matching rule wins. A finding the judge scored the old way (a number, no classification) is cut by the threshold.
+ * matching rule wins.
  * earlierOf finds the ledger entry a repeat names, for the ratchet.
  */
 export function decide(
@@ -255,14 +252,9 @@ export function decide(
     if (earlier) raised = ratchet(c.fields, f.repeatOf!, earlier)
     Object.assign(out, c.fields)
     out.priority = priorityOf(c.fields.impact, c.fields.likelihood, c.fields.fixCost)
-  } else if (c.kind === 'score') out.score = c.score
+  }
   if (isBlocker(f) && !repeatsDeclined(out)) return done(1, 'fix', 'P0/P1')
   if (c.kind === 'none') return done(2, 'fix', c.why)
-  if (c.kind === 'score') {
-    return c.score > policy.threshold
-      ? done(7, 'fix', `score ${c.score} > threshold ${policy.threshold} (numeric score, no classification)`)
-      : done(8, 'residual', `under the bar: score ${c.score} (numeric score, no classification)`)
-  }
   const { verdict, impact, likelihood, fixCost, scope } = c.fields
   const p = out.priority!
   const classes = `${impact}/${likelihood}/${fixCost}`

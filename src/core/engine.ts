@@ -629,7 +629,6 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
       const policy = { threshold: config.threshold, alwaysFix: config.alwaysFix }
       let findings = found.map(f => decide(f, undefined, policy, declinedBefore))
       unmerged = findings
-      let score: number | null = null
       if (judged.length) {
         const prompt = subject.kind === 'plan' ? planJudgePrompt(p, subject.files, judged, earlier) : judgePrompt(p, subject.base, judged, earlier, subject.stage, subject.note)
         const label = `judge ${name} r${round}`
@@ -676,10 +675,9 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
         for (const m of merge.merged) host.log(`${name} r${round}: judge merged ${m.id} into ${m.into} (duplicate)`)
         unmerged = withScores
         findings = merge.findings
-        score = typeof scored?.score === 'number' ? scored.score : typeof retried?.score === 'number' ? retried.score : null
       }
-      history.push({ round, score, findings })
-      host.log(`${name} r${round}: ${findings.length} finding(s), review score ${score} (informational)`)
+      history.push({ round, findings })
+      host.log(`${name} r${round}: ${findings.length} finding(s)`)
 
       const { accepted, residual } = triage(findings)
       const entry: EarlierRound = { round, sent: accepted, ...(residual.length ? { residual } : {}) }
