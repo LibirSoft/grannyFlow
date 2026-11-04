@@ -150,6 +150,13 @@ describe('the plan review', () => {
     expect(f.logs.at(-1)).toBe('plan review ended review-failed - stopping before stage 1; nothing was implemented')
   })
 
+  it('keeps a residual plan finding of an earlier round when a later round is clean', async () => {
+    const f = fakeHost({ reviews: [review(planFinding('P2', 'Missing step'), planFinding('P3', 'Wording')), 'No findings.'], scores: [{ 'codex-F1': 90, 'codex-F2': 20 }] })
+    const r = await runGranny(f.host, input({ plan: PLAN, config: { planReview: true } }))
+    expect(r.plan).toMatchObject({ outcome: 'clean', rounds: 2 })
+    expect(r.plan!.residual.map(x => x.title)).toEqual(['Wording'])
+  })
+
   it('goes on to stage 1 with the residual findings when nothing is above the threshold', async () => {
     const f = fakeHost({ reviews: [review(planFinding('P3', 'Wording'))], scores: [{ 'codex-F1': 20 }] })
     const r = await runGranny(f.host, input({ plan: PLAN, config: { planReview: true } }))

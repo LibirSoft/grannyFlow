@@ -71,7 +71,12 @@ export function renderPrompts(): string {
   const plans = ['<plan files>']
   const stage = { number: 2, total: 2, name: '<stage name>', task: '<stage task>' }
   const earlier: EarlierRound[] = [
-    { round: 1, sent: [{ id: '<reviewer>-F<n>', severity: '<severity>', file: '<file>', title: '<title>', detail: '<detail>' }], deviations: "<the fixer's deviations>" },
+    {
+      round: 1,
+      sent: [{ id: '<reviewer>-F<n>', severity: '<severity>', file: '<file>', title: '<title>', detail: '<detail>' }],
+      residual: [{ id: '<reviewer>-F<m>', severity: '<severity>', file: '<file>', title: '<title>', detail: '<detail>' }],
+      deviations: "<the fixer's deviations>",
+    },
   ]
   const overruled = [{ id: '<id>', repeatOf: 'r1/<reviewer>-F<n>', round: 1, reason: "<the judge's reason>" }]
   const setup = `cd '<repo>' && ${worktreeScript(p.config, '<branch>', '<base>', '<worktreeDir>/<branch-slug>')}`
@@ -102,7 +107,7 @@ export function renderPrompts(): string {
     ['Reviewer - command engine, the text {prompt} is filled with', commandReviewPrompt(p, '<stage name>', '<stage start sha>', stage)],
     ['Judge', judgePrompt(p, '<stage start sha>', [], [], stage).replace(/\[\]$/, '<findings as JSON>')],
     [
-      'Judge - from round 2 on (the plan judge gets the same EARLIER ROUNDS block; one "Round N sent" entry per earlier fix round, and P0/P1 findings join the list once a fixer declined findings)',
+      'Judge - from round 2 on (the plan judge gets the same EARLIER ROUNDS block; one "Round N sent" entry per earlier fix round, followed by its "kept as residual" list when that round left residual findings, and P0/P1 findings join the list once a fixer declined findings)',
       judgePrompt(p, '<stage start sha>', [], earlier, stage).replace(/\[\]$/, '<findings as JSON>'),
     ],
     ['Final review - the note every reviewer prompt (after its first line naming the diff) and the judge prompt (after its first line) carry, with name `final review` and diff base `<base>`', WHOLE_BRANCH_NOTE],

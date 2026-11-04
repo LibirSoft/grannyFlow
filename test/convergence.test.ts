@@ -117,6 +117,18 @@ describe('a finding the fixer declined', () => {
     expect(f.logs).toContain('core r2: the judge overruled the fixer on codex-F1 (repeat of r1/codex-F1, score 85)')
   })
 
+  it('does not take a repeat of a residual finding for a repeat of a declined one', async () => {
+    const f = fakeHost({
+      reviews: [review(finding('P2', 'Phantom crash'), finding('P3', 'Nit')), review(finding('P3', 'Nit'))],
+      scores: [{ 'codex-F1': 90, 'codex-F2': 10 }, { 'codex-F1': { score: 10, repeatOf: 'r1/codex-F2' } }],
+      override: declineIn('fix core r1'),
+    })
+    const r = await runGranny(f.host, input())
+    expect(r.stages[0]).toMatchObject({ outcome: 'residual-only', rounds: 2 })
+    expect(r.stages[0]!.residual.map(x => [x.title, x.repeatOf])).toEqual([['Nit', 'r1/codex-F2']])
+    expect(f.logs.some(l => l.includes('dropped as a repeat'))).toBe(false)
+  })
+
   it('does the same in a plan review', async () => {
     const PLAN = '/plans/v1.md'
     const bad = review(finding('P2', 'Missing migration step', PLAN))

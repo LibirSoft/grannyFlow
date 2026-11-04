@@ -542,6 +542,8 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
     const history: RoundRecord[] = []
     const earlier: EarlierRound[] = []
     let unmerged: Finding[] = []
+    let carried: Array<{ round: number; labels: string[]; finding: Finding }> = []
+    const kept = () => carried.map(c => c.finding)
     for (let round = 1; round <= config.maxRounds; round++) {
       const results = await reviewAll(lane, reviewers, name, subject, round)
       const failed = results.filter(r => !r.ran)
@@ -558,11 +560,12 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
       }
       if (!found.length) {
         host.log(`${name} r${round}: clean`)
-        return { outcome: 'clean', rounds: round, residual: [], unresolved: [], history }
+        return { outcome: 'clean', rounds: round, residual: kept(), unresolved: [], history }
       }
 
       const declined = earlier.filter(e => e.deviations?.trim())
       const labels = new Map(earlier.flatMap(e => e.sent.map(f => [roundLabel(e.round, f), e] as const)))
+      const residualLabels = new Set(earlier.flatMap(e => (e.residual ?? []).map(f => roundLabel(e.round, f))))
       const blockers = found.filter(isBlocker)
       const judged = declined.length ? found : found.filter(f => !isBlocker(f))
       if (blockers.length && declined.length) {
@@ -589,7 +592,7 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
         const withScores = found.map(f => {
           const s = judgedIds.has(f.id) ? per.find(x => x.id === f.id) : undefined
           if (!s) return { ...f }
-          const repeat = typeof s.repeatOf === 'string' && labels.has(s.repeatOf) ? { repeatOf: s.repeatOf } : {}
+          const repeat = typeof s.repeatOf === 'string' && (labels.has(s.repeatOf) || residualLabels.has(s.repeatOf)) ? { repeatOf: s.repeatOf } : {}
           return { ...f, score: s.score, reason: s.reason, ...repeat }
         })
         const merge = mergeDuplicates(withScores, duplicateOf)
@@ -606,12 +609,22 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
       for (const f of residual.filter(declinedBefore)) {
         host.log(`${name} r${round}: ${f.id} dropped as a repeat of ${f.repeatOf}, which the fixer declined (score ${f.score}) - kept as residual`)
       }
+      const repeated = new Set(unmerged.flatMap(f => (f.repeatOf ? [f.repeatOf] : [])))
+      const repeatsOf = (f: Finding) => new Set(unmerged.filter(u => u.id === f.id || f.duplicates?.includes(u.id)).flatMap(u => (u.repeatOf ? [u.repeatOf] : [])))
+      const aliases = (f: Finding) => {
+        const of = repeatsOf(f)
+        return carried.filter(c => c.labels.some(l => of.has(l))).flatMap(c => c.labels)
+      }
+      carried = [
+        ...carried.filter(c => !c.labels.some(l => repeated.has(l))),
+        ...residual.map(f => ({ round, labels: [roundLabel(round, f), ...aliases(f)], finding: f })),
+      ]
       if (residual.length) {
         host.log(`${name} r${round}: ${residual.length} finding(s) <= ${config.threshold} and not ${residual.some(isBlocker) ? 'first-time ' : ''}P0/P1, not sent: ${residual.map(f => `${f.id}(${f.score})`).join(', ')}`)
       }
       if (!accepted.length) {
-        host.log(`${name} r${round}: nothing actionable left - stage done with ${residual.length} residual finding(s) for the user`)
-        return { outcome: 'residual-only', rounds: round, residual, unresolved: [], history }
+        host.log(`${name} r${round}: nothing actionable left - stage done with ${carried.length} residual finding(s) for the user`)
+        return { outcome: 'residual-only', rounds: round, residual: kept(), unresolved: [], history }
       }
 
       const overruled: Overruled[] = accepted.filter(declinedBefore).map(f => ({ id: f.id, repeatOf: f.repeatOf!, round: labels.get(f.repeatOf!)!.round, reason: f.reason }))
@@ -630,10 +643,10 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
       }
       const said = saidSomething(deviations)
       if (said) history.at(-1)!.deviations = said
-      earlier.push({ round, sent: accepted, ...(said ? { deviations: said } : {}) })
+      earlier.push({ round, sent: accepted, ...(residual.length ? { residual } : {}), ...(said ? { deviations: said } : {}) })
       if (subject.kind === 'diff' && checks.length) {
         const gate = await checkGate(lane, name, `fix r${round}`, checks, runs, subject.stage)
-        if (!gate.passed) return { outcome: 'checks-failed', rounds: round, residual, unresolved: [], history, note: gate.note }
+        if (!gate.passed) return { outcome: 'checks-failed', rounds: round, residual: kept(), unresolved: [], history, note: gate.note }
         host.phase(phase)
       } else if (subject.kind === 'diff') {
         const left = await commitWork(lane, name, `fix r${round}`, subject.stage)
@@ -643,7 +656,7 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
       }
     }
     host.log(`${name}: hit the ${config.maxRounds}-round cap without a clean review`)
-    return { outcome: 'round-cap', rounds: config.maxRounds, residual: [], unresolved: history.at(-1)?.findings ?? [], history }
+    return { outcome: 'round-cap', rounds: config.maxRounds, residual: carried.filter(c => c.round < config.maxRounds).map(c => c.finding), unresolved: history.at(-1)?.findings ?? [], history }
   }
 
   const reviewThePlan = async (): Promise<PlanResult | undefined> => {

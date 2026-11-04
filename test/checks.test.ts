@@ -216,6 +216,20 @@ describe('checks', () => {
     expect(r.stages[0]!.history).toHaveLength(1)
   })
 
+  it('keep an earlier round\'s residual findings when the checks fail after a later fix', async () => {
+    const two = { findings: [{ id: 'F1', severity: 'P2', file: 'src/a.ts', line: 3, title: 'real', detail: 'd' }, { id: 'F2', severity: 'P3', file: 'src/a.ts', line: 9, title: 'nit', detail: 'd' }] }
+    const f = scripted(
+      { 'run-tests': [green(), green(), red('broke after fix')] },
+      {
+        scores: [{ 'reviewer-F1': 90, 'reviewer-F2': 10 }],
+        override: req => (req.label === 'review core r1 reviewer' ? two : req.label === 'review core r2 reviewer' ? p1 : undefined),
+      },
+    )
+    const r = await runGranny(f.host, run({ maxRepairs: 0, checks: [TESTS] }))
+    expect(r.stages[0]).toMatchObject({ outcome: 'checks-failed', rounds: 2 })
+    expect(r.stages[0]!.residual.map(x => x.title)).toEqual(['nit'])
+  })
+
   it('repair a fix round and then review again', async () => {
     const f = scripted(
       { 'run-tests': [green(), red(), green()] },

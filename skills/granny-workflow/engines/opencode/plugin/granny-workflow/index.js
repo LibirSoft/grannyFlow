@@ -410,19 +410,22 @@ var judgeRouting = (p, findings) => findings.some(isBlocker) ? `P0/P1 findings a
 function judgeHistory(earlier) {
   if (!earlier.length)
     return "";
+  const labelled = (round, findings) => JSON.stringify(findings.map((f) => ({ label: roundLabel(round, f), severity: f.severity, file: f.file, line: f.line, title: f.title, detail: f.detail })), null, 2);
   const rounds = earlier.map((e) => {
-    const sent = e.sent.map((f) => ({ label: roundLabel(e.round, f), severity: f.severity, file: f.file, line: f.line, title: f.title, detail: f.detail }));
+    const kept = e.residual?.length ? `
+Round ${e.round} kept as residual (not sent to the fixer):
+${labelled(e.round, e.residual)}` : "";
     return `Round ${e.round} sent to the fixer:
-${JSON.stringify(sent, null, 2)}
-The fixer's deviations (findings it did not apply, and why): ${e.deviations?.trim() || "none - it applied all of them"}`;
+${labelled(e.round, e.sent)}
+The fixer's deviations (findings it did not apply, and why): ${e.deviations?.trim() || "none - it applied all of them"}${kept}`;
   });
   return `
-EARLIER ROUNDS of this review - the findings already sent to the fixer, under round-qualified labels, and the fixer's reasons for not applying some:
+EARLIER ROUNDS of this review - the findings already sent to the fixer, under round-qualified labels, the fixer's reasons for not applying some, and the findings kept as residual for the user:
 ${rounds.join(`
 
 `)}
 
-When a finding below repeats one of those earlier findings, set its repeatOf to that label. A repeat of a finding the fixer declined with a convincing reason that the code backs scores low - cite the label and the fixer's reason in your reason. When the fixer's reason is wrong, score the repeat on its merits (high when it is real) and say in reason why the fixer's reason does not hold. A repeat of a finding the fixer applied: check the fix in the code and score what is still wrong.
+When a finding below repeats one of those earlier findings, set its repeatOf to that label. A repeat of a finding the fixer declined with a convincing reason that the code backs scores low - cite the label and the fixer's reason in your reason. When the fixer's reason is wrong, score the repeat on its merits (high when it is real) and say in reason why the fixer's reason does not hold. A repeat of a finding the fixer applied: check the fix in the code and score what is still wrong. A repeat of a residual finding: the fixer never saw it - score it on its merits.
 `;
 }
 function overruledSection(overruled, earlier) {
@@ -1379,6 +1382,8 @@ the last repair's deviations: ${deviations}` : ""}`;
     const history = [];
     const earlier = [];
     let unmerged = [];
+    let carried = [];
+    const kept = () => carried.map((c) => c.finding);
     for (let round = 1;round <= config.maxRounds; round++) {
       const results = await reviewAll(lane, reviewers, name, subject, round);
       const failed = results.filter((r) => !r.ran);
@@ -1394,10 +1399,11 @@ the last repair's deviations: ${deviations}` : ""}`;
       }
       if (!found.length) {
         host.log(`${name} r${round}: clean`);
-        return { outcome: "clean", rounds: round, residual: [], unresolved: [], history };
+        return { outcome: "clean", rounds: round, residual: kept(), unresolved: [], history };
       }
       const declined = earlier.filter((e) => e.deviations?.trim());
       const labels = new Map(earlier.flatMap((e) => e.sent.map((f) => [roundLabel(e.round, f), e])));
+      const residualLabels = new Set(earlier.flatMap((e) => (e.residual ?? []).map((f) => roundLabel(e.round, f))));
       const blockers = found.filter(isBlocker);
       const judged = declined.length ? found : found.filter((f) => !isBlocker(f));
       if (blockers.length && declined.length) {
@@ -1421,7 +1427,7 @@ the last repair's deviations: ${deviations}` : ""}`;
           const s = judgedIds.has(f.id) ? per.find((x) => x.id === f.id) : undefined;
           if (!s)
             return { ...f };
-          const repeat = typeof s.repeatOf === "string" && labels.has(s.repeatOf) ? { repeatOf: s.repeatOf } : {};
+          const repeat = typeof s.repeatOf === "string" && (labels.has(s.repeatOf) || residualLabels.has(s.repeatOf)) ? { repeatOf: s.repeatOf } : {};
           return { ...f, score: s.score, reason: s.reason, ...repeat };
         });
         const merge = mergeDuplicates(withScores, duplicateOf);
@@ -1438,12 +1444,22 @@ the last repair's deviations: ${deviations}` : ""}`;
       for (const f of residual.filter(declinedBefore)) {
         host.log(`${name} r${round}: ${f.id} dropped as a repeat of ${f.repeatOf}, which the fixer declined (score ${f.score}) - kept as residual`);
       }
+      const repeated = new Set(unmerged.flatMap((f) => f.repeatOf ? [f.repeatOf] : []));
+      const repeatsOf = (f) => new Set(unmerged.filter((u) => u.id === f.id || f.duplicates?.includes(u.id)).flatMap((u) => u.repeatOf ? [u.repeatOf] : []));
+      const aliases = (f) => {
+        const of = repeatsOf(f);
+        return carried.filter((c) => c.labels.some((l) => of.has(l))).flatMap((c) => c.labels);
+      };
+      carried = [
+        ...carried.filter((c) => !c.labels.some((l) => repeated.has(l))),
+        ...residual.map((f) => ({ round, labels: [roundLabel(round, f), ...aliases(f)], finding: f }))
+      ];
       if (residual.length) {
         host.log(`${name} r${round}: ${residual.length} finding(s) <= ${config.threshold} and not ${residual.some(isBlocker) ? "first-time " : ""}P0/P1, not sent: ${residual.map((f) => `${f.id}(${f.score})`).join(", ")}`);
       }
       if (!accepted.length) {
-        host.log(`${name} r${round}: nothing actionable left - stage done with ${residual.length} residual finding(s) for the user`);
-        return { outcome: "residual-only", rounds: round, residual, unresolved: [], history };
+        host.log(`${name} r${round}: nothing actionable left - stage done with ${carried.length} residual finding(s) for the user`);
+        return { outcome: "residual-only", rounds: round, residual: kept(), unresolved: [], history };
       }
       const overruled = accepted.filter(declinedBefore).map((f) => ({ id: f.id, repeatOf: f.repeatOf, round: labels.get(f.repeatOf).round, reason: f.reason }));
       for (const o of overruled) {
@@ -1463,11 +1479,11 @@ the last repair's deviations: ${deviations}` : ""}`;
       const said = saidSomething(deviations);
       if (said)
         history.at(-1).deviations = said;
-      earlier.push({ round, sent: accepted, ...said ? { deviations: said } : {} });
+      earlier.push({ round, sent: accepted, ...residual.length ? { residual } : {}, ...said ? { deviations: said } : {} });
       if (subject.kind === "diff" && checks.length) {
         const gate = await checkGate(lane, name, `fix r${round}`, checks, runs, subject.stage);
         if (!gate.passed)
-          return { outcome: "checks-failed", rounds: round, residual, unresolved: [], history, note: gate.note };
+          return { outcome: "checks-failed", rounds: round, residual: kept(), unresolved: [], history, note: gate.note };
         host.phase(phase);
       } else if (subject.kind === "diff") {
         const left = await commitWork(lane, name, `fix r${round}`, subject.stage);
@@ -1479,7 +1495,7 @@ the last repair's deviations: ${deviations}` : ""}`;
       }
     }
     host.log(`${name}: hit the ${config.maxRounds}-round cap without a clean review`);
-    return { outcome: "round-cap", rounds: config.maxRounds, residual: [], unresolved: history.at(-1)?.findings ?? [], history };
+    return { outcome: "round-cap", rounds: config.maxRounds, residual: carried.filter((c) => c.round < config.maxRounds).map((c) => c.finding), unresolved: history.at(-1)?.findings ?? [], history };
   };
   const reviewThePlan = async () => {
     const skipped = (outcome, why) => {
