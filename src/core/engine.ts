@@ -11,6 +11,7 @@ import {
   fixPrompt,
   implementPrompt,
   judgePrompt,
+  judgeRetryNote,
   mergePrompt,
   planFixPrompt,
   planJudgePrompt,
@@ -630,29 +631,51 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
       let score: number | null = null
       if (judged.length) {
         const prompt = subject.kind === 'plan' ? planJudgePrompt(p, subject.files, judged, earlier) : judgePrompt(p, subject.base, judged, earlier, subject.stage, subject.note)
-        const scored = await call('judge', 'score', `judge ${name} r${round}`, phase, prompt, 'read-only', config.roles.judge, lane.cwd)
-        if (!scored) host.log(`${name} r${round}: judge returned nothing - all ${judged.length} finding(s) go to the implementer unjudged (rule 2)`)
-        const per: Array<Record<string, unknown> & { id: string; duplicateOf?: unknown; repeatOf?: unknown }> = Array.isArray(scored?.perFinding)
-          ? scored.perFinding.filter((x: unknown) => x && typeof x === 'object' && typeof (x as { id?: unknown }).id === 'string')
-          : []
+        const label = `judge ${name} r${round}`
         const judgedIds = new Set(judged.map(f => f.id))
         const blockerIds = new Set(blockers.map(f => f.id))
+        type Entry = Record<string, unknown> & { id: string; duplicateOf?: unknown; repeatOf?: unknown }
+        const entriesOf = (answer: any): Entry[] =>
+          Array.isArray(answer?.perFinding)
+            ? answer.perFinding.filter((x: unknown) => x && typeof x === 'object' && typeof (x as { id?: unknown }).id === 'string')
+            : []
+        const decideAll = (per: Entry[]) =>
+          found.map(f => {
+            const s = judgedIds.has(f.id) ? per.find(x => x.id === f.id) : undefined
+            const repeat = typeof s?.repeatOf === 'string' && ledger.has(s.repeatOf) ? { repeatOf: s.repeatOf } : {}
+            return decide({ ...f, ...repeat }, s, policy, declinedBefore, earlierOf)
+          })
+        const unjudged = (decided: Finding[]) => decided.filter(f => judgedIds.has(f.id) && f.decision!.rule === 2)
+        const listed = (fs: Finding[]) => fs.map(f => `${f.id} (${f.decision!.why})`).join(', ')
+
+        const scored = await call('judge', 'score', label, phase, prompt, 'read-only', config.roles.judge, lane.cwd)
+        let per = entriesOf(scored)
+        let withScores = decideAll(per)
+        let left = unjudged(withScores)
+        let retried: any
+        if (left.length) {
+          host.log(`${name} r${round}: ${scored ? `judge left ${left.length} finding(s) unclassified - retrying once: ${listed(left)}` : 'judge returned nothing - retrying once'}`)
+          const problems = scored ? left.map(f => ({ id: f.id, why: f.decision!.why === 'not judged' ? 'no classification in your answer' : f.decision!.why })) : null
+          retried = await call('judge', 'score', `${label} retry`, phase, `${prompt}\n\n${judgeRetryNote(problems)}`, 'read-only', config.roles.judge, lane.cwd)
+          const again = new Set(left.map(f => f.id))
+          const fresh = entriesOf(retried).filter(x => again.has(x.id))
+          per = [...per.filter(x => !again.has(x.id) || !fresh.some(y => y.id === x.id)), ...fresh]
+          withScores = decideAll(per)
+          left = unjudged(withScores)
+          if (!scored && !retried) host.log(`${name} r${round}: judge returned nothing, also on a retry - all ${judged.length} finding(s) go to the implementer unjudged (rule 2)`)
+          else if (left.length) host.log(`${name} r${round}: judge left ${left.length} finding(s) unclassified, also on a retry - to the implementer unjudged (rule 2): ${listed(left)}`)
+        }
         const duplicateOf = new Map(
           per
             .filter(x => judgedIds.has(x.id) && typeof x.duplicateOf === 'string' && judgedIds.has(x.duplicateOf))
             .filter(x => !blockerIds.has(x.id) || blockerIds.has(x.duplicateOf as string))
             .map(x => [x.id, x.duplicateOf as string]),
         )
-        const withScores = found.map(f => {
-          const s = judgedIds.has(f.id) ? per.find(x => x.id === f.id) : undefined
-          const repeat = typeof s?.repeatOf === 'string' && ledger.has(s.repeatOf) ? { repeatOf: s.repeatOf } : {}
-          return decide({ ...f, ...repeat }, s, policy, declinedBefore, earlierOf)
-        })
         const merge = mergeDuplicates(withScores, duplicateOf)
         for (const m of merge.merged) host.log(`${name} r${round}: judge merged ${m.id} into ${m.into} (duplicate)`)
         unmerged = withScores
         findings = merge.findings
-        score = typeof scored?.score === 'number' ? scored.score : null
+        score = typeof scored?.score === 'number' ? scored.score : typeof retried?.score === 'number' ? retried.score : null
       }
       history.push({ round, score, findings })
       host.log(`${name} r${round}: ${findings.length} finding(s), review score ${score} (informational)`)

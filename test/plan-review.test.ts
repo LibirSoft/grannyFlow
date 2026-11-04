@@ -165,6 +165,16 @@ describe('the plan review', () => {
     expect(r.stages[0]).toMatchObject({ stage: 'core', outcome: 'clean' })
   })
 
+  it('asks the plan judge once more when it returned nothing, with the plan judge prompt', async () => {
+    const f = fakeHost({ reviews: [review(planFinding('P3', 'Wording'))], scores: [null, { 'codex-F1': 20 }] })
+    const r = await runGranny(f.host, input({ plan: PLAN, config: { planReview: true } }))
+    const judges = f.calls.filter(c => c.role === 'judge')
+    expect(judges.map(c => c.label)).toEqual(['judge plan review r1', 'judge plan review r1 retry'])
+    expect(judges[1]!.prompt.startsWith(judges[0]!.prompt)).toBe(true)
+    expect(judges[0]!.prompt).toContain('classifying the findings of a plan review')
+    expect(r.plan).toMatchObject({ outcome: 'residual-only', rounds: 1 })
+  })
+
   it('sends P0/P1 plan findings to the implementer without the judge', async () => {
     const f = fakeHost({ reviews: [review(planFinding('P1', 'Wrong dependency version')), 'No findings.'] })
     const r = await runGranny(f.host, input({ plan: PLAN, config: { planReview: true } }))

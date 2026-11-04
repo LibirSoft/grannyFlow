@@ -171,11 +171,12 @@ describe('runGranny', () => {
     expect(f.calls.some(c => c.kind === 'score' || c.kind === 'findings')).toBe(false)
   })
 
-  it('sends every finding when the judge returns nothing, and says so', async () => {
-    const f = fakeHost({ reviews: [review(finding('P3', 'Nit'), finding('P3', 'Other nit')), 'No findings.'], scores: [null] })
+  it('sends every finding when the judge returns nothing, also on a retry, and says so', async () => {
+    const f = fakeHost({ reviews: [review(finding('P3', 'Nit'), finding('P3', 'Other nit')), 'No findings.'], scores: [null, null] })
     await runGranny(f.host, input())
+    expect(f.calls.filter(c => c.role === 'judge').map(c => c.label)).toEqual(['judge core r1', 'judge core r1 retry'])
     expect(f.calls.some(c => c.label === 'fix core r1')).toBe(true)
-    expect(f.logs).toContain('core r1: judge returned nothing - all 2 finding(s) go to the implementer unjudged (rule 2)')
+    expect(f.logs).toContain('core r1: judge returned nothing, also on a retry - all 2 finding(s) go to the implementer unjudged (rule 2)')
   })
 
   it('does not report an unscored send when the judge answers', async () => {
@@ -1957,9 +1958,10 @@ describe('the judge rubric', () => {
   it('fixes a finding whose classification the judge got wrong, and says why', async () => {
     const f = fakeHost({
       reviews: [review(finding('P3', 'Odd')), 'No findings.'],
-      scores: [{ 'codex-F1': judged('severe', 'edge', 'small', 'src/a.ts:3') }],
+      scores: [{ 'codex-F1': judged('severe', 'edge', 'small', 'src/a.ts:3') }, { 'codex-F1': judged('severe', 'edge', 'small', 'src/a.ts:3') }],
     })
     const r = await runGranny(f.host, input())
+    expect(f.calls.filter(c => c.role === 'judge')).toHaveLength(2)
     expect(r.stages[0]!.history[0]!.findings[0]!.decision).toEqual({ rule: 2, action: 'fix', why: 'invalid classification: impact "severe"' })
     expect(f.calls.some(c => c.label === 'fix core r1')).toBe(true)
   })
@@ -1974,6 +1976,101 @@ describe('the judge rubric', () => {
     expect(judge.schema.properties.perFinding).toMatchObject({
       items: { required: ['id', 'verdict', 'impact', 'likelihood', 'fixCost', 'scope', 'evidence', 'reason'] },
     })
+  })
+})
+
+describe('the judge retry', () => {
+  const judged = (impact: string, likelihood: string, evidence = 'src/a.ts:3 - call it twice', extra: Record<string, unknown> = {}) => ({
+    verdict: 'confirmed',
+    impact,
+    likelihood,
+    fixCost: 'small',
+    scope: 'in-scope',
+    evidence,
+    ...extra,
+  })
+  const judges = (f: ReturnType<typeof fakeHost>) => f.calls.filter(c => c.role === 'judge')
+
+  it('asks the judge once more when a classification is invalid, and decides from the retry', async () => {
+    const f = fakeHost({
+      reviews: [review(finding('P2', 'Lost write')), 'No findings.'],
+      scores: [{ 'codex-F1': judged('severe', 'edge') }, { 'codex-F1': judged('major', 'edge') }],
+    })
+    const r = await runGranny(f.host, input())
+    expect(judges(f).map(c => c.label)).toEqual(['judge core r1', 'judge core r1 retry'])
+    const [first, retry] = judges(f)
+    expect(retry!.prompt.startsWith(first!.prompt)).toBe(true)
+    expect(retry!.prompt.slice(first!.prompt.length)).toContain('- codex-F1: invalid classification: impact "severe"')
+    expect(retry).toMatchObject({ kind: 'score', access: 'read-only', model: first!.model })
+    expect(r.stages[0]!.history[0]!.findings[0]!.decision).toEqual({ rule: 6, action: 'fix', why: 'impact major is in alwaysFix (major/edge/small -> 80)' })
+    expect(f.logs).toContain('core r1: judge left 1 finding(s) unclassified - retrying once: codex-F1 (invalid classification: impact "severe")')
+    expect(f.logs.some(l => l.includes('unjudged (rule 2)'))).toBe(false)
+  })
+
+  it('sends only the findings still invalid after the retry to rule 2, and logs them', async () => {
+    const f = fakeHost({
+      reviews: [review(finding('P2', 'Lost write'), finding('P3', 'Odd name')), 'No findings.'],
+      scores: [
+        { 'codex-F1': judged('minor', 'rare'), 'codex-F2': judged('major', 'edge', '') },
+        { 'codex-F1': judged('minor', 'rare'), 'codex-F2': judged('major', 'often') },
+      ],
+    })
+    const r = await runGranny(f.host, input())
+    expect(judges(f)).toHaveLength(2)
+    const [a, b] = r.stages[0]!.history[0]!.findings
+    expect(a!.decision).toEqual({ rule: 8, action: 'residual', why: 'under the bar: minor/rare/small -> 15' })
+    expect(b!.decision).toEqual({ rule: 2, action: 'fix', why: 'invalid classification: likelihood "often"' })
+    expect(f.logs).toContain('core r1: judge left 1 finding(s) unclassified - retrying once: codex-F2 (invalid classification: evidence "")')
+    expect(f.logs).toContain('core r1: judge left 1 finding(s) unclassified, also on a retry - to the implementer unjudged (rule 2): codex-F2 (invalid classification: likelihood "often")')
+  })
+
+  it('keeps a classification that was valid the first time when the retry gets it wrong', async () => {
+    const f = fakeHost({
+      reviews: [review(finding('P2', 'Lost write'), finding('P3', 'Odd name')), 'No findings.'],
+      scores: [
+        { 'codex-F1': judged('minor', 'rare'), 'codex-F2': judged('severe', 'edge') },
+        { 'codex-F1': judged('nope', 'rare'), 'codex-F2': judged('major', 'edge') },
+      ],
+    })
+    const r = await runGranny(f.host, input())
+    const [a, b] = r.stages[0]!.history[0]!.findings
+    expect(a!.decision).toEqual({ rule: 8, action: 'residual', why: 'under the bar: minor/rare/small -> 15' })
+    expect(b!.decision).toEqual({ rule: 6, action: 'fix', why: 'impact major is in alwaysFix (major/edge/small -> 80)' })
+    expect(f.logs.some(l => l.includes('unjudged (rule 2)'))).toBe(false)
+  })
+
+  it('asks once more for a finding the judge left out of its answer', async () => {
+    const f = fakeHost({
+      reviews: [review(finding('P2', 'Lost write')), 'No findings.'],
+      scores: [{}, { 'codex-F1': judged('major', 'edge') }],
+    })
+    const r = await runGranny(f.host, input())
+    expect(judges(f)).toHaveLength(2)
+    expect(judges(f)[1]!.prompt).toContain('- codex-F1: no classification in your answer')
+    expect(r.stages[0]!.history[0]!.findings[0]!.decision).toMatchObject({ rule: 6 })
+  })
+
+  it('asks once more when the judge returned nothing, and classifies from the retry', async () => {
+    const f = fakeHost({
+      reviews: [review(finding('P2', 'Lost write')), 'No findings.'],
+      scores: [null, { 'codex-F1': judged('major', 'edge') }],
+    })
+    const r = await runGranny(f.host, input())
+    expect(judges(f).map(c => c.label)).toEqual(['judge core r1', 'judge core r1 retry'])
+    expect(judges(f)[1]!.prompt).toContain('RETRY: your last answer was empty or did not match the schema.')
+    expect(r.stages[0]!.history[0]!.findings[0]!.decision).toMatchObject({ rule: 6 })
+    expect(f.logs).toContain('core r1: judge returned nothing - retrying once')
+    expect(f.logs.some(l => l.includes('unjudged (rule 2)'))).toBe(false)
+  })
+
+  it('does not retry a judge that classified every finding, or scored one the old way', async () => {
+    const f = fakeHost({
+      reviews: [review(finding('P2', 'Lost write'), finding('P3', 'Odd name')), 'No findings.'],
+      scores: [{ 'codex-F1': judged('major', 'edge'), 'codex-F2': 40 }],
+    })
+    await runGranny(f.host, input())
+    expect(judges(f)).toHaveLength(1)
+    expect(f.logs.some(l => l.includes('retrying once'))).toBe(false)
   })
 })
 

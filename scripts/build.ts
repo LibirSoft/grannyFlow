@@ -13,6 +13,7 @@ import {
   fixPrompt,
   implementPrompt,
   judgePrompt,
+  judgeRetryNote,
   mergePrompt,
   planFixPrompt,
   planJudgePrompt,
@@ -137,6 +138,12 @@ export function renderPrompts(): string {
     [
       'Judge - from round 2 on (the plan judge gets the same EARLIER DECISIONS block; one "Round N sent" entry per earlier fix round, followed by its "kept as residual" list when that round left residual findings, and P0/P1 findings join the list once a fixer declined findings; a field the finding does not have, such as the classes of an unjudged P0/P1, is left out, and `score` replaces them for a numeric-score judge answer; `(ratchet raised <what>)` follows the why when the ratchet raised the finding)',
       judgePrompt(p, '<stage start sha>', [], earlier, stage).replace(/\[\]$/, '<findings as JSON>'),
+    ],
+    [
+      'Judge - retry note (appended once to the judge or plan judge prompt, label `judge <stage> r<n> retry`, when the judge left findings unclassified; when it returned nothing, the note is: `' +
+        judgeRetryNote(null) +
+        '`)',
+      judgeRetryNote([{ id: '<id>', why: '<what was invalid, or: no classification in your answer>' }]),
     ],
     [
       "Judge - final review (from round 1 on, its EARLIER DECISIONS block starts with the decisions of every stage review in the repo, in stage order, one entry per stage review round under `s<k>/r<N>/<id>` labels - a stage's last round has no \"sent\" part when it sent nothing - followed by the final review's own earlier rounds as above)",

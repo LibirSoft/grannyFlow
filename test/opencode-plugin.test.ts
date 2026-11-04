@@ -531,23 +531,25 @@ describe('opencode plugin', () => {
     expect(result.stages[0].history[0].findings[0].score).toBe(95)
   })
 
-  it('gives up on the role after the backoff budget, and the engine reports the unjudged findings', async () => {
+  it('gives up on the role after the backoff budget, and the engine reports the unjudged findings after its one retry', async () => {
     const slept: number[] = []
     const f = fakeContext({
-      providerError: title => (title === 'granny · judge one r1' ? { type: 'provider.rate-limit', message: 'Too many requests', status: 429 } : undefined),
+      providerError: title => (title.startsWith('granny · judge one r1') ? { type: 'provider.rate-limit', message: 'Too many requests', status: 429 } : undefined),
     })
     await createGrannyPlugin({ delays: [5, 10], sleep: async ms => void slept.push(ms) }).setup(f.ctx)
     const { dir } = await startRun(repo, f)
     const result = await finished(dir)
 
-    expect(slept).toEqual([5, 10])
+    expect(slept).toEqual([5, 10, 5, 10])
     expect(promptsTo(f, 'granny · judge one r1')).toHaveLength(3)
+    expect(promptsTo(f, 'granny · judge one r1 retry')).toHaveLength(3)
     const journal = journalOf(dir)
+    for (const label of ['judge one r1', 'judge one r1 retry']) {
+      expect(journal).toContainEqual(expect.objectContaining({ type: 'agent-failed', label, error: expect.objectContaining({ type: 'provider.rate-limit' }) }))
+    }
+    expect(journal).toContainEqual(expect.objectContaining({ type: 'log', message: 'one r1: judge returned nothing - retrying once' }))
     expect(journal).toContainEqual(
-      expect.objectContaining({ type: 'agent-failed', label: 'judge one r1', error: expect.objectContaining({ type: 'provider.rate-limit' }) }),
-    )
-    expect(journal).toContainEqual(
-      expect.objectContaining({ type: 'log', message: 'one r1: judge returned nothing - all 1 finding(s) go to the implementer unjudged (rule 2)' }),
+      expect.objectContaining({ type: 'log', message: 'one r1: judge returned nothing, also on a retry - all 1 finding(s) go to the implementer unjudged (rule 2)' }),
     )
     expect(result.stages[0]).toMatchObject({ outcome: 'clean', rounds: 2 })
     expect(result.stages[0].history[0].findings[0].score).toBeUndefined()
