@@ -530,11 +530,11 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
       return Array.isArray(r?.findings) ? r.findings : []
     }
     if (parsed.markers === 0 && !saysNoFindings(output)) {
-      host.log(`${tag}: no finding in the expected form and no "No findings." - asking an agent to extract findings`)
+      host.log(`${tag}: no finding in the expected form and not just "No findings." - asking an agent to extract findings`)
       const r = await extractions(`extract ${tag}`, extractPrompt(name, output, 'unmarked'))
       const found: Finding[] = Array.isArray(r?.findings) ? r.findings : []
       if (found.length || r?.clean === true) return { ran, findings: found }
-      return { ran: false, findings: [], note: `reviewer output had no findings in the expected form and did not say No findings, and an extraction found none in it: ${output.slice(-2000)}` }
+      return { ran: false, findings: [], note: `reviewer output had no findings in the expected form and was not just No findings, and an extraction found none in it: ${output.slice(-2000)}` }
     }
     if (parsed.markers <= parsed.findings.length) return { ran, findings: parsed.findings }
 

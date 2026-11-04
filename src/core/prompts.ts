@@ -343,7 +343,7 @@ Return findings with id (F1, F2, ...), severity (P0 critical / P1 must fix befor
 export function extractPrompt(name: string, output: string, short?: { markers: number; got: number } | 'unmarked'): string {
   const count =
     short === 'unmarked'
-      ? '\nThe output has no finding bullets (`- [P1] Title — path:line`) and does not say "No findings.", so read its prose: return each problem it reports as a finding. When it reports none, return no findings and set clean to true only if the output is a finished review that clearly says the changes have no problems - an error, a crash, a question, a refusal, a truncated or empty output, or anything else that is not a finished review is not clean.'
+      ? '\nThe output has no finding bullets (`- [P1] Title — path:line`) and is not just "No findings.", so read its prose: return each problem it reports as a finding. When it reports none, return no findings and set clean to true only if the output is a finished review that clearly says the changes have no problems - an error, a crash, a question, a refusal, a truncated or empty output, or anything else that is not a finished review is not clean.'
       : short
         ? `\nThe output has ${short.markers} finding marker(s) (\`- [P0]\` ... \`- [P3]\` bullets); an earlier extraction returned ${short.got}. Return all ${short.markers}.`
         : ''
