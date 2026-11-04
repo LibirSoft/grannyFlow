@@ -66,8 +66,6 @@ function judgeHistory(earlier: EarlierRound[]): string {
         score: f.score,
         evidence: f.evidence,
       })),
-      null,
-      2,
     )
   const rounds = earlier.map(e => {
     const title = e.loop ? `${e.loop.name}, round ${e.round}` : `Round ${e.round}`
@@ -116,7 +114,7 @@ const prBodyOf = (p: PromptContext) => p.prBody ?? prBodyPath(p.config)
 const branchLog = (p: PromptContext) => `\`git log --oneline ${shellQuote(p.base)}..HEAD\``
 const DECLINE = 'list it in declined with its id and your reason'
 const findingsList = (accepted: Finding[]) => `FINDINGS (P0/P1, or sent by the judge's classification; decision names the rule):
-${JSON.stringify(accepted, null, 2)}`
+${JSON.stringify(accepted)}`
 
 function gatesLine(c: GrannyConfig): string {
   if (c.gates === 'auto') {
@@ -415,7 +413,7 @@ For each finding, open the cited code and check that it is real and correctly de
 ${rubric(stage ? "the stage's TASK" : 'what the change set out to do')}
 ${judgeHistory(earlier)}
 REVIEW:
-${JSON.stringify(findings, null, 2)}`
+${JSON.stringify(findings)}`
 }
 
 const RETRY_ASK = 'Answer again for every finding, every field set to an allowed value and the evidence filled in'
@@ -435,7 +433,7 @@ For each finding, open the cited plan line and the code, config or dependency it
 ${rubric('the goal of the plan')}
 ${judgeHistory(earlier)}
 REVIEW:
-${JSON.stringify(findings, null, 2)}`
+${JSON.stringify(findings)}`
 }
 
 export function planFixPrompt(p: PromptContext, plans: string[], round: number, accepted: Finding[], overruled: Overruled[] = []): string {

@@ -434,44 +434,12 @@ Example: a late save response re-binds the editor to another post's id, so the n
 
 EARLIER DECISIONS - the findings earlier rounds sent to the fixer or kept as residual for the user, by label, with classification, priority and deciding rule, and the fixer's declines with its reasons:
 Round 1 sent to the fixer:
-[
-  {
-    "label": "r1/<reviewer>-F<n>",
-    "decision": "fix - rule 6: <why>",
-    "severity": "<severity>",
-    "file": "<file>",
-    "title": "<title>",
-    "detail": "<detail>",
-    "verdict": "confirmed",
-    "impact": "major",
-    "likelihood": "edge",
-    "fixCost": "small",
-    "scope": "in-scope",
-    "priority": 80,
-    "evidence": "<path:line + trigger steps>"
-  }
-]
+[{"label":"r1/<reviewer>-F<n>","decision":"fix - rule 6: <why>","severity":"<severity>","file":"<file>","title":"<title>","detail":"<detail>","verdict":"confirmed","impact":"major","likelihood":"edge","fixCost":"small","scope":"in-scope","priority":80,"evidence":"<path:line + trigger steps>"}]
 Declined by the fixer (not fixed), and why:
 - r1/<reviewer>-F<n>: <the fixer's reason>
 The fixer's other notes: <the fixer's deviations>
 Round 1 kept as residual:
-[
-  {
-    "label": "r1/<reviewer>-F<m>",
-    "decision": "residual - rule 8: <why>",
-    "severity": "<severity>",
-    "file": "<file>",
-    "title": "<title>",
-    "detail": "<detail>",
-    "verdict": "confirmed",
-    "impact": "major",
-    "likelihood": "edge",
-    "fixCost": "small",
-    "scope": "in-scope",
-    "priority": 80,
-    "evidence": "<path:line + trigger steps>"
-  }
-]
+[{"label":"r1/<reviewer>-F<m>","decision":"residual - rule 8: <why>","severity":"<severity>","file":"<file>","title":"<title>","detail":"<detail>","verdict":"confirmed","impact":"major","likelihood":"edge","fixCost":"small","scope":"in-scope","priority":80,"evidence":"<path:line + trigger steps>"}]
 
 When a finding below repeats an earlier one, set its repeatOf to that label, then:
 - a repeat of a finding the fixer declined with a convincing reason the code backs: classify it refuted, or by its scope when it belongs elsewhere; cite the label and the fixer's reason in reason.
@@ -520,44 +488,12 @@ Example: a late save response re-binds the editor to another post's id, so the n
 
 EARLIER DECISIONS - the findings earlier rounds sent to the fixer or kept as residual for the user, by label, with classification, priority and deciding rule, and the fixer's declines with its reasons. A round named after a stage is that stage's own review; this review covers its code too:
 Stage <k> (<stage name>), round 1 sent to the fixer:
-[
-  {
-    "label": "s<k>/r1/<reviewer>-F<n>",
-    "decision": "fix - rule 6: <why>",
-    "severity": "<severity>",
-    "file": "<file>",
-    "title": "<title>",
-    "detail": "<detail>",
-    "verdict": "confirmed",
-    "impact": "major",
-    "likelihood": "edge",
-    "fixCost": "small",
-    "scope": "in-scope",
-    "priority": 80,
-    "evidence": "<path:line + trigger steps>"
-  }
-]
+[{"label":"s<k>/r1/<reviewer>-F<n>","decision":"fix - rule 6: <why>","severity":"<severity>","file":"<file>","title":"<title>","detail":"<detail>","verdict":"confirmed","impact":"major","likelihood":"edge","fixCost":"small","scope":"in-scope","priority":80,"evidence":"<path:line + trigger steps>"}]
 Declined by the fixer (not fixed), and why:
 - s<k>/r1/<reviewer>-F<n>: <the fixer's reason>
 The fixer's other notes: <the fixer's deviations>
 Stage <k> (<stage name>), round 1 kept as residual:
-[
-  {
-    "label": "s<k>/r1/<reviewer>-F<m>",
-    "decision": "residual - rule 8: <why>",
-    "severity": "<severity>",
-    "file": "<file>",
-    "title": "<title>",
-    "detail": "<detail>",
-    "verdict": "confirmed",
-    "impact": "major",
-    "likelihood": "edge",
-    "fixCost": "small",
-    "scope": "in-scope",
-    "priority": 80,
-    "evidence": "<path:line + trigger steps>"
-  }
-]
+[{"label":"s<k>/r1/<reviewer>-F<m>","decision":"residual - rule 8: <why>","severity":"<severity>","file":"<file>","title":"<title>","detail":"<detail>","verdict":"confirmed","impact":"major","likelihood":"edge","fixCost":"small","scope":"in-scope","priority":80,"evidence":"<path:line + trigger steps>"}]
 
 When a finding below repeats an earlier one, set its repeatOf to that label, then:
 - a repeat of a finding the fixer declined with a convincing reason the code backs: classify it refuted, or by its scope when it belongs elsewhere; cite the label and the fixer's reason in reason.

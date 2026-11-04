@@ -61,7 +61,7 @@ describe('runGranny', () => {
     expect(r.stages[0]!.residual[0]).toMatchObject({ title: 'Nit again', score: 15, repeatOf: 'r1/codex-F2' })
     const judge = f.calls.find(c => c.label === 'judge core r2')!.prompt
     expect(judge).toContain('Round 1 kept as residual')
-    expect(judge).toContain('"label": "r1/codex-F2"')
+    expect(judge).toContain('"label":"r1/codex-F2"')
   })
 
   it('keeps one residual finding when a third round repeats the first round\'s version of it', async () => {
@@ -1101,12 +1101,12 @@ describe('several reviewers', () => {
       ['glm-F1', 'glm', 'From glm', 95],
     ])
     const judge = f.calls.find(c => c.role === 'judge')!.prompt
-    expect(judge).toContain('"id": "glm-F1"')
-    expect(judge).toContain('"reviewer": "glm"')
+    expect(judge).toContain('"id":"glm-F1"')
+    expect(judge).toContain('"reviewer":"glm"')
     const fix = f.calls.find(c => c.label === 'fix core r1')!.prompt
-    expect(fix).toContain('"id": "codex-F1"')
-    expect(fix).toContain('"id": "glm-F1"')
-    expect(fix).toContain('"reviewer": "glm"')
+    expect(fix).toContain('"id":"codex-F1"')
+    expect(fix).toContain('"id":"glm-F1"')
+    expect(fix).toContain('"reviewer":"glm"')
     expect(fix).not.toContain('codex-F2')
     expect(f.logs.some(l => l.includes('not sent: codex-F2 (rule 8: under the bar: score 10 (numeric score, no classification))'))).toBe(true)
   })
@@ -1351,8 +1351,8 @@ describe('several reviewers', () => {
     expect(f.logs).toContain('core r1: judge merged glm-F1 into codex-F1 (duplicate)')
     const fix = f.calls.find(c => c.label === 'fix core r1')!.prompt
     expect(fix).toContain('Off by one in totals')
-    expect(fix).toContain('"duplicates": [')
-    expect(fix).not.toContain('"title": "Totals skip the first item"')
+    expect(fix).toContain('"duplicates":[')
+    expect(fix).not.toContain('"title":"Totals skip the first item"')
     expect(f.logs).toContain('core r1: 1 finding(s) kept as residual, not sent: codex-F2 (rule 8: under the bar: score 20 (numeric score, no classification))')
   })
 
@@ -1925,7 +1925,7 @@ describe('the judge rubric', () => {
     const fix = f.calls.find(c => c.label === 'fix core r1')!.prompt
     for (const title of ['Late save re-binds the editor', 'Expired session leaves Save dead', 'CORE_SCHEMA drops YAML merge keys']) expect(fix).toContain(title)
     expect(fix).not.toContain('Countdown says 0 months')
-    expect(fix).toContain('"why": "impact critical is in alwaysFix (critical/edge/small -> 95)"')
+    expect(fix).toContain('"why":"impact critical is in alwaysFix (critical/edge/small -> 95)"')
     expect(r.stages[0]!.residual).toEqual([
       expect.objectContaining({ id: 'codex-F4', impact: 'minor', priority: 40, decision: { rule: 8, action: 'residual', why: 'under the bar: minor/edge/trivial -> 40' } }),
     ])
@@ -2094,11 +2094,11 @@ describe('the decision ledger', () => {
     await runGranny(f.host, input({ config: { maxRounds: 3 } }))
     const r2 = f.calls.find(c => c.label === 'judge core r2')!.prompt
     expect(r2).toContain('EARLIER DECISIONS')
-    expect(r2).toContain('"label": "r1/codex-F1"')
-    expect(r2).toContain('"decision": "fix - rule 6: impact major is in alwaysFix (major/edge/small -> 80)"')
-    expect(r2).toContain('"decision": "residual - rule 8: under the bar: minor/common/small -> 35"')
-    expect(r2).toContain('"impact": "major"')
-    expect(r2).toContain('"priority": 80')
+    expect(r2).toContain('"label":"r1/codex-F1"')
+    expect(r2).toContain('"decision":"fix - rule 6: impact major is in alwaysFix (major/edge/small -> 80)"')
+    expect(r2).toContain('"decision":"residual - rule 8: under the bar: minor/common/small -> 35"')
+    expect(r2).toContain('"impact":"major"')
+    expect(r2).toContain('"priority":80')
   })
 
   it('raises a repeat the judge classified lower than the earlier round, and logs it', async () => {

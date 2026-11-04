@@ -623,7 +623,7 @@ function judgeHistory(earlier) {
     priority: f.priority,
     score: f.score,
     evidence: f.evidence
-  })), null, 2);
+  })));
   const rounds = earlier.map((e) => {
     const title = e.loop ? `${e.loop.name}, round ${e.round}` : `Round ${e.round}`;
     const kept = e.residual?.length ? `
@@ -669,7 +669,7 @@ var prBodyOf = (p) => p.prBody ?? prBodyPath(p.config);
 var branchLog = (p) => `\`git log --oneline ${shellQuote(p.base)}..HEAD\``;
 var DECLINE = "list it in declined with its id and your reason";
 var findingsList = (accepted) => `FINDINGS (P0/P1, or sent by the judge's classification; decision names the rule):
-${JSON.stringify(accepted, null, 2)}`;
+${JSON.stringify(accepted)}`;
 function gatesLine(c) {
   if (c.gates === "auto") {
     return "Gates: every test, lint/format check, build and typecheck command the project has (package.json scripts, Makefile, pyproject, Cargo, CI config). All must pass before every commit; report each exact command and its numbers.";
@@ -874,7 +874,7 @@ For each finding, open the cited code and check that it is real and correctly de
 ${rubric(stage ? "the stage's TASK" : "what the change set out to do")}
 ${judgeHistory(earlier)}
 REVIEW:
-${JSON.stringify(findings, null, 2)}`;
+${JSON.stringify(findings)}`;
 }
 var RETRY_ASK = "Answer again for every finding, every field set to an allowed value and the evidence filled in";
 function judgeRetryNote(problems) {
@@ -892,7 +892,7 @@ For each finding, open the cited plan line and the code, config or dependency it
 ${rubric("the goal of the plan")}
 ${judgeHistory(earlier)}
 REVIEW:
-${JSON.stringify(findings, null, 2)}`;
+${JSON.stringify(findings)}`;
 }
 function planFixPrompt(p, plans, round, accepted, overruled = []) {
   return `${common(p)}
