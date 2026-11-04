@@ -150,7 +150,7 @@ describe('runGranny', () => {
     expect(f.commands).toHaveLength(2)
     expect(r.stages[0]!.note).toContain('codex: review command exited 1')
     expect(r.stages[0]!.note).toContain('still not logged in')
-    expect(f.calls.some(c => c.kind === 'score')).toBe(false)
+    expect(f.calls.some(c => c.kind === 'judge')).toBe(false)
   })
 
   it('fails the review instead of reporting clean when Codex returned no structured result', async () => {
@@ -160,7 +160,7 @@ describe('runGranny', () => {
     expect(r.stages[0]).toMatchObject({ outcome: 'review-failed', rounds: 1 })
     expect(r.stages[0]!.note).toContain('Codex did not return valid structured JSON.')
     expect(r.stages[0]!.note).toContain('Unexpected end of JSON input')
-    expect(f.calls.some(c => c.kind === 'score' || c.kind === 'findings')).toBe(false)
+    expect(f.calls.some(c => c.kind === 'judge' || c.kind === 'findings')).toBe(false)
   })
 
   it('fails the review instead of reporting clean when the Codex plugin review printed nothing', async () => {
@@ -169,7 +169,7 @@ describe('runGranny', () => {
     const r = await runGranny(f.host, input())
     expect(r.stages[0]).toMatchObject({ outcome: 'review-failed', rounds: 1 })
     expect(r.stages[0]!.note).toContain('reviewer returned no usable result (Codex review completed without any stdout output.)')
-    expect(f.calls.some(c => c.kind === 'score' || c.kind === 'findings')).toBe(false)
+    expect(f.calls.some(c => c.kind === 'judge' || c.kind === 'findings')).toBe(false)
   })
 
   it('sends every finding when the judge returns nothing, also on a retry, and says so', async () => {
@@ -265,7 +265,7 @@ describe('runGranny', () => {
       expect(r.stages[0]).toMatchObject({ outcome: 'review-failed', rounds: 1 })
       expect(r.stages[0]!.note).toContain('1 finding marker(s), parser read 0')
       expect(r.stages[0]!.note).toContain('no location here')
-      expect(f.calls.some(c => c.kind === 'score' || c.label.startsWith('fix'))).toBe(false)
+      expect(f.calls.some(c => c.kind === 'judge' || c.label.startsWith('fix'))).toBe(false)
     })
   }
 
@@ -275,7 +275,7 @@ describe('runGranny', () => {
     const r = await runGranny(f.host, input())
     expect(r.stages[0]).toMatchObject({ outcome: 'review-failed', rounds: 1 })
     expect(r.stages[0]!.note).toContain('2 finding marker(s), parser read 1')
-    expect(f.calls.some(c => c.kind === 'score' || c.label.startsWith('fix'))).toBe(false)
+    expect(f.calls.some(c => c.kind === 'judge' || c.label.startsWith('fix'))).toBe(false)
   })
 
   const extracted = (...titles: string[]) => ({
@@ -314,7 +314,7 @@ describe('runGranny', () => {
     expect(r.stages[0]!.note).toContain('2 finding marker(s), parser read 0')
     expect(r.stages[0]!.note).toContain('extraction recovered 1, then 1 on a retry that named the count')
     expect(r.stages[0]!.note).toContain('second without a location')
-    expect(f.calls.some(c => c.kind === 'score' || c.label.startsWith('fix'))).toBe(false)
+    expect(f.calls.some(c => c.kind === 'judge' || c.label.startsWith('fix'))).toBe(false)
   })
 
   it('does not drop the unparsed rest when extraction returns only what the parser already read', async () => {
@@ -326,7 +326,7 @@ describe('runGranny', () => {
     const r = await runGranny(f.host, input())
     expect(r.stages[0]).toMatchObject({ outcome: 'review-failed', rounds: 1 })
     expect(r.stages[0]!.note).toContain('2 finding marker(s), parser read 1')
-    expect(f.calls.some(c => c.kind === 'score' || c.label.startsWith('fix'))).toBe(false)
+    expect(f.calls.some(c => c.kind === 'judge' || c.label.startsWith('fix'))).toBe(false)
   })
 
   it('accepts an extraction that recovers more findings than markers', async () => {
@@ -421,7 +421,7 @@ describe('runGranny', () => {
       expect(f.calls.filter(c => c.kind === 'findings')).toHaveLength(2)
       expect(r.stages[0]!.note).toContain('reviewer output had no findings in the expected form and was not just No findings, and an extraction found none in it')
       expect(r.stages[0]!.note).toContain('French users')
-      expect(f.calls.some(c => c.kind === 'score' || c.label.startsWith('fix'))).toBe(false)
+      expect(f.calls.some(c => c.kind === 'judge' || c.label.startsWith('fix'))).toBe(false)
     })
   })
 
@@ -585,8 +585,8 @@ describe('runGranny', () => {
         expect(prompt).toContain('Classify every finding with exactly these fields:')
         for (const gone of ['score', '0-100', 'rate the review']) expect(prompt).not.toContain(gone)
       }
-      expect(SCHEMAS.score.properties).not.toHaveProperty('score')
-      expect(SCHEMAS.score.required).toEqual(['perFinding', 'rationale'])
+      expect(SCHEMAS.judge.properties).not.toHaveProperty('score')
+      expect(SCHEMAS.judge.required).toEqual(['perFinding', 'rationale'])
       expect(judgePrompt(p, 'abc', [], [], stage)).toContain("stage diff `abc...HEAD`")
       const final = judgePrompt(p, 'main', [], [], undefined, WHOLE_BRANCH_NOTE)
       expect(final).toContain('branch diff `main...HEAD`')
@@ -2055,7 +2055,7 @@ describe('the judge retry', () => {
     const [first, retry] = judges(f)
     expect(retry!.prompt.startsWith(first!.prompt)).toBe(true)
     expect(retry!.prompt.slice(first!.prompt.length)).toContain('- codex-F1: invalid classification: impact "severe"')
-    expect(retry).toMatchObject({ kind: 'score', access: 'read-only', model: first!.model })
+    expect(retry).toMatchObject({ kind: 'judge', access: 'read-only', model: first!.model })
     expect(r.stages[0]!.history[0]!.findings[0]!.decision).toEqual({ rule: 6, action: 'fix', why: 'impact major is in alwaysFix (major/edge/small -> 80)' })
     expect(f.logs).toContain('core r1: judge left 1 finding(s) unclassified - retrying once: codex-F1 (invalid classification: impact "severe")')
     expect(f.logs.some(l => l.includes('unjudged (rule 2)'))).toBe(false)

@@ -26,7 +26,7 @@ const SUBMIT: Partial<Record<ResultKind, string>> = {
   draft: 'granny_submit_plan',
   planFix: 'granny_submit_plan_fix',
   findings: 'granny_submit_findings',
-  score: 'granny_submit_score',
+  judge: 'granny_submit_judgement',
   final: 'granny_submit_final',
 }
 

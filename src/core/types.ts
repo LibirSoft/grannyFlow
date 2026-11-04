@@ -23,7 +23,7 @@ export interface Decision {
   raised?: string
 }
 
-export type ResultKind = 'draft' | 'implementation' | 'planFix' | 'findings' | 'score' | 'command' | 'final'
+export type ResultKind = 'draft' | 'implementation' | 'planFix' | 'findings' | 'judge' | 'command' | 'final'
 
 export type JsonSchema = {
   type: 'object'

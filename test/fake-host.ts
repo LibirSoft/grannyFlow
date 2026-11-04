@@ -200,7 +200,7 @@ export function fakeHost(opts: FakeOptions = {}) {
           return { files: ['/work/repo/.granny/plans/feat-x.md'], stages: [{ name: 'core', task: 'WP-01' }], summary: 'one stage' }
         case 'planFix':
           return { files: ['/plans/v1.md'], changes: 'fixed' }
-        case 'score': {
+        case 'judge': {
           const s = scores.length ? scores.shift() : {}
           if (s === null) return null
           const perFinding = Object.entries(s ?? {}).map(([id, v]) => {

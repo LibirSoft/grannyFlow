@@ -91,7 +91,7 @@ export const SCHEMAS: Record<ResultKind, JsonSchema> = {
     },
     required: ['ran', 'output'],
   },
-  score: {
+  judge: {
     type: 'object',
     properties: {
       perFinding: {

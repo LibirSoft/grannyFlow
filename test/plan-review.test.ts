@@ -111,7 +111,7 @@ describe('the plan review', () => {
     expect(r.plan!.history[0]!.findings[0]).toMatchObject({ id: 'codex-F1', file: PLAN, line: 3, priority: 90, title: 'Step 2 uses a removed flag' })
     expect(f.calls.map(c => c.label)).toEqual(['judge plan review r1', 'fix plan review r1', 'implement core', 'pr-ready check'])
     const judge = f.calls[0]!
-    expect(judge).toMatchObject({ role: 'judge', kind: 'score', phase: 'Plan review', access: 'read-only' })
+    expect(judge).toMatchObject({ role: 'judge', kind: 'judge', phase: 'Plan review', access: 'read-only' })
     expect(judge.prompt).toContain(`You are the JUDGE classifying the findings of a plan review. Repo ${WT}, branch feat/x, plan ${PLAN}, /plans/wo-2.md.`)
     expect(judge.prompt).not.toContain('stage diff')
     const fix = f.calls[1]!
@@ -179,7 +179,7 @@ describe('the plan review', () => {
     const f = fakeHost({ reviews: [review(planFinding('P1', 'Wrong dependency version')), 'No findings.'] })
     const r = await runGranny(f.host, input({ plan: PLAN, config: { planReview: true } }))
     expect(r.plan).toMatchObject({ outcome: 'clean', rounds: 2 })
-    expect(f.calls.some(c => c.kind === 'score')).toBe(false)
+    expect(f.calls.some(c => c.kind === 'judge')).toBe(false)
     expect(f.calls.find(c => c.label === 'fix plan review r1')!.prompt).toContain('Wrong dependency version')
     expect(f.logs).toContain('plan review r1: 1 P0/P1 finding(s) go to the implementer without the judge: codex-F1')
   })

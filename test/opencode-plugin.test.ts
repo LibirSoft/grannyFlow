@@ -26,7 +26,7 @@ function makeRepo(): string {
 
 const CANNED: Record<string, unknown> = {
   granny_submit_implementation: { startSha: 'aaa', headSha: 'bbb', gatesGreen: true, gates: 'ok', commits: ['c1'], untested: '' },
-  granny_submit_score: {
+  granny_submit_judgement: {
     perFinding: [{ id: 'codex-F1', verdict: 'confirmed', impact: 'critical', likelihood: 'edge', fixCost: 'small', scope: 'in-scope', evidence: 'a.txt:1 - real', reason: 'real' }],
     rationale: 'ok',
   },
@@ -323,9 +323,9 @@ describe('opencode plugin', () => {
       'granny_submit_final',
       'granny_submit_findings',
       'granny_submit_implementation',
+      'granny_submit_judgement',
       'granny_submit_plan',
       'granny_submit_plan_fix',
-      'granny_submit_score',
     ])
   })
 
@@ -526,7 +526,7 @@ describe('opencode plugin', () => {
     const judge = promptsTo(f, 'granny · judge one r1')
     expect(judge).toHaveLength(2)
     expect(judge[1]).toContain('provider.quota')
-    expect(judge[1]).toContain('granny_submit_score')
+    expect(judge[1]).toContain('granny_submit_judgement')
     expect(f.prompts.some(p => p.text.startsWith('You stopped without calling'))).toBe(false)
     expect(journalOf(dir)).toContainEqual(
       expect.objectContaining({ type: 'provider-error', label: 'judge one r1', error: quota, transient: true, backoffMs: 30_000 }),

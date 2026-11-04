@@ -14,6 +14,10 @@
 
 - Claude Code: the judge runs on Haiku by default (`roles.judge` is `{ "model": { "claude-code": "haiku" } }`, was `sonnet`); a `roles.judge.model` in any config layer still wins, and opencode keeps the session model. Since the judge only classifies and the engine decides, the classification was measured on 4 real findings, 2 refuted fakes and 1 duplicate, 2 runs per model: Haiku's outcomes matched the user's later fixes on 3/4 findings, Sonnet's on 2/4; both refuted every fake and caught the duplicate, and both gave the same outcome in both runs. Haiku errs toward an extra fix round, Sonnet toward leaving a real bug open (it classified a fail-open `git status` probe `moderate` as a "rare failure case", letting likelihood lower impact), and a Haiku call costs about $0.004 against $0.025. `"roles": { "judge": { "model": "sonnet" } }` switches back for fewer extra fix rounds.
 
+### Removed
+
+- Review: the judge returns only classes and scores nothing. This changes the result shape: the judge's overall `score`, `history[].score` on every review round and a finding's `score` are removed. The numeric per-finding fallback is removed too: a judge entry with a number and no classification is "not judged" like any other missing classification, so it gets the judge's one retry and then goes to the implementer by rule 2; rules 7 and 8 have only their priority form. The judge's result kind is `judge` (was `score`), and on opencode its submit tool is `granny_submit_judgement` (was `granny_submit_score`).
+
 ### Fixed
 
 - Checks: every check run records the HEAD it ran on (`checks[].head`). The final gate of a one-stage repo reuses the stage's last result only when HEAD is still that commit, and its log names the SHA; when a reviewer or the judge committed after the last gate, or HEAD could not be read, the checks run again. When the final check moves HEAD, the checks run once more without repairs (gate `pr-ready`); a red result sets `recheck: { passed: false, note }` and the branch is not PR-ready.

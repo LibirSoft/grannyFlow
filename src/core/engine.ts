@@ -648,7 +648,7 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
         const unjudged = (decided: Finding[]) => decided.filter(f => judgedIds.has(f.id) && f.decision!.rule === 2)
         const listed = (fs: Finding[]) => fs.map(f => `${f.id} (${f.decision!.why})`).join(', ')
 
-        const scored = await call('judge', 'score', label, phase, prompt, 'read-only', config.roles.judge, lane.cwd)
+        const scored = await call('judge', 'judge', label, phase, prompt, 'read-only', config.roles.judge, lane.cwd)
         let per = entriesOf(scored)
         let withScores = decideAll(per)
         let left = unjudged(withScores)
@@ -656,7 +656,7 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
         if (left.length) {
           host.log(`${name} r${round}: ${scored ? `judge left ${left.length} finding(s) unclassified - retrying once: ${listed(left)}` : 'judge returned nothing - retrying once'}`)
           const problems = scored ? left.map(f => ({ id: f.id, why: f.decision!.why === 'not judged' ? 'no classification in your answer' : f.decision!.why })) : null
-          retried = await call('judge', 'score', `${label} retry`, phase, `${prompt}\n\n${judgeRetryNote(problems)}`, 'read-only', config.roles.judge, lane.cwd)
+          retried = await call('judge', 'judge', `${label} retry`, phase, `${prompt}\n\n${judgeRetryNote(problems)}`, 'read-only', config.roles.judge, lane.cwd)
           const again = new Set(left.map(f => f.id))
           const fresh = entriesOf(retried).filter(x => again.has(x.id))
           per = [...per.filter(x => !again.has(x.id) || !fresh.some(y => y.id === x.id)), ...fresh]
