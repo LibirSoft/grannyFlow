@@ -8,11 +8,11 @@ What it sets out to improve is the review load: less work for the human reviewer
 
 ## What it does
 
-An agent skill that takes a plan to a PR-ready branch: an **implementer** builds it stage by stage, any number of **reviewers** - the host model by default, Codex, any CLI - review every stage in parallel, P0/P1 findings go straight back to the implementer, a **judge** scores the rest and merges duplicates, and the findings that matter go back to the implementer until the review is clean. **Granny** - the agent you talk to - prepares the run, launches it, and reports. Nothing is pushed; you decide what happens next.
+An agent skill that takes a plan to a PR-ready branch: an **implementer** builds it stage by stage, any number of **reviewers** - the host model by default, Codex, any CLI - review every stage in parallel, P0/P1 findings go straight back to the implementer, a **judge** classifies the rest and merges duplicates, a fixed rule table picks the findings that matter, and they go back to the implementer until the review is clean. **Granny** - the agent you talk to - prepares the run, launches it, and reports. Nothing is pushed; you decide what happens next.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/loop-dark.svg">
-  <img src="docs/images/loop-light.svg" alt="The granny loop: an optional plan review (planReview: true), then for each stage the implementer builds, optional checks run (red ones go back for a repair), reviewers review in parallel, P0/P1 go straight back, the judge scores the rest, and a final check ends with a PR-ready branch that is not pushed">
+  <img src="docs/images/loop-light.svg" alt="The granny loop: an optional plan review (planReview: true), then for each stage the implementer builds, optional checks run (red ones go back for a repair), reviewers review in parallel, P0/P1 go straight back, the judge classifies the rest, and a final check ends with a PR-ready branch that is not pushed">
 </picture>
 
 <details>
@@ -36,8 +36,9 @@ for each stage - independent stages at the same time (parallel, default on):
   every reviewer reviews it, in parallel (base = the HEAD granny read)
      ├─ a reviewer fails, then fails its one retry ─► stage review-failed
      ├─ no reviewer reports a finding ─────────────► stage clean (without checks: gates-red when the last implementer or fix left gates red)
-     └─ P0/P1 findings go straight to the implementer; the judge scores the rest 0-100 and merges duplicates
-          ├─ any P0/P1, or score > threshold ─► implementer fixes those ─► checks again ─► review again
+     └─ P0/P1 findings go straight to the implementer; the judge classifies the rest and merges duplicates,
+        and a rule table decides: impact in alwaysFix, or priority > threshold, is fixed
+          ├─ any P0/P1 or finding to fix ─► implementer fixes those ─► checks again ─► review again
           └─ none ─► stage done; the rest are "residual" for you, with the residual of earlier rounds
      cap: maxRounds reviews per stage
      a stage in another repo works in that repo's worktree; one whose repo is busy works in its own worktree, merged back after
@@ -58,7 +59,7 @@ The loop is code, not a prompt: on Claude Code and opencode an engine drives eve
 - **Parallel stages** (on by default, `"parallel": false` turns it off) - independent stages run at the same time. One run can span several repos (`repos`): the same logo change in two frontends, a Resilience4j config in every service - each repo gets its own worktree and its stages start together. Inside one repo, a stage that does not build on the one before (`after: []`, which the planner sets) runs in its own worktree and is merged back after its review loop; the implementer resolves a merge conflict, and granny checks with `git merge-base --is-ancestor` that the lane really is in the branch before it removes the lane - a lane that did not merge fails the run and stays where it is. A stage without `after` waits for the previous stage in its repo, so a plain stage list runs in order as before.
 - **Checks** (optional, `checks`) - commands granny runs itself, not the agents: after the implementer, after every fix, on the whole branch before the final review, and once more when the final check moved HEAD. A red check - a failing exit code, or a metric such as coverage outside its bounds - goes back to the implementer for a repair, at most `maxRepairs` times; a stage that stays red is never reviewed. Granny reads `git status --porcelain` before every check run and never checks or reviews uncommitted work: the implementer is asked to commit it first (the plan files stay uncommitted and do not count). On opencode granny executes the command directly; on Claude Code a helper agent runs it and reports the exit code.
 - **Reviewers** - as many as you configure, of any kind: Codex (the CLI or OpenAI's Codex plugin), a host model, or any CLI that answers a prompt. They all review every round at the same time; one that fails twice ends the stage `review-failed` instead of reading as clean.
-- **Judge** - P0/P1 findings skip it and go straight to the implementer. It scores every other finding 0-100 and merges duplicates across reviewers; findings above the threshold are fixed, the rest are left for you as residual - every round's, so a stage that ends `clean` can still list residual findings from an earlier round.
+- **Judge** - P0/P1 findings skip it and go straight to the implementer. It classifies every other finding - verdict, impact if it triggers, likelihood, fix cost, scope and `path:line` evidence - and merges duplicates across reviewers; it gives no score. The engine turns the classes into a priority and a fixed decision table decides: `critical` and `major` impacts are fixed (`alwaysFix`), other findings when their priority is above the threshold, and refuted, pre-existing and other-stage findings are left for you. The rest are residual, each with the rule that kept it - every round's, so a stage that ends `clean` can still list residual findings from an earlier round.
 
 ## Hosts
 
@@ -145,7 +146,8 @@ Three layers, later wins: `~/.config/granny/config.json`, `<repo>/granny.config.
 | `reviewers` | `[{ "name": "reviewer", "engine": "agent" }]` | all review every round, in parallel; each has a unique `name`, an `engine` and its own `model`/`effort` |
 | `reviewers[].engine` | `auto` | `auto`: the Codex plugin when installed and `node` is on `PATH` (Claude Code only), else the Codex CLI; `codex-plugin`: the plugin, required; `codex`: the CLI; `agent`: a host model (Claude models only on Claude Code); `command`: any CLI, with `{base}`, `{out}`, `{model}` and `{prompt}` placeholders |
 | `reviewers[].mode` | `review` | `adversarial-review` runs the Codex plugin's adversarial review, optionally steered by `focus` |
-| `threshold` | `70` | findings scoring strictly above it are fixed; P0/P1 always are, without the judge - except a repeat of a finding the fixer listed in `declined`, which the judge scores like the rest |
+| `threshold` | `70` | findings whose computed priority is strictly above it are fixed; P0/P1 always are, without the judge - except a repeat of a finding the fixer listed in `declined`, which the judge classifies like the rest |
+| `alwaysFix` | `["critical", "major"]` | impact classes fixed whatever their likelihood, fix cost and priority; `[]` leaves only `threshold` |
 | `maxRounds` | `4` | review rounds per stage, and for the plan review; check repairs do not count |
 | `planReview` | `false` | `true` reviews the plan files before stage 1 when the run has a `plan` (extra tokens); skipped when it resumes with `fromStage` |
 | `finalReview` | `true` | after the last stage, review each repo's whole branch for cross-stage duplication, inconsistencies and merge resolutions; skipped for a repo with one stage and no lane merge |

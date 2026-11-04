@@ -76,7 +76,7 @@ describe('skill docs', () => {
       expect({ file, stale }).toEqual({ file, stale: [] })
     }
     const config = read('references/config.md')
-    expect(config).toContain('A P2 that duplicates a P1 is scored on its own')
+    expect(config).toContain('A P2 that duplicates a P1 is classified on its own')
     expect(config).toContain('A reviewer that labels everything P0/P1 bypasses the judge')
     expect(read('references/claude-code.md')).toContain('Claude models only')
   })

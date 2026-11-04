@@ -17,9 +17,9 @@ Layers, later wins:
 | `roles.helper` | `{ "model": { "claude-code": "haiku" }, "effort": "low" }` | Claude Code only: model/effort for the helper agents that run granny's plain commands, because a Workflow script has no shell - the worktree setup, the HEAD, commit-count and working-tree status reads, the timeout probe, the checks, a lane's merge and cleanup, and the start, wait, read and stop steps of a Codex or `command` review. Each is given one fixed command to run once and reports its exit code and output; it decides nothing, so a cheap model is enough. On opencode granny runs these commands itself and no helper starts |
 | `roles.planner` | `{}` | writes the plan and proposes the stages in a run with `goal` ([Planning](#planning)) |
 | `roles.implementer` | `{}` | builds each stage, fixes accepted findings and repairs failed checks; fixes the plan in the plan review |
-| `roles.judge` | `{ "model": { "claude-code": "sonnet" } }` | scores each finding that is not P0/P1 0-100 and marks duplicates |
+| `roles.judge` | `{ "model": { "claude-code": "sonnet" } }` | classifies each finding that is not P0/P1 (verdict, impact, likelihood, fix cost, scope, evidence) and marks duplicates; the engine decides from that ([The decision table](#the-decision-table)) |
 | `reviewers` | `[{ "name": "reviewer", "engine": "agent" }]` | the reviewers; every one of them reviews every round, all at the same time - see [Reviewers](#reviewers) |
-| `threshold` | `70` | a finding is sent back to the implementer when it is P0/P1 (also `critical`/`high`; these skip the judge), when the judge gave it no score, or when its score is **strictly above** this. The overall review score gates nothing |
+| `threshold` | `70` | a finding whose computed priority is **strictly above** this is sent back to the implementer (rule 7 of [the decision table](#the-decision-table)); P0/P1 (also `critical`/`high`) skip the judge and are always sent, and so is a finding the judge did not classify. A judge that returns the old numeric `score` per finding is cut by the same `score > threshold`. The overall review score gates nothing |
 | `alwaysFix` | `["critical", "major"]` | impact classes the implementer always fixes, whatever their likelihood, fix cost and priority (rule 6 of [the decision table](#the-decision-table)); `[]`: only `threshold` decides. Values: `critical`, `major`, `moderate`, `minor`, `none` |
 | `maxRounds` | `4` | review rounds per stage, for the plan review and for the final review; the stage ends `round-cap` after the last one. Check repairs are not review rounds and do not count |
 | `planReview` | `false` | `true`: with a `plan` in the run's input, review the plan files before stage 1 - see [Plan review](#plan-review). It costs extra tokens; no effect without `plan` |
@@ -256,18 +256,67 @@ A reviewer did not run when its command exits non-zero, when its command did not
 
 ### Judge routing
 
-1. P0/P1 findings (also `critical`/`high`) go straight to the implementer, unscored - until a fixer declines findings. A fixer declines a finding by listing it in `declined: [{ id, reason }]` in its result: the id exactly as it was sent, and why it did not fix it. An id it was not sent is ignored (log: `<stage> r<n>: the fixer declined id(s) it was not sent - ignored: ...`; the id of a finding the judge merged into another counts as that finding), and a result without `declined` declines nothing. `deviations` is free text for the report and never counts as a decline, whatever it says. From the round after the first decline on, P0/P1 findings of that review loop go to the judge with the rest (log: `<stage> r<n>: <k> P0/P1 finding(s) go to the judge too - ...`), so the judge can mark which earlier finding each repeats; going to the judge does not make a P0/P1 droppable (step 4).
-2. The judge is called only when there are findings for it. It scores each of them 0-100 and may mark one `duplicateOf: <id>` when it reports the same problem as another finding in its list. The duplicate is merged into the finding it points at, which is reported once, lists the merged ids in `duplicates` and takes the highest score of the group (none when any of them is unscored), so a merge never drops a finding that would have been fixed. The log says `<stage> r<n>: judge merged <id> into <id> (duplicate)`. A `duplicateOf` that points at itself, at an id not in the list, or back in a cycle is ignored.
-3. From round 2 on, the judge prompt has an EARLIER ROUNDS block: every finding already sent to the fixer under a round-qualified label (`r1/codex-F2` - ids restart every round), the ones each round's fixer declined, with its reasons, that round's `deviations` as the fixer's other notes, and the findings each round kept as residual, labelled the same way. The judge sets `repeatOf: <label>` on a finding that repeats one of them; a `repeatOf` naming no listed label is ignored. A repeat of a finding the fixer declined with a reason the code backs scores low; one whose reason is wrong scores on its merits, with the reason saying why.
-4. A finding above `threshold`, or one the judge gave no score (also when the judge returned nothing), goes to the implementer; so does every P0/P1 whatever its score, unless its `repeatOf` names a finding a fixer declined - a P0/P1 that repeats a finding the fixer fixed, or one kept as residual, goes to the implementer like a first-time one. The rest are residual for the user: a repeated P0/P1 at or below `threshold` only when it repeats a declined finding. A residual repeat of a declined finding is logged `<stage> r<n>: <id> dropped as a repeat of <label>, which the fixer declined (score <s>) - kept as residual`, so a disagreement the judge settles for the fixer ends `residual-only` instead of running to `round-cap`.
+1. P0/P1 findings (also `critical`/`high`) go straight to the implementer, without the judge - until a fixer declines findings. A fixer declines a finding by listing it in `declined: [{ id, reason }]` in its result: the id exactly as it was sent, and why it did not fix it. An id it was not sent is ignored (log: `<stage> r<n>: the fixer declined id(s) it was not sent - ignored: ...`; the id of a finding the judge merged into another counts as that finding), and a result without `declined` declines nothing. `deviations` is free text for the report and never counts as a decline, whatever it says. From the round after the first decline on, P0/P1 findings of that review loop go to the judge with the rest (log: `<stage> r<n>: <k> P0/P1 finding(s) go to the judge too - ...`), so the judge can mark which earlier finding each repeats; going to the judge does not make a P0/P1 droppable (step 4).
+2. The judge is called only when there are findings for it. It classifies each of them ([The decision table](#the-decision-table)) and may mark one `duplicateOf: <id>` when it reports the same problem as another finding in its list. The duplicate is merged into the finding it points at, which is reported once, lists the merged ids in `duplicates` and takes the judgement of the strongest copy of the group - one the table sends to the implementer before one it keeps residual, then the higher priority (an unclassified copy is sent, so it wins over a residual one) - so a merge never drops a finding that would have been fixed. The log says `<stage> r<n>: judge merged <id> into <id> (duplicate)`. A `duplicateOf` that points at itself, at an id not in the list, or back in a cycle is ignored.
+3. From round 2 on, the judge prompt has an EARLIER ROUNDS block: every finding already sent to the fixer under a round-qualified label (`r1/codex-F2` - ids restart every round), the ones each round's fixer declined, with its reasons, that round's `deviations` as the fixer's other notes, and the findings each round kept as residual, labelled the same way. The judge sets `repeatOf: <label>` on a finding that repeats one of them; a `repeatOf` naming no listed label is ignored. A repeat of a finding the fixer declined with a reason the code backs is classified `refuted`, or by its `scope` when it belongs elsewhere; one whose reason is wrong is classified on its merits, with the reason saying why.
+4. The decision table decides each finding: it goes to the implementer or stays residual for the user. Every P0/P1 goes to the implementer whatever the judge classified (rule 1), unless its `repeatOf` names a finding a fixer declined - a P0/P1 that repeats a finding the fixer fixed, or one kept as residual, goes to the implementer like a first-time one. A residual repeat of a declined finding is logged `<stage> r<n>: <id> dropped as a repeat of <label>, which the fixer declined (rule <n>: <why>) - kept as residual`, so a disagreement the judge settles for the fixer ends `residual-only` instead of running to `round-cap`.
 
    Residual findings add up over the rounds of a review loop (a stage's review, the plan review, the final review): a finding kept as residual in round 1 is never sent to the fixer, so it stays in the result's `residual` when a later round is clean, ends `residual-only`, ends `checks-failed` or hits the cap. It leaves `residual` only when the judge marks a later finding as its repeat: a repeat that goes to the implementer drops it, since it is being fixed; a repeat kept as residual again takes its place (the latest version, with its `repeatOf`), so each problem is listed once, also when a third round repeats the first round's version. A repeat of a residual finding is not a repeat of a declined one: it is not logged as dropped and never overrules the fixer. The outcome says how the last round ended, not whether residual is left: `clean` means the last review found nothing, and its `residual` can still hold findings of earlier rounds; `residual-only` means the last round had findings and none to send. After `round-cap`, `residual` holds the earlier rounds' residual and the last round's findings - its residual ones too - are in `unresolved`. After `review-failed`, `residual` is empty; the earlier rounds' findings are in `history`.
-5. A repeat of a declined finding that goes back to the implementer is logged `<stage> r<n>: the judge overruled the fixer on <id> (repeat of <label>, score <s>)`, and the fix prompt gets an OVERRULED block: those findings, the judge's reasons and the reason the fixer gave when it declined each, so it fixes them or answers the reason instead of repeating itself. Each round's `declined` and `deviations` are also kept on its `history` entry (log: `<stage> r<n>: the fixer declined <ids>`).
+5. A repeat of a declined finding that goes back to the implementer is logged `<stage> r<n>: the judge overruled the fixer on <id> (repeat of <label>, rule <n>: <why>)`, and the fix prompt gets an OVERRULED block: those findings, the judge's reasons and the reason the fixer gave when it declined each, so it fixes them or answers the reason instead of repeating itself. Each round's `declined` and `deviations` are also kept on its `history` entry (log: `<stage> r<n>: the fixer declined <ids>`).
 
 Two consequences:
 
-- Dedupe happens only among the findings that are not P0/P1 (once P0/P1 findings go to the judge, one may be merged into another P0/P1, never into a P2/P3). A P2 that duplicates a P1 is scored on its own, and may reach the implementer next to the P1.
+- Dedupe happens only among the findings that are not P0/P1 (once P0/P1 findings go to the judge, one may be merged into another P0/P1, never into a P2/P3). A P2 that duplicates a P1 is classified on its own, and may reach the implementer next to the P1.
 - A reviewer that labels everything P0/P1 bypasses the judge until a fixer declines one of its findings, and even then only a repeat of a declined finding can end up residual.
+
+### The decision table
+
+The judge does not score findings: it classifies each one, and the engine decides. For every finding it gets, the judge returns:
+
+- `verdict`: `confirmed` | `refuted` | `unverified` - is it really in the code?
+- `impact`: `critical` | `major` | `moderate` | `minor` | `none` - how bad it is if it triggers. The judge prompt says to judge impact assuming the trigger happens: likelihood never lowers impact, it is its own field. `critical`: data loss or corruption, writing to the wrong record, a security or authorization bypass, a secret or personal data leak, a draft going public, an irreversible operation, stored data silently read differently. `major`: the user cannot get out from inside the app (a lock only a reload clears, endless loading, a crash), something that worked silently breaks, an API or contract break, a required part of the stage's task is missing. `moderate`: wrong behaviour with an easy workaround, a wrong or missing error message, a missing test for changed behaviour, duplicated logic. `minor`: a visual defect, naming, style.
+- `likelihood`: `common` (the normal flow) | `edge` (special timing or state: a race, an expired session, a boundary value) | `rare` (forced input, a rarely used feature).
+- `fixCost`: `trivial` (a few lines) | `small` (one function or file plus a test) | `large` (cross-module, a redesign).
+- `scope`: `in-scope` | `pre-existing` (it was there before this stage) | `other-stage` (another stage's job).
+- `evidence`: `path:line` plus the concrete trigger steps; `reason`: one line.
+
+The plan review's judge returns the same fields, with impact judged by what the plan would cause once implemented as written.
+
+The engine normalizes the classification first: evidence without a `path:line` (anything matching `\S+:\d+`) turns a `confirmed` or `refuted` verdict into `unverified`, and an `unverified` finding's impact is lowered one class (`critical` → `major` → `moderate` → `minor` → `none`). A missing field or an unknown value makes the whole classification invalid: the finding counts as not judged.
+
+The priority is the table value for impact × likelihood, plus the fix cost (`trivial` +15, `small` 0, `large` −15; not for `none`, which stays 0), clamped to 0..100:
+
+| impact | common | edge | rare |
+|---|---|---|---|
+| critical | 100 | 95 | 90 |
+| major | 90 | 80 | 65 |
+| moderate | 75 | 55 | 35 |
+| minor | 35 | 25 | 15 |
+| none | 0 | 0 | 0 |
+
+Then the first matching rule decides:
+
+1. P0/P1, unless it repeats a finding the fixer declined → **fix** (P0/P1 do not go to the judge until a fixer declined a finding - [Judge routing](#judge-routing)).
+2. Not judged, or an invalid classification (also when the judge returned nothing) → **fix**.
+3. `verdict` `refuted` → residual, `refuted`.
+4. `scope` `other-stage` → residual, `left to the stage that owns it`.
+5. `scope` `pre-existing` → residual, `pre-existing`; with impact `critical` or `major` it is flagged `pre-existing - ATTENTION: impact <impact>`, carries `attention: true` and is logged `<stage> r<n>: ATTENTION <id> is pre-existing with impact <impact> - left for the user`. It is not fixed: the stage did not cause it, so it is left for you to decide.
+6. impact in `alwaysFix` (default `["critical", "major"]`) → **fix**, whatever the likelihood, the fix cost and `threshold`.
+7. priority strictly above `threshold` → **fix**.
+8. Everything else → residual, `under the bar: <impact>/<likelihood>/<fixCost> -> <priority>`.
+
+Each finding keeps its normalized classification, its `priority`, the judge's `reason` and `decision: { rule, action, why }` (`action` is `fix` or `residual`; the `why` of a lowered unverified finding says so) - in the fix prompt, the round's `history`, `residual` and `unresolved`. Every round logs `<stage> r<n>: to the implementer: <id> (rule <n>: <why>), ...` and `<stage> r<n>: <k> finding(s) kept as residual, not sent: <id> (rule <n>: <why>), ...`.
+
+With the defaults, these hold:
+
+- `minor` never passes the default threshold: its highest priority is 35 + 15 = 50.
+- `moderate` passes only when `common` with a `small` or `trivial` fix (75 or 90); `moderate`/`edge`/`trivial` is 70, and 70 > 70 is false, so it stays residual.
+- `refuted` and `other-stage` findings always stay residual, whatever their impact.
+- The fixer can still decline a finding with evidence (`declined`), and the judge can agree by classifying the repeat `refuted` or by its scope; `maxRounds` still caps the loop.
+
+`"alwaysFix": []` leaves only `threshold`: a `critical`/`rare`/`large` finding (75) is then fixed, a `major`/`rare`/`small` one (65) is not.
+
+A judge that returns the old numeric `score` per finding and no classification field still works: that finding goes through rule 1, then rule 2 when there is no score either, then `score > threshold` (logged as rule 7, `score <s> > threshold <t> (numeric score, no classification)`, or rule 8, `under the bar: score <s> (numeric score, no classification)`). A finding with any classification field is read as a classification, so a partial one is invalid (rule 2) even with a score next to it.
 
 ### The Codex plugin
 
