@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'bun:test'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { isBlocker, parseCodexReview, reviewFailure, saysNoFindings, triage } from '../src/core/review'
+import { declinedOf, isBlocker, parseCodexReview, reviewFailure, saysNoFindings, triage } from '../src/core/review'
 import type { Finding } from '../src/core/types'
 
 const fixture = (name: string) => readFileSync(join(import.meta.dir, 'fixtures', name), 'utf8')
@@ -236,8 +236,44 @@ describe('triage', () => {
     expect(residual.map(x => x.id)).toEqual(['b', 'g'])
   })
 
+  it('keeps a P0/P1 at or below the threshold residual only when it repeats a declined finding', () => {
+    const repeat = (id: string, of: string): Finding => ({ ...f(id, 'P1', 20), repeatOf: of })
+    const { accepted, residual } = triage([repeat('a', 'r1/x-F1'), repeat('b', 'r1/x-F2'), f('c', 'P1', 20)], 70, x => x.repeatOf === 'r1/x-F1')
+    expect(accepted.map(x => x.id)).toEqual(['b', 'c'])
+    expect(residual.map(x => x.id)).toEqual(['a'])
+  })
+
   it('recognises blocker severities case-insensitively', () => {
     expect(['P0', 'p1', 'High', 'CRITICAL: x'].every(severity => isBlocker({ severity }))).toBe(true)
     expect(['P2', 'P3', 'medium', ''].some(severity => isBlocker({ severity }))).toBe(false)
+  })
+})
+
+describe('declinedOf', () => {
+  const sent: Finding[] = [
+    { id: 'x-F1', severity: 'P1', file: 'a', title: 'a', detail: '' },
+    { id: 'x-F2', severity: 'P2', file: 'b', title: 'b', detail: '', duplicates: ['y-F1'] },
+  ]
+
+  it('keeps the ids the fixer was sent, a merged duplicate under the finding it was merged into', () => {
+    expect(declinedOf([{ id: 'x-F1', reason: 'wrong' }, { id: 'y-F1', reason: 'dup' }, { id: 'x-F1', reason: 'again' }], sent)).toEqual({
+      declined: [
+        { id: 'x-F1', reason: 'wrong' },
+        { id: 'x-F2', reason: 'dup' },
+      ],
+      unknown: [],
+    })
+  })
+
+  it('reports ids it was not sent and skips malformed entries', () => {
+    expect(declinedOf([{ id: 'x-F9', reason: 'r' }, { reason: 'no id' }, 'x-F1', { id: 'x-F2' }], sent)).toEqual({
+      declined: [{ id: 'x-F2', reason: '' }],
+      unknown: ['x-F9'],
+    })
+  })
+
+  it('reads a missing or non-array value as nothing declined', () => {
+    expect(declinedOf(undefined, sent)).toEqual({ declined: [], unknown: [] })
+    expect(declinedOf('x-F1', sent)).toEqual({ declined: [], unknown: [] })
   })
 })

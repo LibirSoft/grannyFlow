@@ -103,7 +103,7 @@ Plan files - read them first: <plan files>
 You are the IMPLEMENTER, fixing the plan after plan review round 1. Implementation has not started: change only the plan.
 Edit the plan files in place at their absolute paths: <plan files>. Change nothing else - no code, no other file. Never stage or commit the plan files, even when they sit inside the repo: they stay uncommitted.
 At the top of each plan file you change, add a section `## rN deltas (<date>)` - N one higher than the highest rN deltas section already in that file, r1 when there is none - listing each finding id and what you changed for it. Take the date from `date +%F` in your shell.
-Fix every finding below. A finding you believe is wrong: leave the plan as it is for it and explain why in deviations.
+Fix every finding below. A finding you believe is wrong: leave the plan as it is for it, and list it in declined with its id and your reason.
 
 FINDINGS (P0/P1 or score > 70):
 <accepted findings as JSON>
@@ -151,7 +151,7 @@ Plan files - read them first: <plan files>
 <context: work-order files and override notes>
 
 You are the IMPLEMENTER, fixing review round 1 of stage "<stage name>".
-Apply the review findings on top of the current branch state (read `git log --oneline '<base>'..HEAD` and the code first). Fix every finding below, red-green where it changes behaviour, keep the gates green, commit (`fix(...)`), and add each finding id with what you did to the "Review fixes" section of .granny/PR-BODY.md. A finding you believe is wrong: do not fix it, explain why in deviations.
+Apply the review findings on top of the current branch state (read `git log --oneline '<base>'..HEAD` and the code first). Fix every finding below, red-green where it changes behaviour, keep the gates green, commit (`fix(...)`), and add each finding id with what you did to the "Review fixes" section of .granny/PR-BODY.md. A finding you believe is wrong: do not fix it, and list it in declined with its id and your reason.
 
 FINDINGS (P0/P1 or score > 70):
 <accepted findings as JSON>
@@ -174,13 +174,12 @@ Plan files - read them first: <plan files>
 <context: work-order files and override notes>
 
 You are the IMPLEMENTER, fixing review round 2 of stage "<stage name>".
-Apply the review findings on top of the current branch state (read `git log --oneline '<base>'..HEAD` and the code first). Fix every finding below, red-green where it changes behaviour, keep the gates green, commit (`fix(...)`), and add each finding id with what you did to the "Review fixes" section of .granny/PR-BODY.md. A finding you believe is wrong: do not fix it, explain why in deviations.
+Apply the review findings on top of the current branch state (read `git log --oneline '<base>'..HEAD` and the code first). Fix every finding below, red-green where it changes behaviour, keep the gates green, commit (`fix(...)`), and add each finding id with what you did to the "Review fixes" section of .granny/PR-BODY.md. A finding you believe is wrong: do not fix it, and list it in declined with its id and your reason.
 
 OVERRULED - you declined these findings in an earlier round; the judge checked your reason against the code and disagreed:
 - <id> (repeat of r1/<reviewer>-F<n>): <the judge's reason>
-What you said then:
-- round 1: <the fixer's deviations>
-Fix them. If you still decline one, answer the judge's reason with new evidence from the code in deviations - do not repeat your earlier explanation.
+  you said: <the fixer's reason>
+Fix them. If you still decline one, list it in declined again and answer the judge's reason with new evidence from the code - do not repeat your earlier explanation.
 
 FINDINGS (P0/P1 or score > 70):
 <accepted findings as JSON>
@@ -341,7 +340,7 @@ Stage 2/2 "<stage name>" was asked to do this - its TASK:
 The findings come from one or more reviewers; each names its reviewer. P0/P1 findings are not in this list: they go to the implementer without a score.
 For each finding below, open the cited code and judge whether it is real, correctly described and worth fixing; score it 0-100 (findings the code refutes score low). Score against the TASK: a finding about work another stage owns scores low; a missing part of this stage's task is worth fixing. When a finding reports the same problem as another finding in this list, score it too and set its duplicateOf to the id of the finding to keep. Then score the whole review 0-100 (correctness + actionability; mostly wrong or trivial findings = low).
 
-EARLIER ROUNDS of this review - the findings already sent to the fixer, under round-qualified labels, the fixer's reasons for not applying some, and the findings kept as residual for the user:
+EARLIER ROUNDS of this review - the findings already sent to the fixer, under round-qualified labels, the ones the fixer declined with its reasons, and the findings kept as residual for the user:
 Round 1 sent to the fixer:
 [
   {
@@ -352,7 +351,9 @@ Round 1 sent to the fixer:
     "detail": "<detail>"
   }
 ]
-The fixer's deviations (findings it did not apply, and why): <the fixer's deviations>
+The findings the fixer declined (did not fix), and why:
+- r1/<reviewer>-F<n>: <the fixer's reason>
+The fixer's other notes: <the fixer's deviations>
 Round 1 kept as residual (not sent to the fixer):
 [
   {

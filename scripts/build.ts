@@ -76,9 +76,10 @@ export function renderPrompts(): string {
       sent: [{ id: '<reviewer>-F<n>', severity: '<severity>', file: '<file>', title: '<title>', detail: '<detail>' }],
       residual: [{ id: '<reviewer>-F<m>', severity: '<severity>', file: '<file>', title: '<title>', detail: '<detail>' }],
       deviations: "<the fixer's deviations>",
+      declined: [{ id: '<reviewer>-F<n>', reason: "<the fixer's reason>" }],
     },
   ]
-  const overruled = [{ id: '<id>', repeatOf: 'r1/<reviewer>-F<n>', round: 1, reason: "<the judge's reason>" }]
+  const overruled = [{ id: '<id>', repeatOf: 'r1/<reviewer>-F<n>', reason: "<the judge's reason>", said: "<the fixer's reason>" }]
   const setup = `cd '<repo>' && ${worktreeScript(p.config, '<branch>', '<base>', '<worktreeDir>/<branch-slug>')}`
   const sections: Array<[string, string]> = [
     ['Granny - worktree setup, the helper agent on Claude Code (on Cursor, run the command yourself)', worktreeCommandPrompt('<repo>', '<branch>', setup)],
@@ -91,7 +92,7 @@ export function renderPrompts(): string {
     ['Implementer - fix', fixPrompt(p, '<stage name>', 1, []).replace(/\[\]$/, '<accepted findings as JSON>')],
     [
       'Implementer - fix, from round 2 on when the judge overruled the fixer (the plan fix gets the same OVERRULED block)',
-      fixPrompt(p, '<stage name>', 2, [], overruled, earlier).replace(/\[\]$/, '<accepted findings as JSON>'),
+      fixPrompt(p, '<stage name>', 2, [], overruled).replace(/\[\]$/, '<accepted findings as JSON>'),
     ],
     ['Granny - a check command, the helper agent on Claude Code (on opencode granny runs it itself; a check with timeout runs as `timeout <s> bash -c \'<run>\'`, or `gtimeout` where only that is on PATH; for a check without a metric the parenthesis reads `when it is very long, the last 3000 characters are enough`)', checkCommandPrompt('<repo>', 'check <stage name> <check name>', "cd '<repo>' && <check run>", '<metric pattern>')],
     [

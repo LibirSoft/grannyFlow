@@ -12,15 +12,17 @@ const input = (extra: Partial<RunInput> = {}): RunInput =>
   ...extra,
   })
 
-const DECLINE = 'codex-F1 not applied: the null check already happens in parse() at src/a.ts:1, so the reported crash cannot occur.'
+const DECLINE = 'the null check already happens in parse() at src/a.ts:1, so the reported crash cannot occur.'
 
-const declineIn = (label: string) => (req: AgentRequest) =>
-  req.label === label ? { startSha: 's', headSha: 'h', gatesGreen: true, gates: 'all green', commits: [], untested: '', deviations: DECLINE } : undefined
+const fixed = (extra: object) => ({ startSha: 's', headSha: 'h', gatesGreen: true, gates: 'all green', commits: [], untested: '', ...extra })
+
+const declineIn = (label: string, ids = ['codex-F1']) => (req: AgentRequest) =>
+  req.label === label ? fixed({ declined: ids.map(id => ({ id, reason: DECLINE })) }) : undefined
 
 const prompt = (calls: AgentRequest[], label: string) => calls.find(c => c.label === label)?.prompt
 
 describe('a finding the fixer declined', () => {
-  it('shows the judge the earlier round and its deviations, and ends residual-only when the judge agrees with the fixer', async () => {
+  it('shows the judge the earlier round and the findings the fixer declined, and ends residual-only when the judge agrees with the fixer', async () => {
     const phantom = review(finding('P2', 'Phantom crash'))
     const f = fakeHost({
       reviews: [phantom, phantom, phantom],
@@ -41,7 +43,9 @@ describe('a finding the fixer declined', () => {
     expect(r2).toContain(DECLINE)
     expect(r2).toContain('repeatOf')
     expect(f.logs).toContain('core r2: codex-F1 dropped as a repeat of r1/codex-F1, which the fixer declined (score 20) - kept as residual')
-    expect(r.stages[0]!.history[0]!.deviations).toBe(DECLINE)
+    expect(r2).toContain(`- r1/codex-F1: ${DECLINE}`)
+    expect(r.stages[0]!.history[0]!.declined).toEqual([{ id: 'codex-F1', reason: DECLINE }])
+    expect(r.stages[0]!.history[0]!.deviations).toBeUndefined()
   })
 
   it('routes a repeated P0/P1 through the judge once the fixer declined, instead of looping to the round cap', async () => {
@@ -83,12 +87,53 @@ describe('a finding the fixer declined', () => {
   })
 
   it('does not count a "None." deviations text as declining', async () => {
-    const none = (req: AgentRequest) =>
-      req.label === 'fix core r1' ? { startSha: 's', headSha: 'h', gatesGreen: true, gates: 'all green', commits: [], untested: '', deviations: 'None.' } : undefined
+    const none = (req: AgentRequest) => (req.label === 'fix core r1' ? fixed({ deviations: 'None.' }) : undefined)
     const f = fakeHost({ reviews: [review(finding('P2', 'Real issue')), review(finding('P1', 'Blocker')), 'No findings.'], scores: [{ 'codex-F1': 90 }], override: none })
     const r = await runGranny(f.host, input())
     expect(r.stages[0]).toMatchObject({ outcome: 'clean', rounds: 3 })
     expect(f.calls.map(c => c.label)).toEqual(['implement core', 'judge core r1', 'fix core r1', 'fix core r2', 'pr-ready check'])
+  })
+
+  it('does not take a deviations text for a decline: a repeated P0/P1 goes straight to the fixer again', async () => {
+    const race = review(finding('P1', 'Race in save'))
+    const f = fakeHost({
+      reviews: [race, race, 'No findings.'],
+      scores: [{ 'codex-F1': { score: 60, repeatOf: 'r1/codex-F1' } }],
+      override: req => (req.label === 'fix core r1' ? fixed({ deviations: 'applied it via the helper' }) : undefined),
+    })
+    const r = await runGranny(f.host, input())
+    expect(r.stages[0]).toMatchObject({ outcome: 'clean', rounds: 3, residual: [] })
+    expect(f.calls.map(c => c.label)).toEqual(['implement core', 'fix core r1', 'fix core r2', 'pr-ready check'])
+    expect(prompt(f.calls, 'fix core r2')).toContain('Race in save')
+    expect(r.stages[0]!.history[0]!.deviations).toBe('applied it via the helper')
+    expect(f.logs.some(l => l.includes('go to the judge too') || l.includes('dropped as a repeat'))).toBe(false)
+  })
+
+  it('drops only the repeat of the finding the fixer declined, not a repeat of one it fixed', async () => {
+    const both = review(finding('P1', 'Phantom blocker'), finding('P1', 'Real blocker', 'src/b.ts'))
+    const f = fakeHost({
+      reviews: [both, both, 'No findings.'],
+      scores: [{ 'codex-F1': { score: 15, repeatOf: 'r1/codex-F1' }, 'codex-F2': { score: 15, repeatOf: 'r1/codex-F2' } }],
+      override: declineIn('fix core r1'),
+    })
+    const r = await runGranny(f.host, input())
+    expect(r.stages[0]).toMatchObject({ outcome: 'clean', rounds: 3 })
+    expect(r.stages[0]!.residual.map(x => [x.title, x.repeatOf])).toEqual([['Phantom blocker', 'r1/codex-F1']])
+    const fix = prompt(f.calls, 'fix core r2')!
+    expect(fix).toContain('Real blocker')
+    expect(fix).not.toContain('Phantom blocker')
+    expect(f.logs).toContain('core r2: codex-F1 dropped as a repeat of r1/codex-F1, which the fixer declined (score 15) - kept as residual')
+    expect(f.logs.some(l => l.includes('codex-F2 dropped'))).toBe(false)
+  })
+
+  it('ignores a declined id the fixer was not sent', async () => {
+    const blocker = review(finding('P1', 'Phantom blocker'))
+    const f = fakeHost({ reviews: [blocker, blocker, 'No findings.'], override: declineIn('fix core r1', ['codex-F9']) })
+    const r = await runGranny(f.host, input())
+    expect(r.stages[0]).toMatchObject({ outcome: 'clean', rounds: 3 })
+    expect(f.calls.map(c => c.label)).toEqual(['implement core', 'fix core r1', 'fix core r2', 'pr-ready check'])
+    expect(f.logs).toContain('core r1: the fixer declined id(s) it was not sent - ignored: codex-F9')
+    expect(r.stages[0]!.history[0]!.declined).toBeUndefined()
   })
 
   it('sends a repeated P0/P1 when the judge returns nothing', async () => {
@@ -110,9 +155,10 @@ describe('a finding the fixer declined', () => {
     expect(r.stages[0]).toMatchObject({ outcome: 'clean', rounds: 3 })
     const r1 = prompt(f.calls, 'fix core r1')!
     expect(r1).not.toContain('OVERRULED')
+    expect(r1).toContain('list it in declined with its id and your reason')
     const r2 = prompt(f.calls, 'fix core r2')!
     expect(r2).toContain('OVERRULED')
-    expect(r2).toContain(DECLINE)
+    expect(r2).toContain(`  you said: ${DECLINE}`)
     expect(r2).toContain('codex-F1 (repeat of r1/codex-F1): reason codex-F1')
     expect(f.logs).toContain('core r2: the judge overruled the fixer on codex-F1 (repeat of r1/codex-F1, score 85)')
   })
@@ -135,7 +181,7 @@ describe('a finding the fixer declined', () => {
     const f = fakeHost({
       reviews: [bad, bad, bad],
       scores: [{ 'codex-F1': 90 }, { 'codex-F1': { score: 30, repeatOf: 'r1/codex-F1' } }],
-      override: req => (req.label === 'fix plan review r1' ? { files: [PLAN], changes: 'none', deviations: DECLINE } : undefined),
+      override: req => (req.label === 'fix plan review r1' ? { files: [PLAN], changes: 'none', declined: [{ id: 'codex-F1', reason: DECLINE }] } : undefined),
     })
     const r = await runGranny(f.host, input({ plan: PLAN, config: { planReview: true, maxRounds: 3 } }))
     expect(r.plan).toMatchObject({ outcome: 'residual-only', rounds: 2 })

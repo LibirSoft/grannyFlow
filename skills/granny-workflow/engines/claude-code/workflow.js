@@ -392,16 +392,30 @@ function mergeDuplicates(findings, duplicateOf) {
   });
   return { findings: kept, merged: [...into].map(([id, k]) => ({ id, into: k })) };
 }
-function triage(findings, threshold) {
+function triage(findings, threshold, repeatsDeclined = () => false) {
   const accepted = [];
   const residual = [];
   for (const f of findings) {
-    if (isBlocker(f) && f.repeatOf === undefined || f.score === undefined || f.score > threshold)
+    if (isBlocker(f) && !repeatsDeclined(f) || f.score === undefined || f.score > threshold)
       accepted.push(f);
     else
       residual.push(f);
   }
   return { accepted, residual };
+}
+function declinedOf(value, sent) {
+  const declined = [];
+  const unknown = [];
+  for (const d of Array.isArray(value) ? value : []) {
+    if (!d || typeof d !== "object" || typeof d.id !== "string")
+      continue;
+    const f = sent.find((s) => s.id === d.id || s.duplicates?.includes(d.id));
+    if (!f)
+      unknown.push(d.id);
+    else if (!declined.some((x) => x.id === f.id))
+      declined.push({ id: f.id, reason: typeof d.reason === "string" ? d.reason.trim() : "" });
+  }
+  return { declined, unknown };
 }
 
 function shellQuote(value) {
@@ -409,7 +423,7 @@ function shellQuote(value) {
 }
 
 var roundLabel = (round, f) => `r${round}/${f.id}`;
-var judgeRouting = (p, findings) => findings.some(isBlocker) ? `P0/P1 findings are in this list only because a fixer declined findings in an earlier round: score them like the rest. A P0/P1 without repeatOf goes to the implementer whatever its score; a repeated one scored ${p.config.threshold} or lower does not.` : "P0/P1 findings are not in this list: they go to the implementer without a score.";
+var judgeRouting = (p, findings) => findings.some(isBlocker) ? `P0/P1 findings are in this list only because a fixer declined findings in an earlier round: score them like the rest. A P0/P1 goes to the implementer whatever its score, unless its repeatOf names a finding the fixer declined and you score it ${p.config.threshold} or lower.` : "P0/P1 findings are not in this list: they go to the implementer without a score.";
 function judgeHistory(earlier) {
   if (!earlier.length)
     return "";
@@ -418,12 +432,16 @@ function judgeHistory(earlier) {
     const kept = e.residual?.length ? `
 Round ${e.round} kept as residual (not sent to the fixer):
 ${labelled(e.round, e.residual)}` : "";
+    const declined = e.declined?.length ? e.declined.map((d) => `
+- ${roundLabel(e.round, d)}: ${d.reason || "no reason given"}`).join("") : " none - it fixed all of them";
+    const notes = e.deviations?.trim() ? `
+The fixer's other notes: ${e.deviations.trim()}` : "";
     return `Round ${e.round} sent to the fixer:
 ${labelled(e.round, e.sent)}
-The fixer's deviations (findings it did not apply, and why): ${e.deviations?.trim() || "none - it applied all of them"}${kept}`;
+The findings the fixer declined (did not fix), and why:${declined}${notes}${kept}`;
   });
   return `
-EARLIER ROUNDS of this review - the findings already sent to the fixer, under round-qualified labels, the fixer's reasons for not applying some, and the findings kept as residual for the user:
+EARLIER ROUNDS of this review - the findings already sent to the fixer, under round-qualified labels, the ones the fixer declined with its reasons, and the findings kept as residual for the user:
 ${rounds.join(`
 
 `)}
@@ -431,19 +449,15 @@ ${rounds.join(`
 When a finding below repeats one of those earlier findings, set its repeatOf to that label. A repeat of a finding the fixer declined with a convincing reason that the code backs scores low - cite the label and the fixer's reason in your reason. When the fixer's reason is wrong, score the repeat on its merits (high when it is real) and say in reason why the fixer's reason does not hold. A repeat of a finding the fixer applied: check the fix in the code and score what is still wrong. A repeat of a residual finding: the fixer never saw it - score it on its merits.
 `;
 }
-function overruledSection(overruled, earlier) {
+function overruledSection(overruled) {
   if (!overruled.length)
     return "";
-  const rounds = new Set(overruled.map((o) => o.round));
-  const said = earlier.filter((e) => rounds.has(e.round) && e.deviations?.trim());
   return `
 OVERRULED - you declined these findings in an earlier round; the judge checked your reason against the code and disagreed:
-${overruled.map((o) => `- ${o.id} (repeat of ${o.repeatOf}): ${o.reason ?? "no reason given"}`).join(`
+${overruled.map((o) => `- ${o.id} (repeat of ${o.repeatOf}): ${o.reason ?? "no reason given"}
+  you said: ${o.said || "no reason given"}`).join(`
 `)}
-What you said then:
-${said.map((e) => `- round ${e.round}: ${e.deviations.trim()}`).join(`
-`)}
-Fix them. If you still decline one, answer the judge's reason with new evidence from the code in deviations - do not repeat your earlier explanation.
+Fix them. If you still decline one, list it in declined again and answer the judge's reason with new evidence from the code - do not repeat your earlier explanation.
 `;
 }
 var prBodyPath = (c) => `${c.workDir}/PR-BODY.md`;
@@ -502,12 +516,12 @@ ${stage.task ?? ""}
 
 Commit per logical step. Keep ${pr} (git-excluded; create the directory if missing) current with sections: Title, Summary, Changes (table), Test plan (real numbers), Revised in stage N, Review fixes, Untested. Return startSha = HEAD before your first change.`;
 }
-function fixPrompt(p, name, round, accepted, overruled = [], earlier = []) {
+function fixPrompt(p, name, round, accepted, overruled = []) {
   return `${common(p)}
 
 You are the IMPLEMENTER, fixing review round ${round} of stage "${name}".
-Apply the review findings on top of the current branch state (read \`git log --oneline ${shellQuote(p.base)}..HEAD\` and the code first). Fix every finding below, red-green where it changes behaviour, keep the gates green, commit (\`fix(...)\`), and add each finding id with what you did to the "Review fixes" section of ${prBodyOf(p)}. A finding you believe is wrong: do not fix it, explain why in deviations.
-${overruledSection(overruled, earlier)}
+Apply the review findings on top of the current branch state (read \`git log --oneline ${shellQuote(p.base)}..HEAD\` and the code first). Fix every finding below, red-green where it changes behaviour, keep the gates green, commit (\`fix(...)\`), and add each finding id with what you did to the "Review fixes" section of ${prBodyOf(p)}. A finding you believe is wrong: do not fix it, and list it in declined with its id and your reason.
+${overruledSection(overruled)}
 FINDINGS (P0/P1 or score > ${p.config.threshold}):
 ${JSON.stringify(accepted, null, 2)}`;
 }
@@ -674,14 +688,14 @@ ${judgeHistory(earlier)}
 REVIEW:
 ${JSON.stringify(findings, null, 2)}`;
 }
-function planFixPrompt(p, plans, round, accepted, overruled = [], earlier = []) {
+function planFixPrompt(p, plans, round, accepted, overruled = []) {
   return `${common(p)}
 
 You are the IMPLEMENTER, fixing the plan after plan review round ${round}. Implementation has not started: change only the plan.
 Edit the plan files in place at their absolute paths: ${plans.join(", ")}. Change nothing else - no code, no other file. Never stage or commit the plan files, even when they sit inside the repo: they stay uncommitted.
 ${round === 1 ? "At the top of each plan file you change, add a section `## rN deltas (<date>)` - N one higher than the highest rN deltas section already in that file, r1 when there is none - listing each finding id and what you changed for it." : "At the top of each plan file you change, extend the newest `## rN deltas (<date>)` section - an earlier round of this plan review added it - with each finding id and what you changed for it; add one (N one higher than the highest in that file, r1 when there is none) where it is missing."} Take the date from \`date +%F\` in your shell.
-Fix every finding below. A finding you believe is wrong: leave the plan as it is for it and explain why in deviations.
-${overruledSection(overruled, earlier)}
+Fix every finding below. A finding you believe is wrong: leave the plan as it is for it, and list it in declined with its id and your reason.
+${overruledSection(overruled)}
 FINDINGS (P0/P1 or score > ${p.config.threshold}):
 ${JSON.stringify(accepted, null, 2)}`;
 }
@@ -766,6 +780,15 @@ function reportedBackend(output) {
   return BACKEND_LINE.exec(output)?.[1]?.trim();
 }
 
+var DECLINED = {
+  type: "array",
+  description: "the findings you were sent and did not fix on purpose, each with its id exactly as given and why; [] when you fixed them all",
+  items: {
+    type: "object",
+    properties: { id: { type: "string" }, reason: { type: "string" } },
+    required: ["id", "reason"]
+  }
+};
 var FINDING = {
   type: "object",
   properties: {
@@ -811,7 +834,8 @@ var SCHEMAS = {
       gates: { type: "string", description: "exact numbers per gate" },
       commits: { type: "array", items: { type: "string" } },
       untested: { type: "string" },
-      deviations: { type: "string" }
+      deviations: { type: "string" },
+      declined: DECLINED
     },
     required: ["startSha", "headSha", "gatesGreen", "gates", "commits", "untested"]
   },
@@ -820,7 +844,8 @@ var SCHEMAS = {
     properties: {
       files: { type: "array", items: { type: "string" }, description: "absolute paths of the plan files you changed" },
       changes: { type: "string", description: "what you changed in the plan, per finding id" },
-      deviations: { type: "string", description: "findings you did not apply, and why" }
+      deviations: { type: "string", description: "anything else the user should know about your changes" },
+      declined: DECLINED
     },
     required: ["files", "changes"]
   },
@@ -1409,12 +1434,12 @@ the last repair's deviations: ${deviations}` : ""}`;
         host.log(`${name} r${round}: clean`);
         return { outcome: "clean", rounds: round, residual: kept(), unresolved: [], history };
       }
-      const declined = earlier.filter((e) => e.deviations?.trim());
-      const labels = new Map(earlier.flatMap((e) => e.sent.map((f) => [roundLabel(e.round, f), e])));
+      const declined = new Map(earlier.flatMap((e) => (e.declined ?? []).map((d) => [roundLabel(e.round, d), d.reason])));
+      const labels = new Set(earlier.flatMap((e) => e.sent.map((f) => roundLabel(e.round, f))));
       const residualLabels = new Set(earlier.flatMap((e) => (e.residual ?? []).map((f) => roundLabel(e.round, f))));
       const blockers = found.filter(isBlocker);
-      const judged = declined.length ? found : found.filter((f) => !isBlocker(f));
-      if (blockers.length && declined.length) {
+      const judged = declined.size ? found : found.filter((f) => !isBlocker(f));
+      if (blockers.length && declined.size) {
         host.log(`${name} r${round}: ${blockers.length} P0/P1 finding(s) go to the judge too - the fixer declined findings before, so a repeat of one can be scored down: ${blockers.map((f) => f.id).join(", ")}`);
       } else if (blockers.length) {
         host.log(`${name} r${round}: ${blockers.length} P0/P1 finding(s) go to the implementer without the judge: ${blockers.map((f) => f.id).join(", ")}`);
@@ -1447,8 +1472,8 @@ the last repair's deviations: ${deviations}` : ""}`;
       }
       history.push({ round, score, findings });
       host.log(`${name} r${round}: ${findings.length} finding(s), review score ${score} (informational)`);
-      const { accepted, residual } = triage(findings, config.threshold);
-      const declinedBefore = (f) => f.repeatOf ? labels.get(f.repeatOf)?.deviations?.trim() : undefined;
+      const declinedBefore = (f) => f.repeatOf !== undefined && declined.has(f.repeatOf);
+      const { accepted, residual } = triage(findings, config.threshold, declinedBefore);
       for (const f of residual.filter(declinedBefore)) {
         host.log(`${name} r${round}: ${f.id} dropped as a repeat of ${f.repeatOf}, which the fixer declined (score ${f.score}) - kept as residual`);
       }
@@ -1463,31 +1488,38 @@ the last repair's deviations: ${deviations}` : ""}`;
         ...residual.map((f) => ({ round, labels: [roundLabel(round, f), ...aliases(f)], finding: f }))
       ];
       if (residual.length) {
-        host.log(`${name} r${round}: ${residual.length} finding(s) <= ${config.threshold} and not ${residual.some(isBlocker) ? "first-time " : ""}P0/P1, not sent: ${residual.map((f) => `${f.id}(${f.score})`).join(", ")}`);
+        host.log(`${name} r${round}: ${residual.length} finding(s) <= ${config.threshold} and not P0/P1${residual.some(isBlocker) ? " (or a repeat of a declined one)" : ""}, not sent: ${residual.map((f) => `${f.id}(${f.score})`).join(", ")}`);
       }
       if (!accepted.length) {
         host.log(`${name} r${round}: nothing actionable left - stage done with ${carried.length} residual finding(s) for the user`);
         return { outcome: "residual-only", rounds: round, residual: kept(), unresolved: [], history };
       }
-      const overruled = accepted.filter(declinedBefore).map((f) => ({ id: f.id, repeatOf: f.repeatOf, round: labels.get(f.repeatOf).round, reason: f.reason }));
+      const overruled = accepted.filter(declinedBefore).map((f) => ({ id: f.id, repeatOf: f.repeatOf, reason: f.reason, said: declined.get(f.repeatOf) }));
       for (const o of overruled) {
         host.log(`${name} r${round}: the judge overruled the fixer on ${o.id} (repeat of ${o.repeatOf}, score ${accepted.find((f) => f.id === o.id).score})`);
       }
-      let deviations;
+      let fixed;
       if (subject.kind === "plan") {
-        deviations = (await fixPlan(`fix ${name} r${round}`, planFixPrompt(p, subject.files, round, accepted, overruled, earlier))).deviations;
+        fixed = await fixPlan(`fix ${name} r${round}`, planFixPrompt(p, subject.files, round, accepted, overruled));
       } else {
-        const fix = await implement(lane, `fix ${name} r${round}`, fixPrompt(p, name, round, accepted, overruled, earlier));
+        const fix = await implement(lane, `fix ${name} r${round}`, fixPrompt(p, name, round, accepted, overruled));
         if (gates)
           Object.assign(gates, { green: fix.gatesGreen, text: fix.gates, by: `the last fix (fix ${name} r${round})` });
         if (!fix.gatesGreen)
           host.log(`${name} r${round}: WARNING fixer left gates red - ${fix.gates}`);
-        deviations = fix.deviations;
+        fixed = fix;
       }
-      const said = saidSomething(deviations);
+      const said = saidSomething(fixed.deviations);
+      const { declined: refused, unknown } = declinedOf(fixed.declined, accepted);
+      if (unknown.length)
+        host.log(`${name} r${round}: the fixer declined id(s) it was not sent - ignored: ${unknown.join(", ")}`);
+      if (refused.length)
+        host.log(`${name} r${round}: the fixer declined ${refused.map((d) => d.id).join(", ")}`);
       if (said)
         history.at(-1).deviations = said;
-      earlier.push({ round, sent: accepted, ...residual.length ? { residual } : {}, ...said ? { deviations: said } : {} });
+      if (refused.length)
+        history.at(-1).declined = refused;
+      earlier.push({ round, sent: accepted, ...residual.length ? { residual } : {}, ...said ? { deviations: said } : {}, ...refused.length ? { declined: refused } : {} });
       if (subject.kind === "diff" && checks.length) {
         const gate = await checkGate(lane, name, `fix r${round}`, checks, runs, subject.stage);
         if (!gate.passed)

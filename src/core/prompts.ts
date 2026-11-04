@@ -1,27 +1,28 @@
 import type { GrannyConfig } from './config'
 import { isBlocker } from './review'
 import { shellQuote } from './shell'
-import type { Finding, StageSpec } from './types'
+import type { Declined, Finding, StageSpec } from './types'
 
 export interface EarlierRound {
   round: number
   sent: Finding[]
   residual?: Finding[]
   deviations?: string
+  declined?: Declined[]
 }
 
 export interface Overruled {
   id: string
   repeatOf: string
-  round: number
   reason?: string
+  said: string
 }
 
 export const roundLabel = (round: number, f: Pick<Finding, 'id'>) => `r${round}/${f.id}`
 
 const judgeRouting = (p: PromptContext, findings: Finding[]): string =>
   findings.some(isBlocker)
-    ? `P0/P1 findings are in this list only because a fixer declined findings in an earlier round: score them like the rest. A P0/P1 without repeatOf goes to the implementer whatever its score; a repeated one scored ${p.config.threshold} or lower does not.`
+    ? `P0/P1 findings are in this list only because a fixer declined findings in an earlier round: score them like the rest. A P0/P1 goes to the implementer whatever its score, unless its repeatOf names a finding the fixer declined and you score it ${p.config.threshold} or lower.`
     : 'P0/P1 findings are not in this list: they go to the implementer without a score.'
 
 function judgeHistory(earlier: EarlierRound[]): string {
@@ -30,28 +31,26 @@ function judgeHistory(earlier: EarlierRound[]): string {
     JSON.stringify(findings.map(f => ({ label: roundLabel(round, f), severity: f.severity, file: f.file, line: f.line, title: f.title, detail: f.detail })), null, 2)
   const rounds = earlier.map(e => {
     const kept = e.residual?.length ? `\nRound ${e.round} kept as residual (not sent to the fixer):\n${labelled(e.round, e.residual)}` : ''
+    const declined = e.declined?.length ? e.declined.map(d => `\n- ${roundLabel(e.round, d)}: ${d.reason || 'no reason given'}`).join('') : ' none - it fixed all of them'
+    const notes = e.deviations?.trim() ? `\nThe fixer's other notes: ${e.deviations.trim()}` : ''
     return `Round ${e.round} sent to the fixer:
 ${labelled(e.round, e.sent)}
-The fixer's deviations (findings it did not apply, and why): ${e.deviations?.trim() || 'none - it applied all of them'}${kept}`
+The findings the fixer declined (did not fix), and why:${declined}${notes}${kept}`
   })
   return `
-EARLIER ROUNDS of this review - the findings already sent to the fixer, under round-qualified labels, the fixer's reasons for not applying some, and the findings kept as residual for the user:
+EARLIER ROUNDS of this review - the findings already sent to the fixer, under round-qualified labels, the ones the fixer declined with its reasons, and the findings kept as residual for the user:
 ${rounds.join('\n\n')}
 
 When a finding below repeats one of those earlier findings, set its repeatOf to that label. A repeat of a finding the fixer declined with a convincing reason that the code backs scores low - cite the label and the fixer's reason in your reason. When the fixer's reason is wrong, score the repeat on its merits (high when it is real) and say in reason why the fixer's reason does not hold. A repeat of a finding the fixer applied: check the fix in the code and score what is still wrong. A repeat of a residual finding: the fixer never saw it - score it on its merits.
 `
 }
 
-function overruledSection(overruled: Overruled[], earlier: EarlierRound[]): string {
+function overruledSection(overruled: Overruled[]): string {
   if (!overruled.length) return ''
-  const rounds = new Set(overruled.map(o => o.round))
-  const said = earlier.filter(e => rounds.has(e.round) && e.deviations?.trim())
   return `
 OVERRULED - you declined these findings in an earlier round; the judge checked your reason against the code and disagreed:
-${overruled.map(o => `- ${o.id} (repeat of ${o.repeatOf}): ${o.reason ?? 'no reason given'}`).join('\n')}
-What you said then:
-${said.map(e => `- round ${e.round}: ${e.deviations!.trim()}`).join('\n')}
-Fix them. If you still decline one, answer the judge's reason with new evidence from the code in deviations - do not repeat your earlier explanation.
+${overruled.map(o => `- ${o.id} (repeat of ${o.repeatOf}): ${o.reason ?? 'no reason given'}\n  you said: ${o.said || 'no reason given'}`).join('\n')}
+Fix them. If you still decline one, list it in declined again and answer the judge's reason with new evidence from the code - do not repeat your earlier explanation.
 `
 }
 
@@ -133,12 +132,12 @@ ${stage.task ?? ''}
 Commit per logical step. Keep ${pr} (git-excluded; create the directory if missing) current with sections: Title, Summary, Changes (table), Test plan (real numbers), Revised in stage N, Review fixes, Untested. Return startSha = HEAD before your first change.`
 }
 
-export function fixPrompt(p: PromptContext, name: string, round: number, accepted: Finding[], overruled: Overruled[] = [], earlier: EarlierRound[] = []): string {
+export function fixPrompt(p: PromptContext, name: string, round: number, accepted: Finding[], overruled: Overruled[] = []): string {
   return `${common(p)}
 
 You are the IMPLEMENTER, fixing review round ${round} of stage "${name}".
-Apply the review findings on top of the current branch state (read \`git log --oneline ${shellQuote(p.base)}..HEAD\` and the code first). Fix every finding below, red-green where it changes behaviour, keep the gates green, commit (\`fix(...)\`), and add each finding id with what you did to the "Review fixes" section of ${prBodyOf(p)}. A finding you believe is wrong: do not fix it, explain why in deviations.
-${overruledSection(overruled, earlier)}
+Apply the review findings on top of the current branch state (read \`git log --oneline ${shellQuote(p.base)}..HEAD\` and the code first). Fix every finding below, red-green where it changes behaviour, keep the gates green, commit (\`fix(...)\`), and add each finding id with what you did to the "Review fixes" section of ${prBodyOf(p)}. A finding you believe is wrong: do not fix it, and list it in declined with its id and your reason.
+${overruledSection(overruled)}
 FINDINGS (P0/P1 or score > ${p.config.threshold}):
 ${JSON.stringify(accepted, null, 2)}`
 }
@@ -344,7 +343,7 @@ REVIEW:
 ${JSON.stringify(findings, null, 2)}`
 }
 
-export function planFixPrompt(p: PromptContext, plans: string[], round: number, accepted: Finding[], overruled: Overruled[] = [], earlier: EarlierRound[] = []): string {
+export function planFixPrompt(p: PromptContext, plans: string[], round: number, accepted: Finding[], overruled: Overruled[] = []): string {
   return `${common(p)}
 
 You are the IMPLEMENTER, fixing the plan after plan review round ${round}. Implementation has not started: change only the plan.
@@ -354,8 +353,8 @@ ${
       ? 'At the top of each plan file you change, add a section `## rN deltas (<date>)` - N one higher than the highest rN deltas section already in that file, r1 when there is none - listing each finding id and what you changed for it.'
       : 'At the top of each plan file you change, extend the newest `## rN deltas (<date>)` section - an earlier round of this plan review added it - with each finding id and what you changed for it; add one (N one higher than the highest in that file, r1 when there is none) where it is missing.'
   } Take the date from \`date +%F\` in your shell.
-Fix every finding below. A finding you believe is wrong: leave the plan as it is for it and explain why in deviations.
-${overruledSection(overruled, earlier)}
+Fix every finding below. A finding you believe is wrong: leave the plan as it is for it, and list it in declined with its id and your reason.
+${overruledSection(overruled)}
 FINDINGS (P0/P1 or score > ${p.config.threshold}):
 ${JSON.stringify(accepted, null, 2)}`
 }
