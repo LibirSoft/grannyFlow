@@ -343,7 +343,8 @@ describe('runGranny', () => {
 
     it('is clean without an extraction when it says No findings., also inside a Codex plugin render', async () => {
       const plugin = '[granny] reviewer: codex-plugin adversarial-review (/c)\n# Codex Adversarial Review\n\nTarget: branch diff against deadbee1\nVerdict: approve\n\nLooks right.\n\nNo material findings.\n'
-      for (const output of ['No findings.', '  no findings  ', plugin]) {
+      const rendered = `[granny] reviewer: codex-plugin adversarial-review (/c)\n${readFileSync(join(FIXTURES, 'codex-plugin-adversarial-review-clean.md'), 'utf8')}`
+      for (const output of ['No findings.', '  no findings  ', plugin, rendered]) {
         const f = fakeHost({ reviews: [output] })
         const r = await runGranny(f.host, input())
         expect(r.stages[0]).toMatchObject({ outcome: 'clean', rounds: 1 })
@@ -361,8 +362,33 @@ describe('runGranny', () => {
       const extract = f.calls.find(c => c.kind === 'findings')!
       expect(extract.label).toBe('extract core r1 codex')
       expect(extract.prompt).toContain(prose)
-      expect(f.logs).toContain('core r1 codex: no finding in the expected form and no "No findings." - asking an agent to extract findings')
+      expect(f.logs).toContain('core r1 codex: no finding in the expected form and not just "No findings." - asking an agent to extract findings')
       expect(r.stages[0]).toMatchObject({ outcome: 'clean', rounds: 2 })
+      expect(r.stages[0]!.history[0]!.findings.map(x => x.title)).toEqual(['Locale missing from the cache key'])
+    })
+
+    it('extracts a prose finding that another section of the output follows with No findings.', async () => {
+      const sections = '## Correctness\n**P1** Null deref in src/a.ts:3 - crashes on empty input.\n## Security\nNo findings.\n'
+      const f = fakeHost({
+        reviews: [sections, 'No findings.'],
+        override: req => (req.kind === 'findings' ? { findings: [{ id: 'F1', severity: 'P1', file: 'src/a.ts', line: 3, title: 'Null deref', detail: 'crashes on empty input' }] } : undefined),
+      })
+      const r = await runGranny(f.host, input())
+      const extract = f.calls.find(c => c.kind === 'findings')!
+      expect(extract.label).toBe('extract core r1 codex')
+      expect(extract.prompt).toContain(sections)
+      expect(extract.prompt).toContain('has no finding bullets (`- [P1] Title — path:line`) and is not just "No findings.", so read its prose')
+      expect(f.logs).toContain('core r1 codex: no finding in the expected form and not just "No findings." - asking an agent to extract findings')
+      expect(f.calls.some(c => c.label === 'fix core r1')).toBe(true)
+      expect(r.stages[0]).toMatchObject({ outcome: 'clean', rounds: 2 })
+      expect(r.stages[0]!.history[0]!.findings.map(x => [x.severity, x.title])).toEqual([['P1', 'Null deref']])
+    })
+
+    it('extracts from a needs-attention Codex plugin render even when it says No material findings.', async () => {
+      const render = '# Codex Adversarial Review\n\nTarget: branch diff against deadbee1\nVerdict: needs-attention\n\nThe cache key in src/a.ts:3 ignores the locale.\n\nNo material findings.\n'
+      const f = fakeHost({ reviews: [render, 'No findings.'], scores: [{ 'codex-F1': 90 }], override: req => (req.kind === 'findings' ? extracted('Locale missing from the cache key') : undefined) })
+      const r = await runGranny(f.host, input())
+      expect(f.calls.filter(c => c.kind === 'findings').map(c => c.label)).toEqual(['extract core r1 codex'])
       expect(r.stages[0]!.history[0]!.findings.map(x => x.title)).toEqual(['Locale missing from the cache key'])
     })
 
@@ -375,7 +401,8 @@ describe('runGranny', () => {
 
     it("keeps a native Codex review that says in its own words it found nothing clean, through the extraction's confirmation", async () => {
       const native = '# Codex Review\n\nTarget: branch diff against deadbee1\n\nThe change threads the locale through the cache key and updates its tests; I did not find any discrete, actionable issues.\n'
-      for (const output of [native, 'The patch looks correct. No issues were found in the changed code.']) {
+      const real = `[granny] reviewer: codex-plugin review (/c)\n${readFileSync(join(FIXTURES, 'codex-plugin-review-clean.md'), 'utf8')}`
+      for (const output of [native, real, 'The patch looks correct. No issues were found in the changed code.']) {
         const f = fakeHost({ reviews: [output], override: req => (req.kind === 'findings' ? { findings: [], clean: true } : undefined) })
         const r = await runGranny(f.host, input())
         expect(r.stages[0]).toMatchObject({ outcome: 'clean', rounds: 1 })
@@ -390,7 +417,7 @@ describe('runGranny', () => {
       const r = await runGranny(f.host, input())
       expect(r.stages[0]).toMatchObject({ outcome: 'review-failed', rounds: 1 })
       expect(f.calls.filter(c => c.kind === 'findings')).toHaveLength(2)
-      expect(r.stages[0]!.note).toContain('reviewer output had no findings in the expected form and did not say No findings')
+      expect(r.stages[0]!.note).toContain('reviewer output had no findings in the expected form and was not just No findings, and an extraction found none in it')
       expect(r.stages[0]!.note).toContain('French users')
       expect(f.calls.some(c => c.kind === 'score' || c.label.startsWith('fix'))).toBe(false)
     })

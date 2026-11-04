@@ -349,7 +349,47 @@ function toFinding(severity, paren, rest, n, repo) {
   return finding;
 }
 var NO_FINDINGS = /^no (?:material )?findings\.?$/i;
-var saysNoFindings = (text) => text.split(/\r\n?|\n/).some((line) => NO_FINDINGS.test(line.trim()));
+var BACKEND_LINE = /^\[granny\] reviewer: /;
+var PLUGIN_HEADING = /^# Codex (?:Adversarial )?Review$/;
+var PLUGIN_LIST = /^(?:Next steps|Reasoning):$/;
+function approvedRender(lines) {
+  if (lines[0] !== "Verdict: approve")
+    return;
+  let end = lines.length;
+  for (;; ) {
+    while (end > 1 && !lines[end - 1])
+      end--;
+    let start = end;
+    while (start > 1 && lines[start - 1].startsWith("- "))
+      start--;
+    if (start === end || !PLUGIN_LIST.test(lines[start - 1] ?? "") || lines[start - 2] !== "")
+      break;
+    end = start - 1;
+  }
+  const sentence = lines[end - 1] ?? "";
+  if (end < 3 || !NO_FINDINGS.test(sentence) || lines[end - 2] !== "")
+    return;
+  const summary = lines.slice(1, end - 2);
+  while (summary[0] === "")
+    summary.shift();
+  return summary.includes("") ? undefined : [sentence];
+}
+function saysNoFindings(text) {
+  let lines = text.split(/\r\n?|\n/).map((line) => line.trim());
+  while (lines.length && (!lines[0] || BACKEND_LINE.test(lines[0])))
+    lines.shift();
+  if (PLUGIN_HEADING.test(lines[0] ?? "")) {
+    let target = 1;
+    while (target < lines.length && !lines[target])
+      target++;
+    if (!lines[target]?.startsWith("Target: "))
+      return false;
+    lines = lines.slice(target + 1);
+    lines = approvedRender(lines) ?? lines;
+  }
+  const left = lines.filter(Boolean);
+  return left.length === 1 && NO_FINDINGS.test(left[0]);
+}
 function reviewFailure(text) {
   return FAILED_RENDER.exec(text)?.[0];
 }
@@ -668,7 +708,7 @@ ${planReviewAsks(p, plans).slice(0, 2).join(`
 Return findings with id (F1, F2, ...), severity (P0 critical / P1 must fix before implementing / P2 should fix / P3 nit), file (the absolute path of the plan file), line (the line in the plan file), title and a concrete detail. Zero findings means the plan is clean.`;
 }
 function extractPrompt(name, output, short) {
-  const count = short === "unmarked" ? '\nThe output has no finding bullets (`- [P1] Title — path:line`) and does not say "No findings.", so read its prose: return each problem it reports as a finding. When it reports none, return no findings and set clean to true only if the output is a finished review that clearly says the changes have no problems - an error, a crash, a question, a refusal, a truncated or empty output, or anything else that is not a finished review is not clean.' : short ? `
+  const count = short === "unmarked" ? '\nThe output has no finding bullets (`- [P1] Title — path:line`) and is not just "No findings.", so read its prose: return each problem it reports as a finding. When it reports none, return no findings and set clean to true only if the output is a finished review that clearly says the changes have no problems - an error, a crash, a question, a refusal, a truncated or empty output, or anything else that is not a finished review is not clean.' : short ? `
 The output has ${short.markers} finding marker(s) (\`- [P0]\` ... \`- [P3]\` bullets); an earlier extraction returned ${short.got}. Return all ${short.markers}.` : "";
   return `Below is the raw output of an automated code review for stage "${name}". Do not run anything and do not judge the findings.
 Extract every finding it reports - each one, none merged, none dropped, none invented - with id (F1, F2, ...), severity exactly as written (e.g. P1), file, line, title and the full detail text.${count}
@@ -726,7 +766,7 @@ Resolve every conflict so both sides' intent survives (read \`git log --oneline 
 }
 
 var SAID = "[granny] reviewer: ";
-var BACKEND_LINE = /^\[granny\] reviewer: (.*)$/m;
+var BACKEND_LINE2 = /^\[granny\] reviewer: (.*)$/m;
 var PLUGINS = 'codex_plugins="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/plugins/cache/openai-codex/codex"';
 var COMPANION = "scripts/codex-companion.mjs";
 var WAIT_SECONDS = 540;
@@ -804,7 +844,7 @@ function planReviewScript(rv, c, host, base, stem, prompt) {
   });
 }
 function reportedBackend(output) {
-  return BACKEND_LINE.exec(output)?.[1]?.trim();
+  return BACKEND_LINE2.exec(output)?.[1]?.trim();
 }
 
 var DECLINED = {
@@ -1413,12 +1453,12 @@ the last repair's deviations: ${deviations}` : ""}`;
       return Array.isArray(r?.findings) ? r.findings : [];
     };
     if (parsed.markers === 0 && !saysNoFindings(output)) {
-      host.log(`${tag}: no finding in the expected form and no "No findings." - asking an agent to extract findings`);
+      host.log(`${tag}: no finding in the expected form and not just "No findings." - asking an agent to extract findings`);
       const r = await extractions(`extract ${tag}`, extractPrompt(name, output, "unmarked"));
       const found = Array.isArray(r?.findings) ? r.findings : [];
       if (found.length || r?.clean === true)
         return { ran, findings: found };
-      return { ran: false, findings: [], note: `reviewer output had no findings in the expected form and did not say No findings, and an extraction found none in it: ${output.slice(-2000)}` };
+      return { ran: false, findings: [], note: `reviewer output had no findings in the expected form and was not just No findings, and an extraction found none in it: ${output.slice(-2000)}` };
     }
     if (parsed.markers <= parsed.findings.length)
       return { ran, findings: parsed.findings };

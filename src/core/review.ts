@@ -60,8 +60,43 @@ function toFinding(severity: string, paren: boolean, rest: string, n: number, re
 }
 
 const NO_FINDINGS = /^no (?:material )?findings\.?$/i
+const BACKEND_LINE = /^\[granny\] reviewer: /
+const PLUGIN_HEADING = /^# Codex (?:Adversarial )?Review$/
+const PLUGIN_LIST = /^(?:Next steps|Reasoning):$/
 
-export const saysNoFindings = (text: string): boolean => text.split(/\r\n?|\n/).some(line => NO_FINDINGS.test(line.trim()))
+// The Codex plugin's structured render prints `No material findings.` because its findings array is empty; the
+// one-paragraph summary before it and the `Next steps:` / `Reasoning:` bullet lists after it are part of its frame.
+function approvedRender(lines: string[]): string[] | undefined {
+  if (lines[0] !== 'Verdict: approve') return undefined
+  let end = lines.length
+  for (;;) {
+    while (end > 1 && !lines[end - 1]) end--
+    let start = end
+    while (start > 1 && lines[start - 1]!.startsWith('- ')) start--
+    if (start === end || !PLUGIN_LIST.test(lines[start - 1] ?? '') || lines[start - 2] !== '') break
+    end = start - 1
+  }
+  const sentence = lines[end - 1] ?? ''
+  if (end < 3 || !NO_FINDINGS.test(sentence) || lines[end - 2] !== '') return undefined
+  const summary = lines.slice(1, end - 2)
+  while (summary[0] === '') summary.shift()
+  return summary.includes('') ? undefined : [sentence]
+}
+
+/** A review without finding bullets is clean only when, without a known wrapper, it is the no-findings sentence alone. */
+export function saysNoFindings(text: string): boolean {
+  let lines = text.split(/\r\n?|\n/).map(line => line.trim())
+  while (lines.length && (!lines[0] || BACKEND_LINE.test(lines[0]))) lines.shift()
+  if (PLUGIN_HEADING.test(lines[0] ?? '')) {
+    let target = 1
+    while (target < lines.length && !lines[target]) target++
+    if (!lines[target]?.startsWith('Target: ')) return false
+    lines = lines.slice(target + 1)
+    lines = approvedRender(lines) ?? lines
+  }
+  const left = lines.filter(Boolean)
+  return left.length === 1 && NO_FINDINGS.test(left[0]!)
+}
 
 export function reviewFailure(text: string): string | undefined {
   return FAILED_RENDER.exec(text)?.[0]

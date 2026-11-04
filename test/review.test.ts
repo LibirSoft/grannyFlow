@@ -53,12 +53,48 @@ Some closing words.`
     expect(parseCodexReview('I did not find any issues with this change.')).toEqual({ findings: [], markers: 0 })
   })
 
-  it('recognises a review that says it has no findings, on a line of its own', () => {
-    for (const text of ['No findings.', 'no findings', '  No Findings.  \n', '# Codex Review\n\nTarget: x\nVerdict: approve\n\nFine.\n\nNo material findings.\n', '[granny] reviewer: codex CLI\nNo findings.']) {
+  it('recognises a review that is only the no-findings sentence, inside a known wrapper', () => {
+    const clean = [
+      'No findings.',
+      'no findings',
+      '  No Findings.  \n',
+      'No material findings.',
+      '# Codex Review\n\nTarget: x\nVerdict: approve\n\nFine.\n\nNo material findings.\n',
+      '[granny] reviewer: codex CLI\nNo findings.',
+      '[granny] reviewer: codex-plugin review (/c)\n# Codex Review\n\nTarget: branch diff against abc\n\nNo findings.\n',
+      fixture('codex-plugin-adversarial-review-clean.md'),
+      `[granny] reviewer: codex-plugin adversarial-review (/c)\n${fixture('codex-plugin-adversarial-review-clean.md')}`,
+      '# Codex Adversarial Review\n\nTarget: x\nVerdict: approve\n\nFine.\n\nNo material findings.\n\nNext steps:\n- Ship it.\n\nReasoning:\n- Read the diff.\n',
+      '# Codex Adversarial Review\n\nTarget: x\nVerdict: approve\n\nNo material findings.\n',
+    ]
+    for (const text of clean) {
       expect(saysNoFindings(text)).toBe(true)
+      expect(saysNoFindings(crlf(text))).toBe(true)
     }
-    for (const text of ['', 'I did not find any issues with this change.', 'No findings. But the cache key is wrong.', 'Findings: none worth a fix']) {
+  })
+
+  it('does not read output with anything besides the sentence and its wrapper as clean', () => {
+    const prose = '## Correctness\n**P1** Null deref in src/a.ts:3 - crashes on empty input.\n## Security\nNo findings.\n'
+    const notClean = [
+      '',
+      'I did not find any issues with this change.',
+      'No findings. But the cache key is wrong.',
+      'Findings: none worth a fix',
+      prose,
+      'No findings.\nBut the cache key in src/a.ts:3 ignores the locale.',
+      'The cache key in src/a.ts:3 ignores the locale.\n\nNo findings.',
+      '[granny] reviewer: codex CLI\nThe cache key ignores the locale.\nNo findings.',
+      '# Codex Review\n\nTarget: x\n\nThe cache key ignores the locale.\n\nNo findings.\n',
+      '# Notes\n\nNo findings.',
+      fixture('codex-plugin-review-clean.md'),
+      '# Codex Adversarial Review\n\nTarget: x\nVerdict: needs-attention\n\nThe cache key in src/a.ts:3 ignores the locale.\n\nNo material findings.\n',
+      '# Codex Adversarial Review\n\nTarget: x\nVerdict: approve\n\nFine.\n\nBut src/a.ts:3 drops the locale.\n\nNo material findings.\n',
+      '# Codex Adversarial Review\n\nTarget: x\nVerdict: approve\n\nFine.\n\nNo material findings.\n\nThe cache key in src/a.ts:3 ignores the locale.\n',
+      '# Codex Adversarial Review\n\nTarget: x\nVerdict: approve\n\nFine.\n\nNo material findings.\n\nNext steps:\n- Ship it.\nAlso src/a.ts:3 drops the locale.\n',
+    ]
+    for (const text of notClean) {
       expect(saysNoFindings(text)).toBe(false)
+      expect(saysNoFindings(crlf(text))).toBe(false)
     }
   })
 
