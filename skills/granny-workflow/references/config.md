@@ -319,6 +319,17 @@ With the defaults, these hold:
 
 `"alwaysFix": []` leaves only `threshold`: a `critical`/`rare`/`large` finding (75) is then fixed, a `major`/`rare`/`small` one (65) is not.
 
+`granny setup` ([setup.md](setup.md)) offers three presets for `threshold`: strict `55`, normal `70` (the default) and relaxed `85`. A lower threshold fixes more: at `55` a `moderate`/`common`/`large` finding (60) and a `moderate`/`edge`/`trivial` one (70) are fixed too; at `85` a `moderate` finding is fixed only when `common` and `trivial` (90). `alwaysFix` is the same in all three.
+
+Four findings from a real run, which an earlier 0-100 judge score all left under the bar - with the classes, the first three are fixed:
+
+| finding | old score | classes | priority | now |
+|---|---|---|---|---|
+| a late save response re-binds the editor to another post, so the next save overwrites it | 55, then 68 | critical · edge · small | 95 | **fix** (rule 6) |
+| an expired session leaves Save dead until a reload | 68, then 62 | major · edge · small | 80 | **fix** (rule 6) |
+| a YAML merge drops the inherited `published: false`, so a draft can go public | 55 | critical · rare · trivial | 100 | **fix** (rule 6) |
+| a countdown reads "in 0 months" at exactly 30 days | 52 | minor · edge · trivial | 40 | residual (rule 8) |
+
 ### The decision ledger and the ratchet
 
 Every finding a round decides - sent to the implementer or kept residual - goes into a ledger with its classification, priority and `decision`, under its round-qualified label, with the fixer's `declined` reason when it declined it. Later rounds of the same review loop see it as EARLIER DECISIONS ([Judge routing](#judge-routing), step 3). Each stage review also records its rounds into its repo's ledger, and the final review of that repo shows them to its judge from round 1 on, in stage order, labelled `s<k>/r<n>/<id>`; a stage review's last round is in it too, also when it only kept findings residual. The plan review keeps its own ledger, and one stage review never sees another's. A stage skipped on a `fromStage` resume recorded nothing, so the final review of a resumed run sees only the stages that ran in it.

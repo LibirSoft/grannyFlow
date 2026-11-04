@@ -50,8 +50,8 @@ describe('skill docs', () => {
     expect(() => resolveConfig([{ $schema: './granny.schema.json' }])).not.toThrow()
   })
 
-  it('shows a Codex, Opus and GLM reviewer list in the README for opencode and for Claude Code', () => {
-    const configs = jsonBlocks(readRoot('README.md')).map(b => JSON.parse(b))
+  it('shows a Codex, Opus and GLM reviewer list in the config reference for opencode and for Claude Code', () => {
+    const configs = jsonBlocks(read('references/config.md')).map(b => JSON.parse(b))
     const glm = (c: any) => c.reviewers?.find((r: any) => r.name === 'glm')
     const trio = configs.filter(c => ['codex', 'opus', 'glm'].every(n => c.reviewers?.some((r: any) => r.name === n)))
     expect(trio.some(c => glm(c).engine === 'agent' && /^[\w.-]+\/[\w.-]+$/.test(glm(c).model?.opencode))).toBe(true)
@@ -61,7 +61,7 @@ describe('skill docs', () => {
   it('has a SKILL.md with the frontmatter every host reads', () => {
     const md = read('SKILL.md')
     expect(md).toMatch(/^---\nname: granny-workflow\ndescription: .{50,1024}\n---\n/)
-    for (const ref of ['references/claude-code.md', 'references/opencode.md', 'references/cursor.md', 'references/config.md']) {
+    for (const ref of ['references/claude-code.md', 'references/opencode.md', 'references/cursor.md', 'references/config.md', 'references/setup.md']) {
       expect(md).toContain(`(${ref}`)
       expect(() => read(ref)).not.toThrow()
     }
@@ -105,6 +105,20 @@ describe('skill docs', () => {
     expect(read('references/opencode.md')).toContain('granny_run({ repo, branch, base, context, plan?, stages')
     expect(read('references/cursor.md')).toContain('## The plan review')
     expect(readRoot('README.md')).toMatch(/^\| `planReview` \| `false` \|/m)
+  })
+
+  it('documents granny setup with the same threshold presets in the README, setup.md and the config reference', () => {
+    expect(read('SKILL.md')).toContain('granny setup')
+    expect(read('engines/opencode/agents/granny.md')).toContain('granny setup')
+    expect(readRoot('README.md').indexOf('## Install')).toBeLessThan(readRoot('README.md').indexOf('## Setup'))
+    expect(readRoot('README.md')).toContain('> granny setup')
+    const presets = { strict: 55, normal: 70, relaxed: 85 }
+    expect(presets.normal).toBe(DEFAULT_CONFIG.threshold)
+    for (const [name, threshold] of Object.entries(presets)) {
+      expect(readRoot('README.md')).toMatch(new RegExp(`^ *\\| ${name} \\| ${threshold} \\|`, 'm'))
+      expect(read('references/setup.md')).toMatch(new RegExp(`^ *\\| ${name}( \\(default\\))? \\| \`${threshold}\` \\|`, 'm'))
+      expect(read('references/config.md')).toContain(`${name} \`${threshold}\``)
+    }
   })
 
   it('has the Cursor protocol route and triage findings in the engine order', () => {

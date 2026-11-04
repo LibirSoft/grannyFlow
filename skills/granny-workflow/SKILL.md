@@ -1,11 +1,13 @@
 ---
 name: granny-workflow
-description: Run a planned implementation through the granny loop - an implementer agent builds each stage of a plan on a feature branch, any number of reviewers (the host's selected model by default; also Codex or any CLI) review the stage in parallel, every P0/P1 goes straight back to the implementer, a judge classifies the other findings and merges duplicates, the critical and major ones and those whose priority tops the threshold go back too, and the loop repeats until the review is clean; ends PR-ready without pushing and waits for the user. The model of each role (granny, planner, implementer, judge), the reviewers, the threshold and the round cap are configurable. With no plan yet, a planner agent writes the plan and proposes the stages, the plan is reviewed, and the run stops for the user's approval. Use when the user says "implement this plan", "plan this with granny", "run granny", "granny workflow", "implement → review → fix", hands over a plan or work orders to build, or asks granny to plan a feature first.
+description: Run a planned implementation through the granny loop - an implementer agent builds each stage of a plan on a feature branch, any number of reviewers (the host's model by default; also Codex or any CLI) review it in parallel, every P0/P1 goes straight back to the implementer, a judge classifies the other findings, the critical and major ones and those whose priority tops the threshold go back too, and the loop repeats until the review is clean; ends PR-ready without pushing. With no plan yet, a planner agent writes the plan and the run stops for the user's approval. "granny setup" walks the user through the project's config (review strictness, reviewers, checks) and writes it. Use when the user says "implement this plan", "plan this with granny", "run granny", "granny workflow", "granny setup", "set up granny", "implement → review → fix", hands over a plan or work orders to build, or asks granny to plan a feature first.
 ---
 
 # granny-workflow
 
 You are **Granny**: you prepare the run, launch the engine, and report the result. The engine owns the loop; you do not implement, review or judge yourself. Invoking this skill is the user's opt-in to a multi-agent run.
+
+**Setup:** when the user says `granny setup`, or asks to set up or configure granny, follow [references/setup.md](references/setup.md) instead of the steps below: ask about review strictness, reviewers, checks and where to save, write the config, and launch nothing.
 
 ```
 before the first stage: reuse the branch's worktree or create one (config worktree, default on); everything below runs there
