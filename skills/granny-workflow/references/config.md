@@ -199,7 +199,7 @@ The fix step is the implementer with write access (label `fix plan review r<n>`)
 | `auto` (default) | on Claude Code: the Codex plugin when its companion script is installed and `node` is on `PATH`, otherwise the Codex CLI. On opencode: always the Codex CLI |
 | `codex-plugin` | OpenAI's Codex plugin for Claude Code, on either host. When the companion script is missing, or `node` is not on `PATH`, the reviewer fails with a note saying so - it never falls back to the CLI |
 | `codex` | the Codex CLI: `codex exec review` |
-| `agent` | a read-only host subagent reviews the diff with the "Reviewer - agent engine" prompt, on this entry's `model` and `effort`. On Claude Code that means Claude models only (`opus`, `sonnet`, `haiku`, a Claude model ID); to have GLM or another provider review there, use engine `command` with a CLI that reaches it, such as `opencode run`. On opencode, any `provider/model` the server has |
+| `agent` | a host subagent told to stay read-only ([Read-only roles](#read-only-roles)) reviews the diff with the "Reviewer - agent engine" prompt, on this entry's `model` and `effort`. On Claude Code that means Claude models only (`opus`, `sonnet`, `haiku`, a Claude model ID); to have GLM or another provider review there, use engine `command` with a CLI that reaches it, such as `opencode run`. On opencode, any `provider/model` the server has |
 | `command` | your command, any CLI - see [Command reviewers](#command-reviewers) |
 
 Codex, Opus and GLM reviewing every stage. On opencode the GLM reviewer is an agent on a provider model:
@@ -326,6 +326,15 @@ With `{prompt}`, any CLI that answers a prompt can review:
 With `{base}`, the command reviews the diff itself, the way `codex exec review --base {base} -o {out}` does - for example `my-review --since {base} --out {out}`.
 
 A command reviewer runs with the permissions its CLI grants. The prompt tells it not to edit, stage or commit, but granny does not enforce that; use the CLI's read-only mode or agent where it has one.
+
+### Read-only roles
+
+`agent` reviewers (the default reviewer is one), the judge, the extraction agent and, on Claude Code, the helper agents that start, wait for and read a review command are read-only roles: they must not edit, create, stage or commit a file. How that holds depends on the host:
+
+- On Claude Code it is only prompt text. granny passes no permission setting to the Workflow `agent()` call; it puts `READ-ONLY ROLE: do not edit, create, stage or commit any file.` at the top of the role's prompt, and the subagent still has its write tools and can ignore that line.
+- On opencode the role's child session gets permission rules that deny edits, `git add` and `git commit` ([opencode.md](opencode.md#models-and-permissions)).
+
+On Claude Code, configure `checks` as the backstop; they catch the damage after the fact, they do not prevent it. Every check gate reads `git status --porcelain` before it runs the checks, so a file a read-only role left changed shows up at the next gate that runs - after a fix round, or the `final` gate - and goes to the implementer as a commit prompt (or fails the gate when no repair is left) instead of being checked or reviewed unseen. Every check run records the HEAD it ran on (`checks[].head`), so a commit a reviewer or the judge made after a stage's last gate makes the `final` gate of a one-stage repo run the checks again instead of reusing that result, and the `pr-ready` gate runs them once more when HEAD moved after the final checks ([Checks](#checks)). Without checks, the status read after the implementer and after every fix still names uncommitted work in the note, but nothing reruns on a commit a read-only role made.
 
 ### Reading the output
 
