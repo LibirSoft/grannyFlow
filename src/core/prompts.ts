@@ -408,6 +408,13 @@ REVIEW:
 ${JSON.stringify(findings, null, 2)}`
 }
 
+/** Appended to the judge prompt for its one retry: null when the first answer was empty or did not parse. */
+export function judgeRetryNote(problems: Array<{ id: string; why: string }> | null): string {
+  return problems
+    ? `RETRY: your last answer left these findings unclassified. Answer again for every finding, with every field set to one of the allowed values and the evidence filled in:\n${problems.map(x => `- ${x.id}: ${x.why}`).join('\n')}`
+    : 'RETRY: your last answer was empty or did not match the schema. Answer again for every finding, with every field set to one of the allowed values and the evidence filled in.'
+}
+
 export function planJudgePrompt(p: PromptContext, plans: string[], findings: Finding[], earlier: EarlierRound[] = []): string {
   return `You are the JUDGE classifying the findings of a plan review. Repo ${p.repo}, branch ${p.branch}, plan ${plans.join(', ')}. Implementation has not started. Do not edit anything.
 ${p.context ? 'Design context:\n' + p.context + '\n' : ''}

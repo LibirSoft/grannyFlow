@@ -78,7 +78,7 @@ describe('claude-code workflow.js', () => {
     expect(runner.opts).toMatchObject({ model: 'haiku', effort: 'low' })
     expect(calls.find(c => c.opts.label === 'pr-ready check')!.opts.model).toBeUndefined()
     const judge = calls.find(c => c.opts.label === 'judge one r1')!
-    expect(judge.opts.model).toBe('sonnet')
+    expect(judge.opts.model).toBe('haiku')
     expect(calls.some(c => c.opts.label === 'fix one r1' && c.prompt.includes('Off by one'))).toBe(true)
     expect(logs.some(l => l.includes('review score 80'))).toBe(true)
   })

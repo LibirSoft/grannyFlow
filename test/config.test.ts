@@ -10,12 +10,12 @@ describe('resolveConfig', () => {
 
   it('applies layers in order, merging roles per key and replacing arrays', () => {
     const c = resolveConfig([
-      { threshold: 60, roles: { judge: { model: 'haiku' }, implementer: { model: 'opus', effort: 'high' } }, gates: ['bun test'] },
+      { threshold: 60, roles: { judge: { model: 'opus' }, implementer: { model: 'opus', effort: 'high' } }, gates: ['bun test'] },
       { threshold: 75, roles: { implementer: { effort: 'max' } }, rules: [] },
     ])
     expect(c.threshold).toBe(75)
     expect(c.roles.implementer).toEqual({ model: 'opus', effort: 'max' })
-    expect(c.roles.judge).toEqual({ model: 'haiku' })
+    expect(c.roles.judge).toEqual({ model: 'opus' })
     expect(c.reviewers).toEqual([{ name: 'reviewer', engine: 'agent' }])
     expect(c.gates).toEqual(['bun test'])
     expect(c.rules).toEqual([])
@@ -31,6 +31,14 @@ describe('resolveConfig', () => {
     expect(resolveConfig([{ roles: { helper: { effort: null } } }]).roles.helper).toEqual({ model: { 'claude-code': 'haiku' } })
     expect(() => resolveConfig([{ roles: { helper: { modle: 'haiku' } } }])).toThrow('unknown key "roles.helper.modle"')
     expect(() => resolveConfig([{ roles: { helper: { effort: 'tiny' } } }])).toThrow('roles.helper.effort must be one of')
+  })
+
+  it('gives the judge haiku on Claude Code only, which a layer overrides', () => {
+    const judge = resolveConfig([]).roles.judge
+    expect(judge).toEqual({ model: { 'claude-code': 'haiku' } })
+    expect(resolveModel(judge.model, 'claude-code')).toBe('haiku')
+    expect(resolveModel(judge.model, 'opencode')).toBeUndefined()
+    expect(resolveConfig([{ roles: { judge: { model: 'sonnet' } } }]).roles.judge).toEqual({ model: 'sonnet' })
   })
 
   it('drops a role key set to null', () => {

@@ -481,6 +481,13 @@ REVIEW:
 <findings as JSON>
 ```
 
+## Judge - retry note (appended once to the judge or plan judge prompt, label `judge <stage> r<n> retry`, when the judge left findings unclassified; when it returned nothing, the note is: `RETRY: your last answer was empty or did not match the schema. Answer again for every finding, with every field set to one of the allowed values and the evidence filled in.`)
+
+```text
+RETRY: your last answer left these findings unclassified. Answer again for every finding, with every field set to one of the allowed values and the evidence filled in:
+- <id>: <what was invalid, or: no classification in your answer>
+```
+
 ## Judge - final review (from round 1 on, its EARLIER DECISIONS block starts with the decisions of every stage review in the repo, in stage order, one entry per stage review round under `s<k>/r<N>/<id>` labels - a stage's last round has no "sent" part when it sent nothing - followed by the final review's own earlier rounds as above)
 
 ```text
