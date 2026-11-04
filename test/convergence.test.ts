@@ -22,6 +22,35 @@ const declineIn = (label: string, ids = ['codex-F1']) => (req: AgentRequest) =>
 const prompt = (calls: AgentRequest[], label: string) => calls.find(c => c.label === label)?.prompt
 
 describe('a finding the fixer declined', () => {
+  it('drops a declined P1 the judge classifies refuted on the repeat, by rule 3, and ends residual-only', async () => {
+    const phantom = review(finding('P1', 'Phantom blocker'))
+    const confirmed = { verdict: 'confirmed', impact: 'critical', likelihood: 'edge', fixCost: 'small', scope: 'in-scope', evidence: 'src/a.ts:3 - call it twice' }
+    const f = fakeHost({
+      reviews: [phantom, phantom, phantom],
+      scores: [{ 'codex-F1': { ...confirmed, verdict: 'refuted', evidence: 'src/a.ts:3 - the guard on line 2 stops it', repeatOf: 'r1/codex-F1' } }],
+      override: declineIn('fix core r1'),
+    })
+    const r = await runGranny(f.host, input({ config: { maxRounds: 3 } }))
+    expect(r.stages[0]).toMatchObject({ outcome: 'residual-only', rounds: 2 })
+    expect(r.stages[0]!.residual).toEqual([expect.objectContaining({ title: 'Phantom blocker', verdict: 'refuted', repeatOf: 'r1/codex-F1', decision: { rule: 3, action: 'residual', why: 'refuted' } })])
+    expect(f.logs).toContain('core r2: codex-F1 dropped as a repeat of r1/codex-F1, which the fixer declined (rule 3: refuted) - kept as residual')
+  })
+
+  it('overrules the fixer when the judge classifies the declined repeat critical', async () => {
+    const phantom = review(finding('P2', 'Late save'))
+    const f = fakeHost({
+      reviews: [phantom, phantom, 'No findings.'],
+      scores: [
+        { 'codex-F1': 90 },
+        { 'codex-F1': { verdict: 'confirmed', impact: 'critical', likelihood: 'rare', fixCost: 'large', scope: 'in-scope', evidence: 'src/a.ts:3 - late response', repeatOf: 'r1/codex-F1' } },
+      ],
+      override: declineIn('fix core r1'),
+    })
+    const r = await runGranny(f.host, input({ config: { maxRounds: 3 } }))
+    expect(r.stages[0]).toMatchObject({ outcome: 'clean', rounds: 3 })
+    expect(f.logs).toContain('core r2: the judge overruled the fixer on codex-F1 (repeat of r1/codex-F1, rule 6: impact critical is in alwaysFix (critical/rare/large -> 75))')
+  })
+
   it('shows the judge the earlier round and the findings the fixer declined, and ends residual-only when the judge agrees with the fixer', async () => {
     const phantom = review(finding('P2', 'Phantom crash'))
     const f = fakeHost({
