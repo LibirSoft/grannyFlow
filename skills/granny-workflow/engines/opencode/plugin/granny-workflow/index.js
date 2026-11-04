@@ -535,6 +535,15 @@ ${script}
 
 Set ran=true only if it exited 0, exitCode to its exit code, and output to everything it printed, verbatim and complete. If it failed, set ran=false and explain in note. Never invent output.`;
 }
+function timeoutProbePrompt(repo, step, script) {
+  return `You run one shell command for the "${step}" step of a granny run: it prints the name of the timeout command the checks run in, or nothing. Run nothing else, and do not install, edit, stage or commit anything yourself.
+Repo ${repo}.
+
+Run exactly this:
+${script}
+
+Set ran=true only if it exited 0, exitCode to its exit code, and output to everything it printed, verbatim and complete. If it failed, set ran=false and explain in note. Never invent output.`;
+}
 function checkCommandPrompt(repo, check, script, metric) {
   const shorter = metric ? `when it is very long, every line that matches the regular expression \`${metric}\` - verbatim and in order, granny reads a number from the last one - then the last 3000 characters` : "when it is very long, the last 3000 characters are enough";
   return `You run one check command for the "${check}" step of a granny run, and return its output and exit code. Run nothing else, do not fix anything, and do not edit, stage or commit anything yourself.
@@ -936,6 +945,8 @@ var PLAN_PHASE = "Plan review";
 var DRAFT_PHASE = "Plan";
 var FINAL_REVIEW_PHASE = "Final review";
 var CHECKS_PHASE = "Checks";
+var TIMEOUT_PROBE = "if command -v timeout >/dev/null; then echo timeout; elif command -v gtimeout >/dev/null; then echo gtimeout; else exit 1; fi";
+var TIMEOUT_MISSING = /(^|[\s:])g?timeout: (command )?not found|command not found: g?timeout$/m;
 var saidSomething = (d) => typeof d === "string" && d.trim() && !/^\s*(none|n\/a|-|no deviations)?\.?\s*$/i.test(d) ? d : undefined;
 var slug = (s) => s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "stage";
 var trimPath = (s) => s.replace(/\/+$/, "") || "/";
@@ -1112,6 +1123,26 @@ ${note}` : ""}` : missing };
     host.log(`worktree${repo === primary && branch === input.branch ? "" : ` ${baseName(repo)} ${branch}`}: ${path}`);
     return path;
   };
+  const findTimeout = async (timed) => {
+    const once = () => shell("timeout probe", CHECKS_PHASE, TIMEOUT_PROBE, primary, timeoutProbePrompt);
+    let r = await once();
+    if (typeof r.code !== "number") {
+      host.log(`timeout probe: the runner failed (exit ${r.code}) - running it once more`);
+      r = await once();
+    }
+    const found = r.ran ? r.output.split(`
+`).map((l) => /^(?:.*\/)?(g?timeout)$/.exec(l.trim())?.[1]).find(Boolean) : undefined;
+    if (found) {
+      if (found !== "timeout")
+        host.log(`checks: no \`timeout\` on PATH - the checks with a timeout run in \`${found}\``);
+      return found;
+    }
+    if (typeof r.code !== "number")
+      throw new Error(`could not look up the timeout command for the checks with a timeout (exit ${r.code}): ${r.output.slice(-300)}`);
+    throw new Error(`checks with a timeout (${timed.map((c) => c.name).join(", ")}) run as \`timeout <s> bash -c '<run>'\`, but neither \`timeout\` nor \`gtimeout\` is on PATH - install GNU coreutils (macOS: \`brew install coreutils\`), or drop \`timeout\` from those checks`);
+  };
+  const timed = config.checks.filter((c) => c.timeout && specs.some((st) => checksOf(st).includes(c)));
+  const timeoutCommand = timed.length ? await findTimeout(timed) : "timeout";
   const used = input.goal !== undefined ? [primary] : [primary, ...extra.map((r) => r.repo).filter((r) => specs.some((st) => repoOf(st) === r))];
   const cwdOf = new Map(used.map((r) => [r, r]));
   if (config.worktree) {
@@ -1180,7 +1211,7 @@ ${note}` : ""}` : missing };
     return r;
   };
   const runCheck = async (lane, name, check) => {
-    const script = check.timeout ? `timeout ${check.timeout} bash -c ${shellQuote(check.run)}` : check.run;
+    const script = check.timeout ? `${timeoutCommand} ${check.timeout} bash -c ${shellQuote(check.run)}` : check.run;
     const ask = (repo, label, run) => checkCommandPrompt(repo, label, run, check.metric?.pattern);
     const once = () => shell(`check ${name} ${check.name}`, CHECKS_PHASE, script, lane.cwd, ask);
     let r = await once();
@@ -1191,6 +1222,8 @@ ${note}` : ""}` : missing };
     const base = { name: check.name, code: r.code, output: r.output };
     if (typeof r.code !== "number")
       return { ...base, passed: false, note: "check runner failed", broken: true };
+    if (check.timeout && r.code === 127 && TIMEOUT_MISSING.test(r.output))
+      return { ...base, passed: false, note: `${timeoutCommand} command not found`, broken: true };
     if (!r.ran || r.code !== 0) {
       const timedOut = check.timeout && r.code === 124 ? { note: `timed out after ${check.timeout}s` } : {};
       return { ...base, passed: false, ...timedOut };

@@ -18,6 +18,7 @@ import {
   repairPrompt,
   reviewCommandPrompt,
   gitCommandPrompt,
+  timeoutProbePrompt,
   worktreeCommandPrompt,
   roundLabel,
   type EarlierRound,
@@ -59,6 +60,8 @@ const PLAN_PHASE = 'Plan review'
 const DRAFT_PHASE = 'Plan'
 const FINAL_REVIEW_PHASE = 'Final review'
 const CHECKS_PHASE = 'Checks'
+const TIMEOUT_PROBE = 'if command -v timeout >/dev/null; then echo timeout; elif command -v gtimeout >/dev/null; then echo gtimeout; else exit 1; fi'
+const TIMEOUT_MISSING = /(^|[\s:])g?timeout: (command )?not found|command not found: g?timeout$/m
 
 export type RepoInput = string | { repo: string; base?: string }
 
@@ -273,6 +276,26 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
     return path
   }
 
+  const findTimeout = async (timed: CheckConfig[]): Promise<string> => {
+    const once = () => shell('timeout probe', CHECKS_PHASE, TIMEOUT_PROBE, primary, timeoutProbePrompt)
+    let r = await once()
+    if (typeof r.code !== 'number') {
+      host.log(`timeout probe: the runner failed (exit ${r.code}) - running it once more`)
+      r = await once()
+    }
+    const found = r.ran ? r.output.split('\n').map(l => /^(?:.*\/)?(g?timeout)$/.exec(l.trim())?.[1]).find(Boolean) : undefined
+    if (found) {
+      if (found !== 'timeout') host.log(`checks: no \`timeout\` on PATH - the checks with a timeout run in \`${found}\``)
+      return found
+    }
+    if (typeof r.code !== 'number') throw new Error(`could not look up the timeout command for the checks with a timeout (exit ${r.code}): ${r.output.slice(-300)}`)
+    throw new Error(
+      `checks with a timeout (${timed.map(c => c.name).join(', ')}) run as \`timeout <s> bash -c '<run>'\`, but neither \`timeout\` nor \`gtimeout\` is on PATH - install GNU coreutils (macOS: \`brew install coreutils\`), or drop \`timeout\` from those checks`,
+    )
+  }
+  const timed = config.checks.filter(c => c.timeout && specs.some(st => checksOf(st).includes(c)))
+  const timeoutCommand = timed.length ? await findTimeout(timed) : 'timeout'
+
   const used = input.goal !== undefined ? [primary] : [primary, ...extra.map(r => r.repo).filter(r => specs.some(st => repoOf(st) === r))]
   const cwdOf = new Map<string, string>(used.map(r => [r, r]))
   if (config.worktree) {
@@ -335,7 +358,7 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
   }
 
   const runCheck = async (lane: Lane, name: string, check: CheckConfig): Promise<CheckResult & { output: string; broken?: true }> => {
-    const script = check.timeout ? `timeout ${check.timeout} bash -c ${shellQuote(check.run)}` : check.run
+    const script = check.timeout ? `${timeoutCommand} ${check.timeout} bash -c ${shellQuote(check.run)}` : check.run
     const ask = (repo: string, label: string, run: string) => checkCommandPrompt(repo, label, run, check.metric?.pattern)
     const once = () => shell(`check ${name} ${check.name}`, CHECKS_PHASE, script, lane.cwd, ask)
     let r = await once()
@@ -345,6 +368,7 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
     }
     const base = { name: check.name, code: r.code, output: r.output }
     if (typeof r.code !== 'number') return { ...base, passed: false, note: 'check runner failed', broken: true }
+    if (check.timeout && r.code === 127 && TIMEOUT_MISSING.test(r.output)) return { ...base, passed: false, note: `${timeoutCommand} command not found`, broken: true }
     if (!r.ran || r.code !== 0) {
       const timedOut = check.timeout && r.code === 124 ? { note: `timed out after ${check.timeout}s` } : {}
       return { ...base, passed: false, ...timedOut }

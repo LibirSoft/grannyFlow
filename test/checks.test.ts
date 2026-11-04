@@ -1,6 +1,6 @@
-import { describe, expect, it } from 'bun:test'
+import { afterAll, describe, expect, it } from 'bun:test'
 import { spawnSync } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { resolveConfig } from '../src/core/config'
@@ -308,6 +308,71 @@ describe('checks', () => {
     const r = await runGranny(f.host, run({ maxRepairs: 0, checks: [{ name: 'slow', run: "echo it's slow", timeout: 30 }] }))
     expect(f.commands[0]).toBe(`timeout 30 bash -c 'echo it'\\''s slow'`)
     expect(r.stages[0]!.checks?.[0]!.results[0]).toEqual({ name: 'slow', passed: false, code: 124, note: 'timed out after 30s' })
+  })
+
+  describe('the timeout command', () => {
+    const temp: string[] = []
+    const tempDir = (prefix: string) => {
+      const dir = realpathSync(mkdtempSync(join(tmpdir(), prefix)))
+      temp.push(dir)
+      return dir
+    }
+    afterAll(() => temp.forEach(dir => rmSync(dir, { recursive: true, force: true })))
+    const bin = (...tools: Array<[string, string]>) => {
+      const dir = tempDir('granny-bin-')
+      for (const [name, target] of [['bash', Bun.which('bash')!] as [string, string], ...tools]) symlinkSync(target, join(dir, name))
+      return dir
+    }
+    const timed = (timeout = 5) => ({ name: 'tests', run: 'true', timeout })
+    const inRepo = (config: Record<string, unknown>, extra: Partial<RunInput> = {}) => run(config, { repo: tempDir('granny-repo-'), ...extra })
+
+    it('is gtimeout when only gtimeout is on PATH, probed once per run', async () => {
+      const f = fakeHost({ shell: { env: { PATH: bin(['gtimeout', (Bun.which('timeout') ?? Bun.which('gtimeout'))!]) } } })
+      const r = await runGranny(f.host, inRepo({ checks: [timed()] }, { stages: [{ name: 'one', task: 'WP-01' }, { name: 'two', task: 'WP-02' }] }))
+      expect(r.stages.map(s => s.outcome)).toEqual(['clean', 'clean'])
+      expect(f.commands.filter(c => c.includes('bash -c true'))).toEqual(['gtimeout 5 bash -c true', 'gtimeout 5 bash -c true', 'gtimeout 5 bash -c true'])
+      expect(f.probes.filter(c => c.includes('command -v gtimeout')).length).toBe(1)
+    })
+
+    it('fails the run before any agent starts when neither timeout nor gtimeout is on PATH', async () => {
+      const f = fakeHost({ shell: { env: { PATH: bin() } } })
+      const failed = runGranny(f.host, inRepo({ checks: [timed()] }))
+      await expect(failed).rejects.toThrow('neither `timeout` nor `gtimeout` is on PATH')
+      await expect(failed).rejects.toThrow('brew install coreutils')
+      await expect(failed).rejects.toThrow('tests')
+      expect(f.calls).toEqual([])
+    })
+
+    it('is probed through the helper on Claude Code, and its absence fails the run there too', async () => {
+      const g = fakeHost({ name: 'claude-code', direct: false, timeoutProbe: 'gtimeout\n' })
+      expect((await runGranny(g.host, run({ checks: [timed(30)] }))).stages[0]!.outcome).toBe('clean')
+      expect(g.commands).toContain('cd /work/repo && gtimeout 30 bash -c true')
+      const none = fakeHost({ name: 'claude-code', direct: false, timeoutProbe: { code: 1, output: '' } })
+      await expect(runGranny(none.host, run({ checks: [timed()] }))).rejects.toThrow('brew install coreutils')
+      expect(none.calls).toEqual([])
+    })
+
+    it('is not probed when no check has a timeout', async () => {
+      const f = scripted({ 'run-tests': [green()] })
+      await runGranny(f.host, run({ checks: [TESTS] }))
+      expect(f.probes.some(c => c.includes('command -v gtimeout'))).toBe(false)
+    })
+
+    it('missing at run time (exit 127) is a runner failure that spends no repair', async () => {
+      const f = scripted({ 'bash -c true': [{ code: 127, output: 'bash: line 1: timeout: command not found\n' }] })
+      const r = await runGranny(f.host, run({ maxRepairs: 2, checks: [timed()] }))
+      expect(r.stages[0]!.outcome).toBe('checks-failed')
+      expect(r.stages[0]!.note).toContain('check runner failed')
+      expect(r.stages[0]!.checks?.[0]!.results[0]).toMatchObject({ code: 127, note: 'timeout command not found' })
+      expect(f.calls.filter(c => c.label.startsWith('repair'))).toEqual([])
+    })
+
+    it('present, a check whose own command is missing (exit 127) is still a red check that gets repairs', async () => {
+      const f = scripted({ 'bash -c true': [{ code: 127, output: 'bash: line 1: bun: command not found\n' }, green()] })
+      const r = await runGranny(f.host, run({ maxRepairs: 2, checks: [timed()] }))
+      expect(r.stages[0]!.outcome).toBe('clean')
+      expect(f.calls.map(c => c.label)).toContain('repair core implement #1')
+    })
   })
 
   it('surface a failed final gate at run level: no final review, the final check still runs', async () => {

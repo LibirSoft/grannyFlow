@@ -173,6 +173,16 @@ ${script}
 Set ran=true only if it exited 0, exitCode to its exit code, and output to everything it printed, verbatim and complete. If it failed, set ran=false and explain in note. Never invent output.`
 }
 
+export function timeoutProbePrompt(repo: string, step: string, script: string): string {
+  return `You run one shell command for the "${step}" step of a granny run: it prints the name of the timeout command the checks run in, or nothing. Run nothing else, and do not install, edit, stage or commit anything yourself.
+Repo ${repo}.
+
+Run exactly this:
+${script}
+
+Set ran=true only if it exited 0, exitCode to its exit code, and output to everything it printed, verbatim and complete. If it failed, set ran=false and explain in note. Never invent output.`
+}
+
 export function checkCommandPrompt(repo: string, check: string, script: string, metric?: string): string {
   const shorter = metric
     ? `when it is very long, every line that matches the regular expression \`${metric}\` - verbatim and in order, granny reads a number from the last one - then the last 3000 characters`
