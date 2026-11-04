@@ -24,24 +24,24 @@ export const roundLabel = (round: number, f: Pick<Finding, 'id'>, loop?: Earlier
 
 const judgeRouting = (findings: Finding[]): string =>
   findings.some(isBlocker)
-    ? 'P0/P1 findings are in this list only because a fixer declined findings in an earlier round: classify them like the rest. A P0/P1 goes to the implementer whatever you classify, unless its repeatOf names a finding the fixer declined - then your classification decides it like any other finding.'
-    : 'P0/P1 findings are not in this list: they go to the implementer without the judge.'
+    ? 'P0/P1 findings are here only because a fixer declined findings in an earlier round: classify them like the rest. A P0/P1 goes to the implementer whatever you classify, unless its repeatOf names a finding the fixer declined - then your classification decides it.'
+    : 'P0/P1 findings are not in this list: they go to the implementer without you.'
 
-const rubric = (task: string) => `Classify every finding below - do not score it. The engine computes a priority from your classes and decides what goes to the implementer, so give each finding exactly these fields:
-- verdict: confirmed (the code shows the problem) | refuted (the code shows it is not there or not a problem) | unverified (you could not confirm it either way).
-- impact: how bad it is IF it triggers - critical | major | moderate | minor | none.
+const rubric = (task: string) => `Classify every finding - do not score it. Give each exactly these fields:
+- verdict: confirmed (the code shows the problem) | refuted (the code shows it is absent or not a problem) | unverified (you cannot tell either way).
+- impact, how bad IF it triggers: critical | major | moderate | minor | none.
   Judge impact assuming the trigger happens. Likelihood never lowers impact; it is its own field.
-  - critical: data loss or corruption, writing to the wrong record, a security or authorization bypass, a secret or personal data leak, a draft going public, an irreversible operation, stored data silently read differently.
+  - critical: data loss or corruption, writing to the wrong record, security or authorization bypass, secret or personal data leak, a draft going public, an irreversible operation, stored data silently read differently.
   - major: the user cannot get out from inside the app (a lock only a reload clears, endless loading, a crash); something that worked silently breaks; an API or contract break; a required part of ${task} is missing.
-  - moderate: wrong behaviour with an easy workaround; a wrong or missing error message; a missing test for changed behaviour; duplicated logic.
-  - minor: a visual defect, naming, style.
-  - none: not a problem at all.
+  - moderate: wrong behaviour with an easy workaround; wrong or missing error message; missing test for changed behaviour; duplicated logic.
+  - minor: visual defect, naming, style.
+  - none: not a problem.
 - likelihood: common (the normal flow) | edge (special timing or state: a race, an expired session, a boundary value) | rare (forced input, a rarely used feature).
 - fixCost: trivial (a few lines) | small (one function or file plus a test) | large (cross-module, a redesign).
-- scope: in-scope | pre-existing (it was already there before this change) | other-stage (another stage's job).
-- evidence: path:line plus the concrete trigger steps, e.g. \`Editor.tsx:225\` + "save -> go back in history -> the late response arrives -> save again". Always give a path:line: evidence without one counts as unverified, and an unverified finding's impact is lowered one class.
+- scope: in-scope | pre-existing (there before this change) | other-stage (another stage's job).
+- evidence: path:line plus the concrete trigger steps, e.g. \`Editor.tsx:225\` + "save -> go back -> late response arrives -> save again". Always give a path:line: without one the finding counts as unverified, which lowers its impact one class.
 - reason: one line.
-Example: a late save response re-binds the editor to another post's id, so the next save can overwrite the wrong post - confirmed, critical, edge, small, in-scope, even though the window is narrow.`
+Example: a late save response re-binds the editor to another post's id, so the next save can overwrite the wrong post: confirmed, critical, edge, small, in-scope, though the window is narrow.`
 
 const decided = (f: Finding) => (f.decision ? `${f.decision.action} - rule ${f.decision.rule}: ${f.decision.why}${f.decision.raised ? ` (ratchet raised ${f.decision.raised})` : ''}` : undefined)
 
@@ -71,20 +71,24 @@ function judgeHistory(earlier: EarlierRound[]): string {
     )
   const rounds = earlier.map(e => {
     const title = e.loop ? `${e.loop.name}, round ${e.round}` : `Round ${e.round}`
-    const kept = e.residual?.length ? `\n${title} kept as residual (not sent to the fixer):\n${labelled(e, e.residual)}` : ''
+    const kept = e.residual?.length ? `\n${title} kept as residual:\n${labelled(e, e.residual)}` : ''
     if (!e.sent.length) return kept.slice(1)
-    const declined = e.declined?.length ? e.declined.map(d => `\n- ${roundLabel(e.round, d, e.loop)}: ${d.reason || 'no reason given'}`).join('') : ' none - it fixed all of them'
+    const declined = e.declined?.length ? e.declined.map(d => `\n- ${roundLabel(e.round, d, e.loop)}: ${d.reason || 'no reason given'}`).join('') : ' none'
     const notes = e.deviations?.trim() ? `\nThe fixer's other notes: ${e.deviations.trim()}` : ''
     return `${title} sent to the fixer:
 ${labelled(e, e.sent)}
-The findings the fixer declined (did not fix), and why:${declined}${notes}${kept}`
+Declined by the fixer (not fixed), and why:${declined}${notes}${kept}`
   })
   return `
-EARLIER DECISIONS - every finding an earlier review round sent to the fixer or kept as residual for the user, under its label, with its classification, priority and the rule that decided it, and the ones the fixer declined with its reasons${earlier.some(e => e.loop) ? ". Rounds named after a stage are that stage's own review; this review covers its code too" : ''}:
+EARLIER DECISIONS - the findings earlier rounds sent to the fixer or kept as residual for the user, by label, with classification, priority and deciding rule, and the fixer's declines with its reasons${earlier.some(e => e.loop) ? ". A round named after a stage is that stage's own review; this review covers its code too" : ''}:
 ${rounds.join('\n\n')}
 
-When a finding below repeats one of those earlier findings, set its repeatOf to that label. A repeat of a finding the fixer declined with a convincing reason that the code backs: classify it refuted, or by its scope when it belongs elsewhere, and cite the label and the fixer's reason in your reason. When the fixer's reason is wrong, classify the repeat on its merits and say in reason why the fixer's reason does not hold. A repeat of a finding the fixer applied: check the fix in the code and classify what is still wrong. A repeat of a residual finding: the fixer never saw it - classify it on its merits.
-A repeat cannot drop below the impact and likelihood of the finding it repeats: the engine raises them back, unless you classify the repeat refuted with path:line evidence the earlier finding did not cite.
+When a finding below repeats an earlier one, set its repeatOf to that label, then:
+- a repeat of a finding the fixer declined with a convincing reason the code backs: classify it refuted, or by its scope when it belongs elsewhere; cite the label and the fixer's reason in reason.
+- if the fixer's reason is wrong: classify the repeat on its merits and say in reason why that reason does not hold.
+- a repeat of a finding the fixer applied: check the fix in the code and classify what is still wrong.
+- a repeat of a residual finding (the fixer never saw it): classify it on its merits.
+A repeat cannot drop below the impact and likelihood of the finding it repeats: the engine raises them back, unless you classify it refuted with path:line evidence the earlier finding did not cite.
 `
 }
 
@@ -310,7 +314,7 @@ Read \`git diff\`, ${branchLog(p)} and the files above. Commit the stage's work 
 }
 
 export const WHOLE_BRANCH_NOTE =
-  'This is the whole-branch review: every stage was already reviewed on its own, so look across them - duplicated code or helpers that several stages added, inconsistencies between stages (naming, contracts, config, docs, tests) - and check the merge commits and their conflict resolutions especially (`git log --merges` and `git show <merge>`): both sides\' intent must survive.'
+  'This is the whole-branch review: each stage was already reviewed alone, so look across them - duplicated code or helpers several stages added, inconsistencies between stages (naming, contracts, config, docs, tests) - and especially at the merge commits and their conflict resolutions (`git log --merges`, `git show <merge>`): both sides\' intent must survive.'
 
 export interface StageTask {
   number: number
@@ -320,14 +324,20 @@ export interface StageTask {
 }
 
 const taskSection = (stage?: StageTask): string =>
-  stage ? `Stage ${stage.number}/${stage.total} "${stage.name}" was asked to do this - its TASK:\n${stage.task}\n` : ''
+  stage ? `Stage ${stage.number}/${stage.total} "${stage.name}" - its TASK:\n${stage.task}\n` : ''
 
 const reviewAsks = (stage?: StageTask): string[] => [
-  'Look for correctness bugs, regressions, missing tests for changed behaviour, security problems and contract breaks. Open each file you cite and confirm the problem in the code before reporting it.',
+  'Find correctness bugs, regressions, missing tests for changed behaviour, security problems and contract breaks. Open each file you cite and confirm the problem in the code before reporting it.',
   ...(stage
-    ? ['Check the diff against the TASK: a part of the task the diff does not do is a finding, and so is a change outside it (scope creep, unrelated edits); work the task leaves to other stages is not a finding.']
+    ? ['Check the diff against the TASK: a missing part of the task is a finding, and so is a change outside it (scope creep, unrelated edits); work the task leaves to other stages is not a finding.']
     : []),
-  'Also report clean-code and design problems - duplication, unclear naming, needless abstraction, deviations from the design the plan or context lays out - as P2/P3 unless they break something.',
+  'Report clean-code and design problems (duplication, unclear naming, needless abstraction, deviations from the design the plan or context lays out) as P2/P3 unless they break something.',
+]
+
+/** The finding format the parser reads from a command or Codex reviewer. */
+const bulletForm = (example: string, p1: string, where: string): string[] => [
+  `Report each finding as one bullet line in exactly this form: \`- [P1] Title — ${example}\` - severity P0 (critical), P1 (${p1}), P2 (should fix) or P3 (nit), a short title, an em dash, then ${where}. Put the detail on the following lines, indented two spaces.`,
+  'Use that bullet form for findings only. With no findings, write "No findings." and nothing else.',
 ]
 
 export function agentReviewPrompt(p: PromptContext, name: string, reviewBase: string, stage?: StageTask, note?: string): string {
@@ -347,8 +357,7 @@ export function commandReviewPrompt(p: PromptContext, name: string, reviewBase: 
     p.context ? `Design context, read it first: ${p.context}` : '',
     taskSection(stage),
     ...reviewAsks(stage),
-    'Report every finding as a bullet line in exactly this form: `- [P1] Title — path/to/file.ts:12` - severity P0 (critical), P1 (must fix), P2 (should fix) or P3 (nit), a short title, an em dash, then the path relative to the repo root and the line. Put the detail on the lines after it, indented by two spaces.',
-    'Use that bullet form for findings only. With no findings, write "No findings." and nothing else.',
+    ...bulletForm('path/to/file.ts:12', 'must fix', 'the path relative to the repo root and the line'),
   ]
     .filter(Boolean)
     .join(' ')
@@ -356,10 +365,9 @@ export function commandReviewPrompt(p: PromptContext, name: string, reviewBase: 
 }
 
 const planReviewAsks = (p: PromptContext, plans: string[]) => [
-  `Review the plan in ${plans.join(', ')} - a plan, not code changes - against the actual repo at ${p.repo} (branch \`${p.branch}\`)${p.others?.length ? ` and the other repos it changes (${p.others.join(', ')})` : ''}: open the code, configs, lockfiles and docs the plan talks about before reporting anything.`,
-  'Look for: wrong assumptions about the code or its dependencies, missing steps, risky ordering, acceptance criteria that cannot be tested, and version drift (versions, APIs, flags or files the plan names that differ from what the repo or its dependencies actually have).',
-  'Report every finding as a bullet line in exactly this form: `- [P1] Title — /abs/path/of/plan.md:12` - severity P0 (critical), P1 (must fix before implementing), P2 (should fix) or P3 (nit), a short title, an em dash, then the absolute path of the plan file and the line in it the finding is about. Put the detail on the lines after it, indented by two spaces.',
-  'Use that bullet form for findings only. With no findings, write "No findings." and nothing else.',
+  `Review the plan in ${plans.join(', ')} - a plan, not code changes - against the actual repo at ${p.repo} (branch \`${p.branch}\`)${p.others?.length ? ` and the other repos it changes (${p.others.join(', ')})` : ''}: open the code, configs, lockfiles and docs it names before reporting anything.`,
+  'Find wrong assumptions about the code or its dependencies, missing steps, risky ordering, acceptance criteria that cannot be tested, and version drift (versions, APIs, flags or files the plan names that differ from what the repo or its dependencies have).',
+  ...bulletForm('/abs/path/of/plan.md:12', 'must fix before implementing', 'the absolute path of the plan file and the line in it the finding is about'),
 ]
 
 export function planReviewPrompt(p: PromptContext, plans: string[]): string {
@@ -385,40 +393,46 @@ Return findings with id (F1, F2, ...), severity (P0 critical / P1 must fix befor
 export function extractPrompt(name: string, output: string, short?: { markers: number; got: number } | 'unmarked'): string {
   const count =
     short === 'unmarked'
-      ? '\nThe output has no finding bullets (`- [P1] Title — path:line`) and is not just "No findings.", so read its prose: return each problem it reports as a finding. When it reports none, return no findings and set clean to true only if the output is a finished review that clearly says the changes have no problems - an error, a crash, a question, a refusal, a truncated or empty output, or anything else that is not a finished review is not clean.'
+      ? '\nThe output has no finding bullets (`- [P1] Title — path:line`) and is not just "No findings.", so read its prose: return each problem it reports as a finding. If it reports none, return no findings and set clean to true only if the output is a finished review that clearly says the changes have no problems; an error, crash, question, refusal, truncated or empty output, or anything else that is not a finished review is not clean.'
       : short
         ? `\nThe output has ${short.markers} finding marker(s) (\`- [P0]\` ... \`- [P3]\` bullets); an earlier extraction returned ${short.got}. Return all ${short.markers}.`
         : ''
-  return `Below is the raw output of an automated code review for stage "${name}". Do not run anything and do not judge the findings.
-Extract every finding it reports - each one, none merged, none dropped, none invented - with id (F1, F2, ...), severity exactly as written (e.g. P1), file, line, title and the full detail text.${count}
+  return `Below is the raw output of an automated code review for stage "${name}". Run nothing; do not judge the findings.
+Extract every finding it reports - none merged, dropped or invented - with id (F1, F2, ...), severity exactly as written (e.g. P1), file, line, title and the full detail text.${count}
 
 RAW REVIEW OUTPUT:
 ${output}`
 }
 
+const JUDGE_FROM = (findings: Finding[]) => `The findings come from one or more reviewers; each names its reviewer. ${judgeRouting(findings)}`
+const JUDGE_DUPES =
+  'If a finding reports the same problem as another one in this list, classify it too and set its duplicateOf to the id of the one to keep. Then score the whole review 0-100 (correctness + actionability; mostly wrong or trivial findings = low); that score is informational only.'
+
 export function judgePrompt(p: PromptContext, reviewBase: string, findings: Finding[], earlier: EarlierRound[] = [], stage?: StageTask, note?: string): string {
   return `You are the JUDGE classifying the findings of a code review. Repo ${p.repo}, branch ${p.branch}, stage diff \`${shellQuote(reviewBase)}...HEAD\`. Do not edit anything.
 ${note ? note + '\n' : ''}${p.context ? 'Design context:\n' + p.context + '\n' : ''}${taskSection(stage)}
-The findings come from one or more reviewers; each names its reviewer. ${judgeRouting(findings)}
-For each finding below, open the cited code and check whether it is real and correctly described.${stage ? " Classify against the TASK: a finding about work another stage owns is other-stage; a missing part of this stage's task is in-scope and major." : ''} When a finding reports the same problem as another finding in this list, classify it too and set its duplicateOf to the id of the finding to keep. Then score the whole review 0-100 (correctness + actionability; mostly wrong or trivial findings = low) - that score is informational only.
+${JUDGE_FROM(findings)}
+For each finding, open the cited code and check that it is real and correctly described.${stage ? " Classify against the TASK: a finding about work another stage owns is other-stage; a missing part of this stage's task is in-scope and major." : ''} ${JUDGE_DUPES}
 ${rubric(stage ? "the stage's TASK" : 'what the change set out to do')}
 ${judgeHistory(earlier)}
 REVIEW:
 ${JSON.stringify(findings, null, 2)}`
 }
 
+const RETRY_ASK = 'Answer again for every finding, every field set to an allowed value and the evidence filled in'
+
 /** Appended to the judge prompt for its one retry: null when the first answer was empty or did not parse. */
 export function judgeRetryNote(problems: Array<{ id: string; why: string }> | null): string {
   return problems
-    ? `RETRY: your last answer left these findings unclassified. Answer again for every finding, with every field set to one of the allowed values and the evidence filled in:\n${problems.map(x => `- ${x.id}: ${x.why}`).join('\n')}`
-    : 'RETRY: your last answer was empty or did not match the schema. Answer again for every finding, with every field set to one of the allowed values and the evidence filled in.'
+    ? `RETRY: your last answer left these findings unclassified. ${RETRY_ASK}:\n${problems.map(x => `- ${x.id}: ${x.why}`).join('\n')}`
+    : `RETRY: your last answer was empty or did not match the schema. ${RETRY_ASK}.`
 }
 
 export function planJudgePrompt(p: PromptContext, plans: string[], findings: Finding[], earlier: EarlierRound[] = []): string {
   return `You are the JUDGE classifying the findings of a plan review. Repo ${p.repo}, branch ${p.branch}, plan ${plans.join(', ')}. Implementation has not started. Do not edit anything.
 ${p.context ? 'Design context:\n' + p.context + '\n' : ''}
-The findings come from one or more reviewers; each names its reviewer. ${judgeRouting(findings)}
-For each finding below, open the cited plan line and the code, config or dependency it talks about, and check whether it is real and correctly described. Classify impact by what the plan would cause once implemented as written; evidence is the plan's path:line plus the repo path:line that shows the problem. When a finding reports the same problem as another finding in this list, classify it too and set its duplicateOf to the id of the finding to keep. Then score the whole review 0-100 (correctness + actionability; mostly wrong or trivial findings = low) - that score is informational only.
+${JUDGE_FROM(findings)}
+For each finding, open the cited plan line and the code, config or dependency it names, and check that it is real and correctly described. Classify impact by what the plan would cause if implemented as written; evidence is the plan's path:line plus the repo path:line that shows the problem. ${JUDGE_DUPES}
 ${rubric('the goal of the plan')}
 ${judgeHistory(earlier)}
 REVIEW:

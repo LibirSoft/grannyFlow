@@ -58,15 +58,15 @@ Plan files - read them first: <plan files>
 <context: work-order files and override notes>
 
 You are the plan REVIEWER. Do not edit, stage or commit anything.
-Review the plan in <plan files> - a plan, not code changes - against the actual repo at <repo> (branch `<branch>`): open the code, configs, lockfiles and docs the plan talks about before reporting anything.
-Look for: wrong assumptions about the code or its dependencies, missing steps, risky ordering, acceptance criteria that cannot be tested, and version drift (versions, APIs, flags or files the plan names that differ from what the repo or its dependencies actually have).
+Review the plan in <plan files> - a plan, not code changes - against the actual repo at <repo> (branch `<branch>`): open the code, configs, lockfiles and docs it names before reporting anything.
+Find wrong assumptions about the code or its dependencies, missing steps, risky ordering, acceptance criteria that cannot be tested, and version drift (versions, APIs, flags or files the plan names that differ from what the repo or its dependencies have).
 Return findings with id (F1, F2, ...), severity (P0 critical / P1 must fix before implementing / P2 should fix / P3 nit), file (the absolute path of the plan file), line (the line in the plan file), title and a concrete detail. Zero findings means the plan is clean.
 ```
 
 ## Plan reviewer - codex exec, the Codex plugin task and the {prompt} of a command engine
 
 ```text
-You are a plan REVIEWER. Do not edit, stage or commit anything. Review the plan in <plan files> - a plan, not code changes - against the actual repo at <repo> (branch `<branch>`): open the code, configs, lockfiles and docs the plan talks about before reporting anything. Design context, read it first: Plan files - read them first: <plan files> <context: work-order files and override notes> Look for: wrong assumptions about the code or its dependencies, missing steps, risky ordering, acceptance criteria that cannot be tested, and version drift (versions, APIs, flags or files the plan names that differ from what the repo or its dependencies actually have). Report every finding as a bullet line in exactly this form: `- [P1] Title — /abs/path/of/plan.md:12` - severity P0 (critical), P1 (must fix before implementing), P2 (should fix) or P3 (nit), a short title, an em dash, then the absolute path of the plan file and the line in it the finding is about. Put the detail on the lines after it, indented by two spaces. Use that bullet form for findings only. With no findings, write "No findings." and nothing else.
+You are a plan REVIEWER. Do not edit, stage or commit anything. Review the plan in <plan files> - a plan, not code changes - against the actual repo at <repo> (branch `<branch>`): open the code, configs, lockfiles and docs it names before reporting anything. Design context, read it first: Plan files - read them first: <plan files> <context: work-order files and override notes> Find wrong assumptions about the code or its dependencies, missing steps, risky ordering, acceptance criteria that cannot be tested, and version drift (versions, APIs, flags or files the plan names that differ from what the repo or its dependencies have). Report each finding as one bullet line in exactly this form: `- [P1] Title — /abs/path/of/plan.md:12` - severity P0 (critical), P1 (must fix before implementing), P2 (should fix) or P3 (nit), a short title, an em dash, then the absolute path of the plan file and the line in it the finding is about. Put the detail on the following lines, indented two spaces. Use that bullet form for findings only. With no findings, write "No findings." and nothing else.
 ```
 
 ## Judge - plan review
@@ -77,23 +77,23 @@ Design context:
 Plan files - read them first: <plan files>
 <context: work-order files and override notes>
 
-The findings come from one or more reviewers; each names its reviewer. P0/P1 findings are not in this list: they go to the implementer without the judge.
-For each finding below, open the cited plan line and the code, config or dependency it talks about, and check whether it is real and correctly described. Classify impact by what the plan would cause once implemented as written; evidence is the plan's path:line plus the repo path:line that shows the problem. When a finding reports the same problem as another finding in this list, classify it too and set its duplicateOf to the id of the finding to keep. Then score the whole review 0-100 (correctness + actionability; mostly wrong or trivial findings = low) - that score is informational only.
-Classify every finding below - do not score it. The engine computes a priority from your classes and decides what goes to the implementer, so give each finding exactly these fields:
-- verdict: confirmed (the code shows the problem) | refuted (the code shows it is not there or not a problem) | unverified (you could not confirm it either way).
-- impact: how bad it is IF it triggers - critical | major | moderate | minor | none.
+The findings come from one or more reviewers; each names its reviewer. P0/P1 findings are not in this list: they go to the implementer without you.
+For each finding, open the cited plan line and the code, config or dependency it names, and check that it is real and correctly described. Classify impact by what the plan would cause if implemented as written; evidence is the plan's path:line plus the repo path:line that shows the problem. If a finding reports the same problem as another one in this list, classify it too and set its duplicateOf to the id of the one to keep. Then score the whole review 0-100 (correctness + actionability; mostly wrong or trivial findings = low); that score is informational only.
+Classify every finding - do not score it. Give each exactly these fields:
+- verdict: confirmed (the code shows the problem) | refuted (the code shows it is absent or not a problem) | unverified (you cannot tell either way).
+- impact, how bad IF it triggers: critical | major | moderate | minor | none.
   Judge impact assuming the trigger happens. Likelihood never lowers impact; it is its own field.
-  - critical: data loss or corruption, writing to the wrong record, a security or authorization bypass, a secret or personal data leak, a draft going public, an irreversible operation, stored data silently read differently.
+  - critical: data loss or corruption, writing to the wrong record, security or authorization bypass, secret or personal data leak, a draft going public, an irreversible operation, stored data silently read differently.
   - major: the user cannot get out from inside the app (a lock only a reload clears, endless loading, a crash); something that worked silently breaks; an API or contract break; a required part of the goal of the plan is missing.
-  - moderate: wrong behaviour with an easy workaround; a wrong or missing error message; a missing test for changed behaviour; duplicated logic.
-  - minor: a visual defect, naming, style.
-  - none: not a problem at all.
+  - moderate: wrong behaviour with an easy workaround; wrong or missing error message; missing test for changed behaviour; duplicated logic.
+  - minor: visual defect, naming, style.
+  - none: not a problem.
 - likelihood: common (the normal flow) | edge (special timing or state: a race, an expired session, a boundary value) | rare (forced input, a rarely used feature).
 - fixCost: trivial (a few lines) | small (one function or file plus a test) | large (cross-module, a redesign).
-- scope: in-scope | pre-existing (it was already there before this change) | other-stage (another stage's job).
-- evidence: path:line plus the concrete trigger steps, e.g. `Editor.tsx:225` + "save -> go back in history -> the late response arrives -> save again". Always give a path:line: evidence without one counts as unverified, and an unverified finding's impact is lowered one class.
+- scope: in-scope | pre-existing (there before this change) | other-stage (another stage's job).
+- evidence: path:line plus the concrete trigger steps, e.g. `Editor.tsx:225` + "save -> go back -> late response arrives -> save again". Always give a path:line: without one the finding counts as unverified, which lowers its impact one class.
 - reason: one line.
-Example: a late save response re-binds the editor to another post's id, so the next save can overwrite the wrong post - confirmed, critical, edge, small, in-scope, even though the window is narrow.
+Example: a late save response re-binds the editor to another post's id, so the next save can overwrite the wrong post: confirmed, critical, edge, small, in-scope, though the window is narrow.
 
 REVIEW:
 <findings as JSON>
@@ -228,7 +228,7 @@ Plan files - read them first: <plan files>
 <context: work-order files and override notes>
 
 You are the IMPLEMENTER, repairing failed checks of stage "<stage name>" (implement, repair 1). Granny ran the checks below on the current branch and they failed; review waits until they pass.
-Stage 2/2 "<stage name>" was asked to do this - its TASK:
+Stage 2/2 "<stage name>" - its TASK:
 <stage task>
 Read `git log --oneline '<base>'..HEAD` and the code, find why each check fails, and fix the code until it passes. Rerun the checks, commit (`fix(...)`), and note what you changed under "Review fixes" in .granny/PR-BODY.md.
 NEVER delete, skip, disable or weaken a test, a check, a threshold, the granny config or a check script to get green - granny reruns the same commands and the reviewers see the diff. If a check cannot pass without that, leave it failing and explain why in deviations.
@@ -260,7 +260,7 @@ Plan files - read them first: <plan files>
 <context: work-order files and override notes>
 
 You are the IMPLEMENTER, finishing stage "<stage name>" (implement). The working tree has uncommitted changes; granny checks and reviews only committed work.
-Stage 2/2 "<stage name>" was asked to do this - its TASK:
+Stage 2/2 "<stage name>" - its TASK:
 <stage task>
 `git status --porcelain` printed:
 ```
@@ -309,12 +309,12 @@ Plan files - read them first: <plan files>
 <context: work-order files and override notes>
 
 You are the REVIEWER. Do not edit, stage or commit anything.
-Stage 2/2 "<stage name>" was asked to do this - its TASK:
+Stage 2/2 "<stage name>" - its TASK:
 <stage task>
 Review the changes of stage "<stage name>": `cd '<repo>' && git diff '<stage start sha>'...HEAD` plus `git log --oneline '<stage start sha>'..HEAD`.
-Look for correctness bugs, regressions, missing tests for changed behaviour, security problems and contract breaks. Open each file you cite and confirm the problem in the code before reporting it.
-Check the diff against the TASK: a part of the task the diff does not do is a finding, and so is a change outside it (scope creep, unrelated edits); work the task leaves to other stages is not a finding.
-Also report clean-code and design problems - duplication, unclear naming, needless abstraction, deviations from the design the plan or context lays out - as P2/P3 unless they break something.
+Find correctness bugs, regressions, missing tests for changed behaviour, security problems and contract breaks. Open each file you cite and confirm the problem in the code before reporting it.
+Check the diff against the TASK: a missing part of the task is a finding, and so is a change outside it (scope creep, unrelated edits); work the task leaves to other stages is not a finding.
+Report clean-code and design problems (duplication, unclear naming, needless abstraction, deviations from the design the plan or context lays out) as P2/P3 unless they break something.
 Return findings with id (F1, F2, ...), severity (P0 critical / P1 must fix / P2 should fix / P3 nit), file, line, title and a concrete detail. Zero findings means the stage is clean.
 ```
 
@@ -369,7 +369,7 @@ Return ran: true only if it exited 0; exitCode: its exit code; output: everythin
 ## Reviewer - command engine, the text {prompt} is filled with
 
 ```text
-You are a code REVIEWER. Do not edit, stage or commit anything. Repo <repo>, branch `<branch>`. Review the changes of stage "<stage name>": `cd '<repo>' && git diff '<stage start sha>'...HEAD` plus `git log --oneline '<stage start sha>'..HEAD`. Design context, read it first: Plan files - read them first: <plan files> <context: work-order files and override notes> Stage 2/2 "<stage name>" was asked to do this - its TASK: <stage task> Look for correctness bugs, regressions, missing tests for changed behaviour, security problems and contract breaks. Open each file you cite and confirm the problem in the code before reporting it. Check the diff against the TASK: a part of the task the diff does not do is a finding, and so is a change outside it (scope creep, unrelated edits); work the task leaves to other stages is not a finding. Also report clean-code and design problems - duplication, unclear naming, needless abstraction, deviations from the design the plan or context lays out - as P2/P3 unless they break something. Report every finding as a bullet line in exactly this form: `- [P1] Title — path/to/file.ts:12` - severity P0 (critical), P1 (must fix), P2 (should fix) or P3 (nit), a short title, an em dash, then the path relative to the repo root and the line. Put the detail on the lines after it, indented by two spaces. Use that bullet form for findings only. With no findings, write "No findings." and nothing else.
+You are a code REVIEWER. Do not edit, stage or commit anything. Repo <repo>, branch `<branch>`. Review the changes of stage "<stage name>": `cd '<repo>' && git diff '<stage start sha>'...HEAD` plus `git log --oneline '<stage start sha>'..HEAD`. Design context, read it first: Plan files - read them first: <plan files> <context: work-order files and override notes> Stage 2/2 "<stage name>" - its TASK: <stage task> Find correctness bugs, regressions, missing tests for changed behaviour, security problems and contract breaks. Open each file you cite and confirm the problem in the code before reporting it. Check the diff against the TASK: a missing part of the task is a finding, and so is a change outside it (scope creep, unrelated edits); work the task leaves to other stages is not a finding. Report clean-code and design problems (duplication, unclear naming, needless abstraction, deviations from the design the plan or context lays out) as P2/P3 unless they break something. Report each finding as one bullet line in exactly this form: `- [P1] Title — path/to/file.ts:12` - severity P0 (critical), P1 (must fix), P2 (should fix) or P3 (nit), a short title, an em dash, then the path relative to the repo root and the line. Put the detail on the following lines, indented two spaces. Use that bullet form for findings only. With no findings, write "No findings." and nothing else.
 ```
 
 ## Judge
@@ -379,26 +379,26 @@ You are the JUDGE classifying the findings of a code review. Repo <repo>, branch
 Design context:
 Plan files - read them first: <plan files>
 <context: work-order files and override notes>
-Stage 2/2 "<stage name>" was asked to do this - its TASK:
+Stage 2/2 "<stage name>" - its TASK:
 <stage task>
 
-The findings come from one or more reviewers; each names its reviewer. P0/P1 findings are not in this list: they go to the implementer without the judge.
-For each finding below, open the cited code and check whether it is real and correctly described. Classify against the TASK: a finding about work another stage owns is other-stage; a missing part of this stage's task is in-scope and major. When a finding reports the same problem as another finding in this list, classify it too and set its duplicateOf to the id of the finding to keep. Then score the whole review 0-100 (correctness + actionability; mostly wrong or trivial findings = low) - that score is informational only.
-Classify every finding below - do not score it. The engine computes a priority from your classes and decides what goes to the implementer, so give each finding exactly these fields:
-- verdict: confirmed (the code shows the problem) | refuted (the code shows it is not there or not a problem) | unverified (you could not confirm it either way).
-- impact: how bad it is IF it triggers - critical | major | moderate | minor | none.
+The findings come from one or more reviewers; each names its reviewer. P0/P1 findings are not in this list: they go to the implementer without you.
+For each finding, open the cited code and check that it is real and correctly described. Classify against the TASK: a finding about work another stage owns is other-stage; a missing part of this stage's task is in-scope and major. If a finding reports the same problem as another one in this list, classify it too and set its duplicateOf to the id of the one to keep. Then score the whole review 0-100 (correctness + actionability; mostly wrong or trivial findings = low); that score is informational only.
+Classify every finding - do not score it. Give each exactly these fields:
+- verdict: confirmed (the code shows the problem) | refuted (the code shows it is absent or not a problem) | unverified (you cannot tell either way).
+- impact, how bad IF it triggers: critical | major | moderate | minor | none.
   Judge impact assuming the trigger happens. Likelihood never lowers impact; it is its own field.
-  - critical: data loss or corruption, writing to the wrong record, a security or authorization bypass, a secret or personal data leak, a draft going public, an irreversible operation, stored data silently read differently.
+  - critical: data loss or corruption, writing to the wrong record, security or authorization bypass, secret or personal data leak, a draft going public, an irreversible operation, stored data silently read differently.
   - major: the user cannot get out from inside the app (a lock only a reload clears, endless loading, a crash); something that worked silently breaks; an API or contract break; a required part of the stage's TASK is missing.
-  - moderate: wrong behaviour with an easy workaround; a wrong or missing error message; a missing test for changed behaviour; duplicated logic.
-  - minor: a visual defect, naming, style.
-  - none: not a problem at all.
+  - moderate: wrong behaviour with an easy workaround; wrong or missing error message; missing test for changed behaviour; duplicated logic.
+  - minor: visual defect, naming, style.
+  - none: not a problem.
 - likelihood: common (the normal flow) | edge (special timing or state: a race, an expired session, a boundary value) | rare (forced input, a rarely used feature).
 - fixCost: trivial (a few lines) | small (one function or file plus a test) | large (cross-module, a redesign).
-- scope: in-scope | pre-existing (it was already there before this change) | other-stage (another stage's job).
-- evidence: path:line plus the concrete trigger steps, e.g. `Editor.tsx:225` + "save -> go back in history -> the late response arrives -> save again". Always give a path:line: evidence without one counts as unverified, and an unverified finding's impact is lowered one class.
+- scope: in-scope | pre-existing (there before this change) | other-stage (another stage's job).
+- evidence: path:line plus the concrete trigger steps, e.g. `Editor.tsx:225` + "save -> go back -> late response arrives -> save again". Always give a path:line: without one the finding counts as unverified, which lowers its impact one class.
 - reason: one line.
-Example: a late save response re-binds the editor to another post's id, so the next save can overwrite the wrong post - confirmed, critical, edge, small, in-scope, even though the window is narrow.
+Example: a late save response re-binds the editor to another post's id, so the next save can overwrite the wrong post: confirmed, critical, edge, small, in-scope, though the window is narrow.
 
 REVIEW:
 <findings as JSON>
@@ -411,28 +411,28 @@ You are the JUDGE classifying the findings of a code review. Repo <repo>, branch
 Design context:
 Plan files - read them first: <plan files>
 <context: work-order files and override notes>
-Stage 2/2 "<stage name>" was asked to do this - its TASK:
+Stage 2/2 "<stage name>" - its TASK:
 <stage task>
 
-The findings come from one or more reviewers; each names its reviewer. P0/P1 findings are not in this list: they go to the implementer without the judge.
-For each finding below, open the cited code and check whether it is real and correctly described. Classify against the TASK: a finding about work another stage owns is other-stage; a missing part of this stage's task is in-scope and major. When a finding reports the same problem as another finding in this list, classify it too and set its duplicateOf to the id of the finding to keep. Then score the whole review 0-100 (correctness + actionability; mostly wrong or trivial findings = low) - that score is informational only.
-Classify every finding below - do not score it. The engine computes a priority from your classes and decides what goes to the implementer, so give each finding exactly these fields:
-- verdict: confirmed (the code shows the problem) | refuted (the code shows it is not there or not a problem) | unverified (you could not confirm it either way).
-- impact: how bad it is IF it triggers - critical | major | moderate | minor | none.
+The findings come from one or more reviewers; each names its reviewer. P0/P1 findings are not in this list: they go to the implementer without you.
+For each finding, open the cited code and check that it is real and correctly described. Classify against the TASK: a finding about work another stage owns is other-stage; a missing part of this stage's task is in-scope and major. If a finding reports the same problem as another one in this list, classify it too and set its duplicateOf to the id of the one to keep. Then score the whole review 0-100 (correctness + actionability; mostly wrong or trivial findings = low); that score is informational only.
+Classify every finding - do not score it. Give each exactly these fields:
+- verdict: confirmed (the code shows the problem) | refuted (the code shows it is absent or not a problem) | unverified (you cannot tell either way).
+- impact, how bad IF it triggers: critical | major | moderate | minor | none.
   Judge impact assuming the trigger happens. Likelihood never lowers impact; it is its own field.
-  - critical: data loss or corruption, writing to the wrong record, a security or authorization bypass, a secret or personal data leak, a draft going public, an irreversible operation, stored data silently read differently.
+  - critical: data loss or corruption, writing to the wrong record, security or authorization bypass, secret or personal data leak, a draft going public, an irreversible operation, stored data silently read differently.
   - major: the user cannot get out from inside the app (a lock only a reload clears, endless loading, a crash); something that worked silently breaks; an API or contract break; a required part of the stage's TASK is missing.
-  - moderate: wrong behaviour with an easy workaround; a wrong or missing error message; a missing test for changed behaviour; duplicated logic.
-  - minor: a visual defect, naming, style.
-  - none: not a problem at all.
+  - moderate: wrong behaviour with an easy workaround; wrong or missing error message; missing test for changed behaviour; duplicated logic.
+  - minor: visual defect, naming, style.
+  - none: not a problem.
 - likelihood: common (the normal flow) | edge (special timing or state: a race, an expired session, a boundary value) | rare (forced input, a rarely used feature).
 - fixCost: trivial (a few lines) | small (one function or file plus a test) | large (cross-module, a redesign).
-- scope: in-scope | pre-existing (it was already there before this change) | other-stage (another stage's job).
-- evidence: path:line plus the concrete trigger steps, e.g. `Editor.tsx:225` + "save -> go back in history -> the late response arrives -> save again". Always give a path:line: evidence without one counts as unverified, and an unverified finding's impact is lowered one class.
+- scope: in-scope | pre-existing (there before this change) | other-stage (another stage's job).
+- evidence: path:line plus the concrete trigger steps, e.g. `Editor.tsx:225` + "save -> go back -> late response arrives -> save again". Always give a path:line: without one the finding counts as unverified, which lowers its impact one class.
 - reason: one line.
-Example: a late save response re-binds the editor to another post's id, so the next save can overwrite the wrong post - confirmed, critical, edge, small, in-scope, even though the window is narrow.
+Example: a late save response re-binds the editor to another post's id, so the next save can overwrite the wrong post: confirmed, critical, edge, small, in-scope, though the window is narrow.
 
-EARLIER DECISIONS - every finding an earlier review round sent to the fixer or kept as residual for the user, under its label, with its classification, priority and the rule that decided it, and the ones the fixer declined with its reasons:
+EARLIER DECISIONS - the findings earlier rounds sent to the fixer or kept as residual for the user, by label, with classification, priority and deciding rule, and the fixer's declines with its reasons:
 Round 1 sent to the fixer:
 [
   {
@@ -451,10 +451,10 @@ Round 1 sent to the fixer:
     "evidence": "<path:line + trigger steps>"
   }
 ]
-The findings the fixer declined (did not fix), and why:
+Declined by the fixer (not fixed), and why:
 - r1/<reviewer>-F<n>: <the fixer's reason>
 The fixer's other notes: <the fixer's deviations>
-Round 1 kept as residual (not sent to the fixer):
+Round 1 kept as residual:
 [
   {
     "label": "r1/<reviewer>-F<m>",
@@ -473,17 +473,21 @@ Round 1 kept as residual (not sent to the fixer):
   }
 ]
 
-When a finding below repeats one of those earlier findings, set its repeatOf to that label. A repeat of a finding the fixer declined with a convincing reason that the code backs: classify it refuted, or by its scope when it belongs elsewhere, and cite the label and the fixer's reason in your reason. When the fixer's reason is wrong, classify the repeat on its merits and say in reason why the fixer's reason does not hold. A repeat of a finding the fixer applied: check the fix in the code and classify what is still wrong. A repeat of a residual finding: the fixer never saw it - classify it on its merits.
-A repeat cannot drop below the impact and likelihood of the finding it repeats: the engine raises them back, unless you classify the repeat refuted with path:line evidence the earlier finding did not cite.
+When a finding below repeats an earlier one, set its repeatOf to that label, then:
+- a repeat of a finding the fixer declined with a convincing reason the code backs: classify it refuted, or by its scope when it belongs elsewhere; cite the label and the fixer's reason in reason.
+- if the fixer's reason is wrong: classify the repeat on its merits and say in reason why that reason does not hold.
+- a repeat of a finding the fixer applied: check the fix in the code and classify what is still wrong.
+- a repeat of a residual finding (the fixer never saw it): classify it on its merits.
+A repeat cannot drop below the impact and likelihood of the finding it repeats: the engine raises them back, unless you classify it refuted with path:line evidence the earlier finding did not cite.
 
 REVIEW:
 <findings as JSON>
 ```
 
-## Judge - retry note (appended once to the judge or plan judge prompt, label `judge <stage> r<n> retry`, when the judge left findings unclassified; when it returned nothing, the note is: `RETRY: your last answer was empty or did not match the schema. Answer again for every finding, with every field set to one of the allowed values and the evidence filled in.`)
+## Judge - retry note (appended once to the judge or plan judge prompt, label `judge <stage> r<n> retry`, when the judge left findings unclassified; when it returned nothing, the note is: `RETRY: your last answer was empty or did not match the schema. Answer again for every finding, every field set to an allowed value and the evidence filled in.`)
 
 ```text
-RETRY: your last answer left these findings unclassified. Answer again for every finding, with every field set to one of the allowed values and the evidence filled in:
+RETRY: your last answer left these findings unclassified. Answer again for every finding, every field set to an allowed value and the evidence filled in:
 - <id>: <what was invalid, or: no classification in your answer>
 ```
 
@@ -491,30 +495,30 @@ RETRY: your last answer left these findings unclassified. Answer again for every
 
 ```text
 You are the JUDGE classifying the findings of a code review. Repo <repo>, branch <branch>, stage diff `'<base>'...HEAD`. Do not edit anything.
-This is the whole-branch review: every stage was already reviewed on its own, so look across them - duplicated code or helpers that several stages added, inconsistencies between stages (naming, contracts, config, docs, tests) - and check the merge commits and their conflict resolutions especially (`git log --merges` and `git show <merge>`): both sides' intent must survive.
+This is the whole-branch review: each stage was already reviewed alone, so look across them - duplicated code or helpers several stages added, inconsistencies between stages (naming, contracts, config, docs, tests) - and especially at the merge commits and their conflict resolutions (`git log --merges`, `git show <merge>`): both sides' intent must survive.
 Design context:
 Plan files - read them first: <plan files>
 <context: work-order files and override notes>
 
-The findings come from one or more reviewers; each names its reviewer. P0/P1 findings are not in this list: they go to the implementer without the judge.
-For each finding below, open the cited code and check whether it is real and correctly described. When a finding reports the same problem as another finding in this list, classify it too and set its duplicateOf to the id of the finding to keep. Then score the whole review 0-100 (correctness + actionability; mostly wrong or trivial findings = low) - that score is informational only.
-Classify every finding below - do not score it. The engine computes a priority from your classes and decides what goes to the implementer, so give each finding exactly these fields:
-- verdict: confirmed (the code shows the problem) | refuted (the code shows it is not there or not a problem) | unverified (you could not confirm it either way).
-- impact: how bad it is IF it triggers - critical | major | moderate | minor | none.
+The findings come from one or more reviewers; each names its reviewer. P0/P1 findings are not in this list: they go to the implementer without you.
+For each finding, open the cited code and check that it is real and correctly described. If a finding reports the same problem as another one in this list, classify it too and set its duplicateOf to the id of the one to keep. Then score the whole review 0-100 (correctness + actionability; mostly wrong or trivial findings = low); that score is informational only.
+Classify every finding - do not score it. Give each exactly these fields:
+- verdict: confirmed (the code shows the problem) | refuted (the code shows it is absent or not a problem) | unverified (you cannot tell either way).
+- impact, how bad IF it triggers: critical | major | moderate | minor | none.
   Judge impact assuming the trigger happens. Likelihood never lowers impact; it is its own field.
-  - critical: data loss or corruption, writing to the wrong record, a security or authorization bypass, a secret or personal data leak, a draft going public, an irreversible operation, stored data silently read differently.
+  - critical: data loss or corruption, writing to the wrong record, security or authorization bypass, secret or personal data leak, a draft going public, an irreversible operation, stored data silently read differently.
   - major: the user cannot get out from inside the app (a lock only a reload clears, endless loading, a crash); something that worked silently breaks; an API or contract break; a required part of what the change set out to do is missing.
-  - moderate: wrong behaviour with an easy workaround; a wrong or missing error message; a missing test for changed behaviour; duplicated logic.
-  - minor: a visual defect, naming, style.
-  - none: not a problem at all.
+  - moderate: wrong behaviour with an easy workaround; wrong or missing error message; missing test for changed behaviour; duplicated logic.
+  - minor: visual defect, naming, style.
+  - none: not a problem.
 - likelihood: common (the normal flow) | edge (special timing or state: a race, an expired session, a boundary value) | rare (forced input, a rarely used feature).
 - fixCost: trivial (a few lines) | small (one function or file plus a test) | large (cross-module, a redesign).
-- scope: in-scope | pre-existing (it was already there before this change) | other-stage (another stage's job).
-- evidence: path:line plus the concrete trigger steps, e.g. `Editor.tsx:225` + "save -> go back in history -> the late response arrives -> save again". Always give a path:line: evidence without one counts as unverified, and an unverified finding's impact is lowered one class.
+- scope: in-scope | pre-existing (there before this change) | other-stage (another stage's job).
+- evidence: path:line plus the concrete trigger steps, e.g. `Editor.tsx:225` + "save -> go back -> late response arrives -> save again". Always give a path:line: without one the finding counts as unverified, which lowers its impact one class.
 - reason: one line.
-Example: a late save response re-binds the editor to another post's id, so the next save can overwrite the wrong post - confirmed, critical, edge, small, in-scope, even though the window is narrow.
+Example: a late save response re-binds the editor to another post's id, so the next save can overwrite the wrong post: confirmed, critical, edge, small, in-scope, though the window is narrow.
 
-EARLIER DECISIONS - every finding an earlier review round sent to the fixer or kept as residual for the user, under its label, with its classification, priority and the rule that decided it, and the ones the fixer declined with its reasons. Rounds named after a stage are that stage's own review; this review covers its code too:
+EARLIER DECISIONS - the findings earlier rounds sent to the fixer or kept as residual for the user, by label, with classification, priority and deciding rule, and the fixer's declines with its reasons. A round named after a stage is that stage's own review; this review covers its code too:
 Stage <k> (<stage name>), round 1 sent to the fixer:
 [
   {
@@ -533,10 +537,10 @@ Stage <k> (<stage name>), round 1 sent to the fixer:
     "evidence": "<path:line + trigger steps>"
   }
 ]
-The findings the fixer declined (did not fix), and why:
+Declined by the fixer (not fixed), and why:
 - s<k>/r1/<reviewer>-F<n>: <the fixer's reason>
 The fixer's other notes: <the fixer's deviations>
-Stage <k> (<stage name>), round 1 kept as residual (not sent to the fixer):
+Stage <k> (<stage name>), round 1 kept as residual:
 [
   {
     "label": "s<k>/r1/<reviewer>-F<m>",
@@ -555,8 +559,12 @@ Stage <k> (<stage name>), round 1 kept as residual (not sent to the fixer):
   }
 ]
 
-When a finding below repeats one of those earlier findings, set its repeatOf to that label. A repeat of a finding the fixer declined with a convincing reason that the code backs: classify it refuted, or by its scope when it belongs elsewhere, and cite the label and the fixer's reason in your reason. When the fixer's reason is wrong, classify the repeat on its merits and say in reason why the fixer's reason does not hold. A repeat of a finding the fixer applied: check the fix in the code and classify what is still wrong. A repeat of a residual finding: the fixer never saw it - classify it on its merits.
-A repeat cannot drop below the impact and likelihood of the finding it repeats: the engine raises them back, unless you classify the repeat refuted with path:line evidence the earlier finding did not cite.
+When a finding below repeats an earlier one, set its repeatOf to that label, then:
+- a repeat of a finding the fixer declined with a convincing reason the code backs: classify it refuted, or by its scope when it belongs elsewhere; cite the label and the fixer's reason in reason.
+- if the fixer's reason is wrong: classify the repeat on its merits and say in reason why that reason does not hold.
+- a repeat of a finding the fixer applied: check the fix in the code and classify what is still wrong.
+- a repeat of a residual finding (the fixer never saw it): classify it on its merits.
+A repeat cannot drop below the impact and likelihood of the finding it repeats: the engine raises them back, unless you classify it refuted with path:line evidence the earlier finding did not cite.
 
 REVIEW:
 <findings as JSON>
@@ -565,14 +573,14 @@ REVIEW:
 ## Final review - the note every reviewer prompt (after its first line naming the diff) and the judge prompt (after its first line) carry, with name `final review` and diff base `<base>`
 
 ```text
-This is the whole-branch review: every stage was already reviewed on its own, so look across them - duplicated code or helpers that several stages added, inconsistencies between stages (naming, contracts, config, docs, tests) - and check the merge commits and their conflict resolutions especially (`git log --merges` and `git show <merge>`): both sides' intent must survive.
+This is the whole-branch review: each stage was already reviewed alone, so look across them - duplicated code or helpers several stages added, inconsistencies between stages (naming, contracts, config, docs, tests) - and especially at the merge commits and their conflict resolutions (`git log --merges`, `git show <merge>`): both sides' intent must survive.
 ```
 
 ## Extraction fallback
 
 ```text
-Below is the raw output of an automated code review for stage "<stage name>". Do not run anything and do not judge the findings.
-Extract every finding it reports - each one, none merged, none dropped, none invented - with id (F1, F2, ...), severity exactly as written (e.g. P1), file, line, title and the full detail text.
+Below is the raw output of an automated code review for stage "<stage name>". Run nothing; do not judge the findings.
+Extract every finding it reports - none merged, dropped or invented - with id (F1, F2, ...), severity exactly as written (e.g. P1), file, line, title and the full detail text.
 
 RAW REVIEW OUTPUT:
 <raw review output>
