@@ -495,6 +495,7 @@ describe('the ratchet', () => {
       { rule: 3, action: 'residual', why: 'refuted', raised: 'repeat of r1/codex-F1: impact none -> major, likelihood rare -> edge' },
     ])
     expect(repeat({ verdict: 'refuted', impact: 'none', evidence: 'see `a.ts:3-4` (unchanged)' }).decision!.raised).toBe('repeat of r1/codex-F1: impact none -> major, likelihood rare -> edge')
+    expect(repeat({ verdict: 'refuted', impact: 'none', evidence: 'src/a.ts:3:10 - not a problem' }).decision!.raised).toBe('repeat of r1/codex-F1: impact none -> major, likelihood rare -> edge')
   })
 
   it('has no floor when the earlier entry carries no classification, or the repeat none', () => {

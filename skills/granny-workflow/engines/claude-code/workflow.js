@@ -497,7 +497,7 @@ function classify(entry) {
     note
   };
 }
-var pathLines = (evidence = "") => (evidence.match(/[^\s`'"()[\]{}<>,;]+:\d+/g) ?? []).map((t) => t.split("/").pop());
+var pathLines = (evidence = "") => [...evidence.matchAll(/([^\s`'"()[\]{}<>,;:]+):(\d+)/g)].map((m) => `${m[1].split("/").pop()}:${m[2]}`);
 function ratchet(fields, label, earlier) {
   if (!earlier.impact || !earlier.likelihood)
     return;

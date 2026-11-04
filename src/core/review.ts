@@ -205,8 +205,9 @@ function classify(entry: Record<string, unknown> | undefined): Classified {
   }
 }
 
-/** The file:line spots evidence cites, by file name, so `a.ts:3` and src/a.ts:3 are one spot. */
-const pathLines = (evidence = ''): string[] => (evidence.match(/[^\s`'"()[\]{}<>,;]+:\d+/g) ?? []).map(t => t.split('/').pop()!)
+/** The file:line spots evidence cites, by file name and line, so `a.ts:3`, src/a.ts:3 and src/a.ts:3:10 are one spot. */
+const pathLines = (evidence = ''): string[] =>
+  [...evidence.matchAll(/([^\s`'"()[\]{}<>,;:]+):(\d+)/g)].map(m => `${m[1]!.split('/').pop()}:${m[2]}`)
 
 /**
  * A repeat cannot drop below the earlier entry's impact and likelihood (both lists run worst first) unless it is
