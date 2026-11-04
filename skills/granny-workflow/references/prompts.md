@@ -115,12 +115,12 @@ CONTEXT - read it before anything else and obey it:
 Plan files - read them first: <plan files>
 <context: work-order files and override notes>
 
-You are the IMPLEMENTER, fixing the plan after plan review round 1. Implementation has not started: change only the plan.
-Edit the plan files in place at their absolute paths: <plan files>. Change nothing else - no code, no other file. Never stage or commit the plan files, even when they sit inside the repo: they stay uncommitted.
-At the top of each plan file you change, add a section `## rN deltas (<date>)` - N one higher than the highest rN deltas section already in that file, r1 when there is none - listing each finding id and what you changed for it. Take the date from `date +%F` in your shell.
-Fix every finding below. A finding you believe is wrong: leave the plan as it is for it, and list it in declined with its id and your reason.
+You are the IMPLEMENTER, fixing the plan after plan review round 1. Implementation has not started.
+Edit the plan files in place at their absolute paths: <plan files>. Change nothing else - no code, no other file. Never stage or commit the plan files, even inside the repo: they stay uncommitted.
+At the top of each plan file you change, add a section `## rN deltas (<date>)` (N one above the highest rN in that file, r1 if none) listing each finding id and what you changed for it. Get the date from `date +%F`.
+Fix every finding below. If you believe a finding is wrong, leave the plan as is for it and list it in declined with its id and your reason.
 
-FINDINGS (P0/P1, or the judge's classification sent them - each names the rule in decision):
+FINDINGS (P0/P1, or sent by the judge's classification; decision names the rule):
 <accepted findings as JSON>
 ```
 
@@ -140,13 +140,12 @@ CONTEXT - read it before anything else and obey it:
 Plan files - read them first: <plan files>
 <context: work-order files and override notes>
 
-You are the IMPLEMENTER.
-Stage 2/2: "<stage name>".
-Earlier stages are done and reviewed - read `git log --oneline '<base>'..HEAD`, the code and .granny/PR-BODY.md first.
+You are the IMPLEMENTER. Stage 2/2: "<stage name>".
+Earlier stages are done and reviewed: first read `git log --oneline '<base>'..HEAD`, the code and .granny/PR-BODY.md.
 Do ONLY this stage, then stop:
 <stage task>
 
-Commit per logical step. Keep .granny/PR-BODY.md (git-excluded; create the directory if missing) current with sections: Title, Summary, Changes (table), Test plan (real numbers), Revised in stage N, Review fixes, Untested. Return startSha = HEAD before your first change.
+Commit per logical step. Keep .granny/PR-BODY.md (git-excluded; create its directory if missing) current, with sections: Title, Summary, Changes (table), Test plan (real numbers), Revised in stage N, Review fixes, Untested. Return startSha = HEAD before your first change.
 ```
 
 ## Implementer - fix
@@ -166,9 +165,9 @@ Plan files - read them first: <plan files>
 <context: work-order files and override notes>
 
 You are the IMPLEMENTER, fixing review round 1 of stage "<stage name>".
-Apply the review findings on top of the current branch state (read `git log --oneline '<base>'..HEAD` and the code first). Fix every finding below, red-green where it changes behaviour, keep the gates green, commit (`fix(...)`), and add each finding id with what you did to the "Review fixes" section of .granny/PR-BODY.md. A finding you believe is wrong: do not fix it, and list it in declined with its id and your reason.
+First read `git log --oneline '<base>'..HEAD` and the code. Fix every finding below on the current branch, red-green where it changes behaviour, gates green, and commit (`fix(...)`). Add each finding id and what you did to "Review fixes" in .granny/PR-BODY.md. If you believe a finding is wrong, do not fix it: list it in declined with its id and your reason.
 
-FINDINGS (P0/P1, or the judge's classification sent them - each names the rule in decision):
+FINDINGS (P0/P1, or sent by the judge's classification; decision names the rule):
 <accepted findings as JSON>
 ```
 
@@ -189,14 +188,14 @@ Plan files - read them first: <plan files>
 <context: work-order files and override notes>
 
 You are the IMPLEMENTER, fixing review round 2 of stage "<stage name>".
-Apply the review findings on top of the current branch state (read `git log --oneline '<base>'..HEAD` and the code first). Fix every finding below, red-green where it changes behaviour, keep the gates green, commit (`fix(...)`), and add each finding id with what you did to the "Review fixes" section of .granny/PR-BODY.md. A finding you believe is wrong: do not fix it, and list it in declined with its id and your reason.
+First read `git log --oneline '<base>'..HEAD` and the code. Fix every finding below on the current branch, red-green where it changes behaviour, gates green, and commit (`fix(...)`). Add each finding id and what you did to "Review fixes" in .granny/PR-BODY.md. If you believe a finding is wrong, do not fix it: list it in declined with its id and your reason.
 
-OVERRULED - you declined these findings in an earlier round; the judge checked your reason against the code and disagreed:
+OVERRULED - you declined these in an earlier round; the judge checked your reason against the code and disagreed:
 - <id> (repeat of r1/<reviewer>-F<n>): <the judge's reason>
   you said: <the fixer's reason>
-Fix them. If you still decline one, list it in declined again and answer the judge's reason with new evidence from the code - do not repeat your earlier explanation.
+Fix them. To decline one again, list it in declined and answer the judge's reason with new evidence from the code, not your earlier explanation.
 
-FINDINGS (P0/P1, or the judge's classification sent them - each names the rule in decision):
+FINDINGS (P0/P1, or sent by the judge's classification; decision names the rule):
 <accepted findings as JSON>
 ```
 
@@ -228,10 +227,10 @@ CONTEXT - read it before anything else and obey it:
 Plan files - read them first: <plan files>
 <context: work-order files and override notes>
 
-You are the IMPLEMENTER, repairing failed checks of stage "<stage name>" (implement, repair 1). Granny ran the configured checks itself on the current branch state and they failed; review does not start until they pass.
+You are the IMPLEMENTER, repairing failed checks of stage "<stage name>" (implement, repair 1). Granny ran the checks below on the current branch and they failed; review waits until they pass.
 Stage 2/2 "<stage name>" was asked to do this - its TASK:
 <stage task>
-Read `git log --oneline '<base>'..HEAD` and the code, find why each check below fails, and make it pass by fixing the code. Rerun the checks yourself, commit (`fix(...)`), and note what you changed in the "Review fixes" section of .granny/PR-BODY.md.
+Read `git log --oneline '<base>'..HEAD` and the code, find why each check fails, and fix the code until it passes. Rerun the checks, commit (`fix(...)`), and note what you changed under "Review fixes" in .granny/PR-BODY.md.
 NEVER delete, skip, disable or weaken a test, a check, a threshold, the granny config or a check script to get green - granny reruns the same commands and the reviewers see the diff. If a check cannot pass without that, leave it failing and explain why in deviations.
 
 FAILED CHECKS:
@@ -260,7 +259,7 @@ CONTEXT - read it before anything else and obey it:
 Plan files - read them first: <plan files>
 <context: work-order files and override notes>
 
-You are the IMPLEMENTER, finishing stage "<stage name>" (implement). The working tree has uncommitted changes. Granny runs the checks and the reviewers on what is committed, so it never checks or reviews uncommitted work.
+You are the IMPLEMENTER, finishing stage "<stage name>" (implement). The working tree has uncommitted changes; granny checks and reviews only committed work.
 Stage 2/2 "<stage name>" was asked to do this - its TASK:
 <stage task>
 `git status --porcelain` printed:
@@ -268,7 +267,7 @@ Stage 2/2 "<stage name>" was asked to do this - its TASK:
  M <file>
 ?? <file>
 ```
-Read `git diff`, `git log --oneline '<base>'..HEAD` and the files above. Commit the work that belongs to the stage with explicit paths, gates green, and delete only stray files you created that do not belong in the repo (scratch files, build output). Do not hide changes to get a clean tree: never `git stash`, `git reset`, `git checkout -- <path>` or `git clean`. Leave the plan files <plan files inside the repo> as they are: never stage or commit them - they stay uncommitted, and granny left them out of the status above. When you are done, `git status --porcelain` prints nothing (.granny/ is git-excluded and does not count, nor do the plan files); explain a change you cannot commit in deviations. Return startSha = HEAD before your first commit.
+Read `git diff`, `git log --oneline '<base>'..HEAD` and the files above. Commit the stage's work with explicit paths, gates green. Delete only stray files you created that do not belong in the repo (scratch files, build output). Do not hide changes to get a clean tree: never `git stash`, `git reset`, `git checkout -- <path>` or `git clean`. Leave the plan files <plan files inside the repo> as they are and never stage or commit them (granny left them out of the status above). When you are done, `git status --porcelain` prints nothing (.granny/ is git-excluded and does not count, nor do the plan files); explain any change you cannot commit in deviations. Return startSha = HEAD before your first commit.
 ```
 
 ## Implementer - merge (a stage that ran in its own worktree; its merge stopped on conflicts)
@@ -290,7 +289,7 @@ Plan files - read them first: <plan files>
 You are the IMPLEMENTER, finishing a merge. Stage "<stage name>" ran in parallel on branch `<lane branch>` and was reviewed there; `git merge <lane branch>` into `<branch>` stopped on conflicts:
 <git merge output>
 
-Resolve every conflict so both sides' intent survives (read `git log --oneline '<base>'..HEAD` and `git log --oneline HEAD..'<lane branch>'` first), keep the gates green, and conclude the merge with `git commit --no-edit`. Never abort the merge, never rebase or reset. Return startSha = HEAD before the merge (`git rev-parse HEAD` before you commit).
+First read `git log --oneline '<base>'..HEAD` and `git log --oneline HEAD..'<lane branch>'`. Resolve every conflict so both sides' intent survives, keep the gates green, and conclude with `git commit --no-edit`. Never abort the merge or reset. Return startSha = HEAD before the merge (`git rev-parse HEAD` before you commit).
 ```
 
 ## Reviewer - agent engine
