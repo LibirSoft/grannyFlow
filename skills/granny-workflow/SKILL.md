@@ -22,6 +22,7 @@ for each stage - independent stages at the same time (config parallel, default o
   granny reads HEAD, the implementer builds the stage
      ├─ no commit since that HEAD ─► one commit prompt when the tree is dirty; still no commit ─► stage no-changes,
      │  not reviewed; the stages that build on it are skipped
+     │  (the first stage of a fromStage resume reviews base...HEAD instead; no-changes only when that is empty too)
   checks (config checks, default none): granny runs them itself; red ones go back to the implementer for a repair, up to maxRepairs
      (on Claude Code a granny helper agent runs each command and reports the exit code; on opencode granny runs it directly)
      never on uncommitted work: git status --porcelain first (the plan files do not count); dirty ─► the implementer commits it, which spends a repair;
