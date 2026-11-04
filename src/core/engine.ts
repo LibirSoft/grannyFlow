@@ -28,7 +28,7 @@ import {
   type StageTask,
   WHOLE_BRANCH_NOTE,
 } from './prompts'
-import { isBlocker, mergeDuplicates, parseCodexReview, reviewFailure, saysNoFindings, triage } from './review'
+import { declinedOf, isBlocker, mergeDuplicates, parseCodexReview, reviewFailure, saysNoFindings, triage } from './review'
 import { planReviewScript, reportedBackend, reviewPlan, reviewStem } from './reviewer'
 import { SCHEMAS } from './schemas'
 import { shellQuote } from './shell'
@@ -587,12 +587,12 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
         return { outcome: 'clean', rounds: round, residual: kept(), unresolved: [], history }
       }
 
-      const declined = earlier.filter(e => e.deviations?.trim())
-      const labels = new Map(earlier.flatMap(e => e.sent.map(f => [roundLabel(e.round, f), e] as const)))
+      const declined = new Map(earlier.flatMap(e => (e.declined ?? []).map(d => [roundLabel(e.round, d), d.reason] as const)))
+      const labels = new Set(earlier.flatMap(e => e.sent.map(f => roundLabel(e.round, f))))
       const residualLabels = new Set(earlier.flatMap(e => (e.residual ?? []).map(f => roundLabel(e.round, f))))
       const blockers = found.filter(isBlocker)
-      const judged = declined.length ? found : found.filter(f => !isBlocker(f))
-      if (blockers.length && declined.length) {
+      const judged = declined.size ? found : found.filter(f => !isBlocker(f))
+      if (blockers.length && declined.size) {
         host.log(`${name} r${round}: ${blockers.length} P0/P1 finding(s) go to the judge too - the fixer declined findings before, so a repeat of one can be scored down: ${blockers.map(f => f.id).join(', ')}`)
       } else if (blockers.length) {
         host.log(`${name} r${round}: ${blockers.length} P0/P1 finding(s) go to the implementer without the judge: ${blockers.map(f => f.id).join(', ')}`)
@@ -628,8 +628,8 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
       history.push({ round, score, findings })
       host.log(`${name} r${round}: ${findings.length} finding(s), review score ${score} (informational)`)
 
-      const { accepted, residual } = triage(findings, config.threshold)
-      const declinedBefore = (f: Finding) => (f.repeatOf ? labels.get(f.repeatOf)?.deviations?.trim() : undefined)
+      const declinedBefore = (f: Finding) => f.repeatOf !== undefined && declined.has(f.repeatOf)
+      const { accepted, residual } = triage(findings, config.threshold, declinedBefore)
       for (const f of residual.filter(declinedBefore)) {
         host.log(`${name} r${round}: ${f.id} dropped as a repeat of ${f.repeatOf}, which the fixer declined (score ${f.score}) - kept as residual`)
       }
@@ -644,30 +644,34 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
         ...residual.map(f => ({ round, labels: [roundLabel(round, f), ...aliases(f)], finding: f })),
       ]
       if (residual.length) {
-        host.log(`${name} r${round}: ${residual.length} finding(s) <= ${config.threshold} and not ${residual.some(isBlocker) ? 'first-time ' : ''}P0/P1, not sent: ${residual.map(f => `${f.id}(${f.score})`).join(', ')}`)
+        host.log(`${name} r${round}: ${residual.length} finding(s) <= ${config.threshold} and not P0/P1${residual.some(isBlocker) ? ' (or a repeat of a declined one)' : ''}, not sent: ${residual.map(f => `${f.id}(${f.score})`).join(', ')}`)
       }
       if (!accepted.length) {
         host.log(`${name} r${round}: nothing actionable left - stage done with ${carried.length} residual finding(s) for the user`)
         return { outcome: 'residual-only', rounds: round, residual: kept(), unresolved: [], history }
       }
 
-      const overruled: Overruled[] = accepted.filter(declinedBefore).map(f => ({ id: f.id, repeatOf: f.repeatOf!, round: labels.get(f.repeatOf!)!.round, reason: f.reason }))
+      const overruled: Overruled[] = accepted.filter(declinedBefore).map(f => ({ id: f.id, repeatOf: f.repeatOf!, reason: f.reason, said: declined.get(f.repeatOf!)! }))
       for (const o of overruled) {
         host.log(`${name} r${round}: the judge overruled the fixer on ${o.id} (repeat of ${o.repeatOf}, score ${accepted.find(f => f.id === o.id)!.score})`)
       }
 
-      let deviations: string | undefined
+      let fixed: { deviations?: string; declined?: unknown }
       if (subject.kind === 'plan') {
-        deviations = (await fixPlan(`fix ${name} r${round}`, planFixPrompt(p, subject.files, round, accepted, overruled, earlier))).deviations
+        fixed = await fixPlan(`fix ${name} r${round}`, planFixPrompt(p, subject.files, round, accepted, overruled))
       } else {
-        const fix = await implement(lane, `fix ${name} r${round}`, fixPrompt(p, name, round, accepted, overruled, earlier))
+        const fix = await implement(lane, `fix ${name} r${round}`, fixPrompt(p, name, round, accepted, overruled))
         if (gates) Object.assign(gates, { green: fix.gatesGreen, text: fix.gates, by: `the last fix (fix ${name} r${round})` })
         if (!fix.gatesGreen) host.log(`${name} r${round}: WARNING fixer left gates red - ${fix.gates}`)
-        deviations = fix.deviations
+        fixed = fix
       }
-      const said = saidSomething(deviations)
+      const said = saidSomething(fixed.deviations)
+      const { declined: refused, unknown } = declinedOf(fixed.declined, accepted)
+      if (unknown.length) host.log(`${name} r${round}: the fixer declined id(s) it was not sent - ignored: ${unknown.join(', ')}`)
+      if (refused.length) host.log(`${name} r${round}: the fixer declined ${refused.map(d => d.id).join(', ')}`)
       if (said) history.at(-1)!.deviations = said
-      earlier.push({ round, sent: accepted, ...(residual.length ? { residual } : {}), ...(said ? { deviations: said } : {}) })
+      if (refused.length) history.at(-1)!.declined = refused
+      earlier.push({ round, sent: accepted, ...(residual.length ? { residual } : {}), ...(said ? { deviations: said } : {}), ...(refused.length ? { declined: refused } : {}) })
       if (subject.kind === 'diff' && checks.length) {
         const gate = await checkGate(lane, name, `fix r${round}`, checks, runs, subject.stage)
         if (!gate.passed) return { outcome: 'checks-failed', rounds: round, residual: kept(), unresolved: [], history, note: gate.note }

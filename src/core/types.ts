@@ -51,6 +51,11 @@ export interface Finding {
   repeatOf?: string
 }
 
+export interface Declined {
+  id: string
+  reason: string
+}
+
 export interface StageSpec {
   name?: string
   task?: string
@@ -69,6 +74,7 @@ export interface Implementation {
   commits: string[]
   untested: string
   deviations?: string
+  declined?: Declined[]
 }
 
 export interface RoundRecord {
@@ -76,6 +82,7 @@ export interface RoundRecord {
   score: number | null
   findings: Finding[]
   deviations?: string
+  declined?: Declined[]
 }
 
 export type StageOutcome = 'clean' | 'residual-only' | 'round-cap' | 'review-failed' | 'review-skipped' | 'gates-red' | 'no-changes' | 'checks-failed' | 'skipped'
@@ -117,6 +124,7 @@ export interface PlanFix {
   files: string[]
   changes: string
   deviations?: string
+  declined?: Declined[]
 }
 
 export type PlanResult = Omit<StageResult, 'stage' | 'implementation'>

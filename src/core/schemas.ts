@@ -1,5 +1,15 @@
 import type { JsonSchema, ResultKind } from './types'
 
+const DECLINED = {
+  type: 'array',
+  description: 'the findings you were sent and did not fix on purpose, each with its id exactly as given and why; [] when you fixed them all',
+  items: {
+    type: 'object',
+    properties: { id: { type: 'string' }, reason: { type: 'string' } },
+    required: ['id', 'reason'],
+  },
+}
+
 const FINDING = {
   type: 'object',
   properties: {
@@ -47,6 +57,7 @@ export const SCHEMAS: Record<ResultKind, JsonSchema> = {
       commits: { type: 'array', items: { type: 'string' } },
       untested: { type: 'string' },
       deviations: { type: 'string' },
+      declined: DECLINED,
     },
     required: ['startSha', 'headSha', 'gatesGreen', 'gates', 'commits', 'untested'],
   },
@@ -55,7 +66,8 @@ export const SCHEMAS: Record<ResultKind, JsonSchema> = {
     properties: {
       files: { type: 'array', items: { type: 'string' }, description: 'absolute paths of the plan files you changed' },
       changes: { type: 'string', description: 'what you changed in the plan, per finding id' },
-      deviations: { type: 'string', description: 'findings you did not apply, and why' },
+      deviations: { type: 'string', description: 'anything else the user should know about your changes' },
+      declined: DECLINED,
     },
     required: ['files', 'changes'],
   },

@@ -1,4 +1,4 @@
-import type { Finding } from './types'
+import type { Declined, Finding } from './types'
 
 const MARKER = /^\s*[-*]\s*\[(P[0-3]|[A-Za-z]+)\](.*)$/
 const WORD_SEVERITY = new Map([['critical', 'P0'], ['high', 'P1'], ['medium', 'P2'], ['low', 'P3']])
@@ -107,12 +107,24 @@ export function mergeDuplicates(findings: Finding[], duplicateOf: Map<string, st
   return { findings: kept, merged: [...into].map(([id, k]) => ({ id, into: k })) }
 }
 
-export function triage(findings: Finding[], threshold: number): { accepted: Finding[]; residual: Finding[] } {
+export function triage(findings: Finding[], threshold: number, repeatsDeclined: (f: Finding) => boolean = () => false): { accepted: Finding[]; residual: Finding[] } {
   const accepted: Finding[] = []
   const residual: Finding[] = []
   for (const f of findings) {
-    if ((isBlocker(f) && f.repeatOf === undefined) || f.score === undefined || f.score > threshold) accepted.push(f)
+    if ((isBlocker(f) && !repeatsDeclined(f)) || f.score === undefined || f.score > threshold) accepted.push(f)
     else residual.push(f)
   }
   return { accepted, residual }
+}
+
+export function declinedOf(value: unknown, sent: Finding[]): { declined: Declined[]; unknown: string[] } {
+  const declined: Declined[] = []
+  const unknown: string[] = []
+  for (const d of Array.isArray(value) ? value : []) {
+    if (!d || typeof d !== 'object' || typeof d.id !== 'string') continue
+    const f = sent.find(s => s.id === d.id || s.duplicates?.includes(d.id))
+    if (!f) unknown.push(d.id)
+    else if (!declined.some(x => x.id === f.id)) declined.push({ id: f.id, reason: typeof d.reason === 'string' ? d.reason.trim() : '' })
+  }
+  return { declined, unknown }
 }
