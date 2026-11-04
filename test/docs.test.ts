@@ -107,6 +107,15 @@ describe('skill docs', () => {
     expect(readRoot('README.md')).toMatch(/^\| `planReview` \| `false` \|/m)
   })
 
+  it('has the Cursor protocol route and triage findings in the engine order', () => {
+    const cursor = read('references/cursor.md')
+    const route = cursor.slice(cursor.indexOf('3. **Route.**'), cursor.indexOf('4. **Judge**'))
+    expect(route).toContain('in the final review, a decline in a stage review of that repo counts too')
+    const triage = cursor.slice(cursor.indexOf('5. **Triage**'), cursor.indexOf('take the first rule that matches'))
+    expect(triage.indexOf('apply [the ratchet]')).toBeGreaterThan(-1)
+    expect(triage.indexOf('apply [the ratchet]')).toBeLessThan(triage.indexOf('compute the priority'))
+  })
+
   it('releases 1.5.0 with a CHANGELOG entry for the package version', () => {
     const { version } = JSON.parse(readRoot('package.json'))
     expect(version).toBe('1.5.0')
