@@ -622,6 +622,33 @@ describe('the base a stage review diffs against', () => {
     )
     expect(r.stages.map(s => [s.stage, s.outcome])).toEqual([['a', 'no-changes'], ['b', 'clean']])
   })
+
+  it('reviews <base>...HEAD when the first resumed stage makes no new commit, and runs the stages after it', async () => {
+    const f = fakeHost({ commits: base => (base === 'deadbee1' ? 0 : 1) })
+    const r = await runGranny(f.host, input({ fromStage: 2, stages: [{ name: 'a', task: 'A' }, { name: 'b', task: 'B' }, { name: 'c', task: 'C' }] }))
+    expect(r.stages.map(s => [s.stage, s.outcome])).toEqual([['a', 'skipped'], ['b', 'clean'], ['c', 'clean']])
+    expect(f.logs).toContain('b: no new commit on resume - reviewing main...HEAD instead')
+    expect(f.probes.slice(0, 4)).toEqual(['git rev-parse --verify HEAD', 'git rev-list --count deadbee1..HEAD', 'git status --porcelain', 'git rev-list --count main..HEAD'])
+    expect(f.commands[0]).toContain('codex exec review --base main -o')
+    expect(f.commands[0]).toContain('review-b-r1')
+    expect(f.calls.filter(c => c.kind === 'implementation').map(c => c.label)).toEqual(['implement b', 'implement c'])
+  })
+
+  it('still ends the first resumed stage no-changes when <base>...HEAD is empty too', async () => {
+    const f = fakeHost({ commits: 0 })
+    const r = await runGranny(f.host, input({ fromStage: 2, stages: [{ name: 'a', task: 'A' }, { name: 'b', task: 'B' }, { name: 'c', task: 'C' }] }))
+    expect(r.stages.map(s => [s.stage, s.outcome])).toEqual([['a', 'skipped'], ['b', 'no-changes'], ['c', 'skipped']])
+    expect(r.stages[1]!.note).toBe('the implementer made no commit: deadbee1..HEAD is empty, and so is main..HEAD on this resume, so there was nothing to review')
+    expect(f.probes).toContain('git rev-list --count main..HEAD')
+    expect(f.commands.filter(c => c.includes('review-b-r1'))).toEqual([])
+  })
+
+  it('ends a later resumed stage no-changes when it makes no commit', async () => {
+    const f = fakeHost({ commits: base => (base === 'deadbee2' ? 0 : 1) })
+    const r = await runGranny(f.host, input({ fromStage: 2, stages: [{ name: 'a', task: 'A' }, { name: 'b', task: 'B' }, { name: 'c', task: 'C' }] }))
+    expect(r.stages.map(s => [s.stage, s.outcome])).toEqual([['a', 'skipped'], ['b', 'clean'], ['c', 'no-changes']])
+    expect(f.probes).not.toContain('git rev-list --count main..HEAD')
+  })
 })
 
 describe('a review command on Claude Code', () => {

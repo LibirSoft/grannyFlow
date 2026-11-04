@@ -28,6 +28,7 @@ for each stage - independent stages at the same time (parallel, default on):
   granny reads HEAD, the implementer builds the stage
      ├─ no commit since that HEAD ─► one commit prompt when the tree is dirty; still no commit ─► stage no-changes,
      │  not reviewed; the stages that build on it are skipped
+     │  (the first stage of a fromStage resume reviews base...HEAD instead; no-changes only when that is empty too)
   checks (config checks, default none): granny runs them itself; red ones go back to the implementer for a repair, up to maxRepairs
      never on uncommitted work: a dirty tree goes back to the implementer to commit, which spends a repair;
      a status granny cannot read, also on one more read, fails the gate
@@ -185,6 +186,8 @@ Full reference: [skills/granny-workflow/references/config.md](skills/granny-work
 
 - Claude Code: relaunch the Workflow with `resumeFromRunId`; finished agent calls come back from cache.
 - opencode: no cache - relaunch with `fromStage` set to the first unfinished stage.
+
+With `fromStage`, the first resumed stage that makes no new commit - its work is already on the branch - is reviewed over `<base>...HEAD` instead of ending `no-changes`.
 
 Either way the run works in the worktree the first launch used.
 

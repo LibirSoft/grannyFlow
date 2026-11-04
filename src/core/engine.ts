@@ -766,11 +766,11 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
       impl = await implement(lane, `implement ${name}`, implementPrompt(lane.p, st, i, specs.length, name, buildsOnEarlier(i)))
       if (!impl.gatesGreen) host.log(`${name}: implementer ended with RED gates - review will see it`)
       if (start && impl.startSha !== start) host.log(`${name}: the implementer reported startSha ${impl.startSha}, but HEAD was ${start} before it ran - reviewing ${start}...HEAD`)
-      const commits = async (label: string) => {
-        const count = await shell(label, 'Implement', `git rev-list --count ${shellQuote(base)}..HEAD`, lane.cwd)
+      const commits = async (label: string, since = base) => {
+        const count = await shell(label, 'Implement', `git rev-list --count ${shellQuote(since)}..HEAD`, lane.cwd)
         const n = count.ran ? lineShaped(count.output, COUNT) : undefined
         if (n !== undefined) return Number(n)
-        host.log(`${name}: could not count the commits in ${base}..HEAD - reviewing it anyway (exit ${count.code}): ${count.output.slice(-500)}`)
+        host.log(`${name}: could not count the commits in ${since}..HEAD - reviewing it anyway (exit ${count.code}): ${count.output.slice(-500)}`)
         return undefined
       }
       let count = await commits(`commits ${name}`)
@@ -778,11 +778,19 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
         committed = await commitWork(lane, name, 'implement', task)
         if (committed.impl) count = await commits(`commits ${name} after commit`)
       }
+      const resumed = count === 0 && fromStage > 1 && i === fromStage - 1
+      if (resumed) {
+        count = await commits(`commits ${name} on resume`, lane.base)
+        if (count !== 0) {
+          host.log(`${name}: no new commit on resume - reviewing ${lane.base}...HEAD instead`)
+          base = lane.base
+        }
+      }
       if (count === 0) {
         const { left, unread } = committed
         const note = left
           ? `the implementer made no commit: the work it left is uncommitted (${listed(left)}), so there was nothing to review`
-          : `the implementer made no commit: ${base}..HEAD is empty, so there was nothing to review${unread ? `; the working tree status could not be read (${unread}), so uncommitted work may be left` : ''}`
+          : `the implementer made no commit: ${base}..HEAD is empty${resumed ? `, and so is ${lane.base}..HEAD on this resume` : ''}, so there was nothing to review${unread ? `; the working tree status could not be read (${unread}), so uncommitted work may be left` : ''}`
         host.log(`${name}: no-changes - ${note}`)
         return { stage: name, ...where, implementation: impl, outcome: 'no-changes', rounds: 0, residual: [], unresolved: [], history: [], note }
       }
