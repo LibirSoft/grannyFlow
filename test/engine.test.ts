@@ -511,9 +511,15 @@ describe('runGranny', () => {
     expect(cc.calls.find(c => c.role === 'judge')).toBeUndefined()
   })
 
-  it('defaults the judge to sonnet on claude-code', async () => {
+  it('defaults the judge to haiku on claude-code', async () => {
     const f = fakeHost({ name: 'claude-code', direct: false, reviews: [review(finding('P2', 'x')), 'No findings.'], scores: [{ 'codex-F1': 99 }] })
     await runGranny(f.host, input())
+    expect(f.calls.find(c => c.role === 'judge')).toMatchObject({ model: 'haiku', access: 'read-only' })
+  })
+
+  it('runs the judge on the model a user config sets, over the haiku default', async () => {
+    const f = fakeHost({ name: 'claude-code', direct: false, reviews: [review(finding('P2', 'x')), 'No findings.'], scores: [{ 'codex-F1': 99 }] })
+    await runGranny(f.host, input({ config: { roles: { judge: { model: 'sonnet' } } } }))
     expect(f.calls.find(c => c.role === 'judge')).toMatchObject({ model: 'sonnet', access: 'read-only' })
   })
 

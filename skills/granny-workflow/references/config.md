@@ -17,7 +17,7 @@ Layers, later wins:
 | `roles.helper` | `{ "model": { "claude-code": "haiku" }, "effort": "low" }` | Claude Code only: model/effort for the helper agents that run granny's plain commands, because a Workflow script has no shell - the worktree setup, the HEAD, commit-count and working-tree status reads, the timeout probe, the checks, a lane's merge and cleanup, and the start, wait, read and stop steps of a Codex or `command` review. Each is given one fixed command to run once and reports its exit code and output; it decides nothing, so a cheap model is enough. On opencode granny runs these commands itself and no helper starts |
 | `roles.planner` | `{}` | writes the plan and proposes the stages in a run with `goal` ([Planning](#planning)) |
 | `roles.implementer` | `{}` | builds each stage, fixes accepted findings and repairs failed checks; fixes the plan in the plan review |
-| `roles.judge` | `{ "model": { "claude-code": "sonnet" } }` | classifies each finding that is not P0/P1 (verdict, impact, likelihood, fix cost, scope, evidence) and marks duplicates; the engine decides from that ([The decision table](#the-decision-table)) |
+| `roles.judge` | `{ "model": { "claude-code": "haiku" } }` | classifies each finding that is not P0/P1 (verdict, impact, likelihood, fix cost, scope, evidence) and marks duplicates; the engine decides from that ([The decision table](#the-decision-table)). Haiku on Claude Code because the judge only classifies and the engine decides; on a measured set it matched the user's later fixes more often than Sonnet, and its errors lean toward an extra fix round rather than a real bug left open ([The judge's model](#the-judges-model)). `"roles": { "judge": { "model": "sonnet" } }` switches back. On opencode the judge uses the session model |
 | `reviewers` | `[{ "name": "reviewer", "engine": "agent" }]` | the reviewers; every one of them reviews every round, all at the same time - see [Reviewers](#reviewers) |
 | `threshold` | `70` | a finding whose computed priority is **strictly above** this is sent back to the implementer (rule 7 of [the decision table](#the-decision-table)); P0/P1 (also `critical`/`high`) skip the judge and are always sent, and so is a finding the judge did not classify. A judge that returns the old numeric `score` per finding is cut by the same `score > threshold`. The overall review score gates nothing |
 | `alwaysFix` | `["critical", "major"]` | impact classes the implementer always fixes, whatever their likelihood, fix cost and priority (rule 6 of [the decision table](#the-decision-table)); `[]`: only `threshold` decides. Values: `critical`, `major`, `moderate`, `minor`, `none` |
@@ -325,6 +325,27 @@ When the judge marks a finding as a repeat (`repeatOf`) of a ledger entry, the e
 Residual findings still add up per loop: a final-review repeat of a stage's residual finding does not remove it from that stage's `residual`.
 
 A judge that returns the old numeric `score` per finding and no classification field still works: that finding goes through rule 1, then rule 2 when there is no score either, then `score > threshold` (logged as rule 7, `score <s> > threshold <t> (numeric score, no classification)`, or rule 8, `under the bar: score <s> (numeric score, no classification)`). A finding with any classification field is read as a classification, so a partial one is invalid (rule 2) even with a score next to it.
+
+### The judge's model
+
+On Claude Code the judge runs on `haiku` by default. Since it only classifies and the engine's table decides, the classification is what matters, and it was measured on 4 real findings, 2 refuted fakes and 1 duplicate, 2 runs per model, with the rubric prompt:
+
+| | Haiku | Sonnet |
+|---|---|---|
+| outcomes matching the user's later fixes | 3/4 | 2/4 |
+| direction of the errors | toward fix (an extra fix round) | toward residual (a real bug left open) |
+| fakes refuted, duplicate caught | 8/8 | 8/8 |
+| same outcome across runs | every finding | every finding |
+| cost per call | ~$0.004 | ~$0.025 |
+| malformed structured output on the first try | 2/8 (recovered) | 0/8 |
+
+The deciding case was a fail-open `git status` probe the user fixed later: Haiku classified it `major` (fix) in both runs, Sonnet `moderate` (residual) in both, reasoning that it was a rare failure - likelihood lowering impact, which the rubric forbids. To trade the extra fix rounds for Sonnet's fewer ones, set:
+
+```json
+{ "roles": { "judge": { "model": "sonnet" } } }
+```
+
+On opencode the judge keeps the session model unless `roles.judge.model` names one.
 
 ### The Codex plugin
 

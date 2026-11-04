@@ -141,7 +141,7 @@ Three layers, later wins: `~/.config/granny/config.json`, `<repo>/granny.config.
 
 | key | default | |
 |---|---|---|
-| `roles.<role>.model` | session model; judge `sonnet` and helper `haiku` (effort `low`) on Claude Code | one string for every host, or `{ "claude-code": …, "opencode": … }` |
+| `roles.<role>.model` | session model; judge `haiku` and helper `haiku` (effort `low`) on Claude Code | one string for every host, or `{ "claude-code": …, "opencode": … }` |
 | `roles.<role>.effort` | inherit | Claude Code only; on opencode use a `#variant` model suffix |
 | `reviewers` | `[{ "name": "reviewer", "engine": "agent" }]` | all review every round, in parallel; each has a unique `name`, an `engine` and its own `model`/`effort` |
 | `reviewers[].engine` | `auto` | `auto`: the Codex plugin when installed and `node` is on `PATH` (Claude Code only), else the Codex CLI; `codex-plugin`: the plugin, required; `codex`: the CLI; `agent`: a host model (Claude models only on Claude Code); `command`: any CLI, with `{base}`, `{out}`, `{model}` and `{prompt}` placeholders |

@@ -20,7 +20,7 @@ var DEFAULT_CONFIG = {
     helper: { model: { "claude-code": "haiku" }, effort: "low" },
     planner: {},
     implementer: {},
-    judge: { model: { "claude-code": "sonnet" } }
+    judge: { model: { "claude-code": "haiku" } }
   },
   reviewers: [{ name: "reviewer", engine: "agent" }],
   threshold: 70,
