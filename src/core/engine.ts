@@ -193,12 +193,13 @@ export function stageCheckErrors(stages: StageSpec[] | undefined, checks: CheckC
 
 const planFiles = (input: RunInput): string[] => (input.plan === undefined ? [] : Array.isArray(input.plan) ? input.plan : [input.plan])
 
+export const configLayers = (input: RunInput): unknown[] => (Array.isArray(input.config) ? input.config : [input.config])
+
 export async function runGranny(host: Host, input: RunInput): Promise<RunResult> {
   const inputErrors = checkInput(input)
   if (inputErrors.length) throw new Error(`Invalid granny input:\n- ${inputErrors.join('\n- ')}`)
 
-  const layers = Array.isArray(input.config) ? input.config : [input.config]
-  const config = resolveConfig(layers, host.name)
+  const config = resolveConfig(configLayers(input), host.name)
   const base = input.base ?? config.base
   const fromStage = input.fromStage ?? 1
   const primary = trimPath(input.repo)

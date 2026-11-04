@@ -41,7 +41,8 @@ var DEFAULT_CONFIG = {
     "Code comments: default none; add one only when the reason cannot be recovered from the code."
   ],
   checks: [],
-  maxRepairs: 2
+  maxRepairs: 2,
+  readOnlyAgent: false
 };
 var ROLES = ["granny", "helper", "planner", "implementer", "judge"];
 var TOP_KEYS = new Set(["$schema", "roles", "worktreeDir", ...Object.keys(DEFAULT_CONFIG).filter((k) => k !== "roles")]);
@@ -223,6 +224,8 @@ function validate(c) {
     errors.push("maxParallel must be an integer >= 1");
   if (typeof c.aiAttribution !== "boolean")
     errors.push("aiAttribution must be a boolean");
+  if (typeof c.readOnlyAgent !== "boolean")
+    errors.push("readOnlyAgent must be a boolean");
   if (!Array.isArray(c.rules) || !c.rules.every((r) => typeof r === "string"))
     errors.push("rules must be an array of strings");
   if (!isRepairs(c.maxRepairs))
@@ -1295,14 +1298,14 @@ function stageCheckErrors(stages, checks) {
   return (stages ?? []).flatMap((st, i) => (Array.isArray(st?.checks) ? st.checks : []).filter((n) => !names.has(n)).map((n) => `stages[${i}].checks names "${n}", which is not in config checks (${[...names].join(", ") || "none configured"})`));
 }
 var planFiles = (input) => input.plan === undefined ? [] : Array.isArray(input.plan) ? input.plan : [input.plan];
+var configLayers = (input) => Array.isArray(input.config) ? input.config : [input.config];
 async function runGranny(host, input) {
   const inputErrors = checkInput(input);
   if (inputErrors.length)
     throw new Error(`Invalid granny input:
 - ${inputErrors.join(`
 - `)}`);
-  const layers = Array.isArray(input.config) ? input.config : [input.config];
-  const config = resolveConfig(layers, host.name);
+  const config = resolveConfig(configLayers(input), host.name);
   const base = input.base ?? config.base;
   const fromStage = input.fromStage ?? 1;
   const primary = trimPath(input.repo);

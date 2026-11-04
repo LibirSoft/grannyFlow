@@ -53,6 +53,7 @@ export interface GrannyConfig {
   rules: string[]
   checks: CheckConfig[]
   maxRepairs: number
+  readOnlyAgent: boolean
 }
 
 export const DEFAULT_CONFIG: GrannyConfig = {
@@ -83,6 +84,7 @@ export const DEFAULT_CONFIG: GrannyConfig = {
   ],
   checks: [],
   maxRepairs: 2,
+  readOnlyAgent: false,
 }
 
 const ROLES: ConfigRole[] = ['granny', 'helper', 'planner', 'implementer', 'judge']
@@ -243,6 +245,7 @@ function validate(c: GrannyConfig): string[] {
   if (typeof c.parallel !== 'boolean') errors.push('parallel must be a boolean')
   if (!Number.isInteger(c.maxParallel) || c.maxParallel < 1) errors.push('maxParallel must be an integer >= 1')
   if (typeof c.aiAttribution !== 'boolean') errors.push('aiAttribution must be a boolean')
+  if (typeof c.readOnlyAgent !== 'boolean') errors.push('readOnlyAgent must be a boolean')
   if (!Array.isArray(c.rules) || !c.rules.every(r => typeof r === 'string')) errors.push('rules must be an array of strings')
   if (!isRepairs(c.maxRepairs)) errors.push('maxRepairs must be an integer >= 0')
   errors.push(...checkErrors(c.checks))

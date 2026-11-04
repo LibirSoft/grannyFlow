@@ -87,7 +87,14 @@ npx skills add LibirSoft/grannyFlow
 
 This puts `skills/granny-workflow/` where your agents look for skills. Then, per host:
 
-- **Claude Code** - nothing else. Optional: OpenAI's Codex plugin (`/plugin marketplace add openai/codex-plugin-cc`, then `/plugin install codex@openai-codex`); a reviewer with engine `auto` or `codex-plugin` uses it when it is installed and `node` is on `PATH`.
+- **Claude Code** - nothing else. Optional: OpenAI's Codex plugin (`/plugin marketplace add openai/codex-plugin-cc`, then `/plugin install codex@openai-codex`); a reviewer with engine `auto` or `codex-plugin` uses it when it is installed and `node` is on `PATH`. Optional: the `granny-readonly` agent and its guard hook, so that `agent` reviewers, the judge and the extraction agent cannot edit files or commit - by default that is only a line in their prompt. Copy the two files, add the hook to `~/.claude/settings.json` as [config.md](skills/granny-workflow/references/config.md#read-only-roles) shows, and set `"readOnlyAgent": true`:
+
+  ```sh
+  mkdir -p ~/.claude/agents ~/.claude/hooks
+  cp <skill-dir>/engines/claude-code/agents/granny-readonly.md ~/.claude/agents/
+  cp <skill-dir>/engines/claude-code/hooks/granny-readonly-guard.mjs ~/.claude/hooks/
+  ```
+
 - **opencode** - install the plugin globally (and optionally the `granny` primary agent), then restart the service. A per-project install breaks with worktrees on, since the role sessions run in the worktree, where the plugin is missing:
 
   ```sh
@@ -159,6 +166,7 @@ Three layers, later wins: `~/.config/granny/config.json`, `<repo>/granny.config.
 | `worktree` | `true` | work in the branch's own git worktree; `false` works in `repo` on the branch you checked out |
 | `worktreeDir` | `<parent of repo>/<repo name>-worktrees` | where new worktrees go; absolute, or relative to the repo's parent |
 | `aiAttribution` | `false` | forbid Co-Authored-By / "Generated with" lines |
+| `readOnlyAgent` | `false` | Claude Code only: run `agent` reviewers, the judge and the extraction agent as the `granny-readonly` agent type, whose hook allows only read-only git and shell; install the agent and the hook first |
 | `language`, `rules`, `base`, `workDir` | | see the reference |
 
 ### Several reviewers

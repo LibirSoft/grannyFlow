@@ -35,6 +35,7 @@ Layers, later wins:
 | `worktreeDir` | `<parent of repo>/<repo name>-worktrees` | where new worktrees go: an absolute path, or a path relative to the repo's parent directory (`~` is not expanded). A worktree is `<worktreeDir>/<branch-slug>` |
 | `language` | `"English"` | language of code, comments, commits and the PR body |
 | `aiAttribution` | `false` | `false` forbids Co-Authored-By / "Generated with" lines and the final check greps for them |
+| `readOnlyAgent` | `false` | Claude Code only: `true` runs `agent` reviewers, the judge and the extraction agent as the `granny-readonly` agent type (Read, Grep, Glob and Bash; no Edit or Write) with a PreToolUse hook that lets their Bash run only read-only git and shell commands - see [Read-only roles](#read-only-roles). Install the agent and the hook first; without the agent the run stops at the first reviewer with `agent type 'granny-readonly' not found`. opencode enforces read-only with permissions and ignores it |
 | `rules` | red-green tests; code comments default none | extra house rules appended to every working prompt; `[]` removes them |
 | `$schema` | | accepted and ignored, so an editor can point a config file at a JSON schema of your own; granny ships none |
 
@@ -415,10 +416,51 @@ A command reviewer runs with the permissions its CLI grants. The prompt tells it
 
 `agent` reviewers (the default reviewer is one), the judge and the extraction agent are read-only roles: they must not edit, create, stage or commit a file. How that holds depends on the host:
 
-- On Claude Code it is only prompt text. granny passes no permission setting to the Workflow `agent()` call; it puts `READ-ONLY ROLE: do not edit, create, stage or commit any file.` at the top of the role's prompt, and the subagent still has its write tools and can ignore that line.
+- On Claude Code, by default, it is only prompt text. granny puts `READ-ONLY ROLE: do not edit, create, stage or commit any file.` at the top of the role's prompt, and the subagent still has its write tools and can ignore that line. With `readOnlyAgent` on, it is enforced - see below.
 - On opencode the role's child session gets permission rules that deny edits, `git add` and `git commit` ([opencode.md](opencode.md#models-and-permissions)).
 
-On Claude Code, configure `checks` as the backstop; they catch the damage after the fact, they do not prevent it. Every check gate reads `git status --porcelain` before it runs the checks, so a file a read-only role left changed shows up at the next gate that runs - after a fix round, or the `final` gate (a one-stage repo whose `final` gate reuses the stage's result reads no status there) - and goes to the implementer as a commit prompt (or fails the gate when no repair is left) instead of being checked or reviewed unseen. Every check run records the HEAD it ran on (`checks[].head`), so a commit a reviewer or the judge made after a stage's last gate makes the `final` gate of a one-stage repo run the checks again instead of reusing that result, and the `pr-ready` gate runs them once more when HEAD moved after the final checks ([Checks](#checks)). Without checks, the status read after the implementer and after every fix still names uncommitted work in the note, but nothing reruns on a commit a read-only role made.
+**`readOnlyAgent` (Claude Code).** With `"readOnlyAgent": true` granny passes `agentType: "granny-readonly"` to the Workflow `agent()` call of every `agent` reviewer, the judge (the plan judge too) and the extraction agent, and lists the commands they may run after the `READ-ONLY ROLE` line ("Claude Code - the lines before the prompt ..." in [prompts.md](prompts.md)). Two files enforce it, both shipped in the skill:
+
+- `engines/claude-code/agents/granny-readonly.md`, the agent definition: tools Read, Grep, Glob and Bash - no Edit, Write or NotebookEdit. The Workflow adds the StructuredOutput tool for the result's schema and applies the role's `effort`; the definition sets no `model`, so the role's model is the one granny passes from the config (not yet confirmed in a real Workflow run - check the judge's model in the run's journal).
+- `engines/claude-code/hooks/granny-readonly-guard.mjs`, a PreToolUse hook run with `node`. For a call from agent type `granny-readonly` (or `<plugin>:granny-readonly`) it blocks Edit, Write, MultiEdit and NotebookEdit, and a Bash command unless every part of it is one of: `git diff`, `git log`, `git show`, `git blame`, `git status`, `git rev-parse`, `git merge-base`, `git ls-files` (not with `--output`; git's only global options allowed are `-C <dir>`, `--no-pager` and `-P`), `git branch --show-current` (or `--list`, `-a`, `-r`, `-v`), `cat`, `sed -n '<from>,<to>p'`, `grep`, `find` without `-exec`, `-delete` or `-fprint`, `ls`, `head`, `tail`, `wc`, `pwd` and `cd`. The parts may be joined with `&&`, `||`, `;` and `|`; output may go to `/dev/null` (`2>&1` too). `$(...)`, backticks, `$VARIABLES`, `VAR=value` prefixes, subshells, here-documents, a background `&` and a redirection into any file are refused. A blocked call exits 2 and its reason goes back to the agent. Calls from every other agent, and from your own session, pass untouched.
+
+The skill install puts neither file where Claude Code looks, so the key is off by default. Install both once, then turn it on:
+
+```sh
+mkdir -p ~/.claude/agents ~/.claude/hooks
+cp <skill-dir>/engines/claude-code/agents/granny-readonly.md ~/.claude/agents/
+cp <skill-dir>/engines/claude-code/hooks/granny-readonly-guard.mjs ~/.claude/hooks/
+```
+
+and add the hook to `~/.claude/settings.json` (merge it into an existing `hooks.PreToolUse` list):
+
+```jsonc
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash|Edit|Write|MultiEdit|NotebookEdit",
+        "hooks": [{ "type": "command", "command": "node \"${CLAUDE_CONFIG_DIR:-$HOME/.claude}/hooks/granny-readonly-guard.mjs\"" }]
+      }
+    ]
+  }
+}
+```
+
+```json
+{ "readOnlyAgent": true }
+```
+
+What to know:
+
+- The hook goes into the settings, not into the agent's frontmatter, because Claude Code skips frontmatter hooks of an agent whose folder is not trusted; a settings hook runs for every agent, so it starts `node` on every Bash call of every session and lets all but `granny-readonly` through. Without `node` on `PATH` the hook fails with a non-blocking error and the command runs - read-only is then the tool list only.
+- Without the agent definition, `agent()` throws `agent type 'granny-readonly' not found` and the run stops at the first reviewer. Without the hook, the agent still has no Edit or Write, but its Bash runs anything.
+- An `agent` reviewer cannot run the tests or any other command outside the list; it reads the code.
+- The helpers that start, wait for, read and stop a review command keep the default agent: they write the review's `.out`, `.exit` and `.pid` files.
+- Changing the key changes the `agent()` options, so `resumeFromRunId` runs those roles again instead of reusing their cached results.
+- The guard reads the command as a shell would only for the forms above; anything it cannot read that way is refused, not guessed.
+
+On Claude Code, configure `checks` as the backstop (with `readOnlyAgent` on, too); they catch the damage after the fact, they do not prevent it. Every check gate reads `git status --porcelain` before it runs the checks, so a file a read-only role left changed shows up at the next gate that runs - after a fix round, or the `final` gate (a one-stage repo whose `final` gate reuses the stage's result reads no status there) - and goes to the implementer as a commit prompt (or fails the gate when no repair is left) instead of being checked or reviewed unseen. Every check run records the HEAD it ran on (`checks[].head`), so a commit a reviewer or the judge made after a stage's last gate makes the `final` gate of a one-stage repo run the checks again instead of reusing that result, and the `pr-ready` gate runs them once more when HEAD moved after the final checks ([Checks](#checks)). Without checks, the status read after the implementer and after every fix still names uncommitted work in the note, but nothing reruns on a commit a read-only role made.
 
 ### Reading the output
 

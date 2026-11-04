@@ -579,6 +579,19 @@ RAW REVIEW OUTPUT:
 <raw review output>
 ```
 
+## Claude Code - the line before every read-only prompt (an `agent` reviewer, the judge, the extraction agent, and the helpers that start, wait for, read and stop a review command)
+
+```text
+READ-ONLY ROLE: do not edit, create, stage or commit any file.
+```
+
+## Claude Code - the lines before the prompt of an `agent` reviewer, the judge and the extraction agent with `readOnlyAgent` on (they run as the `granny-readonly` agent type)
+
+```text
+READ-ONLY ROLE: do not edit, create, stage or commit any file.
+Besides Read (and Grep and Glob where you have them), your Bash runs these commands only: git diff, git log, git show, git blame, git status, git rev-parse, git merge-base, git ls-files, git branch --show-current, cat, sed -n '<from>,<to>p', grep, find (without -exec, -delete or -fprint), ls, head, tail, wc, pwd. Write each as a plain command; `cd <dir> && ` before it, `|` between them and `2>/dev/null` are fine, but `$(...)`, backticks, `$VARIABLES` and redirection into a file are not. A hook blocks any other command.
+```
+
 ## Granny - final check (the plan-file part only when a plan file sits inside the repo, outside the work dir)
 
 ```text
