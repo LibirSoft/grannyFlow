@@ -18,10 +18,15 @@ import {
   planJudgePrompt,
   planReviewPrompt,
   repairPrompt,
+  reviewReadPrompt,
+  reviewStartPrompt,
+  reviewStopPrompt,
+  reviewWaitPrompt,
   worktreeCommandPrompt,
   type EarlierRound,
   WHOLE_BRANCH_NOTE,
 } from '../src/core/prompts'
+import { detachedReview, MAX_WAITS, WAIT_SECONDS } from '../src/core/reviewer'
 import { worktreeScript } from '../src/core/worktree'
 
 const root = join(import.meta.dir, '..')
@@ -81,6 +86,7 @@ export function renderPrompts(): string {
   ]
   const overruled = [{ id: '<id>', repeatOf: 'r1/<reviewer>-F<n>', reason: "<the judge's reason>", said: "<the fixer's reason>" }]
   const setup = `cd '<repo>' && ${worktreeScript(p.config, '<branch>', '<base>', '<worktreeDir>/<branch-slug>')}`
+  const job = detachedReview({ script: '', body: '<review script>' }, p.config, '.granny/review-<stage>-r<n>-<name>', '<repo>')
   const sections: Array<[string, string]> = [
     ['Granny - worktree setup, the helper agent on Claude Code (on Cursor, run the command yourself)', worktreeCommandPrompt('<repo>', '<branch>', setup)],
     ['Planner - a run with goal (context here is the run\'s context only; the plan files do not exist yet)', draftPrompt({ ...p, context: '<context: work-order files and override notes>' }, '<goal>', ['<repo>/.granny/plans/<branch-slug>.md'])],
@@ -105,6 +111,16 @@ export function renderPrompts(): string {
     ],
     ['Implementer - merge (a stage that ran in its own worktree; its merge stopped on conflicts)', mergePrompt(p, '<stage name>', '<lane branch>', '<git merge output>')],
     ['Reviewer - agent engine', agentReviewPrompt(p, '<stage name>', '<stage start sha>', stage)],
+    [
+      'Granny - a review command, start: the helper agent on Claude Code for a Codex or command reviewer, in the diff review and the plan review (on opencode granny runs the review script itself and waits for it)',
+      reviewStartPrompt(p, '<stage name>', '<reviewer>', job.start),
+    ],
+    [
+      `Granny - a review command, wait <k> (k = 1 to ${MAX_WAITS}; granny calls the next wait until one prints done)`,
+      reviewWaitPrompt(p, '<stage name>', '<reviewer>', 1, MAX_WAITS, WAIT_SECONDS / 60, job.wait),
+    ],
+    ['Granny - a review command, read (after a wait printed done)', reviewReadPrompt(p, '<stage name>', '<reviewer>', job.read)],
+    [`Granny - a review command, stop (after ${MAX_WAITS} waits without done)`, reviewStopPrompt(p, '<stage name>', '<reviewer>', job.stop)],
     ['Reviewer - command engine, the text {prompt} is filled with', commandReviewPrompt(p, '<stage name>', '<stage start sha>', stage)],
     ['Judge', judgePrompt(p, '<stage start sha>', [], [], stage).replace(/\[\]$/, '<findings as JSON>')],
     [
