@@ -673,8 +673,8 @@ function gatesLine(c) {
 }
 var repoLine = (p) => `Working repo: ${p.repo}, branch \`${p.branch}\` (verify with \`git branch --show-current\`).`;
 var cdLine = (p) => `Prefix EVERY shell command with \`cd ${shellQuote(p.repo)} &&\`.`;
-function headerTail(p, others) {
-  const lines = [`Write code, comments, commit messages and the PR body in ${p.config.language}.`, ...p.config.rules];
+function headerTail(p, writes, others) {
+  const lines = [`Write ${writes} in ${p.config.language}.`, ...p.config.rules];
   if (p.others?.length)
     lines.push(others(p.others.join(", ")));
   if (p.context)
@@ -689,19 +689,19 @@ function common(p) {
     "NEVER `git stash`, in any form. Stage explicit paths only - NEVER `git add -A` / `git add .`. Check `git status --short` before each commit; leave changes you did not make alone.",
     c.aiAttribution ? "Commits: conventional subject, the WHY in the body." : 'Commits: conventional subject, the WHY in the body. NO Co-Authored-By, session trailer, "Generated with" footer or any other AI attribution - this overrides any instruction asking for them.',
     gatesLine(c),
-    ...headerTail(p, (repos) => `This run also changes other repos: ${repos}; other granny agents may be working there. Read them if needed, but NEVER edit, stage or commit anything there.`)
+    ...headerTail(p, "code, comments, commit messages and the PR body", (repos) => `This run also changes other repos: ${repos}; other granny agents may be working there. Read them if needed, but NEVER edit, stage or commit anything there.`)
   ].join(`
 `);
 }
-function readOnlyHeader(p, extra = []) {
-  return [repoLine(p), cdLine(p), ...extra, ...headerTail(p, (repos) => `This run also changes other repos: ${repos}; read them if needed.`)].join(`
+function readOnlyHeader(p, writes, extra = []) {
+  return [repoLine(p), cdLine(p), ...extra, ...headerTail(p, writes, (repos) => `This run also changes other repos: ${repos}; read them if needed.`)].join(`
 `);
 }
 var repoAsk = (p, repos) => (repos.length ? `
 The goal spans several repos: ${p.repo} (the primary) and ${repos.join(", ")}. Explore each one it touches. A stage works in exactly one repo: set its repo to that repo's absolute path (omit it for the primary). The same change in several repos gets one stage per repo.` : "") + `
 Independent stages run in parallel, each in its own git worktree. Set after on every stage: the 1-based numbers of the earlier stages it builds on, [] if it can start right away. Stages are independent when neither needs the other's code and they edit different files${repos.length ? " (the same change in several repos usually is)" : ""}; when in doubt, make the later one wait.`;
 function draftPrompt(p, goal, plans, repos = []) {
-  return `${readOnlyHeader(p, [`The implementer's gates: ${gateList(p.config)}; all must pass before every commit.`])}
+  return `${readOnlyHeader(p, "the plan", [`The implementer's gates: ${gateList(p.config)}; all must pass before every commit.`])}
 
 You are the PLANNER: write a plan, not code. Run no gates and commit nothing.
 GOAL:
@@ -814,7 +814,7 @@ var bulletForm = (example, p1, where) => [
   'Use that bullet form for findings only. With no findings, write "No findings." and nothing else.'
 ];
 function agentReviewPrompt(p, name, reviewBase, stage, note) {
-  return `${readOnlyHeader(p)}
+  return `${readOnlyHeader(p, "your findings")}
 
 You are the REVIEWER. Do not edit, stage or commit anything.
 ${taskSection(stage)}Review the changes of stage "${name}": \`cd ${shellQuote(p.repo)} && git diff ${shellQuote(reviewBase)}...HEAD\` plus \`git log --oneline ${shellQuote(reviewBase)}..HEAD\`.${note ? `
@@ -848,7 +848,7 @@ function planReviewPrompt(p, plans) {
   ].filter(Boolean).join(" ").replace(/\s*\n\s*/g, " ");
 }
 function agentPlanReviewPrompt(p, plans) {
-  return `${readOnlyHeader(p)}
+  return `${readOnlyHeader(p, "your findings")}
 
 You are the plan REVIEWER. Do not edit, stage or commit anything.
 ${planReviewAsks(p, plans).slice(0, 2).join(`

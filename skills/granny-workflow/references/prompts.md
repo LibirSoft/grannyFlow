@@ -21,7 +21,7 @@ Return ran: true only if it exited 0; exitCode: its exit code; output: everythin
 Working repo: <repo>, branch `<branch>` (verify with `git branch --show-current`).
 Prefix EVERY shell command with `cd '<repo>' &&`.
 The implementer's gates: every test, lint/format check, build and typecheck command the project has (package.json scripts, Makefile, pyproject, Cargo, CI config); all must pass before every commit.
-Write code, comments, commit messages and the PR body in English.
+Write the plan in English.
 Every behaviour change gets a test that fails without the change - write the red half first.
 Code comments: default none; add one only when the reason cannot be recovered from the code.
 
@@ -44,7 +44,7 @@ Return files (the absolute paths you wrote), stages ([{ name, task, after }]), s
 ```text
 Working repo: <repo>, branch `<branch>` (verify with `git branch --show-current`).
 Prefix EVERY shell command with `cd '<repo>' &&`.
-Write code, comments, commit messages and the PR body in English.
+Write your findings in English.
 Every behaviour change gets a test that fails without the change - write the red half first.
 Code comments: default none; add one only when the reason cannot be recovered from the code.
 
@@ -292,7 +292,7 @@ First read `git log --oneline '<base>'..HEAD` and `git log --oneline HEAD..'<lan
 ```text
 Working repo: <repo>, branch `<branch>` (verify with `git branch --show-current`).
 Prefix EVERY shell command with `cd '<repo>' &&`.
-Write code, comments, commit messages and the PR body in English.
+Write your findings in English.
 Every behaviour change gets a test that fails without the change - write the red half first.
 Code comments: default none; add one only when the reason cannot be recovered from the code.
 

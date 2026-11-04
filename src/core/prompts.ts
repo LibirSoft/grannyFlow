@@ -126,9 +126,9 @@ function gatesLine(c: GrannyConfig): string {
 const repoLine = (p: PromptContext) => `Working repo: ${p.repo}, branch \`${p.branch}\` (verify with \`git branch --show-current\`).`
 const cdLine = (p: PromptContext) => `Prefix EVERY shell command with \`cd ${shellQuote(p.repo)} &&\`.`
 
-/** What every agent prompt ends its header with: the language, the user's rules, the other repos and the run's CONTEXT. */
-function headerTail(p: PromptContext, others: (repos: string) => string): string[] {
-  const lines = [`Write code, comments, commit messages and the PR body in ${p.config.language}.`, ...p.config.rules]
+/** What every agent prompt ends its header with: the language of what it writes, the user's rules, the other repos and the run's CONTEXT. */
+function headerTail(p: PromptContext, writes: string, others: (repos: string) => string): string[] {
+  const lines = [`Write ${writes} in ${p.config.language}.`, ...p.config.rules]
   if (p.others?.length) lines.push(others(p.others.join(', ')))
   if (p.context) lines.push('', 'CONTEXT - read it before anything else and obey it:', p.context)
   return lines
@@ -145,13 +145,13 @@ export function common(p: PromptContext): string {
       ? 'Commits: conventional subject, the WHY in the body.'
       : 'Commits: conventional subject, the WHY in the body. NO Co-Authored-By, session trailer, "Generated with" footer or any other AI attribution - this overrides any instruction asking for them.',
     gatesLine(c),
-    ...headerTail(p, repos => `This run also changes other repos: ${repos}; other granny agents may be working there. Read them if needed, but NEVER edit, stage or commit anything there.`),
+    ...headerTail(p, 'code, comments, commit messages and the PR body', repos => `This run also changes other repos: ${repos}; other granny agents may be working there. Read them if needed, but NEVER edit, stage or commit anything there.`),
   ].join('\n')
 }
 
 /** The header of an agent that commits nothing (the agent reviewers and the planner): the workspace without the git, commit and gate rules. */
-export function readOnlyHeader(p: PromptContext, extra: string[] = []): string {
-  return [repoLine(p), cdLine(p), ...extra, ...headerTail(p, repos => `This run also changes other repos: ${repos}; read them if needed.`)].join('\n')
+export function readOnlyHeader(p: PromptContext, writes: string, extra: string[] = []): string {
+  return [repoLine(p), cdLine(p), ...extra, ...headerTail(p, writes, repos => `This run also changes other repos: ${repos}; read them if needed.`)].join('\n')
 }
 
 const repoAsk = (p: PromptContext, repos: string[]): string =>
@@ -163,7 +163,7 @@ The goal spans several repos: ${p.repo} (the primary) and ${repos.join(', ')}. E
 Independent stages run in parallel, each in its own git worktree. Set after on every stage: the 1-based numbers of the earlier stages it builds on, [] if it can start right away. Stages are independent when neither needs the other's code and they edit different files${repos.length ? ' (the same change in several repos usually is)' : ''}; when in doubt, make the later one wait.`
 
 export function draftPrompt(p: PromptContext, goal: string, plans: string[], repos: string[] = []): string {
-  return `${readOnlyHeader(p, [`The implementer's gates: ${gateList(p.config)}; all must pass before every commit.`])}
+  return `${readOnlyHeader(p, 'the plan', [`The implementer's gates: ${gateList(p.config)}; all must pass before every commit.`])}
 
 You are the PLANNER: write a plan, not code. Run no gates and commit nothing.
 GOAL:
@@ -350,7 +350,7 @@ const bulletForm = (example: string, p1: string, where: string): string[] => [
 ]
 
 export function agentReviewPrompt(p: PromptContext, name: string, reviewBase: string, stage?: StageTask, note?: string): string {
-  return `${readOnlyHeader(p)}
+  return `${readOnlyHeader(p, 'your findings')}
 
 You are the REVIEWER. Do not edit, stage or commit anything.
 ${taskSection(stage)}Review the changes of stage "${name}": \`cd ${shellQuote(p.repo)} && git diff ${shellQuote(reviewBase)}...HEAD\` plus \`git log --oneline ${shellQuote(reviewBase)}..HEAD\`.${note ? `\n${note}` : ''}
@@ -392,7 +392,7 @@ export function planReviewPrompt(p: PromptContext, plans: string[]): string {
 }
 
 export function agentPlanReviewPrompt(p: PromptContext, plans: string[]): string {
-  return `${readOnlyHeader(p)}
+  return `${readOnlyHeader(p, 'your findings')}
 
 You are the plan REVIEWER. Do not edit, stage or commit anything.
 ${planReviewAsks(p, plans).slice(0, 2).join('\n')}

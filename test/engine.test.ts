@@ -572,11 +572,15 @@ describe('runGranny', () => {
       expect(prompts.draft).toContain("The implementer's gates: `make test`")
       expect(prompts.draft).toContain('never stage or commit the plan files')
       expect(prompts.draft).not.toContain('rules above are for the implementer')
+      for (const prompt of Object.values(prompts)) expect(prompt).not.toContain('commit messages and the PR body')
+      expect(prompts.review).toContain('Write your findings in Turkish.')
+      expect(prompts.planReview).toContain('Write your findings in Turkish.')
+      expect(prompts.draft).toContain('Write the plan in Turkish.')
     })
 
     it('keeps every write rule for the implementer and the fixer', () => {
       for (const prompt of [implementPrompt(p, { task: 'WP-01' }, 0, 1, 'core'), fixPrompt(p, 'core', 1, [])]) {
-        for (const line of [...SHARED, ...WRITE_RULES, 'Gates (all must pass before every commit; report exact numbers): `make test`.']) expect(prompt).toContain(line)
+        for (const line of [...SHARED, ...WRITE_RULES, 'Write code, comments, commit messages and the PR body in Turkish.', 'Gates (all must pass before every commit; report exact numbers): `make test`.']) expect(prompt).toContain(line)
       }
     })
 

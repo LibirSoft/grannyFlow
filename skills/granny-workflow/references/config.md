@@ -33,7 +33,7 @@ Layers, later wins:
 | `workDir` | `".granny"` | repo-relative, git-excluded: PR body, review outputs, run journals |
 | `worktree` | `true` | work in the branch's own git worktree: reuse the one that has the branch checked out, or create one - see [Worktree](#worktree). `false`: work in `repo`, on the branch checked out there |
 | `worktreeDir` | `<parent of repo>/<repo name>-worktrees` | where new worktrees go: an absolute path, or a path relative to the repo's parent directory (`~` is not expanded). A worktree is `<worktreeDir>/<branch-slug>` |
-| `language` | `"English"` | language of code, comments, commits and the PR body |
+| `language` | `"English"` | language of code, comments, commits and the PR body; the planner writes the plan and the `agent` reviewers their findings in it |
 | `aiAttribution` | `false` | `false` forbids Co-Authored-By / "Generated with" lines and the final check greps for them |
 | `readOnlyAgent` | `false` | Claude Code only: `true` runs `agent` reviewers, the judge and the extraction agent as the `granny-readonly` agent type (Read, Grep, Glob and Bash; no Edit or Write) with a PreToolUse hook that lets their Bash run only read-only git and shell commands - see [Read-only roles](#read-only-roles). Install the agent and the hook first; without the agent the run stops at the first reviewer with `agent type 'granny-readonly' not found`. opencode enforces read-only with permissions and ignores it |
 | `rules` | red-green tests; code comments default none | extra house rules appended to every agent prompt that carries the run's header (the implementer's, the planner's and an `agent` reviewer's); `[]` removes them |
