@@ -126,6 +126,21 @@ describe('a finding the fixer declined', () => {
     expect(f.logs.some(l => l.includes('codex-F2 dropped'))).toBe(false)
   })
 
+  it('sends a P0/P1 that repeats a residual repeat of a declined finding: only the declined finding itself can be dropped', async () => {
+    const blocker = finding('P1', 'Phantom blocker')
+    const f = fakeHost({
+      reviews: [review(blocker), review(blocker, finding('P2', 'Other', 'src/b.ts')), review(blocker), 'No findings.'],
+      scores: [{ 'codex-F1': { score: 15, repeatOf: 'r1/codex-F1' }, 'codex-F2': 90 }, { 'codex-F1': { score: 15, repeatOf: 'r2/codex-F1' } }],
+      override: declineIn('fix core r1'),
+    })
+    const r = await runGranny(f.host, input())
+    expect(r.stages[0]).toMatchObject({ outcome: 'clean', rounds: 4, residual: [] })
+    expect(prompt(f.calls, 'fix core r2')).not.toContain('Phantom blocker')
+    expect(prompt(f.calls, 'fix core r3')).toContain('Phantom blocker')
+    expect(f.logs).toContain('core r2: codex-F1 dropped as a repeat of r1/codex-F1, which the fixer declined (score 15) - kept as residual')
+    expect(f.logs.some(l => l.startsWith('core r3: codex-F1 dropped'))).toBe(false)
+  })
+
   it('ignores a declined id the fixer was not sent', async () => {
     const blocker = review(finding('P1', 'Phantom blocker'))
     const f = fakeHost({ reviews: [blocker, blocker, 'No findings.'], override: declineIn('fix core r1', ['codex-F9']) })
