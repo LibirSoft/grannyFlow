@@ -531,7 +531,7 @@ ${script}
 
 ${REPORT}`;
 function reviewStartPrompt(p, name, reviewer, script) {
-  return reviewStep(p, name, reviewer, "it starts the review in the background and returns at once; granny waits for it in later steps", "Run exactly this, once:", script);
+  return reviewStep(p, name, reviewer, "it starts the review detached and returns at once; granny waits for it in later steps", "Run exactly this, once, in the foreground - it detaches the review itself and returns at once:", script);
 }
 function reviewWaitPrompt(p, name, reviewer, n, max, minutes, script) {
   return reviewStep(p, name, reviewer, `wait ${n} of at most ${max} for the review granny started; granny decides from what it prints whether to wait again`, `Run exactly this, once, in the foreground (never in the background), with your shell tool's timeout set to 600000 ms (10 minutes). It returns by itself within ${minutes} minutes and prints done or pending:`, script);

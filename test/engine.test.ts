@@ -647,6 +647,7 @@ describe('a review command on Claude Code', () => {
       expect(p).not.toContain('wait for it to finish')
       expect(p).toContain('Run exactly this')
     }
+    expect(promptOf(f, 'review core r1 codex')).toContain('Run exactly this, once, in the foreground - it detaches the review itself and returns at once:\n')
     const [wait1, wait2] = [promptOf(f, 'review core r1 codex wait 1'), promptOf(f, 'review core r1 codex wait 2')]
     expect(wait1).toContain('wait 1 of at most 7')
     expect(wait2).toContain('wait 2 of at most 7')

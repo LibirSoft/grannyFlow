@@ -154,7 +154,14 @@ ${script}
 ${REPORT}`
 
 export function reviewStartPrompt(p: PromptContext, name: string, reviewer: string, script: string): string {
-  return reviewStep(p, name, reviewer, 'it starts the review in the background and returns at once; granny waits for it in later steps', 'Run exactly this, once:', script)
+  return reviewStep(
+    p,
+    name,
+    reviewer,
+    'it starts the review detached and returns at once; granny waits for it in later steps',
+    'Run exactly this, once, in the foreground - it detaches the review itself and returns at once:',
+    script,
+  )
 }
 
 export function reviewWaitPrompt(p: PromptContext, name: string, reviewer: string, n: number, max: number, minutes: number, script: string): string {

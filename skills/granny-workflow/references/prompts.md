@@ -307,10 +307,10 @@ Return findings with id (F1, F2, ...), severity (P0 critical / P1 must fix / P2 
 ## Granny - a review command, start: the helper agent on Claude Code for a Codex or command reviewer, in the diff review and the plan review (on opencode granny runs the review script itself and waits for it)
 
 ```text
-You run one shell command for a code review - it starts the review in the background and returns at once; granny waits for it in later steps - and return its output. Run nothing else, do not edit, stage or commit anything, and do not review the code yourself.
+You run one shell command for a code review - it starts the review detached and returns at once; granny waits for it in later steps - and return its output. Run nothing else, do not edit, stage or commit anything, and do not review the code yourself.
 Stage "<stage name>" of repo <repo>, branch `<branch>`, reviewer "<reviewer>".
 
-Run exactly this, once:
+Run exactly this, once, in the foreground - it detaches the review itself and returns at once:
 cd '<repo>' && if [ -s '.granny/review-<stage>-r<n>-<name>.pid' ] && [ ! -s '.granny/review-<stage>-r<n>-<name>.exit' ]; then kill -TERM -- "-$(cat '.granny/review-<stage>-r<n>-<name>.pid')" 2>/dev/null || kill -TERM "$(cat '.granny/review-<stage>-r<n>-<name>.pid')" 2>/dev/null; fi; mkdir -p .granny && rm -f '.granny/review-<stage>-r<n>-<name>.md' '.granny/review-<stage>-r<n>-<name>.log' '.granny/review-<stage>-r<n>-<name>.out' '.granny/review-<stage>-r<n>-<name>.exit' '.granny/review-<stage>-r<n>-<name>.pid' && { set -m; nohup bash -c 'echo $$ > '\''.granny/review-<stage>-r<n>-<name>.pid'\''; (<review script>) > '\''.granny/review-<stage>-r<n>-<name>.out'\'' 2>&1; echo $? > '\''.granny/review-<stage>-r<n>-<name>.exit'\''' > /dev/null 2>&1 < /dev/null & } && echo started
 
 Set ran=true only if it exited 0, exitCode to its exit code, and output to everything it printed, verbatim and complete. If it failed, set ran=false and explain in note. Never invent output.
