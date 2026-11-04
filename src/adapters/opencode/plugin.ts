@@ -5,7 +5,7 @@ import { isAbsolute, join } from 'node:path'
 import { resolveConfig } from '../../core/config'
 import { checkInput, runGranny, stageCheckErrors, type RunInput } from '../../core/engine'
 import { checkShape, SCHEMAS } from '../../core/schemas'
-import type { AgentRequest, CommandResult, Host, PlanResult, ResultKind, RunResult } from '../../core/types'
+import type { AgentRequest, CommandResult, Host, PlanResult, Recheck, ResultKind, RunResult } from '../../core/types'
 
 type Status = 'running' | 'done' | 'failed' | 'cancelled'
 
@@ -130,7 +130,7 @@ function runId(): string {
   return `${new Date().toISOString().replace(/[-:]/g, '').replace('T', '-').slice(0, 15)}-${Math.random().toString(36).slice(2, 6)}`
 }
 
-function summarize(result: RunResult, worktree: boolean): string {
+export function summarize(result: RunResult, worktree: boolean): string {
   const line = (s: PlanResult, name: string) => {
     const extra = [
       s.residual.length ? `${s.residual.length} residual` : '',
@@ -154,9 +154,13 @@ function summarize(result: RunResult, worktree: boolean): string {
     `${line(s, name)}${s.outcome === 'skipped' || s.outcome === 'review-skipped' ? ` - ${s.note ?? 'not run'}` : s.outcome === 'round-cap' || s.outcome === 'review-failed' ? ' - the branch still has unresolved findings; the final check ran anyway' : s.outcome === 'checks-failed' ? ` - NOT PR-ready, the checks fail: ${s.note ?? ''}; the final check ran anyway` : ''}`
   if (result.finalReview) lines.push(reviewLine(result.finalReview, 'final review'))
   for (const r of result.repos?.slice(1) ?? []) if (r.finalReview) lines.push(reviewLine(r.finalReview, `final review ${r.repo}`))
+  const recheckLine = (r: Recheck, name: string) =>
+    `- ${name}: ${r.passed ? 'green on the HEAD the pr-ready check left' : `RED - NOT PR-ready, the pr-ready check moved HEAD and the checks fail: ${r.note ?? ''}`}`
   if (result.final) lines.push(`- final: gates ${result.final.gatesGreen ? 'green' : 'RED'}, PR body ${result.final.prBodyPath}${result.final.issues ? `, issues: ${result.final.issues}` : ''}`)
+  if (result.recheck) lines.push(recheckLine(result.recheck, 'checks after the final check'))
   for (const r of result.repos?.slice(1) ?? []) {
     lines.push(`- final ${r.repo}: ${r.final ? `gates ${r.final.gatesGreen ? 'green' : 'RED'}, PR body ${r.final.prBodyPath}${r.final.issues ? `, issues: ${r.final.issues}` : ''}` : 'returned nothing'}`)
+    if (r.recheck) lines.push(recheckLine(r.recheck, `checks after the final check ${r.repo}`))
   }
   if (worktree) lines.push(`- worktree: ${result.worktree}${result.repos?.length ? ` (and ${result.repos.slice(1).map(r => r.worktree).join(', ')})` : ''} - review and push from there; granny never removes it`)
   return lines.join('\n')
