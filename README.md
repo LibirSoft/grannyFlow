@@ -2,7 +2,7 @@
 
 Granny takes a plan and turns it into a PR-ready branch. An **implementer** agent builds the plan stage by stage, **reviewers** check every stage, a **judge** decides which findings are worth fixing, and the loop repeats until the review is clean. Nothing is pushed: you get a branch, a PR body and a short report, and you decide what happens next.
 
-It works on Claude Code and opencode, where the loop runs as code (the round cap and thresholds hold on every run), and on Cursor, where the agent follows the same steps by hand.
+It works on Claude Code, opencode and omp (oh-my-pi), where the loop runs as code (the round cap and thresholds hold on every run), and on Cursor, where the agent follows the same steps by hand.
 
 ## Install
 
@@ -22,13 +22,19 @@ It works on Claude Code and opencode, where the loop runs as code (the round cap
      opencode service restart
      ```
 
+   - **omp** - install the extension globally, then quit omp and start it again. omp must find the skill in `~/.omp/agent/skills/` or `~/.agents/skills/`; link it there if it landed elsewhere:
+
+     ```sh
+     cp -r <skill-dir>/engines/omp/extensions/granny-workflow ~/.omp/agent/extensions/
+     ```
+
    - **Cursor** - copy the subagents and set `model:` in each:
 
      ```sh
      cp <skill-dir>/engines/cursor/agents/*.md ~/.cursor/agents/
      ```
 
-3. Optional: Codex as a second reviewer. Install the [Codex CLI](https://github.com/openai/codex) and run `codex login`. On Claude Code, OpenAI's [Codex plugin](https://github.com/openai/codex-plugin-cc) is used instead when it is installed.
+3. Optional: Codex as a second reviewer. Install the [Codex CLI](https://github.com/openai/codex) and run `codex login`. On Claude Code, OpenAI's [Codex plugin](https://github.com/openai/codex-plugin-cc) is used instead when it is installed. omp runs no Codex reviewer: use an `agent` reviewer on one of omp's `openai-codex/...` models.
 
 4. In your project, ask your agent:
 
@@ -36,7 +42,7 @@ It works on Claude Code and opencode, where the loop runs as code (the round cap
 
 ## Setup
 
-`granny setup` asks four questions and writes `granny.config.json` in your repo (or `~/.config/granny/config.json` for every project). It does not start a run.
+`granny setup` (or `granny init`) asks five questions and writes `granny.config.json` in your repo (or `~/.config/granny/config.json` for every project). It does not start a run.
 
 1. **Review strictness** - how many findings go back to the implementer. P0/P1 findings and critical or major issues are always fixed; the preset decides the rest:
 
@@ -48,7 +54,8 @@ It works on Claude Code and opencode, where the loop runs as code (the round cap
 
 2. **Reviewers** - the host model, the host model and Codex, or Codex only.
 3. **Checks** - the project's test, typecheck, lint or build commands that granny runs itself before every review. A red check goes back to the implementer.
-4. **Where to save** - this project or every project.
+4. **Models** - keep the defaults, or pick a model for each role in turn: who writes the code (implementer), who reviews, who judges the findings, who plans, and granny's own final check. Claude Code also asks about the helper that runs plain commands; opencode and omp have none, granny runs those commands itself.
+5. **Where to save** - this project or every project.
 
 ## Use
 
@@ -119,11 +126,12 @@ Every key, reviewer engines and examples: [config.md](skills/granny-workflow/ref
 |---|---|
 | Claude Code | a Workflow script; every role is its own agent with its own model |
 | opencode | a server plugin; every role is its own session with its own model |
+| omp | an extension in your omp session; every role is its own `omp` process with its own model |
 | Cursor | the agent follows the steps by hand with four subagents - not deterministic |
 
 On Claude Code, plain commands (git, checks) run through a small Haiku helper agent, because Workflow scripts have no shell ([claude-code#98566](https://github.com/anthropics/claude-code/issues/98566)).
 
-To resume a stopped run: on Claude Code relaunch it with `resumeFromRunId`; on opencode relaunch it with `fromStage` set to the first unfinished stage.
+To resume a stopped run: on Claude Code relaunch it with `resumeFromRunId`; on opencode and omp relaunch it with `fromStage` set to the first unfinished stage.
 
 ## Develop
 
@@ -133,7 +141,7 @@ bun run build   # regenerates the engines and references/prompts.md from src/
 bun run check   # typecheck + tests
 ```
 
-`src/core` holds the loop, shared by both engines; `src/adapters` connects it to each host. The generated engine files are committed so the skill installs without a build step.
+`src/core` holds the loop, shared by every engine; `src/adapters` connects it to each host. The generated engine files are committed so the skill installs without a build step.
 
 ## License
 

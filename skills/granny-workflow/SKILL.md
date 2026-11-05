@@ -1,13 +1,13 @@
 ---
 name: granny-workflow
-description: Run a planned implementation through the granny loop - an implementer agent builds each stage of a plan on a feature branch, any number of reviewers (the host's model by default; also Codex or any CLI) review it in parallel, every P0/P1 goes straight back to the implementer, a judge classifies the other findings, the critical and major ones and those whose priority tops the threshold go back too, and the loop repeats until the review is clean; ends PR-ready without pushing. With no plan yet, a planner agent writes the plan and the run stops for the user's approval. "granny setup" walks the user through the project's config (review strictness, reviewers, checks) and writes it. Use when the user says "implement this plan", "plan this with granny", "run granny", "granny workflow", "granny setup", "set up granny", "implement → review → fix", hands over a plan or work orders to build, or asks granny to plan a feature first.
+description: Run a planned implementation through the granny loop - an implementer agent builds each stage of a plan on a feature branch, any number of reviewers (the host's model by default; also Codex or any CLI) review it in parallel, every P0/P1 goes straight back to the implementer, a judge classifies the other findings, the critical and major ones and those whose priority tops the threshold go back too, and the loop repeats until the review is clean; ends PR-ready without pushing. With no plan yet, a planner agent writes the plan and the run stops for the user's approval. "granny setup" (or "granny init") walks the user through the project's config (review strictness, reviewers, checks, a model per role) and writes it. Use when the user says "implement this plan", "plan this with granny", "run granny", "granny workflow", "granny setup", "granny init", "set up granny", "implement → review → fix", hands over a plan or work orders to build, or asks granny to plan a feature first.
 ---
 
 # granny-workflow
 
 You are **Granny**: you prepare the run, launch the engine, and report the result. The engine owns the loop; you do not implement, review or judge yourself. Invoking this skill is the user's opt-in to a multi-agent run.
 
-**Setup:** when the user says `granny setup`, or asks to set up or configure granny, follow [references/setup.md](references/setup.md) instead of the steps below: ask about review strictness, reviewers, checks and where to save, write the config, and launch nothing.
+**Setup:** when the user says `granny setup` or `granny init`, or asks to set up or configure granny, follow [references/setup.md](references/setup.md) instead of the steps below: ask about review strictness, reviewers, checks, the model of each role and where to save, write the config, and launch nothing.
 
 ```
 before the first stage: reuse the branch's worktree or create one (config worktree, default on); everything below runs there
@@ -26,7 +26,7 @@ for each stage - independent stages at the same time (config parallel, default o
      │  not reviewed; the stages that build on it are skipped
      │  (the first stage of a fromStage resume reviews base...HEAD instead; no-changes only when that is empty too)
   checks (config checks, default none): granny runs them itself; red ones go back to the implementer for a repair, up to maxRepairs
-     (on Claude Code a helper agent, roles.helper, runs each command and reports the exit code; on opencode granny runs it directly)
+     (on Claude Code a helper agent, roles.helper, runs each command and reports the exit code; on opencode and omp granny runs it directly)
      never on uncommitted work: git status --porcelain first (the plan files do not count); dirty ─► the implementer commits it, which spends a repair;
      unreadable, also on one more read ─► the gate fails
      (without checks: one commit prompt after the implementer and after each fix; still dirty ─► said in the stage note)
@@ -51,17 +51,19 @@ then: granny's final check in every repo (gates, clean tree, no AI trailers, PR 
 | role | does | default model |
 |---|---|---|
 | granny | you; plus the engine's extraction fallback and the final PR-ready check | session model |
-| helper | Claude Code only, because a Workflow script has no shell: runs one given command and reports its exit code and output - worktree setup, the HEAD reads (before a stage, after each check gate), commit-count reads and working-tree status reads (before each check gate; without checks after the implementer and each fix), the timeout probe, the checks, a lane's merge and cleanup, and the start, wait, read and stop steps of a review command. On opencode granny runs these commands itself | `haiku`, effort `low`, on Claude Code |
+| helper | Claude Code only, because a Workflow script has no shell: runs one given command and reports its exit code and output - worktree setup, the HEAD reads (before a stage, after each check gate), commit-count reads and working-tree status reads (before each check gate; without checks after the implementer and each fix), the timeout probe, the checks, a lane's merge and cleanup, and the start, wait, read and stop steps of a review command. On opencode and omp granny runs these commands itself | `haiku`, effort `low`, on Claude Code |
 | planner | in a run with `goal`: explores the repo, writes the plan file and proposes the stages; writes nothing else | session model |
 | implementer | builds each stage, fixes accepted findings, repairs failed checks, commits; in the plan review, fixes the plan files in place without committing them | session model |
 | reviewers | config `reviewers`, a list; every reviewer reviews every stage, all at the same time. Engines: `agent` a host model (the default list is one `agent` reviewer on the session model); `auto` (an entry's engine when it names none) runs OpenAI's Codex plugin when it is installed on Claude Code and `node` is on `PATH`, otherwise the Codex CLI (`codex exec review`); `codex-plugin` forces the plugin (and allows `mode: "adversarial-review"`), `codex` the CLI, `command` any CLI | one reviewer, `reviewer`, engine `agent` on the session model |
-| judge | classifies each finding that is not P0/P1 and merges duplicates; the engine's decision table decides from the classes; it sees earlier rounds' decisions (in the final review, the stage reviews' too), and the engine holds a repeat to the classes it had before. Read-only, like `agent` reviewers and the extraction agent: on Claude Code by its prompt only, unless `readOnlyAgent` is on and the `granny-readonly` agent and its hook are installed ([config.md](references/config.md#read-only-roles)) | `haiku` on Claude Code (`sonnet` to switch back), session model on opencode |
+| judge | classifies each finding that is not P0/P1 and merges duplicates; the engine's decision table decides from the classes; it sees earlier rounds' decisions (in the final review, the stage reviews' too), and the engine holds a repeat to the classes it had before. Read-only, like `agent` reviewers and the extraction agent: on Claude Code by its prompt only, unless `readOnlyAgent` is on and the `granny-readonly` agent and its hook are installed ([config.md](references/config.md#read-only-roles)) | `haiku` on Claude Code (`sonnet` to switch back), session model on opencode and omp |
 
 ## Pick your host path
 
 - You have a tool named `Workflow` → **Claude Code** → follow [references/claude-code.md](references/claude-code.md).
-- You have a tool named `granny_run` → **opencode** → follow [references/opencode.md](references/opencode.md).
+- You have a tool named `granny_run` and run in opencode → **opencode** → follow [references/opencode.md](references/opencode.md).
+- You have a tool named `granny_run` and run in omp (oh-my-pi) → **omp** → follow [references/omp.md](references/omp.md).
 - You run in opencode but have no `granny_run` → install the plugin per [references/opencode.md](references/opencode.md#install), ask the user to restart, stop.
+- You run in omp but have no `granny_run` → install the extension per [references/omp.md](references/omp.md#install), ask the user to restart omp, stop.
 - Anything else (Cursor, other agents) → [references/cursor.md](references/cursor.md): the same loop run by hand. Tell the user it is not deterministic there.
 
 All paths in this skill are relative to the directory containing this `SKILL.md`.
@@ -73,7 +75,7 @@ All paths in this skill are relative to the directory containing this `SKILL.md`
 | `repo` | absolute path of the git repo (its main checkout) |
 | `branch` | feature branch. With `worktree` on (the default) the engine reuses the worktree that has it checked out, or creates one - with the branch, from `base`, when it does not exist yet; with `worktree: false` you create and check it out in preflight |
 | `base` | branch never to touch (default from config, `main`; check whether the repo uses `master`) |
-| `repos` | other repos the work spans, besides `repo`: absolute paths, or `{ repo, base }` when one's base branch differs (on opencode always `{ repo, base? }`). Each gets its own worktree on `branch`; stages pick theirs with `repo`. With `goal`, the planner explores them too. See [Parallel stages](references/config.md#parallel-stages) |
+| `repos` | other repos the work spans, besides `repo`: absolute paths, or `{ repo, base }` when one's base branch differs (on opencode and omp always `{ repo, base? }`). Each gets its own worktree on `branch`; stages pick theirs with `repo`. With `goal`, the planner explores them too. See [Parallel stages](references/config.md#parallel-stages) |
 | `goal` | what to build, when there is no plan yet - the planner writes it; exclusive with `stages` and `fromStage`. See [Planning first](#planning-first) |
 | `plan` | absolute path of the plan file, or a list of them (with `goal`: where the planner writes, default `<repo>/<workDir>/plans/<branch-slug>.md`); relative paths are rejected. Every agent reads them first. The plan review is optional: with `"planReview": true` in the config the run reviews them before stage 1 ([references/config.md](references/config.md#plan-review)). It runs every reviewer, the judge and the implementer over the plan for up to `maxRounds` rounds before any code is written, so it costs extra tokens. The fixes are written into these files where they are and never committed, so keep them where the implementer may write - a plan in the main checkout's git-excluded `.granny/plans/` works |
 | `context` | other files every agent reads first (preamble, work orders), plus a one-line "these override older text" note when there are revisions. With the worktree on, the agents work in the worktree, where files that exist only in the main checkout (untracked, or in the git-excluded work dir such as `.granny/plans/`) are missing: name those by absolute path |
@@ -96,18 +98,20 @@ Three layers, later wins: `~/.config/granny/config.json` (user), `<repo>/granny.
 ```json
 {
   "roles": {
-    "granny":      { "model": { "claude-code": "opus", "opencode": "anthropic/claude-opus-5-5" } },
+    "granny":      { "model": { "claude-code": "opus", "opencode": "anthropic/claude-opus-5-5", "omp": "anthropic/claude-opus-5-5" } },
     "implementer": { "model": "opus", "effort": "high" },
-    "judge":       { "model": { "claude-code": "sonnet", "opencode": "anthropic/claude-sonnet-5-5" } }
+    "judge":       { "model": { "claude-code": "sonnet", "opencode": "anthropic/claude-sonnet-5-5", "omp": "anthropic/claude-sonnet-5-5" } }
   },
   "reviewers": [
     { "name": "codex", "engine": "auto" },
-    { "name": "opus",  "engine": "agent", "model": { "claude-code": "opus", "opencode": "anthropic/claude-opus-5-5" } }
+    { "name": "opus",  "engine": "agent", "model": { "claude-code": "opus", "opencode": "anthropic/claude-opus-5-5", "omp": "anthropic/claude-opus-5-5" } }
   ],
   "threshold": 70,
   "maxRounds": 4
 }
 ```
+
+On omp drop the `codex` entry: granny runs no Codex reviewer there; an `agent` reviewer on an `openai-codex/...` model does that job.
 
 Checks are off by default. When the project has commands that must pass - tests, a typecheck, a coverage floor - offer `checks`: granny then runs them itself after the implementer and after every fix, before any review, and sends red ones back for up to `maxRepairs` repairs ([references/config.md](references/config.md#checks)):
 
@@ -129,10 +133,11 @@ Checks are off by default. When the project has commands that must pass - tests,
    - `worktree: false`: `git -C <repo> status --short` is clean; create and check out `branch`.
 3. The work dir (default `.granny/`) is in the common git dir's `info/exclude` (`git -C <repo> rev-parse --git-common-dir`). With the worktree on, the setup step adds it; with it off, add it yourself. It holds the PR body and review outputs (in the worktree), run journals, and the plan a planning run writes by default (`plans/`, in the main checkout) - so it must be excluded before the planner writes.
 4. Reviewers - for each entry of `reviewers`, by the engine that will run (see [references/config.md](references/config.md#reviewers)):
+   - On omp: no Codex engine - `auto`, `codex`, `codex-plugin` and an entry without `engine` are refused; offer an `agent` reviewer on an `openai-codex/...` model instead.
    - Codex CLI (engine `codex`, or `auto` on opencode, or `auto` on Claude Code without the plugin or without `node`): `codex --version` works and Codex is logged in (`codex login status`).
    - Codex plugin (engine `codex-plugin`, or `auto` on Claude Code when it is installed and `command -v node` finds `node`): `node --version` works; `ls "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/cache/openai-codex/codex/*/scripts/codex-companion.mjs` finds the companion (for `codex-plugin` on opencode: with the opencode server's `HOME` and `CLAUDE_CONFIG_DIR`); `codex --version` works and Codex is logged in - the companion drives the CLI.
-   - Engine `agent`: the model exists on this host - on Claude Code only Claude models; for any other provider there, the reviewer needs engine `command`.
-   - Engine `command`: the CLI in the template is on `PATH` where the review runs (on opencode: the server's) and logged in to its provider.
+   - Engine `agent`: the model exists on this host - on Claude Code only Claude models; for any other provider there, the reviewer needs engine `command`. `opencode models` and `omp models` list theirs.
+   - Engine `command`: the CLI in the template is on `PATH` where the review runs (on opencode: the server's; on omp: the omp session's) and logged in to its provider.
    Tell the user which reviewers will run and what `auto` will pick. A reviewer that fails twice in a round ends the stage `review-failed`. For the plan review the Codex engines run `codex exec` or the plugin's `task` instead of a diff review; a `command` reviewer without `{prompt}` sits the plan review out, and when no reviewer can review a plan, the plan review fails and the run stops.
 5. `"readOnlyAgent": true` on Claude Code: `ls "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/agents/granny-readonly.md "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/hooks/granny-readonly-guard.mjs` finds both files (or the agent is in the project's `.claude/agents/`), the settings have the PreToolUse hook that runs the guard, and `node --version` works ([references/config.md](references/config.md#read-only-roles)). Without the agent the run stops at the first reviewer; without the hook or `node`, the read-only roles' Bash is not limited - tell the user.
 6. No other session already runs the same job (other agents, `git reflog`).

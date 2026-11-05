@@ -1,4 +1,5 @@
-export type HostName = 'claude-code' | 'opencode'
+export const HOSTS = ['claude-code', 'opencode', 'omp'] as const
+export type HostName = (typeof HOSTS)[number]
 
 export type Role = 'granny' | 'helper' | 'planner' | 'implementer' | 'reviewer' | 'judge'
 

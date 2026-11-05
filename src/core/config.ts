@@ -1,4 +1,4 @@
-import { IMPACTS, type HostName, type Impact } from './types'
+import { HOSTS, IMPACTS, type HostName, type Impact } from './types'
 
 export type ModelSpec = string | Partial<Record<HostName, string>>
 
@@ -96,6 +96,7 @@ const METRIC_KEYS = new Set(['pattern', 'min', 'max'])
 const EFFORTS = new Set(['low', 'medium', 'high', 'xhigh', 'max'])
 const ENGINES: ReviewerEngine[] = ['auto', 'codex', 'codex-plugin', 'agent', 'command']
 const PLUGIN_ENGINES: ReviewerEngine[] = ['auto', 'codex-plugin']
+const CODEX_ENGINES: ReviewerEngine[] = ['auto', 'codex', 'codex-plugin']
 const MODES: ReviewMode[] = ['review', 'adversarial-review']
 const NAME = /^[a-z0-9-]+$/
 
@@ -162,7 +163,7 @@ function modelErrors(path: string, spec: unknown): string[] {
   if (typeof spec === 'string') return []
   const errors: string[] = []
   for (const [host, m] of Object.entries(spec)) {
-    if (host !== 'claude-code' && host !== 'opencode') errors.push(`${path}: unknown host "${host}"`)
+    if (!(HOSTS as readonly string[]).includes(host)) errors.push(`${path}: unknown host "${host}"`)
     if (typeof m !== 'string' || !m) errors.push(`${path}.${host} must be a non-empty string`)
   }
   return errors
@@ -211,7 +212,11 @@ function reviewers(list: unknown, errors: string[], host?: HostName): ReviewerCo
     } else if (entry.command !== undefined) {
       errors.push(`${at}.command needs "engine": "command"; engine "${engine}" runs its own reviewer`)
     }
-    if (host === 'opencode' && adversarial && engine === 'auto') {
+    if (host === 'omp' && CODEX_ENGINES.includes(engine)) {
+      errors.push(
+        `${at}.engine "${engine}"${entry.engine === undefined ? ' (the engine of an entry that names none)' : ''} runs Codex, which granny does not run on omp - use "engine": "agent" with an omp model, e.g. "model": { "omp": "openai-codex/gpt-6.1-sol" }, or "engine": "command"`,
+      )
+    } else if (host === 'opencode' && adversarial && engine === 'auto') {
       errors.push(`${at}.mode "adversarial-review" needs the Codex plugin, and on opencode engine "auto" means the Codex CLI - set ${at}.engine to "codex-plugin"`)
     }
     return { ...entry, name, engine }
