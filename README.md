@@ -42,7 +42,7 @@ It works on Claude Code, opencode and omp (oh-my-pi), where the loop runs as cod
 
 ## Setup
 
-`granny setup` asks four questions and writes `granny.config.json` in your repo (or `~/.config/granny/config.json` for every project). It does not start a run.
+`granny setup` (or `granny init`) asks five questions and writes `granny.config.json` in your repo (or `~/.config/granny/config.json` for every project). It does not start a run.
 
 1. **Review strictness** - how many findings go back to the implementer. P0/P1 findings and critical or major issues are always fixed; the preset decides the rest:
 
@@ -54,7 +54,8 @@ It works on Claude Code, opencode and omp (oh-my-pi), where the loop runs as cod
 
 2. **Reviewers** - the host model, the host model and Codex, or Codex only.
 3. **Checks** - the project's test, typecheck, lint or build commands that granny runs itself before every review. A red check goes back to the implementer.
-4. **Where to save** - this project or every project.
+4. **Models** - keep the defaults, or pick a model for each role in turn: who writes the code (implementer), who reviews, who judges the findings, who plans, and granny's own final check. Claude Code also asks about the helper that runs plain commands; opencode and omp have none, granny runs those commands itself.
+5. **Where to save** - this project or every project.
 
 ## Use
 
