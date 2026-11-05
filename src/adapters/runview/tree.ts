@@ -1,7 +1,6 @@
-// The run navigator's tree: phases, round/stage groups, agents and their task subagents, built from a
-// run's journal entries with the live state of its role processes laid over them.
+// A granny run as a tree: phases, round/stage groups, agents and their task subagents, built from the
+// run's journal entries with what the host knows live about each role laid over them.
 import { clock, duration } from './format'
-import type { RoleActivity } from '../omp/panel'
 
 export interface JournalEntry {
   t?: string
@@ -10,6 +9,16 @@ export interface JournalEntry {
 }
 
 export type AgentState = 'running' | 'waiting' | 'done' | 'failed' | 'cancelled'
+
+/** What a host knows live about a role session; the activity shows only with both `state` and `since`. */
+export interface LiveView {
+  active: boolean
+  state?: string
+  since?: number
+  outcome?: AgentState
+  endedAt?: number
+  error?: string
+}
 
 export interface SubagentNode {
   name: string
@@ -116,6 +125,15 @@ function lastOf<T>(items: readonly T[], match: (item: T) => boolean): T | undefi
 
 const modelText = (model?: string, effort?: string) => `${model ?? 'default model'}${effort ? `/${effort}` : ''}`
 
+/** A journalled model: omp's string, or opencode's `{ providerID, id, variant? }` as `provider/id[#variant]`. */
+function modelOf(model: unknown): string | undefined {
+  if (typeof model === 'string') return model
+  if (!model || typeof model !== 'object') return undefined
+  const { providerID, id, variant } = model as Record<string, unknown>
+  if (typeof providerID !== 'string' || typeof id !== 'string') return undefined
+  return `${providerID}/${id}${typeof variant === 'string' && variant ? `#${variant}` : ''}`
+}
+
 interface PhaseBuild extends PhaseNode {
   entries: string[][]
   byGroup: Map<string, GroupNode>
@@ -126,7 +144,7 @@ interface PhaseBuild extends PhaseNode {
 export function buildRunTree(
   run: RunInfo,
   entries: readonly JournalEntry[],
-  live: ReadonlyMap<string, RoleActivity>,
+  live: ReadonlyMap<string, LiveView>,
   now: number,
   files: ReadonlyMap<string, ReadonlyMap<string, string>> = new Map(),
 ): RunTree {
@@ -147,6 +165,10 @@ export function buildRunTree(
     return node
   }
   const current = (t: number) => phases.at(-1) ?? newPhase('Starting', t)
+  const phaseFor = (entry: JournalEntry, t: number) => {
+    const title = typeof entry.phase === 'string' && entry.phase ? entry.phase : undefined
+    return title ? (lastOf(phases, p => p.title === title) ?? newPhase(title, t)) : current(t)
+  }
   const note = (phase: PhaseBuild, lines: string[]) => {
     phase.entries.push(lines)
     if (phase.entries.length > MAX_PHASE_ENTRIES) phase.entries.shift()
@@ -171,12 +193,12 @@ export function buildRunTree(
         break
       }
       case 'agent': {
-        const title = typeof entry.phase === 'string' && entry.phase ? entry.phase : undefined
-        const phase = title ? (lastOf(phases, p => p.title === title) ?? newPhase(title, t)) : current(t)
+        const phase = phaseFor(entry, t)
+        const model = modelOf(entry.model)
         const agent: AgentNode = {
           label: String(entry.label ?? '?'),
           role: String(entry.role ?? '?'),
-          ...(typeof entry.model === 'string' ? { model: entry.model } : {}),
+          ...(model ? { model } : {}),
           ...(typeof entry.effort === 'string' ? { effort: entry.effort } : {}),
           session: String(entry.session ?? ''),
           phase: phase.title,
@@ -233,6 +255,9 @@ export function buildRunTree(
       case 'error':
         note(current(t), at(t, `✗ run failed: ${String(entry.error ?? '')}`))
         break
+      case 'link-failed':
+        note(phaseFor(entry, t), at(t, `! ${entry.label}: not linked to the parent session (${String(entry.error ?? '').split('\n')[0]})`))
+        break
     }
   }
 
@@ -258,7 +283,7 @@ export function buildRunTree(
       agent.state = run.status === 'cancelled' ? 'cancelled' : run.status === 'failed' ? 'failed' : 'done'
       agent.end = view?.endedAt ?? end
     }
-    if (agent.state === 'running' && view) agent.activity = `${view.state} ${duration(now - view.since)}`
+    if (agent.state === 'running' && view?.state !== undefined && view.since !== undefined) agent.activity = `${view.state} ${duration(now - view.since)}`
     if (agent.state !== 'running' && agent.state !== 'waiting') ended(agent.session, agent.state, agent.end)
     const names = subagentNames.get(agent)
     if (names) {

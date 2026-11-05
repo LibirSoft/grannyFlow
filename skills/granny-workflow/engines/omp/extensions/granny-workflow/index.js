@@ -3272,6 +3272,16 @@ function lastOf(items, match) {
   return;
 }
 var modelText = (model, effort) => `${model ?? "default model"}${effort ? `/${effort}` : ""}`;
+function modelOf(model) {
+  if (typeof model === "string")
+    return model;
+  if (!model || typeof model !== "object")
+    return;
+  const { providerID, id, variant } = model;
+  if (typeof providerID !== "string" || typeof id !== "string")
+    return;
+  return `${providerID}/${id}${typeof variant === "string" && variant ? `#${variant}` : ""}`;
+}
 function buildRunTree(run, entries, live, now, files = new Map) {
   const running = run.status === "running";
   const phases = [];
@@ -3289,6 +3299,10 @@ function buildRunTree(run, entries, live, now, files = new Map) {
     return node;
   };
   const current = (t) => phases.at(-1) ?? newPhase("Starting", t);
+  const phaseFor = (entry, t) => {
+    const title = typeof entry.phase === "string" && entry.phase ? entry.phase : undefined;
+    return title ? lastOf(phases, (p) => p.title === title) ?? newPhase(title, t) : current(t);
+  };
   const note = (phase, lines) => {
     phase.entries.push(lines);
     if (phase.entries.length > MAX_PHASE_ENTRIES)
@@ -3315,12 +3329,12 @@ function buildRunTree(run, entries, live, now, files = new Map) {
         break;
       }
       case "agent": {
-        const title = typeof entry.phase === "string" && entry.phase ? entry.phase : undefined;
-        const phase = title ? lastOf(phases, (p) => p.title === title) ?? newPhase(title, t) : current(t);
+        const phase = phaseFor(entry, t);
+        const model = modelOf(entry.model);
         const agent = {
           label: String(entry.label ?? "?"),
           role: String(entry.role ?? "?"),
-          ...typeof entry.model === "string" ? { model: entry.model } : {},
+          ...model ? { model } : {},
           ...typeof entry.effort === "string" ? { effort: entry.effort } : {},
           session: String(entry.session ?? ""),
           phase: phase.title,
@@ -3383,6 +3397,10 @@ function buildRunTree(run, entries, live, now, files = new Map) {
       case "error":
         note(current(t), at(t, `\u2717 run failed: ${String(entry.error ?? "")}`));
         break;
+      case "link-failed":
+        note(phaseFor(entry, t), at(t, `! ${entry.label}: not linked to the parent session (${String(entry.error ?? "").split(`
+`)[0]})`));
+        break;
     }
   }
   const end = running ? undefined : run.endedAt ?? lastTime;
@@ -3412,7 +3430,7 @@ function buildRunTree(run, entries, live, now, files = new Map) {
       agent.state = run.status === "cancelled" ? "cancelled" : run.status === "failed" ? "failed" : "done";
       agent.end = view?.endedAt ?? end;
     }
-    if (agent.state === "running" && view)
+    if (agent.state === "running" && view?.state !== undefined && view.since !== undefined)
       agent.activity = `${view.state} ${duration(now - view.since)}`;
     if (agent.state !== "running" && agent.state !== "waiting")
       ended(agent.session, agent.state, agent.end);
