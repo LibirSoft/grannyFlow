@@ -538,7 +538,7 @@ class RunWatch {
         continue;
       try {
         const entry = JSON.parse(text);
-        if (isRecord(entry) && typeof entry.type === "string")
+        if (isRecord(entry) && typeof entry.type === "string" && entry.type !== "heartbeat")
           fresh.push(entry);
       } catch {}
     }
@@ -1139,6 +1139,7 @@ var MAX_TOASTS = 3;
 var LIST_EVERY_MS = 1e4;
 var LIST_LIMIT = 50;
 var WAKE_TICKS = 3;
+var STALE_WAKE_MS = 30000;
 var FRESH_MS2 = 60000;
 var TERMINAL2 = new Set(["done", "failed", "cancelled"]);
 var WAKE_EVENTS = ["session.created", "session.updated"];
@@ -1189,6 +1190,7 @@ class Hub {
   timers;
   interval;
   expiry;
+  staleWake;
   wakeTicks = 0;
   mounted = 0;
   lastList = Number.NEGATIVE_INFINITY;
@@ -1277,6 +1279,9 @@ class Hub {
     if (this.expiry !== undefined)
       attempt(() => this.timers.clearTimeout(this.expiry));
     this.expiry = undefined;
+    if (this.staleWake !== undefined)
+      attempt(() => this.timers.clearTimeout(this.staleWake));
+    this.staleWake = undefined;
     for (const off of this.unsubscribe.splice(0))
       attempt(off);
   }
@@ -1336,8 +1341,20 @@ class Hub {
     } catch {}
     if (this.wakeTicks > 0)
       this.wakeTicks--;
-    if (!this.busy())
+    if (!this.busy()) {
       this.stop();
+      this.watchStale();
+    }
+  }
+  watchStale() {
+    if (this.staleWake !== undefined || this.disposed)
+      return;
+    if (![...this.runs.values()].some((run) => run.ended && run.watch.snapshot.stale))
+      return;
+    this.staleWake = attempt(() => this.timers.setTimeout(() => {
+      this.staleWake = undefined;
+      this.wake();
+    }, STALE_WAKE_MS));
   }
   liveRuns() {
     return [...this.runs.values()].filter((run) => !run.ended);

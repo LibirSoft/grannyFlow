@@ -698,6 +698,19 @@ describe('omp extension in the user session (parent mode)', () => {
     await finished(dir)
   })
 
+  it('journals a heartbeat while a long command runs, and none after it ends', async () => {
+    behave({})
+    const f = fakePi()
+    await createGrannyExtension({ heartbeatMs: 40 })(f.pi as any)
+    const { dir } = await start(f, { checks: [{ name: 'slow', run: 'sleep 0.3' }] })
+    await finished(dir)
+    const beats = journalOf(dir).filter(e => e.type === 'heartbeat')
+    expect(beats.length).toBeGreaterThanOrEqual(3)
+    for (const beat of beats) expect(beat.command).toContain('sleep 0.3')
+    await Bun.sleep(150)
+    expect(journalOf(dir).filter(e => e.type === 'heartbeat')).toHaveLength(beats.length)
+  })
+
   it('refuses a Codex reviewer, which granny does not run on omp, without starting a run', async () => {
     const f = fakePi()
     await extension(f.pi as any)

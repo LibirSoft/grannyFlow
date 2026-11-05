@@ -5,7 +5,7 @@ import { GrannyCancelled, isCancelled } from '../../core/cancel'
 import { checkInput, runGranny, stageCheckErrors, type RunInput } from '../../core/engine'
 import { checkShape, SCHEMAS } from '../../core/schemas'
 import type { AgentRequest, Host, ResultKind } from '../../core/types'
-import { DEFAULT_DELAYS, dropPlaceholders, globalConfigPath, type HostOptions, KILL_GRACE_MS, pause, planReviewNotice, preflight, readJson, RUN_INPUT_SCHEMA, RUN_TOOL_DESCRIPTION, runCommand, runDir, runId, runStatus, stageRepos, stamp, statusError, SUBMIT, summarize } from '../common'
+import { DEFAULT_DELAYS, dropPlaceholders, globalConfigPath, HEARTBEAT_MS, type HostOptions, KILL_GRACE_MS, pause, planReviewNotice, preflight, readJson, RUN_INPUT_SCHEMA, RUN_TOOL_DESCRIPTION, runCommand, runDir, runId, runStatus, stageRepos, stamp, statusError, SUBMIT, summarize, withHeartbeat } from '../common'
 import { duration } from '../runview/format'
 import { runOutline } from '../runview/outline'
 
@@ -107,7 +107,7 @@ export function isTransient(error: ProviderError): boolean {
 
 export type PluginOptions = HostOptions
 
-export const createGrannyPlugin = ({ delays = DEFAULT_DELAYS, sleep = pause, killGraceMs = KILL_GRACE_MS }: Partial<PluginOptions> = {}) => ({
+export const createGrannyPlugin = ({ delays = DEFAULT_DELAYS, sleep = pause, killGraceMs = KILL_GRACE_MS, heartbeatMs = HEARTBEAT_MS }: Partial<PluginOptions> = {}) => ({
   id: 'granny-workflow',
   async setup(ctx: any) {
     const startRun = async (input: RunInput, parentSession: string): Promise<string> => {
@@ -282,7 +282,7 @@ export const createGrannyPlugin = ({ delays = DEFAULT_DELAYS, sleep = pause, kil
         async run(command, cwd) {
           if (run.cancelled) return { code: 130, output: 'cancelled' }
           journal('command', { command })
-          return runCommand(command, cwd, run.abort.signal, killGraceMs)
+          return withHeartbeat(() => runCommand(command, cwd, run.abort.signal, killGraceMs), () => journal('heartbeat', { command }), heartbeatMs)
         },
         log: message => journal('log', { message }),
         phase: title => journal('phase', { title }),

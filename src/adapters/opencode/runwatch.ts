@@ -210,7 +210,7 @@ export class RunWatch {
       if (!text.trim()) continue
       try {
         const entry = JSON.parse(text)
-        if (isRecord(entry) && typeof entry.type === 'string') fresh.push(entry as JournalEntry)
+        if (isRecord(entry) && typeof entry.type === 'string' && entry.type !== 'heartbeat') fresh.push(entry as JournalEntry)
       } catch {}
     }
     for (const entry of fresh) this.entries.push(entry)

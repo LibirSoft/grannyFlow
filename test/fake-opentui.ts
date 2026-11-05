@@ -108,6 +108,7 @@ export function fakeTimers() {
   let next = 1
   const intervals = new Map<number, () => void>()
   const timeouts = new Map<number, () => void>()
+  const delays = new Map<number, number>()
   return {
     setInterval(fn: () => void, _ms: number) {
       const id = next++
@@ -117,13 +118,18 @@ export function fakeTimers() {
     clearInterval(id: unknown) {
       intervals.delete(id as number)
     },
-    setTimeout(fn: () => void, _ms: number) {
+    setTimeout(fn: () => void, ms: number) {
       const id = next++
       timeouts.set(id, fn)
+      delays.set(id, ms)
       return id
     },
     clearTimeout(id: unknown) {
       timeouts.delete(id as number)
+    },
+    /** The delays of the pending timeouts. */
+    delays() {
+      return [...timeouts.keys()].map(id => delays.get(id))
     },
     get intervals() {
       return intervals.size

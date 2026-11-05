@@ -33,6 +33,7 @@ const MAX_TOASTS = 3
 const LIST_EVERY_MS = 10_000
 const LIST_LIMIT = 50
 const WAKE_TICKS = 3
+const STALE_WAKE_MS = 30_000
 const FRESH_MS = 60_000
 const TERMINAL = new Set(['done', 'failed', 'cancelled'])
 const WAKE_EVENTS = ['session.created', 'session.updated']
@@ -99,6 +100,7 @@ export class Hub {
   private readonly timers: Timers
   private interval?: unknown
   private expiry?: unknown
+  private staleWake?: unknown
   private wakeTicks = 0
   private mounted = 0
   private lastList = Number.NEGATIVE_INFINITY
@@ -194,6 +196,8 @@ export class Hub {
     this.stop()
     if (this.expiry !== undefined) attempt(() => this.timers.clearTimeout(this.expiry))
     this.expiry = undefined
+    if (this.staleWake !== undefined) attempt(() => this.timers.clearTimeout(this.staleWake))
+    this.staleWake = undefined
     for (const off of this.unsubscribe.splice(0)) attempt(off)
   }
 
@@ -250,7 +254,22 @@ export class Hub {
       if (changed) this.bump()
     } catch {}
     if (this.wakeTicks > 0) this.wakeTicks--
-    if (!this.busy()) this.stop()
+    if (!this.busy()) {
+      this.stop()
+      this.watchStale()
+    }
+  }
+
+  /** With the timer stopped, nothing would see a stale run's files change; one slow wake keeps looking. */
+  private watchStale() {
+    if (this.staleWake !== undefined || this.disposed) return
+    if (![...this.runs.values()].some(run => run.ended && run.watch.snapshot.stale)) return
+    this.staleWake = attempt(() =>
+      this.timers.setTimeout(() => {
+        this.staleWake = undefined
+        this.wake()
+      }, STALE_WAKE_MS),
+    )
   }
 
   private liveRuns(): KnownRun[] {

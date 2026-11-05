@@ -367,6 +367,29 @@ describe('opencode TUI plugin: sidebar, chip and toasts', () => {
     expect(m.timers.intervals).toBe(1)
   })
 
+  it('looks at a stale run again every 30 s with nothing else waking the timer, and revives it once its journal grows', () => {
+    planRun()
+    const m = mount({ running: [] })
+    const sidebar = m.sidebar()
+    m.timers.tick()
+    m.now += 10 * M
+    m.timers.tick()
+    for (let i = 0; i < 5 && m.timers.intervals; i++) m.timers.tick()
+    expect(m.timers.intervals).toBe(0)
+    expect(m.timers.delays()).toEqual([30_000])
+    m.timers.flush()
+    for (let i = 0; i < 5 && m.timers.intervals; i++) m.timers.tick()
+    expect(texts(sidebar)[0]).toBe('granny 523r · stale?')
+    expect(m.timers.delays()).toEqual([30_000])
+    journal(line(44 * M, 'phase', { title: 'Review' }))
+    m.timers.flush()
+    m.timers.tick()
+    expect(texts(sidebar)[0]).toBe('granny 523r · running')
+    expect(m.timers.intervals).toBe(1)
+    m.cleanup()
+    expect(m.timers.timeouts).toBe(0)
+  })
+
   it('keeps a run whose files stopped changing live while one of its role sessions runs', () => {
     planRun()
     const m = mount({ running: ['ses_r'] })

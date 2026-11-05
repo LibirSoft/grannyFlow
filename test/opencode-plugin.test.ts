@@ -558,6 +558,18 @@ describe('opencode plugin', () => {
     expect(git(repo, 'status', '--porcelain')).toBe('')
   })
 
+  it('journals a heartbeat while a long command runs, and none after it ends', async () => {
+    const f = fakeContext()
+    await createGrannyPlugin({ heartbeatMs: 40 }).setup(f.ctx)
+    const { dir } = await startRun(repo, f, { checks: [{ name: 'slow', run: 'sleep 0.3' }] })
+    await finished(dir)
+    const beats = journalOf(dir).filter(e => e.type === 'heartbeat')
+    expect(beats.length).toBeGreaterThanOrEqual(3)
+    for (const beat of beats) expect(beat.command).toContain('sleep 0.3')
+    await Bun.sleep(150)
+    expect(journalOf(dir).filter(e => e.type === 'heartbeat')).toHaveLength(beats.length)
+  })
+
   it('writes the run outline to status.json from the start, and a planning run as kind plan', async () => {
     const f = fakeContext({ hangUntilInterrupted: title => title === 'granny · implement one' || title === 'granny · plan' })
     await plugin.setup(f.ctx)

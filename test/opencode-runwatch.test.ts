@@ -338,6 +338,24 @@ describe('a running run nothing writes to any more', () => {
     expect(watch.snapshot.stale).toBeUndefined()
   })
 
+  it('never calls a run stale while a long command writes a heartbeat every minute, and redraws nothing for one', () => {
+    planRun()
+    journal(line(33 * M, 'command', { command: 'bun test' }))
+    let now = BASE + 33 * M
+    const watch = new RunWatch(dir, { now: () => now })
+    watch.poll(running())
+    const entries = watch.entryCount
+    for (let minute = 1; minute <= 15; minute++) {
+      now = BASE + (33 + minute) * M
+      journal(line(33 * M + minute * M, 'heartbeat', { command: 'bun test' }))
+      watch.poll(running())
+      expect(watch.snapshot.stale).toBeUndefined()
+    }
+    expect(watch.entryCount).toBe(entries)
+    journal(line(49 * M, 'heartbeat', { command: 'bun test' }))
+    expect(watch.poll(running())).toBe(false)
+  })
+
   it('never calls a finished run stale', () => {
     planRun()
     status({ status: 'done', finishedAt: new Date(BASE + 33 * M).toISOString() })

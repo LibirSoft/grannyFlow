@@ -2554,6 +2554,24 @@ var RUN_INPUT_SCHEMA = {
   },
   required: ["repo", "branch"]
 };
+var HEARTBEAT_MS = 60000;
+var intervals = {
+  setInterval: (fn, ms) => setInterval(fn, ms),
+  clearInterval: (handle) => clearInterval(handle)
+};
+async function withHeartbeat(work, beat, everyMs, timers = intervals) {
+  const handle = timers.setInterval(() => {
+    try {
+      beat();
+    } catch {}
+  }, everyMs);
+  handle?.unref?.();
+  try {
+    return await work();
+  } finally {
+    timers.clearInterval(handle);
+  }
+}
 var DEFAULT_DELAYS = [30000, 120000, 300000, 600000];
 var KILL_GRACE_MS = 5000;
 function signalGroup(child, name) {
@@ -2728,7 +2746,7 @@ var TRANSIENT_STATUS = new Set([429, 502, 503, 504, 529]);
 function isTransient(error) {
   return TRANSIENT_TYPES.has(error.type) || TRANSIENT_STATUS.has(error.status ?? 0) || /overloaded/i.test(error.message);
 }
-var createGrannyPlugin = ({ delays = DEFAULT_DELAYS, sleep = pause, killGraceMs = KILL_GRACE_MS } = {}) => ({
+var createGrannyPlugin = ({ delays = DEFAULT_DELAYS, sleep = pause, killGraceMs = KILL_GRACE_MS, heartbeatMs = HEARTBEAT_MS } = {}) => ({
   id: "granny-workflow",
   async setup(ctx) {
     const startRun = async (input, parentSession) => {
@@ -2920,7 +2938,7 @@ When done, call the \`${tool}\` tool exactly once with your result. That call is
           if (run.cancelled)
             return { code: 130, output: "cancelled" };
           journal("command", { command });
-          return runCommand(command, cwd, run.abort.signal, killGraceMs);
+          return withHeartbeat(() => runCommand(command, cwd, run.abort.signal, killGraceMs), () => journal("heartbeat", { command }), heartbeatMs);
         },
         log: (message) => journal("log", { message }),
         phase: (title) => journal("phase", { title }),

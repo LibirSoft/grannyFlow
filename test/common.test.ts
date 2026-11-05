@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test'
-import { dropPlaceholders, planReviewWarning, RUN_INPUT_SCHEMA, RUN_TOOL_DESCRIPTION } from '../src/adapters/common'
+import { dropPlaceholders, HEARTBEAT_MS, planReviewWarning, RUN_INPUT_SCHEMA, RUN_TOOL_DESCRIPTION, withHeartbeat } from '../src/adapters/common'
 import { checkInput, type RunInput } from '../src/core/engine'
 
 // The granny_run arguments gpt-5.6-luna sent through omp for a plain one-stage run: every optional
@@ -61,5 +61,48 @@ describe('the plan review warning', () => {
       expect(text).toContain('only when the user')
       expect(text).toContain('tokens')
     }
+  })
+})
+
+describe('withHeartbeat', () => {
+  function timers() {
+    const live = new Map<number, { fn: () => void; ms: number; unref: boolean }>()
+    let next = 1
+    return {
+      live,
+      setInterval: (fn: () => void, ms: number) => {
+        const id = next++
+        const entry = { fn, ms, unref: false }
+        live.set(id, entry)
+        return { id, unref: () => void (entry.unref = true) }
+      },
+      clearInterval: (handle: unknown) => void live.delete((handle as { id: number }).id),
+      tick: () => [...live.values()].forEach(e => e.fn()),
+    }
+  }
+
+  it('beats once a minute while a 15-minute command runs, then stops', async () => {
+    const t = timers()
+    const beats: number[] = []
+    let finish!: (v: string) => void
+    const done = withHeartbeat(() => new Promise<string>(r => (finish = r)), () => beats.push(beats.length), HEARTBEAT_MS, t)
+    expect([...t.live.values()]).toEqual([expect.objectContaining({ ms: 60_000, unref: true })])
+    for (let minute = 0; minute < 15; minute++) t.tick()
+    expect(beats).toHaveLength(15)
+    finish('ok')
+    expect(await done).toBe('ok')
+    expect(t.live.size).toBe(0)
+  })
+
+  it('stops beating when the command throws, and swallows a failing beat', async () => {
+    const t = timers()
+    const done = withHeartbeat(async () => {
+      t.tick()
+      throw new Error('boom')
+    }, () => {
+      throw new Error('journal gone')
+    }, 10, t)
+    await expect(done).rejects.toThrow('boom')
+    expect(t.live.size).toBe(0)
   })
 })

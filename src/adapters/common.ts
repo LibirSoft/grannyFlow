@@ -223,6 +223,38 @@ export interface RetryPolicy {
 
 export interface HostOptions extends RetryPolicy {
   killGraceMs: number
+  /** How often a running command journals a heartbeat. */
+  heartbeatMs: number
+}
+
+export const HEARTBEAT_MS = 60_000
+
+interface IntervalTimers {
+  setInterval(fn: () => void, ms: number): unknown
+  clearInterval(handle: unknown): void
+}
+
+const intervals: IntervalTimers = {
+  setInterval: (fn, ms) => setInterval(fn, ms),
+  clearInterval: handle => clearInterval(handle as ReturnType<typeof setInterval>),
+}
+
+/**
+ * Runs `work`, calling `beat` every `everyMs` until it settles: a command journals one entry when it starts and
+ * nothing while it runs, and a run view would otherwise take a long check for a dead run.
+ */
+export async function withHeartbeat<T>(work: () => Promise<T>, beat: () => void, everyMs: number, timers: IntervalTimers = intervals): Promise<T> {
+  const handle = timers.setInterval(() => {
+    try {
+      beat()
+    } catch {}
+  }, everyMs)
+  ;(handle as { unref?: () => void } | undefined)?.unref?.()
+  try {
+    return await work()
+  } finally {
+    timers.clearInterval(handle)
+  }
 }
 
 export const DEFAULT_DELAYS = [30_000, 120_000, 300_000, 600_000]
