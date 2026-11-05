@@ -58,6 +58,7 @@ const NAV_KEYS: Array<[string, string, NavKey]> = [
   ['[', 'previous agent', 'prev'],
   ['p', 'parent session', 'parent'],
   ['v', 'details or summary', 'verbose'],
+  ['f', 'follow the details', 'follow'],
   ['escape,q', 'back', 'back'],
 ]
 

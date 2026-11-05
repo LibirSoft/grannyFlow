@@ -34,7 +34,7 @@ export interface NavDeps {
   now(): number
 }
 
-export type NavKey = 'up' | 'down' | 'pageup' | 'pagedown' | 'home' | 'end' | 'return' | 'space' | 'next' | 'prev' | 'parent' | 'back' | 'verbose'
+export type NavKey = 'up' | 'down' | 'pageup' | 'pagedown' | 'home' | 'end' | 'return' | 'space' | 'next' | 'prev' | 'parent' | 'back' | 'verbose' | 'follow'
 
 export type NavAction = { type: 'open'; sessionID: string } | { type: 'parent'; sessionID: string } | { type: 'back' }
 
@@ -49,6 +49,11 @@ export class NavModel {
   shown: string
   selected = ''
   verbose = false
+  private follow = true
+  private listTop = 0
+  private listRows = 0
+  private listRoom = 0
+  private listFor = ''
   private readonly folded = new Set<string>()
   private readonly opened = new Set<string>()
   private readonly parents = new Map<string, string>()
@@ -127,6 +132,10 @@ export class NavModel {
     let key: string | undefined = this.selected
     while (key && !this.rows.some(r => r.key === key && r.selectable)) key = this.parents.get(key)
     this.selected = key ?? this.rows.find(r => r.selectable)?.key ?? ''
+    if (this.selected !== this.listFor) {
+      this.listFor = this.selected
+      this.follow = true
+    }
     const row = this.selectedRow()
     const session = row?.kind === 'agent' ? row.agent!.session : undefined
     if (session === this.told) return
@@ -156,24 +165,34 @@ export class NavModel {
       const next = selectable[clamp(at + delta, 0, selectable.length - 1)]
       if (next) this.selected = next.key
     }
+    const listing = this.listing()
+    const listPage = Math.max(1, this.listRoom - 1)
     switch (key) {
       case 'up':
         return void move(-1)
       case 'down':
         return void move(1)
       case 'pageup':
-        return void move(-this.page)
+        return void (listing ? this.scroll(-listPage) : move(-this.page))
       case 'pagedown':
-        return void move(this.page)
+        return void (listing ? this.scroll(listPage) : move(this.page))
       case 'home':
-        return void (this.selected = selectable[0]?.key ?? this.selected)
+        return void (listing ? this.scroll(-this.listRows) : (this.selected = selectable[0]?.key ?? this.selected))
       case 'end':
-        return void (this.selected = selectable.at(-1)?.key ?? this.selected)
+        return void (listing ? (this.follow = true) : (this.selected = selectable.at(-1)?.key ?? this.selected))
       case 'next':
       case 'prev':
         return void (this.selected = nextAgent(this.rows, this.selected, key === 'next' ? 1 : -1) ?? this.selected)
       case 'verbose':
-        return void (this.verbose = !this.verbose)
+        this.verbose = !this.verbose
+        this.follow = true
+        return
+      case 'follow':
+        if (listing) {
+          this.scroll(0)
+          this.follow = !this.follow
+        }
+        return
       case 'space':
         return void this.toggle()
       case 'return': {
@@ -189,6 +208,18 @@ export class NavModel {
       case 'back':
         return { type: 'back' }
     }
+  }
+
+  /** Whether the detail shows the verbose list, which then takes the page keys. */
+  private listing(): boolean {
+    return this.verbose && this.selectedRow()?.kind === 'agent'
+  }
+
+  /** Moves the verbose list by `delta` rows from what it shows; only a list that can move stops following. */
+  private scroll(delta: number) {
+    const max = Math.max(0, this.listRows - this.listRoom)
+    this.listTop = clamp((this.follow ? max : this.listTop) + delta, 0, max)
+    if (this.listTop < max) this.follow = false
   }
 
   /** Folds or opens the selected group, or shows the selected run. */
@@ -252,7 +283,8 @@ export class NavModel {
           : row?.kind === 'run' && row.run.id !== this.shown
             ? 'Enter switch run'
             : undefined
-    const verbose = row?.kind === 'agent' ? `v ${this.verbose ? 'summary' : 'details'}` : undefined
+    if (this.listing()) return ['↑↓ move', 'PgUp/PgDn scroll', `f follow ${this.follow ? 'on' : 'off'}`, 'v summary', enter, 'Tab next agent', 'p parent', 'Esc close'].join(' · ')
+    const verbose = row?.kind === 'agent' ? 'v details' : undefined
     return ['↑↓ move', enter, 'Tab next agent', 'Space fold', verbose, 'p parent', 'Esc close'].filter(Boolean).join(' · ')
   }
 
@@ -301,7 +333,11 @@ export class NavModel {
     const room = Math.max(0, height - head.length - 1)
     if (this.verbose) {
       const lines = activityLines(items, agent.cwd, this.deps.home)
-      const body: Cell[] = lines.length ? lines.slice(lines.length - room).map(text => ({ text, tone: 'base' })) : [{ text: 'no activity yet', tone: 'muted' }]
+      this.listRows = lines.length
+      this.listRoom = room
+      const max = Math.max(0, lines.length - room)
+      const top = this.follow ? max : clamp(this.listTop, 0, max)
+      const body: Cell[] = lines.length ? lines.slice(top, top + room).map(text => ({ text, tone: 'base' })) : [{ text: 'no activity yet', tone: 'muted' }]
       return [...head, BLANK, ...body]
     }
     const end = agentEnd(agent)

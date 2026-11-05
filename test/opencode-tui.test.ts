@@ -881,7 +881,7 @@ describe('opencode TUI plugin: the /granny navigator', () => {
       expect(text).toContain(`${clock(at(40))}  ✎ "Added pause/resume messages to the protocol."`)
       expect(text).toContain(`${clock(at(87))}  ▸ shell  bun test test/GameService.test.ts`)
       expect(text).not.toContain('RECENT')
-      expect(v.lines().at(-1)!.trimEnd()).toBe(HELP.replace('v details', 'v summary'))
+      expect(v.lines().at(-1)!.trimEnd()).toBe('↑↓ move · PgUp/PgDn scroll · f follow on · v summary · Enter open session · Tab next agent · p parent · Esc close')
       v.key('v')
       expect(v.text()).toContain('RECENT')
     })
@@ -921,6 +921,124 @@ describe('opencode TUI plugin: the /granny navigator', () => {
         `${clock(at(40))}  ✎ "Added pause/resume messages to the protocol."`,
         `${clock(at(87))}  ▸ shell  bun test test/GameService.test.ts`,
       ])
+    })
+
+    describe('the verbose list', () => {
+      const READ = `${clock(at(6))}  ▸ read   src/services/GameService.ts`
+      const EDIT = `${clock(at(21))}  ▸ edit   src/game/protocol.ts`
+      const SAID = `${clock(at(40))}  ✎ "Added pause/resume messages to the protocol."`
+      const SHELL = `${clock(at(87))}  ▸ shell  bun test test/GameService.test.ts`
+      const LATER = `${clock(at(90))}  ▸ read   src/later.ts`
+
+      function short(options: FakeCtxOptions = {}, journalled: string[] = []) {
+        const v = staged(options, { width: 160, height: 8 }, journalled)
+        v.key('v')
+        const rows = () => v.lines().slice(4, -1).map(l => l.split(' │ ')[1]!.trimEnd())
+        rows()
+        const grow = () => {
+          ;(v.m.fc.messages.get('ses_impl')!.at(-1) as any).content.push(tool('t9', 'read', { path: `${WT}/src/later.ts` }, 'completed', { created: at(90), completed: at(90) }))
+          v.m.timers.tick()
+        }
+        return { v, rows, grow }
+      }
+
+      it('scrolls back with PgUp and forward with PgDn, leaving the tree selection where it is', () => {
+        const { v, rows } = short()
+        const selected = v.selected()
+        expect(rows()).toEqual([EDIT, SAID, SHELL])
+        v.key('pageup')
+        expect(rows()).toEqual([READ, EDIT, SAID])
+        v.key('pagedown')
+        expect(rows()).toEqual([EDIT, SAID, SHELL])
+        expect(v.selected()).toBe(selected)
+      })
+
+      it('goes to the first event with Home and back to the newest with End', () => {
+        const { v, rows, grow } = short()
+        v.key('home')
+        expect(rows()).toEqual([READ, EDIT, SAID])
+        grow()
+        expect(rows()).toEqual([READ, EDIT, SAID])
+        v.key('end')
+        expect(rows()).toEqual([SAID, SHELL, LATER])
+      })
+
+      it('follows new events until scrolled back, and stays put while f is off', () => {
+        const { v, rows, grow } = short()
+        expect(v.lines().at(-1)).toContain('f follow on')
+        v.key('f')
+        expect(v.lines().at(-1)).toContain('f follow off')
+        expect(rows()).toEqual([EDIT, SAID, SHELL])
+        grow()
+        expect(rows()).toEqual([EDIT, SAID, SHELL])
+        v.key('f')
+        expect(v.lines().at(-1)).toContain('f follow on')
+        expect(rows()).toEqual([SAID, SHELL, LATER])
+      })
+
+      it('moves with new events while following', () => {
+        const { rows, grow } = short()
+        grow()
+        expect(rows()).toEqual([SAID, SHELL, LATER])
+      })
+
+      it('stops following when scrolled back', () => {
+        const { v, rows, grow } = short()
+        v.key('pageup')
+        expect(v.lines().at(-1)).toContain('f follow off')
+        grow()
+        expect(rows()).toEqual([READ, EDIT, SAID])
+      })
+
+      it('keeps following when a list that fits the pane has nowhere to scroll', () => {
+        const v = staged()
+        v.key('v')
+        v.lines()
+        v.key('pageup')
+        expect(v.lines().at(-1)).toContain('f follow on')
+      })
+
+      it('starts at the newest events again on another agent and after leaving the list', () => {
+        const ended = [
+          line(50 * S, 'agent', { label: `review ${S1} r1 a`, role: 'reviewer', session: 'ses_rev', model: K3, phase: 'Review', cwd: WT, linked: false }),
+          line(70 * S, 'agent-end', { label: `review ${S1} r1 a`, session: 'ses_rev', outcome: 'done' }),
+        ]
+        const review = Array.from({ length: 6 }, (_, i) => msg(`r${i}`, at(51 + i), [{ type: 'text', text: `said ${i}` }], at(52 + i)))
+        const { v, rows } = short({ messages: { ses_impl: implMessages(), ses_rev: review } }, ended)
+        v.key('pageup')
+        expect(rows()).toEqual([READ, EDIT, SAID])
+        v.key('tab,]')
+        v.m.timers.tick()
+        expect(rows().at(-1)).toContain('said 5')
+        v.key('[')
+        v.m.timers.tick()
+        expect(rows()).toEqual([EDIT, SAID, SHELL])
+        v.key('pageup')
+        v.key('v')
+        v.key('v')
+        expect(rows()).toEqual([EDIT, SAID, SHELL])
+      })
+
+      it('leaves the page keys and f to the tree in the summary view', () => {
+        const v = staged()
+        expect(v.selected()).toContain('implement')
+        v.key('pagedown')
+        expect(v.selected()).not.toContain('implement')
+        const before = v.text()
+        v.key('f')
+        expect(v.text()).toBe(before)
+        expect(v.lines().at(-1)).not.toContain('follow')
+      })
+
+      it('leaves the page keys to the tree on a row that has no list', () => {
+        const v = staged()
+        v.key('v')
+        v.key('down,j')
+        expect(v.selected()).toContain('2 Client pause UI and e2e')
+        expect(v.lines().at(-1)).not.toContain('follow')
+        v.key('pageup')
+        expect(v.selected()).not.toContain('2 Client pause UI and e2e')
+      })
     })
 
     it('moves the stepper and the header with the selected stage', () => {

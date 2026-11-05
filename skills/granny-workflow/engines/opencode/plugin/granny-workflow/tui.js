@@ -2011,6 +2011,11 @@ class NavModel {
   shown;
   selected = "";
   verbose = false;
+  follow = true;
+  listTop = 0;
+  listRows = 0;
+  listRoom = 0;
+  listFor = "";
   folded = new Set;
   opened = new Set;
   parents = new Map;
@@ -2083,6 +2088,10 @@ class NavModel {
     while (key && !this.rows.some((r) => r.key === key && r.selectable))
       key = this.parents.get(key);
     this.selected = key ?? this.rows.find((r) => r.selectable)?.key ?? "";
+    if (this.selected !== this.listFor) {
+      this.listFor = this.selected;
+      this.follow = true;
+    }
     const row = this.selectedRow();
     const session = row?.kind === "agent" ? row.agent.session : undefined;
     if (session === this.told)
@@ -2109,24 +2118,34 @@ class NavModel {
       if (next)
         this.selected = next.key;
     };
+    const listing = this.listing();
+    const listPage = Math.max(1, this.listRoom - 1);
     switch (key) {
       case "up":
         return void move(-1);
       case "down":
         return void move(1);
       case "pageup":
-        return void move(-this.page);
+        return void (listing ? this.scroll(-listPage) : move(-this.page));
       case "pagedown":
-        return void move(this.page);
+        return void (listing ? this.scroll(listPage) : move(this.page));
       case "home":
-        return void (this.selected = selectable[0]?.key ?? this.selected);
+        return void (listing ? this.scroll(-this.listRows) : this.selected = selectable[0]?.key ?? this.selected);
       case "end":
-        return void (this.selected = selectable.at(-1)?.key ?? this.selected);
+        return void (listing ? this.follow = true : this.selected = selectable.at(-1)?.key ?? this.selected);
       case "next":
       case "prev":
         return void (this.selected = nextAgent(this.rows, this.selected, key === "next" ? 1 : -1) ?? this.selected);
       case "verbose":
-        return void (this.verbose = !this.verbose);
+        this.verbose = !this.verbose;
+        this.follow = true;
+        return;
+      case "follow":
+        if (listing) {
+          this.scroll(0);
+          this.follow = !this.follow;
+        }
+        return;
       case "space":
         return void this.toggle();
       case "return": {
@@ -2144,6 +2163,15 @@ class NavModel {
       case "back":
         return { type: "back" };
     }
+  }
+  listing() {
+    return this.verbose && this.selectedRow()?.kind === "agent";
+  }
+  scroll(delta) {
+    const max = Math.max(0, this.listRows - this.listRoom);
+    this.listTop = clamp2((this.follow ? max : this.listTop) + delta, 0, max);
+    if (this.listTop < max)
+      this.follow = false;
   }
   toggle() {
     const row = this.selectedRow();
@@ -2194,7 +2222,9 @@ class NavModel {
   help() {
     const row = this.selectedRow();
     const enter = row?.kind === "agent" || row?.kind === "sub" ? "Enter open session" : row?.kind === "group" && row.folded !== undefined ? "Enter fold" : row?.kind === "run" && row.run.id !== this.shown ? "Enter switch run" : undefined;
-    const verbose = row?.kind === "agent" ? `v ${this.verbose ? "summary" : "details"}` : undefined;
+    if (this.listing())
+      return ["\u2191\u2193 move", "PgUp/PgDn scroll", `f follow ${this.follow ? "on" : "off"}`, "v summary", enter, "Tab next agent", "p parent", "Esc close"].join(" \xB7 ");
+    const verbose = row?.kind === "agent" ? "v details" : undefined;
     return ["\u2191\u2193 move", enter, "Tab next agent", "Space fold", verbose, "p parent", "Esc close"].filter(Boolean).join(" \xB7 ");
   }
   detail(now, width, height) {
@@ -2242,7 +2272,11 @@ class NavModel {
     const room = Math.max(0, height - head.length - 1);
     if (this.verbose) {
       const lines = activityLines(items, agent.cwd, this.deps.home);
-      const body = lines.length ? lines.slice(lines.length - room).map((text) => ({ text, tone: "base" })) : [{ text: "no activity yet", tone: "muted" }];
+      this.listRows = lines.length;
+      this.listRoom = room;
+      const max = Math.max(0, lines.length - room);
+      const top = this.follow ? max : clamp2(this.listTop, 0, max);
+      const body = lines.length ? lines.slice(top, top + room).map((text) => ({ text, tone: "base" })) : [{ text: "no activity yet", tone: "muted" }];
       return [...head, BLANK, ...body];
     }
     const end = agentEnd(agent);
@@ -2299,6 +2333,7 @@ var NAV_KEYS = [
   ["[", "previous agent", "prev"],
   ["p", "parent session", "parent"],
   ["v", "details or summary", "verbose"],
+  ["f", "follow the details", "follow"],
   ["escape,q", "back", "back"]
 ];
 var NO_RUN = "granny: no granny run in this session yet - role sessions appear once the run starts its first agent.";
