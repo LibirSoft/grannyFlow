@@ -321,3 +321,19 @@ describe('alwaysFix', () => {
     expect(() => resolveConfig([{ alwaysFix: value }])).toThrow(message)
   })
 })
+
+describe('watch', () => {
+  it('defaults to "full" and takes "panel" or "off" from a layer', () => {
+    expect(resolveConfig([]).watch).toBe('full')
+    expect(resolveConfig([{ watch: 'panel' }]).watch).toBe('panel')
+    expect(resolveConfig([{ watch: 'off' }, { watch: 'full' }]).watch).toBe('full')
+  })
+
+  it.each([['an unknown mode', 'live'], ['a boolean', false], ['null', null]])('rejects %s with the allowed values', (_label, value) => {
+    expect(() => resolveConfig([{ watch: value }])).toThrow('watch must be "full", "panel" or "off"')
+  })
+
+  it('is accepted, and ignored, on Claude Code and opencode', () => {
+    for (const host of ['claude-code', 'opencode', 'omp'] as HostName[]) expect(resolveConfig([{ watch: 'off' }], host).watch).toBe('off')
+  })
+})

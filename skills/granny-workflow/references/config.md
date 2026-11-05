@@ -36,6 +36,7 @@ Layers, later wins:
 | `language` | `"English"` | language of code, comments, commits and the PR body; the planner writes the plan and the `agent` reviewers their findings in it |
 | `aiAttribution` | `false` | `false` forbids Co-Authored-By / "Generated with" lines and the final check greps for them |
 | `readOnlyAgent` | `false` | Claude Code only: `true` runs `agent` reviewers, the judge and the extraction agent as the `granny-readonly` agent type (Read, Grep, Glob and Bash; no Edit or Write) with a PreToolUse hook that lets their Bash run only read-only git and shell commands - see [Read-only roles](#read-only-roles). Install the agent and the hook first; without the agent the run stops at the first reviewer with `agent type 'granny-readonly' not found`. opencode enforces read-only with permissions and ignores it |
+| `watch` | `"full"` | omp only: how much of a running run you can watch - `"full"` the live panel, an event log per role and the `/granny` command; `"panel"` the panel only; `"off"` none of them. The run itself is the same in every mode - see [Watching a run](#watching-a-run). Claude Code and opencode accept it and ignore it |
 | `rules` | red-green tests; code comments default none | extra house rules appended to every agent prompt that carries the run's header (the implementer's, the planner's and an `agent` reviewer's); `[]` removes them |
 | `$schema` | | accepted and ignored, so an editor can point a config file at a JSON schema of your own; granny ships none |
 
@@ -499,6 +500,20 @@ Findings are read from lines shaped like Codex's output - the built-in reviewer'
 ```
 
 The word severities map to `critical` → P0, `high` → P1, `medium` → P2, `low` → P3; for them the location is the last parenthesised part of the line (an ` — ` location is accepted too). Other bracketed words (`[note]`) are not findings. A marker bullet indented under a finding belongs to that finding's detail; it is neither a finding nor a marker. If the output has more markers than parseable findings, a granny agent (`roles.granny`) extracts them instead. If it recovers fewer findings than markers, it is asked once more with the expected count; still short, the reviewer did not run (above), and when the retry ends short too, the stage ends `review-failed` with the marker, parser and extraction counts and the raw review output in its note - findings are never dropped silently and the stage is never reported clean. Output in which the Codex plugin says it got no usable result (`Codex did not return valid structured JSON.`, `Codex returned JSON with an unexpected review shape.`, `Codex review completed without any stdout output.`, and for the plan review's `task`, `Codex did not return a final message.`) also means the reviewer did not run, even when the command exited 0. Output with no marker at all reads as a clean review only when the no-findings sentence is all there is: `No findings.` or the Codex plugin's `No material findings.` (case and the period do not matter) on a line of its own, with nothing else but granny's leading `[granny] reviewer: ...` line and the plugin's frame - its `# Codex Review` or `# Codex Adversarial Review` heading and `Target: ...` line, and in its structured render with `Verdict: approve` the one-paragraph summary before the sentence and the `Next steps:` and `Reasoning:` lists of one-line bullets after it, which the plugin prints around the sentence when its findings list is empty. A no-findings line next to anything else - a finding written as prose or as a heading in another section, a second summary paragraph, `Verdict: needs-attention`, text after the sentence - does not make the output clean. Otherwise - prose findings, a native Codex review (the plugin's `review` or `codex exec review`), or a sentence like `Review could not be completed: ... No code was inspected` that the CLI prints with exit 0 when its sandbox cannot run commands - a granny agent (`roles.granny`) reads it (`extract <stage> r<n> <reviewer>`, after the log line `<stage> r<n> <reviewer>: no finding in the expected form and not just "No findings." - asking an agent to extract findings`): the findings it extracts go on as the reviewer's findings; with none, the review is clean only when the agent confirms (`clean: true`) that the output is a finished review saying the changes have no problems, and otherwise the reviewer did not run (above), with the note `reviewer output had no findings in the expected form and was not just No findings, and an extraction found none in it` and the raw output. A clean native Codex review (`No actionable regressions were identified. Type checking passed; ...`) therefore costs one extraction call: the sentence is the model's own prose, worded differently and followed by different caveats on every run, so granny does not match a phrase in it, and the extraction agent confirms it as clean.
+
+## Watching a run
+
+`watch` (omp only) decides what the omp session that started a run shows of it. The run, its journal, `granny_status` and its live view are the same in every mode.
+
+- `"full"` (default): the live panel and status line, plus a condensed event log per role process (`sessions/<n>-<label>/events.jsonl`: state changes, reasoning headings, tool calls, the final text of each answer) and the `/granny` command that opens a role's log live in an overlay.
+- `"panel"`: the live panel and status line only; no event log, and `/granny` says watching is off for that run.
+- `"off"`: no panel, no status line, no event log.
+
+```json
+{ "watch": "panel" }
+```
+
+Claude Code (`/workflows`) and opencode have their own views of a run; they accept the key and ignore it. Details: [omp.md](omp.md#watching-a-role).
 
 ## Example: everything set
 

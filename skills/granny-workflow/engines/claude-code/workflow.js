@@ -48,7 +48,8 @@ var DEFAULT_CONFIG = {
   ],
   checks: [],
   maxRepairs: 2,
-  readOnlyAgent: false
+  readOnlyAgent: false,
+  watch: "full"
 };
 var ROLES = ["granny", "helper", "planner", "implementer", "judge"];
 var TOP_KEYS = new Set(["$schema", "roles", "worktreeDir", ...Object.keys(DEFAULT_CONFIG).filter((k) => k !== "roles")]);
@@ -61,6 +62,7 @@ var ENGINES = ["auto", "codex", "codex-plugin", "agent", "command"];
 var PLUGIN_ENGINES = ["auto", "codex-plugin"];
 var CODEX_ENGINES = ["auto", "codex", "codex-plugin"];
 var MODES = ["review", "adversarial-review"];
+var WATCH_MODES = ["full", "panel", "off"];
 var NAME = /^[a-z0-9-]+$/;
 var isObject = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
 function resolveConfig(layers, host) {
@@ -235,6 +237,8 @@ function validate(c) {
     errors.push("aiAttribution must be a boolean");
   if (typeof c.readOnlyAgent !== "boolean")
     errors.push("readOnlyAgent must be a boolean");
+  if (!WATCH_MODES.includes(c.watch))
+    errors.push('watch must be "full", "panel" or "off"');
   if (!Array.isArray(c.rules) || !c.rules.every((r) => typeof r === "string"))
     errors.push("rules must be an array of strings");
   if (!isRepairs(c.maxRepairs))
