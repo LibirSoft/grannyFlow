@@ -4,6 +4,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { TailReader } from '../src/adapters/omp/tail'
 import { LineBuffer, sessionEntryLines } from '../src/adapters/omp/transcript'
+import { RoleActivity } from '../src/adapters/omp/panel'
+import { buildRunTree, groupOf, type JournalEntry, nextAgent, rowText, subagentFiles, visibleRows } from '../src/adapters/omp/tree'
 
 let tmp: string
 beforeEach(() => {
@@ -241,5 +243,257 @@ describe('LineBuffer', () => {
     const version = buffer.version
     buffer.push([])
     expect(buffer.version).toBe(version)
+  })
+})
+
+const BASE = Date.parse('2026-11-05T17:00:00.000Z')
+const j = (sec: number, type: string, data: Record<string, unknown> = {}): JournalEntry => ({ t: new Date(BASE + sec * 1000).toISOString(), type, ...data })
+const S = (n: number, label: string) => `/r/.granny/runs/R/sessions/${n}-${label.replace(/ /g, '-')}`
+let sessions = 0
+const agentEntries = (sec: number, label: string, role: string, phase: string | undefined, extra: Record<string, unknown> = {}) => {
+  const session = S(++sessions, label)
+  return { session, entry: j(sec, 'agent', { label, role, ...(phase ? { phase } : {}), session, model: null, ...extra }) }
+}
+
+function fixture() {
+  sessions = 0
+  const e: JournalEntry[] = []
+  const sess: Record<string, string> = {}
+  const agent = (sec: number, label: string, role: string, phase: string | undefined, extra: Record<string, unknown> = {}) => {
+    const { session, entry } = agentEntries(sec, label, role, phase, extra)
+    sess[label] = session
+    e.push(entry)
+  }
+  const end = (sec: number, label: string, outcome: string) => e.push(j(sec, 'agent-end', { label, session: sess[label], outcome }))
+  e.push(j(0, 'phase', { title: 'Worktree' }), j(0, 'command', { command: 'git worktree add ../wt feat/x\nsecond line' }))
+  e.push(j(1, 'phase', { title: 'Plan' }))
+  agent(1, 'plan', 'planner', 'Plan', { model: 'openai-codex/gpt-6.1-sol', effort: 'xhigh' })
+  e.push(j(2, 'subagent', { label: 'plan', agents: ['BaselineGates', 'PublishedContracts'] }))
+  end(60, 'plan', 'done')
+  e.push(j(61, 'phase', { title: 'Plan review' }))
+  agent(61, 'review plan review r1 terra', 'reviewer', 'Plan review')
+  end(120, 'review plan review r1 terra', 'done')
+  agent(121, 'judge plan review r1', 'judge', 'Plan review')
+  end(150, 'judge plan review r1', 'done')
+  agent(151, 'judge plan review r1 retry', 'judge', 'Plan review')
+  end(170, 'judge plan review r1 retry', 'done')
+  agent(171, 'fix plan review r1', 'implementer', 'Plan review')
+  end(200, 'fix plan review r1', 'done')
+  agent(201, 'review plan review r2 terra', 'reviewer', 'Plan review')
+  end(230, 'review plan review r2 terra', 'done')
+  e.push(j(231, 'log', { message: 'plan review: clean after 2 rounds\nno findings left' }))
+  e.push(j(232, 'phase', { title: 'Implement' }))
+  agent(232, 'implement one', 'implementer', 'Implement')
+  end(300, 'implement one', 'done')
+  e.push(j(301, 'phase', { title: 'Checks' }), j(301, 'command', { command: 'bun test' }))
+  e.push(j(302, 'phase', { title: 'Review' }))
+  agent(302, 'review one r1 terra', 'reviewer', undefined)
+  end(330, 'review one r1 terra', 'done')
+  agent(331, 'judge one r1', 'judge', 'Review')
+  e.push(j(340, 'agent-failed', { label: 'judge one r1', session: sess['judge one r1'], error: '503' }))
+  e.push(j(341, 'phase', { title: 'Review' }))
+  e.push(j(342, 'phase', { title: 'Implement' }))
+  agent(342, 'implement two', 'implementer', 'Implement')
+  end(400, 'implement two', 'done')
+  e.push(j(401, 'phase', { title: 'Review' }))
+  agent(401, 'review two r1 terra', 'reviewer', 'Review')
+  end(420, 'review two r1 terra', 'cancelled')
+  e.push(j(421, 'phase', { title: 'Final review' }))
+  agent(421, 'review final review r1 terra', 'reviewer', 'Final review')
+  end(450, 'review final review r1 terra', 'done')
+  e.push(j(451, 'phase', { title: 'PR ready' }))
+  agent(451, 'pr-ready check', 'granny', 'PR ready')
+  return { entries: e, sess }
+}
+
+const activity = (session: string, label: string, opts: { active: boolean; state?: string; since?: number; outcome?: 'done' | 'failed' | 'cancelled' }) => {
+  const role = new RoleActivity({ label, role: 'x', session, phase: 'p' }, BASE)
+  if (opts.active) role.begin(BASE)
+  role.state = opts.state ?? role.state
+  role.since = BASE + (opts.since ?? 0) * 1000
+  if (opts.outcome) role.outcome = opts.outcome
+  return role
+}
+
+const NOW = BASE + 500_000
+const listing = (rows: ReturnType<typeof visibleRows>, now = NOW, width?: number) => rows.map(r => rowText(r, now, width))
+
+describe('groupOf', () => {
+  it('groups review, judge, fix and extraction agents by subject and round, and implementers by stage', () => {
+    expect(groupOf('review one r1 terra')).toBe('one · round 1')
+    expect(groupOf('review plan review r2 terra #2')).toBe('plan review · round 2')
+    expect(groupOf('review final review r1 terra')).toBe('final review · round 1')
+    expect(groupOf('judge plan review r1 retry')).toBe('plan review · round 1')
+    expect(groupOf('fix one r3')).toBe('one · round 3')
+    expect(groupOf('extract one r1 codex')).toBe('one · round 1')
+    expect(groupOf('extract one r1 codex retry')).toBe('one · round 1')
+    expect(groupOf('implement stage two')).toBe('stage two')
+    for (const label of ['plan', 'pr-ready check', 'commit one fix r1', 'resolve merge one', 'review']) expect(groupOf(label)).toBeUndefined()
+  })
+})
+
+describe('buildRunTree / visibleRows', () => {
+  it('lays out phases, groups, agents and subagents with markers and elapsed times', () => {
+    const { entries, sess } = fixture()
+    const live = new Map([[sess['pr-ready check']!, activity(sess['pr-ready check']!, 'pr-ready check', { active: true, state: 'thinking', since: 480 })]])
+    const tree = buildRunTree({ id: 'R', status: 'running', startedAt: BASE }, entries, live, NOW)
+    expect(tree.phase).toBe('PR ready')
+    expect(listing(visibleRows([tree], new Set(), 'R'))).toEqual([
+      '▾ run R · running · 8m20s',
+      '  ✓ Worktree · 1s',
+      '  ✓ Plan · 1m00s',
+      '    ✓ plan  planner · openai-codex/gpt-6.1-sol/xhigh · 59s',
+      '      └ BaselineGates (no transcript yet)',
+      '      └ PublishedContracts (no transcript yet)',
+      '  ✓ Plan review · 2m51s',
+      '    plan review · round 1',
+      '      ✓ review plan review r1 terra  reviewer · default model · 59s',
+      '      ✓ judge plan review r1  judge · default model · 29s',
+      '      ✓ judge plan review r1 retry  judge · default model · 19s',
+      '      ✓ fix plan review r1  implementer · default model · 29s',
+      '    plan review · round 2',
+      '      ✓ review plan review r2 terra  reviewer · default model · 29s',
+      '  ✓ Implement · 1m09s',
+      '    one',
+      '      ✓ implement one  implementer · default model · 1m08s',
+      '  ✓ Checks · 1s',
+      '  ✗ Review · 40s',
+      '    one · round 1',
+      '      ✓ review one r1 terra  reviewer · default model · 28s',
+      '      ✗ judge one r1  judge · default model · 9s',
+      '  ✓ Implement · 59s',
+      '    two',
+      '      ✓ implement two  implementer · default model · 58s',
+      '  ⊘ Review · 20s',
+      '    two · round 1',
+      '      ⊘ review two r1 terra  reviewer · default model · 19s',
+      '  ✓ Final review · 30s',
+      '    final review · round 1',
+      '      ✓ review final review r1 terra  reviewer · default model · 29s',
+      '  ● PR ready · 49s',
+      '    ● pr-ready check  granny · default model · 49s · thinking 20s',
+    ])
+    const rows = visibleRows([tree], new Set(), 'R')
+    expect(rows.filter(r => r.kind === 'group').every(r => !r.selectable)).toBe(true)
+    expect(rows.filter(r => r.kind !== 'group').every(r => r.selectable)).toBe(true)
+    expect(rows.find(r => r.agent?.label === 'judge one r1')?.agent?.error).toBe('503')
+    expect(new Set(rows.map(r => r.key)).size).toBe(rows.length)
+    expect(rows.map(r => r.key).slice(0, 5)).toEqual(['run:R', 'phase:R:0', 'phase:R:1', `agent:${sess.plan}`, `sub:${sess.plan}:BaselineGates`])
+  })
+
+  it('keeps the journal lines of each phase: logs, commands, agents started and ended', () => {
+    const { entries } = fixture()
+    const tree = buildRunTree({ id: 'R', status: 'running', startedAt: BASE }, entries, new Map(), NOW)
+    const clock = (sec: number) => new Date(BASE + sec * 1000).toTimeString().slice(0, 8)
+    expect(tree.phases[0]!.lines).toEqual([`${clock(0)}  $ git worktree add ../wt feat/x`])
+    expect(tree.phases[1]!.lines).toEqual([`${clock(1)}  ▸ plan started (planner · openai-codex/gpt-6.1-sol/xhigh)`, `${clock(60)}  ■ plan done 59s`])
+    expect(tree.phases[2]!.lines.slice(-3)).toEqual([`${clock(230)}  ■ review plan review r2 terra done 29s`, `${clock(231)}  plan review: clean after 2 rounds`, `          no findings left`])
+  })
+
+  it('shows the subagent transcripts it found instead of the journalled names', () => {
+    const { entries, sess } = fixture()
+    const files = new Map([[sess.plan!, new Map([['BaselineGates', '/x/BaselineGates.jsonl']])]])
+    const tree = buildRunTree({ id: 'R', status: 'running', startedAt: BASE }, entries, new Map(), NOW, files)
+    expect(tree.agents[0]!.subagents).toEqual([{ name: 'BaselineGates', path: '/x/BaselineGates.jsonl' }])
+  })
+
+  it('marks an agent with no process and no end … while the run runs, and takes an outcome from memory', () => {
+    const { entries, sess } = fixture()
+    const waiting = buildRunTree({ id: 'R', status: 'running', startedAt: BASE }, entries, new Map([[sess['pr-ready check']!, activity(sess['pr-ready check']!, 'pr-ready check', { active: false })]]), NOW)
+    expect(waiting.agents.at(-1)!.state).toBe('waiting')
+    expect(listing(visibleRows([waiting], new Set(), 'R')).at(-1)).toBe('    … pr-ready check  granny · default model · 49s')
+    const noLive = buildRunTree({ id: 'R', status: 'running', startedAt: BASE }, entries, new Map(), NOW)
+    expect(noLive.agents.at(-1)!.state).toBe('waiting')
+    const remembered = buildRunTree({ id: 'R', status: 'running', startedAt: BASE }, entries, new Map([[sess['pr-ready check']!, activity(sess['pr-ready check']!, 'x', { active: false, outcome: 'failed' })]]), NOW)
+    expect(remembered.agents.at(-1)!.state).toBe('failed')
+  })
+
+  it('marks open agents and the last phase ⊘ when the run was cancelled', () => {
+    const { entries } = fixture()
+    const tree = buildRunTree({ id: 'R', status: 'cancelled', startedAt: BASE, endedAt: BASE + 460_000 }, entries, new Map(), NOW)
+    const rows = listing(visibleRows([tree], new Set(), 'R'))
+    expect(rows[0]).toBe('▾ run R · cancelled · 7m40s')
+    expect(rows.slice(-2)).toEqual(['  ⊘ PR ready · 9s', '    ⊘ pr-ready check  granny · default model · 9s'])
+  })
+
+  it('places a parallel lane\'s agent in the last phase of its own title, not the current one', () => {
+    sessions = 0
+    const a = agentEntries(0, 'implement a', 'implementer', 'Implement')
+    const r = agentEntries(10, 'review a r1 x', 'reviewer', 'Review')
+    const b = agentEntries(12, 'implement b', 'implementer', 'Implement')
+    const c = agentEntries(15, 'implement c', 'implementer', 'Implement')
+    const entries = [
+      j(0, 'phase', { title: 'Implement' }),
+      a.entry,
+      j(1, 'phase', { title: 'Implement' }),
+      j(10, 'agent-end', { label: 'implement a', session: a.session, outcome: 'done' }),
+      j(10, 'phase', { title: 'Review' }),
+      r.entry,
+      j(12, 'phase', { title: 'Implement' }),
+      b.entry,
+      j(14, 'phase', { title: 'Review' }),
+      c.entry,
+    ]
+    const tree = buildRunTree({ id: 'P', status: 'running', startedAt: BASE }, entries, new Map(), BASE + 20_000)
+    expect(tree.phases.map(p => [p.title, p.groups.flatMap(g => g.agents.map(x => x.label))])).toEqual([
+      ['Implement', ['implement a']],
+      ['Review', ['review a r1 x']],
+      ['Implement', ['implement b', 'implement c']],
+      ['Review', []],
+    ])
+  })
+
+  it('treats a run that is not expanded as one row, and folds a phase', () => {
+    const { entries } = fixture()
+    const tree = buildRunTree({ id: 'R', status: 'running', startedAt: BASE }, entries, new Map(), NOW)
+    const other = buildRunTree({ id: 'Q', status: 'done', startedAt: BASE - 100_000, endedAt: BASE - 40_000 }, [], new Map(), NOW)
+    expect(listing(visibleRows([other, tree], new Set(), 'R')).slice(0, 2)).toEqual(['▸ run Q · done · 1m00s', '▾ run R · running · 8m20s'])
+    expect(listing(visibleRows([other, tree], new Set(['run:R']), 'R'))).toEqual(['▸ run Q · done · 1m00s', '▸ run R · running · 8m20s'])
+    const folded = listing(visibleRows([tree], new Set(['phase:R:2']), 'R'))
+    expect(folded.slice(5, 8)).toEqual(['      └ PublishedContracts (no transcript yet)', '  ✓ Plan review · 2m51s · 5 agents folded', '  ✓ Implement · 1m09s'])
+    expect(folded.some(l => l.includes('judge plan review'))).toBe(false)
+  })
+
+  it('moves to the next and previous agent across phases, skipping groups, phases and subagents', () => {
+    const { entries, sess } = fixture()
+    const rows = visibleRows([buildRunTree({ id: 'R', status: 'running', startedAt: BASE }, entries, new Map(), NOW)], new Set(), 'R')
+    expect(nextAgent(rows, `agent:${sess.plan}`, 1)).toBe(`agent:${sess['review plan review r1 terra']}`)
+    expect(nextAgent(rows, `agent:${sess['review plan review r2 terra']}`, 1)).toBe(`agent:${sess['implement one']}`)
+    expect(nextAgent(rows, `agent:${sess['implement one']}`, -1)).toBe(`agent:${sess['review plan review r2 terra']}`)
+    expect(nextAgent(rows, `sub:${sess.plan}:BaselineGates`, 1)).toBe(`agent:${sess['review plan review r1 terra']}`)
+    expect(nextAgent(rows, 'run:R', 1)).toBe(`agent:${sess.plan}`)
+    expect(nextAgent(rows, `agent:${sess.plan}`, -1)).toBeUndefined()
+    expect(nextAgent(rows, `agent:${sess['pr-ready check']}`, 1)).toBeUndefined()
+  })
+
+  it('drops the provider prefix of a model when the row is narrow', () => {
+    const { entries } = fixture()
+    const rows = visibleRows([buildRunTree({ id: 'R', status: 'running', startedAt: BASE }, entries, new Map(), NOW)], new Set(), 'R')
+    expect(rowText(rows[3]!, NOW, 40)).toBe('    ✓ plan  planner · gpt-6.1-sol/xhigh · 59s')
+  })
+
+  it('reads a journal written before agents had a phase into the current phase', () => {
+    sessions = 0
+    const a = agentEntries(1, 'implement one', 'implementer', undefined)
+    const tree = buildRunTree({ id: 'O', status: 'done', startedAt: BASE, endedAt: BASE + 9000 }, [j(0, 'phase', { title: 'Implement' }), a.entry], new Map(), NOW)
+    expect(tree.phases[0]!.groups[0]!.agents[0]).toMatchObject({ label: 'implement one', phase: 'Implement', state: 'done', end: BASE + 9000 })
+  })
+})
+
+describe('subagentFiles', () => {
+  it('finds <Name>.jsonl one level under the session directory, by name', () => {
+    const session = join(tmp, '1-plan')
+    mkdirSync(join(session, '2026-01-01T00-00-00-000Z_u', 'deeper'), { recursive: true })
+    writeFileSync(join(session, 'events.jsonl'), '')
+    writeFileSync(join(session, '2026-01-01T00-00-00-000Z_u.jsonl'), '')
+    writeFileSync(join(session, '2026-01-01T00-00-00-000Z_u', 'PublishedContracts.jsonl'), '')
+    writeFileSync(join(session, '2026-01-01T00-00-00-000Z_u', 'BaselineGates.jsonl'), '')
+    writeFileSync(join(session, '2026-01-01T00-00-00-000Z_u', '1.read.log'), '')
+    writeFileSync(join(session, '2026-01-01T00-00-00-000Z_u', 'deeper', 'Nested.jsonl'), '')
+    expect([...subagentFiles(session)]).toEqual([
+      ['BaselineGates', join(session, '2026-01-01T00-00-00-000Z_u', 'BaselineGates.jsonl')],
+      ['PublishedContracts', join(session, '2026-01-01T00-00-00-000Z_u', 'PublishedContracts.jsonl')],
+    ])
+    expect(subagentFiles(join(tmp, 'missing')).size).toBe(0)
   })
 })
