@@ -2,12 +2,13 @@ import { spawn, type ChildProcess } from 'node:child_process'
 import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { basename, dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { resolveConfig } from '../../core/config'
+import { resolveConfig, type WatchMode } from '../../core/config'
 import { checkInput, runGranny, stageCheckErrors, type RunInput } from '../../core/engine'
 import { checkShape, SCHEMAS } from '../../core/schemas'
 import type { AgentRequest, Host, ResultKind } from '../../core/types'
 import { DEFAULT_DELAYS, dropPlaceholders, globalConfigPath, type HostOptions, KILL_GRACE_MS, pause, preflight, readJson, RUN_INPUT_SCHEMA, RUN_TOOL_DESCRIPTION, runCommand, runDir, runId, runStatus, signalGroup, stageRepos, stamp, SUBMIT, summarize } from '../common'
 import { lineType, LiveRun, type LiveOptions, PARSED_EVENTS, type RoleActivity } from './panel'
+import { EventLog } from './watch'
 
 // The omp (oh-my-pi) host. One file, two modes: in the user's omp session it registers granny_run,
 // granny_status, granny_wait and granny_cancel and runs the loop; every role runs as its own `omp --mode json`
@@ -60,11 +61,12 @@ interface RunState {
   /** Pending granny_wait calls; set at the moment the run ends, so a run reports either to them or by notice. */
   waiters: Set<(reply: string) => void>
   live: LiveRun
+  watch: WatchMode
 }
 
 // omp re-runs the factory for every session in the process; runs started in one must stay visible to all.
 const SHARED = Symbol.for('granny-workflow.omp.state')
-const shared: { runs: Map<string, RunState>; clearStatus?: () => void } = ((globalThis as any)[SHARED] ??= { runs: new Map() })
+const shared: { runs: Map<string, RunState>; clearStatus?: () => void; hidden?: boolean } = ((globalThis as any)[SHARED] ??= { runs: new Map() })
 const { runs } = shared
 
 const text = (t: string): ToolResult => ({ content: [{ type: 'text', text: t }] })
@@ -336,8 +338,9 @@ export const createGrannyExtension =
       mkdirSync(dir, { recursive: true })
       shared.clearStatus?.()
       shared.clearStatus = undefined
-      const live = new LiveRun(id, ctx?.hasUI === true ? ctx.ui : undefined, { now, renderEveryMs })
-      const run: RunState = { id, dir, status: 'running', cancelled: false, abort: new AbortController(), children: new Set(), agents: 0, waiters: new Set(), live }
+      const { watch } = config
+      const live = new LiveRun(id, watch !== 'off' && ctx?.hasUI === true ? ctx.ui : undefined, { now, renderEveryMs }, !shared.hidden)
+      const run: RunState = { id, dir, status: 'running', cancelled: false, abort: new AbortController(), children: new Set(), agents: 0, waiters: new Set(), live, watch }
       runs.set(id, run)
       const journal = (type: string, data: Record<string, unknown>) =>
         appendFileSync(join(dir, 'journal.jsonl'), JSON.stringify({ t: stamp(), type, ...data }) + '\n')
@@ -391,6 +394,7 @@ export const createGrannyExtension =
           proc.on('close', code => {
             run.children.delete(proc)
             if (pending) scan(pending)
+            view.exit(code ?? 1)
             live.stop(view)
             resolve({ code: code ?? 1, assistant, stderr })
           })
@@ -456,7 +460,12 @@ export const createGrannyExtension =
             ...(req.effort ? ['--thinking', req.effort] : []),
           ]
           journal('agent', { label: req.label, role: req.role, session, model: model ?? null, ...(req.effort ? { effort: req.effort } : {}) })
-          const view = live.role({ label: req.label, role: req.role, model, effort: req.effort })
+          const path = join(session, 'events.jsonl')
+          const log =
+            watch === 'full'
+              ? new EventLog(path, now, e => journal('event-log-failed', { label: req.label, path, error: String((e as Error)?.message ?? e) }))
+              : undefined
+          const view = live.role({ label: req.label, role: req.role, model, effort: req.effort, ...(log ? { log: path } : {}) }, log && (entry => log.write(entry)))
           return converse(req, spec, args, session, view)
         },
         async run(command, cwd) {

@@ -5,7 +5,8 @@ import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import extension, { blockReason, createGrannyExtension, isTransient, waitSeconds } from '../src/adapters/omp/extension'
-import { lineType, LiveRun, PARSED_EVENTS, type RoleActivity } from '../src/adapters/omp/panel'
+import { lineType, LiveRun, type LogEntry, PARSED_EVENTS, type RoleActivity } from '../src/adapters/omp/panel'
+import { EventLog } from '../src/adapters/omp/watch'
 import { SCHEMAS } from '../src/core/schemas'
 import type { FakeOmpBehaviour } from './fake-omp'
 
@@ -424,6 +425,74 @@ describe('live panel', () => {
     live.stop(role)
     expect(live.lines()).toEqual(['granny r4 · Review · 0s', '  no role process running'])
     live.close('done')()
+  })
+})
+
+describe('role event log', () => {
+  it('condenses a role\'s stream into state, heading, tool, tool-end, text, subagents and exit entries', () => {
+    const entries: LogEntry[] = []
+    const live = new LiveRun('r1', undefined, { now: () => 0, renderEveryMs: 1000 })
+    const role = live.role({ label: 'plan', role: 'planner' }, entry => void entries.push(entry))
+    live.start(role)
+    const huge = `,"partial":{"content":[{"type":"thinking","thinking":"HUGE${'z'.repeat(50_000)}"}]}`
+    for (const line of [
+      ev({ type: 'message_start', message: { role: 'assistant', content: [] } }),
+      update('thinking_start'),
+      `{"type":"message_update","assistantMessageEvent":{"type":"thinking_delta","contentIndex":0,"delta":"**Comparing"}${huge}}`,
+      update('thinking_delta', { delta: ' options**\n\nfirst' }),
+      update('thinking_delta', { delta: ' more' }),
+      ev({ type: 'tool_execution_start', toolCallId: 't1', toolName: 'read', args: { path: 'plan.md' }, intent: 'Reading the plan' }),
+      ev({ type: 'tool_execution_end', toolCallId: 't1', toolName: 'read', result: {} }),
+      ev({ type: 'tool_execution_start', toolCallId: 't2', toolName: 'bash', args: { command: `echo ${'a'.repeat(300)}` } }),
+      ev({ type: 'tool_execution_end', toolCallId: 't2', toolName: 'bash', result: {}, isError: true }),
+      ev({ type: 'message_end', message: { role: 'assistant', content: [{ type: 'thinking', thinking: 'hidden' }, { type: 'text', text: `Done. ${'w'.repeat(5000)}` }], stopReason: 'stop' } }),
+      ev({ type: 'message_end', message: { role: 'user', content: [{ type: 'text', text: 'the prompt' }] } }),
+      ev({ type: 'tool_execution_start', toolCallId: 't3', toolName: 'task', args: { tasks: [{ name: 'BaselineGates' }, { agent: 'explore' }] } }),
+    ]) feed(role, line, 0)
+    role.exit(0)
+    expect(entries.map(e => e.type)).toEqual(['state', 'state', 'heading', 'state', 'tool', 'tool-end', 'state', 'state', 'tool', 'tool-end', 'state', 'text', 'state', 'tool', 'subagents', 'exit'])
+    expect(entries.slice(0, 7)).toEqual([
+      { type: 'state', state: 'waiting for model' },
+      { type: 'state', state: 'thinking' },
+      { type: 'heading', text: 'Comparing options' },
+      { type: 'state', state: 'running read: Reading the plan' },
+      { type: 'tool', name: 'read', intent: 'Reading the plan', arg: 'plan.md' },
+      { type: 'tool-end', name: 'read' },
+      { type: 'state', state: 'waiting for model' },
+    ])
+    expect(entries[8]).toEqual({ type: 'tool', name: 'bash', arg: `echo ${'a'.repeat(194)}…` })
+    expect(entries[9]).toEqual({ type: 'tool-end', name: 'bash', error: true })
+    const text = entries.find(e => e.type === 'text') as { text: string }
+    expect(text.text).toStartWith('Done. www')
+    expect(text.text).toHaveLength(4000)
+    expect(entries.at(-2)).toEqual({ type: 'subagents', agents: ['BaselineGates', 'explore'] })
+    expect(entries.at(-1)).toEqual({ type: 'exit', code: 0 })
+    expect(JSON.stringify(entries)).not.toContain('HUGE')
+  })
+
+  it('stops writing after the first failed append, reports it once, and never throws - not even when reporting fails', () => {
+    const errors: unknown[] = []
+    const log = new EventLog('/proc/no-such-dir/events.jsonl', () => 0, e => {
+      errors.push(e)
+      throw new Error('journal gone too')
+    })
+    expect(() => {
+      log.write({ type: 'state', state: 'thinking' })
+      log.write({ type: 'exit', code: 0 })
+    }).not.toThrow()
+    expect(errors).toHaveLength(1)
+  })
+
+  it('logs each new heading once, as it arrives, without a draw', () => {
+    const headings: string[] = []
+    const live = new LiveRun('r1', undefined, { now: () => 0, renderEveryMs: 1000 })
+    const role = live.role({ label: 'plan', role: 'planner' }, e => void (e.type === 'heading' && headings.push(e.text)))
+    live.start(role)
+    role.stream('message_update', update('thinking_start'), 0)
+    for (const delta of ['**First**\n', 'body *x* ', 'more\n', '**Second', ' one**\n', 'tail']) role.stream('message_update', update('thinking_delta', { delta }), 0)
+    expect(headings).toEqual(['First', 'Second one'])
+    live.lines()
+    expect(headings).toEqual(['First', 'Second one'])
   })
 })
 
@@ -1075,6 +1144,106 @@ describe('omp extension in the user session (parent mode)', () => {
     const { dir } = await start(f, {}, { ...CTX, hasUI: false, ui: u.ui })
     await finished(dir)
     expect(u.calls).toEqual([])
+  })
+
+  const sessionFiles = (dir: string, name: string) =>
+    existsSync(join(dir, 'sessions'))
+      ? fs.readdirSync(join(dir, 'sessions')).filter(d => existsSync(join(dir, 'sessions', d, name))).map(d => join(dir, 'sessions', d, name))
+      : []
+  const logOf = (path: string) => readFileSync(path, 'utf8').trim().split('\n').map(l => JSON.parse(l))
+  const HUGE = `,"partial":{"content":[{"type":"thinking","thinking":"HUGE${'z'.repeat(50_000)}"}]}`
+  const STREAM = [
+    { type: 'message_start', message: { role: 'assistant', content: [] } },
+    { type: 'message_update', assistantMessageEvent: { type: 'thinking_start', contentIndex: 0 } },
+    `{"type":"message_update","assistantMessageEvent":{"type":"thinking_delta","contentIndex":0,"delta":"**Reading the plan**\\n"}${HUGE}}`,
+    { type: 'tool_execution_start', toolCallId: 't1', toolName: 'read', args: { path: 'plan.md' }, intent: 'Reading the plan' },
+    { type: 'tool_execution_end', toolCallId: 't1', toolName: 'read', result: {} },
+    { type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text: 'Spawning helpers.' }], stopReason: 'toolUse' } },
+    { type: 'tool_execution_start', toolCallId: 't2', toolName: 'task', args: { tasks: [{ name: 'BaselineGates' }] } },
+    { type: 'tool_execution_end', toolCallId: 't2', toolName: 'task', result: {} },
+  ]
+
+  it('writes a condensed events.jsonl next to each role\'s session with watch "full", never the raw stream', async () => {
+    behave({ events: { 'implement-one': STREAM } })
+    const u = tui()
+    const f = fakePi()
+    await createGrannyExtension({ renderEveryMs: 10 })(f.pi as any)
+    const { dir } = await start(f, {}, u.ctx)
+    expect((await finished(dir)).stages[0].outcome).toBe('clean')
+    const logs = sessionFiles(dir, 'events.jsonl')
+    expect(logs.length).toBe(fs.readdirSync(join(dir, 'sessions')).length)
+    const implement = logOf(logs.find(p => p.includes('-implement-one/'))!)
+    const kinds = implement.map(e => (e.type === 'state' ? `state:${e.state}` : e.type))
+    expect(kinds).toEqual([
+      'state:waiting for model',
+      'state:thinking',
+      'heading',
+      'state:running read: Reading the plan',
+      'tool',
+      'tool-end',
+      'state:waiting for model',
+      'text',
+      'state:running task: BaselineGates',
+      'tool',
+      'subagents',
+      'tool-end',
+      'state:waiting for model',
+      'exit',
+    ])
+    expect(implement.find(e => e.type === 'heading').text).toBe('Reading the plan')
+    expect(implement.find(e => e.type === 'tool')).toMatchObject({ name: 'read', intent: 'Reading the plan', arg: 'plan.md' })
+    expect(implement.find(e => e.type === 'text').text).toBe('Spawning helpers.')
+    expect(implement.at(-1)).toMatchObject({ type: 'exit', code: 0 })
+    expect(implement.every(e => typeof e.t === 'string' && !Number.isNaN(Date.parse(e.t)))).toBe(true)
+    expect(readFileSync(logs.find(p => p.includes('-implement-one/'))!, 'utf8')).not.toContain('HUGE')
+    for (const path of logs) expect(logOf(path).at(-1)).toMatchObject({ type: 'exit' })
+  })
+
+  it('writes no event log with watch "panel", and still shows the panel', async () => {
+    behave({ events: { 'implement-one': STREAM } })
+    const u = tui()
+    const f = fakePi()
+    await createGrannyExtension({ renderEveryMs: 10 })(f.pi as any)
+    const { id, dir } = await start(f, { watch: 'panel' }, u.ctx)
+    await finished(dir)
+    expect(sessionFiles(dir, 'submission.json').length).toBeGreaterThan(0)
+    expect(sessionFiles(dir, 'events.jsonl')).toEqual([])
+    expect(u.widgets(`granny-${id}`).length).toBeGreaterThan(1)
+    expect(u.status(`granny-${id}`)).toBe(`granny ${id}: done`)
+  })
+
+  it('makes no UI call and writes no event log with watch "off", and the run is the same', async () => {
+    behave({ events: { 'implement-one': STREAM } })
+    const u = tui()
+    const f = fakePi()
+    await createGrannyExtension({ renderEveryMs: 1 })(f.pi as any)
+    const { id, dir } = await start(f, { watch: 'off' }, u.ctx)
+    expect((await finished(dir)).stages[0].outcome).toBe('clean')
+    expect(u.calls).toEqual([])
+    expect(sessionFiles(dir, 'events.jsonl')).toEqual([])
+    expect(journalOf(dir).filter(e => e.type === 'subagent')).toEqual([expect.objectContaining({ label: 'implement one', agents: ['BaselineGates'] })])
+    await waitFor(() => f.sent.length > 0)
+    expect(f.sent[0]!.message.content).toContain(`[granny] Run ${id} finished.`)
+  })
+
+  it('journals a failing event log once per role and keeps the run going', async () => {
+    behave({ events: { 'implement-one': STREAM } })
+    const real = fs.appendFileSync
+    const spy = spyOn(fs, 'appendFileSync').mockImplementation(((path: any, data: any, options?: any) => {
+      if (String(path).endsWith('events.jsonl')) throw new Error('disk full')
+      return real(path, data, options)
+    }) as typeof fs.appendFileSync)
+    try {
+      const f = fakePi()
+      await createGrannyExtension({ renderEveryMs: 10 })(f.pi as any)
+      const { dir } = await start(f, {}, tui().ctx)
+      expect((await finished(dir)).stages[0].outcome).toBe('clean')
+      const failures = journalOf(dir).filter(e => e.type === 'event-log-failed')
+      expect(failures.filter(e => e.label === 'implement one')).toEqual([expect.objectContaining({ error: 'disk full', path: expect.stringContaining('-implement-one/events.jsonl') })])
+      expect(new Set(failures.map(e => e.label)).size).toBe(failures.length)
+    } finally {
+      spy.mockRestore()
+    }
   })
 
   it('keeps the run going when the UI throws', async () => {

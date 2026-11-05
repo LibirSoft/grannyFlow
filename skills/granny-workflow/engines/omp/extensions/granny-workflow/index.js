@@ -2,7 +2,7 @@
 // @bun
 // src/adapters/omp/extension.ts
 import { spawn as spawn2 } from "child_process";
-import { appendFileSync as appendFileSync2, existsSync as existsSync2, mkdirSync as mkdirSync2, readFileSync as readFileSync2, rmSync, writeFileSync } from "fs";
+import { appendFileSync as appendFileSync3, existsSync as existsSync3, mkdirSync as mkdirSync2, readFileSync as readFileSync2, rmSync, writeFileSync } from "fs";
 import { basename, dirname, join as join2 } from "path";
 import { fileURLToPath } from "url";
 
@@ -2586,6 +2586,8 @@ var PARSED_EVENTS = new Set(["message_start", "message_end", "tool_execution_sta
 var HEAD = 200;
 var MAX_LINES = 8;
 var THINKING_TAIL = 4000;
+var LOG_ARG = 200;
+var LOG_TEXT = 4000;
 function stringAfter(text, marker) {
   const i = text.indexOf(marker);
   if (i < 0)
@@ -2637,29 +2639,47 @@ function subagents(args) {
   const items = Array.isArray(args?.tasks) ? args.tasks : [args];
   return items.map((t) => oneLine(String(t?.name || t?.agent || "task"), 40));
 }
+function argOf(args, max) {
+  const key = ARG_KEYS.find((k) => typeof args?.[k] === "string" && args[k].trim());
+  return key ? oneLine(args[key], max) : undefined;
+}
+function toolEntry(event) {
+  const intent = typeof event?.intent === "string" && event.intent.trim() ? oneLine(event.intent, LOG_ARG) : undefined;
+  const arg = argOf(event?.args, LOG_ARG);
+  return { type: "tool", name: String(event?.toolName ?? "tool"), ...intent ? { intent } : {}, ...arg ? { arg } : {} };
+}
+function finalText(message) {
+  const parts = Array.isArray(message?.content) ? message.content : [];
+  return parts.filter((p) => p?.type === "text" && typeof p.text === "string").map((p) => p.text).join(`
+`).trim().slice(0, LOG_TEXT);
+}
 function describe(event) {
   const name = String(event?.toolName ?? "tool");
   if (typeof event?.intent === "string" && event.intent.trim())
     return { name, detail: oneLine(event.intent), intent: true };
   if (name === "task")
     return { name, detail: oneLine(subagents(event?.args).join(", ")) };
-  const key = ARG_KEYS.find((k) => typeof event?.args?.[k] === "string" && event.args[k].trim());
-  return { name, detail: key ? oneLine(event.args[key]) : undefined };
+  return { name, detail: argOf(event?.args, 60) };
 }
 var HEADING = /(?:^|\n)[ \t]*\*\*([^*\n]+)\*\*/g;
 
 class RoleActivity {
   info;
+  log;
   state = "starting";
   since;
   heading;
   lastTool;
   task;
+  startedAt;
+  endedAt;
+  active = false;
   thinking = "";
   unscanned = false;
   running = new Map;
-  constructor(info, now) {
+  constructor(info, now, log) {
     this.info = info;
+    this.log = log;
     this.since = now;
   }
   set(state, now) {
@@ -2667,10 +2687,20 @@ class RoleActivity {
       return;
     this.state = state;
     this.since = now;
+    this.log?.({ type: "state", state });
   }
   begin(now) {
     this.running.clear();
+    this.startedAt ??= now;
+    this.active = true;
     this.set("starting", now);
+  }
+  end(now) {
+    this.active = false;
+    this.endedAt = now;
+  }
+  exit(code) {
+    this.log?.({ type: "exit", code });
   }
   stream(type, line, now) {
     if (type !== "message_update")
@@ -2687,7 +2717,7 @@ class RoleActivity {
         this.thinking += delta;
         if (delta.includes("*"))
           this.unscanned = true;
-        if (this.thinking.length > 2 * THINKING_TAIL)
+        if (this.unscanned && this.log || this.thinking.length > 2 * THINKING_TAIL)
           this.flush();
         this.set("thinking", now);
         break;
@@ -2711,14 +2741,24 @@ class RoleActivity {
         if (event.message?.role === "assistant")
           this.set("waiting for model", now);
         return;
+      case "message_end": {
+        if (event.message?.role !== "assistant" || !this.log)
+          return;
+        const text = finalText(event.message);
+        if (text)
+          this.log({ type: "text", text });
+        return;
+      }
       case "tool_execution_start": {
         const call = describe(event);
         this.running.set(String(event.toolCallId), call);
         this.set(running(call), now);
+        this.log?.(toolEntry(event));
         if (call.name !== "task")
           return;
         const agents = subagents(event.args);
         this.task = { id: String(event.toolCallId), agents };
+        this.log?.({ type: "subagents", agents });
         return agents;
       }
       case "tool_execution_end": {
@@ -2729,6 +2769,7 @@ class RoleActivity {
         this.lastTool = { text: call.intent || !call.detail ? call.detail ?? call.name : `${call.name}: ${call.detail}`, at: now, error };
         if (this.task?.id === id)
           this.task.mark = error ? "\u2717" : "\u2713";
+        this.log?.({ type: "tool-end", name: call.name, ...error ? { error: true } : {} });
         const other = [...this.running.values()].at(-1);
         this.set(other ? running(other) : "waiting for model", now);
         return;
@@ -2745,8 +2786,11 @@ class RoleActivity {
       let heading;
       for (const m of this.thinking.matchAll(HEADING))
         heading = m[1];
-      if (heading?.trim())
-        this.heading = oneLine(heading);
+      const text = heading?.trim() ? oneLine(heading) : undefined;
+      if (text && text !== this.heading) {
+        this.heading = text;
+        this.log?.({ type: "heading", text });
+      }
     }
     if (this.thinking.length > THINKING_TAIL)
       this.thinking = this.thinking.slice(-THINKING_TAIL);
@@ -2768,23 +2812,31 @@ class LiveRun {
   id;
   ui;
   options;
+  visible;
   phase = "Starting";
   startedAt;
+  roles = [];
   active = new Set;
   lastDraw = Number.NEGATIVE_INFINITY;
   closed = false;
   timer;
-  constructor(id, ui, options) {
+  constructor(id, ui, options, visible = true) {
     this.id = id;
     this.ui = ui;
     this.options = options;
+    this.visible = visible;
     this.startedAt = options.now();
   }
   get key() {
     return `granny-${this.id}`;
   }
-  role(info) {
-    return new RoleActivity(info, this.options.now());
+  now() {
+    return this.options.now();
+  }
+  role(info, log) {
+    const role = new RoleActivity(info, this.options.now(), log);
+    this.roles.push(role);
+    return role;
   }
   start(role) {
     role.begin(this.options.now());
@@ -2792,8 +2844,20 @@ class LiveRun {
     this.touch();
   }
   stop(role) {
+    role.end(this.options.now());
     this.active.delete(role);
     this.touch();
+  }
+  setVisible(visible) {
+    if (visible === this.visible || this.closed)
+      return;
+    this.visible = visible;
+    if (visible) {
+      this.lastDraw = Number.NEGATIVE_INFINITY;
+      return this.touch();
+    }
+    this.call((ui) => ui.setWidget(this.key, undefined));
+    this.call((ui) => ui.setStatus(this.key, undefined));
   }
   setPhase(title) {
     this.phase = title;
@@ -2830,7 +2894,7 @@ class LiveRun {
     } catch {}
   }
   touch() {
-    if (!this.ui || this.closed)
+    if (!this.ui || this.closed || !this.visible)
       return;
     if (!this.timer) {
       this.timer = setInterval(() => this.touch(), Math.max(10, Math.min(250, this.options.renderEveryMs)));
@@ -2850,6 +2914,8 @@ class LiveRun {
     if (this.timer)
       clearInterval(this.timer);
     this.active.clear();
+    if (!this.visible)
+      return () => {};
     this.call((ui) => ui.setWidget(this.key, undefined));
     this.call((ui) => ui.setStatus(this.key, `granny ${this.id}: ${outcome}`));
     let cleared = !this.ui;
@@ -2859,6 +2925,34 @@ class LiveRun {
       cleared = true;
       this.call((ui) => ui.setStatus(this.key, undefined));
     };
+  }
+}
+
+// src/adapters/omp/watch.ts
+import { appendFileSync as appendFileSync2, closeSync, existsSync as existsSync2, openSync, readSync, statSync } from "fs";
+var TAIL_BYTES = 256 * 1024;
+class EventLog {
+  path;
+  now;
+  onError;
+  failed = false;
+  constructor(path, now, onError) {
+    this.path = path;
+    this.now = now;
+    this.onError = onError;
+  }
+  write(entry) {
+    if (this.failed)
+      return;
+    try {
+      appendFileSync2(this.path, JSON.stringify({ t: new Date(this.now()).toISOString(), ...entry }) + `
+`);
+    } catch (e) {
+      this.failed = true;
+      try {
+        this.onError(e);
+      } catch {}
+    }
   }
 }
 
@@ -3072,7 +3166,7 @@ function turnError(turn) {
   return;
 }
 function readSubmission(path) {
-  if (!existsSync2(path))
+  if (!existsSync3(path))
     return;
   try {
     return JSON.parse(readFileSync2(path, "utf8"));
@@ -3140,10 +3234,11 @@ var createGrannyExtension = ({ delays = DEFAULT_DELAYS, sleep = pause, killGrace
     mkdirSync2(dir, { recursive: true });
     shared.clearStatus?.();
     shared.clearStatus = undefined;
-    const live = new LiveRun(id, ctx?.hasUI === true ? ctx.ui : undefined, { now, renderEveryMs });
-    const run = { id, dir, status: "running", cancelled: false, abort: new AbortController, children: new Set, agents: 0, waiters: new Set, live };
+    const { watch } = config;
+    const live = new LiveRun(id, watch !== "off" && ctx?.hasUI === true ? ctx.ui : undefined, { now, renderEveryMs }, !shared.hidden);
+    const run = { id, dir, status: "running", cancelled: false, abort: new AbortController, children: new Set, agents: 0, waiters: new Set, live, watch };
     runs.set(id, run);
-    const journal = (type, data) => appendFileSync2(join2(dir, "journal.jsonl"), JSON.stringify({ t: stamp(), type, ...data }) + `
+    const journal = (type, data) => appendFileSync3(join2(dir, "journal.jsonl"), JSON.stringify({ t: stamp(), type, ...data }) + `
 `);
     const writeStatus = (extra = {}) => writeFileSync(join2(dir, "status.json"), JSON.stringify({ id, status: run.status, repo: input.repo, branch: input.branch, ...extra }, null, 2));
     writeFileSync(join2(dir, "input.json"), JSON.stringify({ ...input, config: layers }, null, 2));
@@ -3196,6 +3291,7 @@ var createGrannyExtension = ({ delays = DEFAULT_DELAYS, sleep = pause, killGrace
         run.children.delete(proc);
         if (pending)
           scan(pending);
+        view.exit(code ?? 1);
         live.stop(view);
         resolve({ code: code ?? 1, assistant, stderr });
       });
@@ -3272,7 +3368,9 @@ When done, call the \`${tool}\` tool exactly once with your result. That call is
           ...req.effort ? ["--thinking", req.effort] : []
         ];
         journal("agent", { label: req.label, role: req.role, session, model: model ?? null, ...req.effort ? { effort: req.effort } : {} });
-        const view = live.role({ label: req.label, role: req.role, model, effort: req.effort });
+        const path = join2(session, "events.jsonl");
+        const log = watch === "full" ? new EventLog(path, now, (e) => journal("event-log-failed", { label: req.label, path, error: String(e?.message ?? e) })) : undefined;
+        const view = live.role({ label: req.label, role: req.role, model, effort: req.effort, ...log ? { log: path } : {} }, log && ((entry) => log.write(entry)));
         return converse(req, spec, args, session, view);
       },
       async run(command, cwd) {

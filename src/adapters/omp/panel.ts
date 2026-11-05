@@ -17,7 +17,21 @@ export interface RoleInfo {
   role: string
   model?: string
   effort?: string
+  /** The role's events.jsonl, when the run keeps one. */
+  log?: string
 }
+
+/** One condensed entry of a role's event log. */
+export type LogEntry =
+  | { type: 'state'; state: string }
+  | { type: 'heading'; text: string }
+  | { type: 'tool'; name: string; intent?: string; arg?: string }
+  | { type: 'tool-end'; name: string; error?: true }
+  | { type: 'text'; text: string }
+  | { type: 'subagents'; agents: string[] }
+  | { type: 'exit'; code: number }
+
+export type LogSink = (entry: LogEntry) => void
 
 /** Events the extension parses in full; every other line is classified from its text. */
 export const PARSED_EVENTS = new Set(['message_start', 'message_end', 'tool_execution_start', 'tool_execution_end', 'turn_start', 'turn_end'])
@@ -25,6 +39,8 @@ export const PARSED_EVENTS = new Set(['message_start', 'message_end', 'tool_exec
 const HEAD = 200
 const MAX_LINES = 8
 const THINKING_TAIL = 4000
+const LOG_ARG = 200
+const LOG_TEXT = 4000
 
 function stringAfter(text: string, marker: string): string | undefined {
   const i = text.indexOf(marker)
@@ -88,12 +104,32 @@ interface ToolCall {
   intent?: boolean
 }
 
+function argOf(args: any, max: number): string | undefined {
+  const key = ARG_KEYS.find(k => typeof args?.[k] === 'string' && args[k].trim())
+  return key ? oneLine(args[key], max) : undefined
+}
+
+function toolEntry(event: any): LogEntry {
+  const intent = typeof event?.intent === 'string' && event.intent.trim() ? oneLine(event.intent, LOG_ARG) : undefined
+  const arg = argOf(event?.args, LOG_ARG)
+  return { type: 'tool', name: String(event?.toolName ?? 'tool'), ...(intent ? { intent } : {}), ...(arg ? { arg } : {}) }
+}
+
+function finalText(message: any): string {
+  const parts = Array.isArray(message?.content) ? message.content : []
+  return parts
+    .filter((p: any) => p?.type === 'text' && typeof p.text === 'string')
+    .map((p: any) => p.text)
+    .join('\n')
+    .trim()
+    .slice(0, LOG_TEXT)
+}
+
 function describe(event: any): ToolCall {
   const name = String(event?.toolName ?? 'tool')
   if (typeof event?.intent === 'string' && event.intent.trim()) return { name, detail: oneLine(event.intent), intent: true }
   if (name === 'task') return { name, detail: oneLine(subagents(event?.args).join(', ')) }
-  const key = ARG_KEYS.find(k => typeof event?.args?.[k] === 'string' && event.args[k].trim())
-  return { name, detail: key ? oneLine(event.args[key]) : undefined }
+  return { name, detail: argOf(event?.args, 60) }
 }
 
 const HEADING = /(?:^|\n)[ \t]*\*\*([^*\n]+)\*\*/g
@@ -104,11 +140,14 @@ export class RoleActivity {
   heading?: string
   lastTool?: { text: string; at: number; error: boolean }
   task?: { id: string; agents: string[]; mark?: string }
+  startedAt?: number
+  endedAt?: number
+  active = false
   private thinking = ''
   private unscanned = false
   private running = new Map<string, ToolCall>()
 
-  constructor(readonly info: RoleInfo, now: number) {
+  constructor(readonly info: RoleInfo, now: number, private readonly log?: LogSink) {
     this.since = now
   }
 
@@ -116,11 +155,24 @@ export class RoleActivity {
     if (state === this.state) return
     this.state = state
     this.since = now
+    this.log?.({ type: 'state', state })
   }
 
   begin(now: number) {
     this.running.clear()
+    this.startedAt ??= now
+    this.active = true
     this.set('starting', now)
+  }
+
+  end(now: number) {
+    this.active = false
+    this.endedAt = now
+  }
+
+  /** The role process closed with this exit code. */
+  exit(code: number) {
+    this.log?.({ type: 'exit', code })
   }
 
   /** A `message_update` (or other unparsed) line. */
@@ -137,7 +189,7 @@ export class RoleActivity {
         const delta = deltaOf(line)
         this.thinking += delta
         if (delta.includes('*')) this.unscanned = true
-        if (this.thinking.length > 2 * THINKING_TAIL) this.flush()
+        if ((this.unscanned && this.log) || this.thinking.length > 2 * THINKING_TAIL) this.flush()
         this.set('thinking', now)
         break
       }
@@ -161,13 +213,21 @@ export class RoleActivity {
       case 'message_start':
         if (event.message?.role === 'assistant') this.set('waiting for model', now)
         return undefined
+      case 'message_end': {
+        if (event.message?.role !== 'assistant' || !this.log) return undefined
+        const text = finalText(event.message)
+        if (text) this.log({ type: 'text', text })
+        return undefined
+      }
       case 'tool_execution_start': {
         const call = describe(event)
         this.running.set(String(event.toolCallId), call)
         this.set(running(call), now)
+        this.log?.(toolEntry(event))
         if (call.name !== 'task') return undefined
         const agents = subagents(event.args)
         this.task = { id: String(event.toolCallId), agents }
+        this.log?.({ type: 'subagents', agents })
         return agents
       }
       case 'tool_execution_end': {
@@ -177,6 +237,7 @@ export class RoleActivity {
         const error = event.isError === true
         this.lastTool = { text: call.intent || !call.detail ? (call.detail ?? call.name) : `${call.name}: ${call.detail}`, at: now, error }
         if (this.task?.id === id) this.task.mark = error ? '✗' : '✓'
+        this.log?.({ type: 'tool-end', name: call.name, ...(error ? { error: true as const } : {}) })
         const other = [...this.running.values()].at(-1)
         this.set(other ? running(other) : 'waiting for model', now)
         return undefined
@@ -196,7 +257,11 @@ export class RoleActivity {
       this.unscanned = false
       let heading: string | undefined
       for (const m of this.thinking.matchAll(HEADING)) heading = m[1]
-      if (heading?.trim()) this.heading = oneLine(heading)
+      const text = heading?.trim() ? oneLine(heading) : undefined
+      if (text && text !== this.heading) {
+        this.heading = text
+        this.log?.({ type: 'heading', text })
+      }
     }
     if (this.thinking.length > THINKING_TAIL) this.thinking = this.thinking.slice(-THINKING_TAIL)
   }
@@ -216,12 +281,19 @@ const running = (call: ToolCall) => `running ${call.name}${call.detail ? `: ${ca
 export class LiveRun {
   phase = 'Starting'
   readonly startedAt: number
+  /** Every role process of the run, in start order. */
+  readonly roles: RoleActivity[] = []
   private readonly active = new Set<RoleActivity>()
   private lastDraw = Number.NEGATIVE_INFINITY
   private closed = false
   private timer?: ReturnType<typeof setInterval>
 
-  constructor(readonly id: string, private readonly ui: PanelUi | undefined, private readonly options: LiveOptions) {
+  constructor(
+    readonly id: string,
+    private readonly ui: PanelUi | undefined,
+    private readonly options: LiveOptions,
+    private visible = true,
+  ) {
     this.startedAt = options.now()
   }
 
@@ -229,8 +301,14 @@ export class LiveRun {
     return `granny-${this.id}`
   }
 
-  role(info: RoleInfo): RoleActivity {
-    return new RoleActivity(info, this.options.now())
+  now(): number {
+    return this.options.now()
+  }
+
+  role(info: RoleInfo, log?: LogSink): RoleActivity {
+    const role = new RoleActivity(info, this.options.now(), log)
+    this.roles.push(role)
+    return role
   }
 
   start(role: RoleActivity) {
@@ -240,8 +318,21 @@ export class LiveRun {
   }
 
   stop(role: RoleActivity) {
+    role.end(this.options.now())
     this.active.delete(role)
     this.touch()
+  }
+
+  /** Shows or hides the widget and status line for the rest of the run. */
+  setVisible(visible: boolean) {
+    if (visible === this.visible || this.closed) return
+    this.visible = visible
+    if (visible) {
+      this.lastDraw = Number.NEGATIVE_INFINITY
+      return this.touch()
+    }
+    this.call(ui => ui.setWidget(this.key, undefined))
+    this.call(ui => ui.setStatus(this.key, undefined))
   }
 
   setPhase(title: string) {
@@ -283,7 +374,7 @@ export class LiveRun {
 
   /** Redraws the widget, at most once per `renderEveryMs`. */
   touch() {
-    if (!this.ui || this.closed) return
+    if (!this.ui || this.closed || !this.visible) return
     if (!this.timer) {
       this.timer = setInterval(() => this.touch(), Math.max(10, Math.min(250, this.options.renderEveryMs)))
       this.timer.unref?.()
@@ -302,6 +393,7 @@ export class LiveRun {
     this.closed = true
     if (this.timer) clearInterval(this.timer)
     this.active.clear()
+    if (!this.visible) return () => {}
     this.call(ui => ui.setWidget(this.key, undefined))
     this.call(ui => ui.setStatus(this.key, `granny ${this.id}: ${outcome}`))
     let cleared = !this.ui
