@@ -301,6 +301,51 @@ describe('opencode TUI plugin: sidebar, chip and toasts', () => {
     expect(m.fc.listCalls.length).toBe(1)
   })
 
+  const RUN2 = '20261105-185500-77xq'
+  function secondRun(startMs: number) {
+    const dir2 = join(tmp, RUN2)
+    mkdirSync(dir2)
+    writeFileSync(
+      join(dir2, 'status.json'),
+      JSON.stringify({ id: RUN2, status: 'running', repo: '/repo', branch: 'feat/y', parent: 'parent', watch: 'full', startedAt: new Date(BASE + startMs).toISOString() }),
+    )
+    appendFileSync(
+      join(dir2, 'journal.jsonl'),
+      line(startMs, 'phase', { title: 'Implement' }) + line(startMs + S, 'agent', { label: 'implement', role: 'implementer', session: 'ses_u', model: kimi, phase: 'Implement', linked: false }),
+    )
+    return role('ses_u', { run: RUN2, dir: dir2, label: 'implement', role: 'implementer', phase: 'Implement' }, undefined)
+  }
+
+  it('finds an unlinked run created next to a running linked run of the same session', async () => {
+    planRun()
+    const unlinked = secondRun(32 * M)
+    const m = mount({ listed: [unlinked] })
+    m.timers.tick()
+    expect(texts(m.sidebar())[0]).toBe('granny 523r · running')
+    expect(m.fc.listCalls).toEqual([])
+    m.fc.emit('session.created', { sessionID: 'ses_u' })
+    m.timers.tick()
+    expect(m.fc.listCalls).toEqual([{ parentID: null, order: 'desc', limit: 50 }])
+    await Bun.sleep(0)
+    m.timers.tick()
+    expect(texts(m.sidebar())[0]).toBe('granny 77xq · running')
+    m.timers.tick()
+    expect(m.fc.listCalls.length).toBe(1)
+  })
+
+  it('looks for unlinked runs once every linked run of the session has ended', async () => {
+    planRun({ status: 'done', finishedAt: new Date(BASE + 32 * M).toISOString() })
+    const unlinked = secondRun(32 * M + 30 * S)
+    const m = mount({ listed: [unlinked], running: [] })
+    m.timers.tick()
+    m.now += 10 * S
+    m.timers.tick()
+    expect(m.fc.listCalls.length).toBe(1)
+    await Bun.sleep(0)
+    m.timers.tick()
+    expect(texts(m.sidebar())[0]).toBe('granny 77xq · running')
+  })
+
   it('wakes its timer when a session is created', () => {
     const m = mount({ sessions: [{ id: 'parent' }], running: [] })
     m.timers.tick()

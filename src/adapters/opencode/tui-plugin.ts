@@ -103,6 +103,7 @@ export class Hub {
   private mounted = 0
   private lastList = Number.NEGATIVE_INFINITY
   private lastRoot?: string
+  private listDue = false
   private hidden: { get(): boolean; set(off: boolean): void }
   private readonly unsubscribe: Array<() => void> = []
   private disposed = false
@@ -177,7 +178,12 @@ export class Hub {
       }),
     )
     for (const type of WAKE_EVENTS) {
-      const off = attempt(() => this.ctx.data.on(type, () => this.wake()))
+      const off = attempt(() =>
+        this.ctx.data.on(type, () => {
+          if (type === 'session.created') this.listDue = true
+          this.wake()
+        }),
+      )
       if (typeof off === 'function') this.unsubscribe.push(off)
     }
     this.wake()
@@ -324,7 +330,8 @@ export class Hub {
       }
       const found = discoverRuns(sessions)
       if (this.merge(found)) changed = true
-      if (!found.size) this.listUnlinked(root)
+      const running = [...found.keys()].some(id => this.runs.get(id)?.ended === false)
+      if (!running || this.listDue) this.listUnlinked(root)
     }
     return changed
   }
@@ -334,6 +341,7 @@ export class Hub {
     const now = this.now()
     if (now - this.lastList < LIST_EVERY_MS) return
     this.lastList = now
+    this.listDue = false
     const pending = attempt(() => this.ctx.client.session.list({ parentID: null, order: 'desc', limit: LIST_LIMIT }))
     if (!pending || typeof pending.then !== 'function') return
     pending.then(
