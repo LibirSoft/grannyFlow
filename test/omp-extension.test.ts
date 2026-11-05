@@ -1569,7 +1569,7 @@ describe('omp extension in the user session (parent mode)', () => {
     for (const key of keys) view.handleInput(key)
   }
 
-  it('/granny opens the run navigator full-screen: the run\'s phases and agents, a running agent\'s live events, then transcripts once it ended, until Esc', async () => {
+  it('/granny opens the run navigator full-screen: the stage and its agents, a running agent\'s summary, then its outcome and transcript once it ended, until Esc', async () => {
     behave({
       events: { 'implement-one': STREAM },
       hold: ['implement-one'],
@@ -1587,47 +1587,47 @@ describe('omp extension in the user session (parent mode)', () => {
     expect(c.views[0]!.options).toEqual(OVERLAY)
     expect(c.selects).toEqual([])
     const view = c.views[0]!.view
-    await waitFor(() => screen(view).includes('└ task: BaselineGates'), 3000)
+    await waitFor(() => screen(view).includes('task   BaselineGates ✓'), 3000)
     const live = screen(view).split('\n')
-    expect(live[0]).toMatch(new RegExp(`^granny ${id} · Implement · running · \\d+s +\\[tree\\]$`))
-    expect(live.some(l => l.startsWith(`  ▾ run ${id} · running · `))).toBe(true)
-    expect(live.some(l => /^ {4}● Implement · \d+s/.test(l))).toBe(true)
-    expect(live.some(l => /^› {7}● implement one · \d+s · waiting for model \d+s +│/.test(l))).toBe(true)
-    expect(live.some(l => l.startsWith('          └ BaselineGates '))).toBe(true)
-    expect(live.some(l => l.includes('│ implement one (implementer) · omp-test/parent-model · waiting for model ') && l.includes(' · events · follow on'))).toBe(true)
-    for (const text of ['  » Reading the plan', '  ▸ read: Reading the plan (plan.md)', '  ✎ answer:', '  └ task: BaselineGates']) {
-      expect(live.some(l => l.includes(`│ `) && l.includes(text))).toBe(true)
-    }
-    expect(live.at(-1)).toBe('↑↓ move · Enter/→ open · Space fold · Tab/] next agent · [ prev · Esc close')
+    const tree = (lines: string[]) => lines.map(l => l.split(' │ ')[0]!.trimEnd())
+    const detail = (lines: string[]) => lines.map(l => (l.includes(' │ ') ? l.slice(l.indexOf(' │ ') + 3).trimEnd() : ''))
+    expect(live[0]).toMatch(/^granny · feat\/x · stage 1\/1 · Implement · \d+s +$/)
+    expect(live[1]).toStartWith('Worktree ✓ › Implement ● › Review › PR ready')
+    expect(tree(live)).toContainEqual(expect.stringMatching(/^ {2}▾ ● 1 one +\d+s$/))
+    expect(tree(live)).toContainEqual(expect.stringMatching(/^› {3}● implement +\d+s$/))
+    expect(tree(live)).toContain('      └ ● BaselineGates')
+    expect(detail(live)).toContainEqual(expect.stringMatching(/^implementer · parent-model · \d+s$/))
+    expect(detail(live)).toContainEqual(expect.stringMatching(/^NOW {3}… waiting for model \d+s$/))
+    expect(detail(live)).toContainEqual(expect.stringMatching(/^ \d\d:\d\d:\d\d {2}task {3}BaselineGates ✓$/))
+    expect(detail(live)).toContainEqual(expect.stringMatching(/^ \d\d:\d\d:\d\d {2}read {3}Reading the plan$/))
+    expect(detail(live)).toContain('LAST SAID  "Spawning helpers."')
+    expect(live.filter(l => l.includes(id))).toEqual([])
+    expect(live.at(-1)!.trimEnd()).toBe('↑↓ move · Enter/→ open · Tab/] next agent · [ prev · Space fold · Esc close')
     expect(live).toHaveLength(40)
 
     writeFileSync(join(fake, 'release-implement-one'), '')
     expect((await finished(dir)).stages[0].outcome).toBe('clean')
-    await waitFor(() => screen(view).includes(`▾ run ${id} · done · `), 3000)
+    await waitFor(() => /^granny · feat\/x · done · /.test(screen(view)), 3000)
     const ended = screen(view).split('\n')
-    const tree = ended.map(l => l.split(' │ ')[0]!.trimEnd())
-    expect(tree.some(l => /^ {4}✓ Review · \d+s$/.test(l))).toBe(true)
-    expect(tree.filter(l => l === '      one · round 1')).toHaveLength(2)
-    expect(tree).toContain('      one · round 2')
-    for (const label of ['review one r1 reviewer', 'judge one r1', 'fix one r1', 'review one r2 reviewer']) {
-      expect(tree.some(l => new RegExp(`^ {8}✓ ${label}( · | {2})`).test(l))).toBe(true)
-    }
-    expect(tree.some(l => /^ {4}✓ PR ready · \d+s$/.test(l))).toBe(true)
-    expect(tree.some(l => /^› {7}✓ implement one( · | {2})/.test(l))).toBe(true)
-    expect(tree).toContain('          └ BaselineGates')
+    expect(tree(ended)).toContainEqual(expect.stringMatching(/^ {2}▾ ✓ 1 one +\d+s$/))
+    expect(tree(ended)).toContainEqual(expect.stringMatching(/^› {3}✓ implement +\d+s$/))
+    for (const action of ['review r1', 'judge r1', 'fix r1', 'review r2']) expect(tree(ended)).toContainEqual(expect.stringMatching(new RegExp(`^ {4}✓ ${action} +\\d+s$`)))
+    expect(tree(ended)).toContainEqual(expect.stringMatching(/^ {2}▸ ✓ PR ready +\d+s$/))
+    expect(tree(ended)).toContain('      └ ✓ BaselineGates')
+    expect(ended[1]).toStartWith('Worktree ✓ › Implement ✓ › Review ✓ › PR ready ✓')
+    expect(detail(ended)).toContainEqual(expect.stringMatching(/^implementer · parent-model · ✓ \d+s$/))
+    expect(detail(ended)).toContainEqual(expect.stringMatching(/^NOW {3}✓ done in \d+s$/))
 
-    press(view, '\r')
+    press(view, '\r', 't')
     await waitFor(() => screen(view).includes('✎ Stage one is implemented.'), 3000)
     const transcript = screen(view)
-    expect(transcript.split('\n')[0]).toEndWith('[detail]')
-    expect(transcript).toContain('│ implement one (implementer) · omp-test/parent-model · done ')
     expect(transcript).toContain('── session fake-session · /work')
     expect(transcript).toMatch(/\d\d:\d\d:\d\d {2}▸ read: Reading the plan/)
-    expect(transcript.split('\n').at(-1)).toStartWith('↑↓ PgUp/PgDn Home/End scroll · f follow (off) · t events')
+    expect(transcript.split('\n').at(-1)).toStartWith('↑↓ PgUp/PgDn Home/End scroll · f follow (off) · v details · t summary')
 
     press(view, '\x1b', '\x1b[B')
     await waitFor(() => screen(view).includes('✎ Baseline gates are green.'), 3000)
-    expect(screen(view)).toContain('│ BaselineGates · subagent of implement one · transcript')
+    expect(screen(view)).toContain('│ BaselineGates · subagent of implement')
     expect(screen(view)).not.toContain('Stage one is implemented.')
 
     press(view, '\r', '\x1b', '\x1b')
@@ -1650,14 +1650,15 @@ describe('omp extension in the user session (parent mode)', () => {
     const third = await start(f, { maxRounds: 3 }, c.ctx)
     await waitFor(() => existsSync(join(third.dir, 'sessions')))
     const granny = f.commands.get('granny')
+    const runRow = (shown: string, run: string, status: string) => new RegExp(`^${shown} [✓●] ${run.slice(-4)} · ${status}`)
 
     const opened = granny.handler(first.id, c.ctx)
     await waitFor(() => c.views.length === 1)
-    const shown = screen(c.views[0]!.view)
-    expect(shown.split('\n')[0]).toStartWith(`granny ${first.id} · `)
-    expect(shown).toContain(`▾ run ${first.id} · done`)
-    expect(shown).toContain(`▸ run ${third.id} · running`)
-    expect(shown).not.toContain(second.id)
+    const shown = screen(c.views[0]!.view).split('\n')
+    expect(shown[0]).toStartWith('granny · feat/x · done · ')
+    expect(shown).toContainEqual(expect.stringMatching(runRow(' ', first.id, 'done \\(shown\\)')))
+    expect(shown).toContainEqual(expect.stringMatching(runRow(' ', third.id, 'running')))
+    expect(shown.filter(l => l.includes(` ${second.id.slice(-4)} · `))).toEqual([])
 
     await granny.handler('', c.ctx)
     await granny.handler(third.id, c.ctx)
@@ -1668,7 +1669,9 @@ describe('omp extension in the user session (parent mode)', () => {
     await opened
     const reopened = granny.handler('', c.ctx)
     await waitFor(() => c.views.length === 2)
-    expect(screen(c.views[1]!.view).split('\n')[0]).toStartWith(`granny ${third.id} · `)
+    const again = screen(c.views[1]!.view).split('\n')
+    expect(again[0]).toStartWith('granny · feat/x · stage 1/1 · ')
+    expect(again).toContainEqual(expect.stringMatching(runRow(' ', third.id, 'running \\(shown\\)')))
     press(c.views[1]!.view, 'q')
     await reopened
     writeFileSync(join(fake, 'release-implement-one'), '')
@@ -1755,7 +1758,9 @@ describe('omp extension in the user session (parent mode)', () => {
     expect(handler(c.ctx)).toBeUndefined()
     await waitFor(() => c.views.length === 1)
     expect(c.views[0]!.options).toEqual(OVERLAY)
-    expect(screen(c.views[0]!.view).split('\n')[0]).toStartWith(`granny ${id} · `)
+    expect(screen(c.views[0]!.view).split('\n')[0]).toStartWith('granny · feat/x · ')
+    press(c.views[0]!.view, '\x1b[F')
+    expect(screen(c.views[0]!.view)).toContain(`│ run ${id}`)
     handler(c.ctx)
     await Bun.sleep(50)
     expect(c.views).toHaveLength(1)

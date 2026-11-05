@@ -1,15 +1,19 @@
-// The run navigator: a full-screen overlay with the runs of this omp process as a tree (phases,
-// round/stage groups, agents, subagents) and a detail pane for the selected node. Files are read
-// only in the tick; render() lays out cached lines.
+// The run navigator: a full-screen overlay with the shared run page - header, stepper, the run's stage
+// groups with their agents beside a detail pane, key help - for the runs of this omp process. Files are
+// read only in the tick; render() lays out what the tick read.
 import { readdirSync, readFileSync } from 'node:fs'
+import { homedir } from 'node:os'
 import { join } from 'node:path'
-import { clean, stamp } from './format'
-import { duration, type LiveRun, type RoleActivity } from './panel'
+import { type ActivityItem, activityLines, summarise } from '../runview/activity'
+import { clean, fit } from '../runview/format'
+import { agentEnd, agentHead, type Cell, checksDetail, frame, groupDetail, headerText, paneSizes, runDetail, type RunFacts, stepperCells, summaryCells, type Tone, treeCells } from '../runview/layout'
+import type { RunOutline } from '../runview/outline'
 import { TailReader } from '../runview/tail'
+import { agentKey, buildRunTree, focusStage, groupKey, type JournalEntry, nextAgent, type Row, runKey, type RunTree, stepsFor, visibleRows } from '../runview/tree'
+import { eventLine } from './activity'
+import type { LiveRun, RoleActivity } from './panel'
 import { subagentFiles } from './subagents'
 import { LineBuffer, sessionEntryLines } from './transcript'
-import { AGENT_MARKERS, buildRunTree, type JournalEntry, nextAgent, type PhaseRow as Row, phaseRowText as rowText, runKey, type RunTree, phaseRows as visibleRows } from '../runview/tree'
-import { entryLines, fit, type Logged } from './watch'
 
 export interface NavRun {
   id: string
@@ -17,6 +21,8 @@ export interface NavRun {
   status: string
   reply?: string
   live: LiveRun
+  branch?: string
+  outline?: RunOutline
 }
 
 export interface NavigatorDeps {
@@ -32,7 +38,7 @@ export interface NavigatorDeps {
 
 type Key =
   | 'up' | 'down' | 'pageUp' | 'pageDown' | 'home' | 'end' | 'enter' | 'right' | 'left' | 'escape'
-  | 'tab' | 'backtab' | 'space' | 'next' | 'prev' | 'follow' | 'toggle' | 'quit'
+  | 'tab' | 'backtab' | 'space' | 'next' | 'prev' | 'follow' | 'toggle' | 'verbose' | 'quit'
 
 const NAMED: Array<[string, Key]> = [
   ['tui.select.up', 'up'],
@@ -59,28 +65,30 @@ const RAW: Record<string, Key> = {
   '\r': 'enter', '\n': 'enter',
   '\x1b': 'escape',
   '\t': 'tab', '\x1b[Z': 'backtab',
-  ' ': 'space', ']': 'next', '[': 'prev', f: 'follow', t: 'toggle', q: 'quit',
+  ' ': 'space', ']': 'next', '[': 'prev', f: 'follow', t: 'toggle', v: 'verbose', q: 'quit',
 }
 
-const TREE_HELP = '↑↓ move · Enter/→ open · Space fold · Tab/] next agent · [ prev · Esc close'
+const TREE_HELP = '↑↓ move · Enter/→ open · Tab/] next agent · [ prev · Space fold · Esc close'
 const SOURCES = 8
+const MAX_ITEMS = 5000
 const MB = 1024 * 1024
-const SEPARATOR = ' │ '
+const TONE_STYLES: Record<Tone, string> = { base: 'text', muted: 'muted', success: 'success', error: 'error', warning: 'warning', info: 'accent' }
 
-type SourceKind = 'events' | 'transcript' | 'phase' | 'run'
+/** What an agent's detail shows: the summary, every event (`v`), or its session transcript (`t`). */
+type Mode = 'summary' | 'verbose' | 'transcript'
 
 interface Source {
   key: string
-  kind: SourceKind
-  /** A file source's directory to list (an agent's transcript) or its one file. */
+  kind: 'events' | 'transcript' | 'static'
+  /** A transcript's directory to list (an agent's session) or the one file it reads. */
   dir?: string
   file?: string
   relist: boolean
   readers: Map<string, TailReader>
   buffer: LineBuffer
-  /** The body of a phase or run detail, rebuilt from the tree. */
-  lines?: string[]
-  linesVersion: number
+  items: ActivityItem[]
+  itemsVersion: number
+  skippedMb: number
   follow: boolean
   top?: number
   read: number
@@ -95,7 +103,13 @@ interface RunCache {
   read: boolean
 }
 
+interface Body {
+  key: string
+  lines: string[]
+}
+
 const clamp = (n: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, n))
+const isLive = (row: Row) => row.agent?.state === 'running' || row.agent?.state === 'waiting'
 
 function wrap(lines: readonly string[], width: number): string[] {
   const out: string[] = []
@@ -108,22 +122,34 @@ function wrap(lines: readonly string[], width: number): string[] {
   return out
 }
 
+function home(): string | undefined {
+  try {
+    return homedir()
+  } catch {
+    return undefined
+  }
+}
+
 export class Navigator {
   private focus: 'tree' | 'detail' = 'tree'
-  private expanded: string
+  private shown: string
   private readonly folded = new Set<string>()
+  private readonly opened = new Set<string>()
   private selected = ''
   private trees: RunTree[] = []
   private rows: Row[] = []
   private readonly parents = new Map<string, string>()
   private readonly caches = new Map<string, RunCache>()
   private readonly sources = new Map<string, Source>()
-  private readonly overrides = new Map<string, 'events' | 'transcript'>()
+  private readonly modes = new Map<string, Mode>()
+  private readonly home = home()
   private source?: Source
   private version = 0
   private memo?: { key: string; lines: string[] }
   private wrapped?: { key: string; lines: string[] }
+  private verbose?: { key: string; lines: string[] }
   private bodyHeight = 10
+  private bodyLength = 0
   private treeTop = 0
   private closed = false
   private finished = false
@@ -131,12 +157,10 @@ export class Navigator {
   private soon?: ReturnType<typeof setTimeout>
 
   constructor(private readonly deps: NavigatorDeps) {
-    this.expanded = deps.runId
+    this.shown = deps.runId
     try {
       this.refresh()
-      const tree = this.trees.find(t => t.id === this.expanded)
-      const agent = tree && ([...tree.agents].reverse().find(a => a.state === 'running') ?? tree.agents.at(-1))
-      this.selected = agent ? `agent:${agent.session}` : runKey(this.expanded)
+      this.selected = this.firstSelection()
       this.relayout()
       this.pollSource()
     } catch {}
@@ -278,23 +302,30 @@ export class Navigator {
     }
   }
 
+  private liveRole(runId: string, session: string): RoleActivity | undefined {
+    return this.runList()
+      .find(r => r.id === runId)
+      ?.live.roles.find(r => r.info.session === session)
+  }
+
   private refresh() {
     const now = this.deps.now()
     const runs = this.runList()
     this.trees = runs.map(run => {
       const cache = this.cacheOf(run)
-      const open = run.id === this.expanded
-      if (open || (!cache.read && run.status !== 'running')) this.pollJournal(cache)
+      const shown = run.id === this.shown
+      if (shown || (!cache.read && run.status !== 'running')) this.pollJournal(cache)
       const live = new Map<string, RoleActivity>()
       for (const role of run.live.roles) live.set(role.info.session, role)
-      const info = { id: run.id, status: run.status, startedAt: run.live.startedAt, ...(run.reply !== undefined ? { reply: run.reply } : {}) }
-      const tree = buildRunTree(info, cache.entries, live, now, cache.files)
-      if (!open) return tree
+      const info = { id: run.id, status: run.status, startedAt: run.live.startedAt, ...(run.reply !== undefined ? { reply: run.reply } : {}), ...(run.branch ? { branch: run.branch } : {}) }
+      const build = () => buildRunTree(info, cache.entries, live, now, cache.files, run.outline)
       if (this.selected === runKey(run.id) && cache.status?.for !== run.status) {
         try {
           cache.status = { for: run.status, data: JSON.parse(readFileSync(join(run.dir, 'status.json'), 'utf8')) }
         } catch {}
       }
+      const tree = build()
+      if (!shown) return tree
       let found = false
       for (const agent of tree.agents) {
         if (!agent.subagents.length) continue
@@ -302,13 +333,36 @@ export class Navigator {
         if ([...files.values()].join('\n') !== [...(cache.files.get(agent.session)?.values() ?? [])].join('\n')) found = true
         cache.files.set(agent.session, files)
       }
-      return found ? buildRunTree(info, cache.entries, live, now, cache.files) : tree
+      return found ? build() : tree
     })
     this.relayout()
   }
 
+  private shownTree(): RunTree | undefined {
+    return this.trees.find(t => t.id === this.shown)
+  }
+
+  /** The newest running agent of the shown run, else its last one, else its first row. */
+  private firstSelection(): string {
+    const tree = this.shownTree()
+    const agent = tree && ([...tree.agents].reverse().find(a => a.state === 'running') ?? tree.agents.at(-1))
+    if (agent && tree) {
+      this.relayout()
+      for (const key of [agentKey(agent.session), groupKey(tree.id, agent.group)]) if (this.rows.some(r => r.key === key)) return key
+    }
+    return runKey(this.shown)
+  }
+
   private relayout() {
-    this.rows = visibleRows(this.trees, this.folded, this.expanded)
+    const tree = this.shownTree()
+    const focus = tree && focusStage(tree)
+    const layout = () => visibleRows(this.trees, { run: this.shown, folded: this.folded, opened: this.opened, ...(focus !== undefined ? { focus } : {}), runs: this.trees.length > 1 ? 'list' : 'one' })
+    this.rows = layout()
+    const hidden = this.hiddenGroup()
+    if (hidden) {
+      this.opened.add(hidden)
+      this.rows = layout()
+    }
     for (const row of this.rows) if (row.parent) this.parents.set(row.key, row.parent)
     let key: string | undefined = this.selected
     while (key && !this.rows.some(r => r.key === key && r.selectable)) key = this.parents.get(key)
@@ -316,35 +370,47 @@ export class Navigator {
     this.choose()
   }
 
+  /** A group that just folded by itself (its stage ended) over the selected row; the user did not fold it. */
+  private hiddenGroup(): string | undefined {
+    if (!this.selected || this.rows.some(r => r.key === this.selected)) return undefined
+    for (let key = this.parents.get(this.selected); key; key = this.parents.get(key)) {
+      const row = this.rows.find(r => r.key === key)
+      if (row) return row.kind === 'group' && row.folded && !this.folded.has(key) ? key : undefined
+    }
+    return undefined
+  }
+
   private selectedRow(): Row | undefined {
     return this.rows.find(r => r.key === this.selected)
+  }
+
+  private modeOf(row: Row): Mode {
+    return this.modes.get(row.key) ?? 'summary'
   }
 
   private choose() {
     const row = this.selectedRow()
     if (!row) return void (this.source = undefined)
-    let kind: SourceKind
-    let spec: Partial<Source> = {}
+    let spec: Pick<Source, 'kind' | 'relist' | 'follow'> & Partial<Pick<Source, 'dir' | 'file'>>
     if (row.kind === 'agent') {
       const agent = row.agent!
-      const live = agent.state === 'running' || agent.state === 'waiting'
-      kind = this.overrides.get(row.key) ?? (live ? 'events' : 'transcript')
-      spec = kind === 'events' ? { file: join(agent.session, 'events.jsonl'), relist: false } : { dir: agent.session, relist: live }
-      spec.follow = live
-    } else if (row.kind === 'sub') {
-      kind = 'transcript'
-      spec = { ...(row.sub!.path ? { file: row.sub!.path } : {}), relist: false, follow: false }
-    } else kind = row.kind === 'run' ? 'run' : 'phase'
-    const key = `${row.key}|${kind}|${spec.file ?? spec.dir ?? ''}`
+      const live = isLive(row)
+      spec =
+        this.modeOf(row) === 'transcript'
+          ? { kind: 'transcript', dir: agent.session, relist: live, follow: live }
+          : { kind: 'events', file: join(agent.session, 'events.jsonl'), relist: false, follow: live }
+    } else if (row.kind === 'sub') spec = { kind: 'transcript', ...(row.sub!.path ? { file: row.sub!.path } : {}), relist: false, follow: false }
+    else spec = { kind: 'static', relist: false, follow: false }
+    const key = `${row.key}|${spec.kind}|${spec.file ?? spec.dir ?? ''}`
     let source = this.sources.get(key)
     if (!source) {
-      source = { key, kind, relist: false, readers: new Map(), buffer: new LineBuffer(), linesVersion: 0, follow: false, read: 0, polled: false, ...spec }
+      source = { key, readers: new Map(), buffer: new LineBuffer(), items: [], itemsVersion: 0, skippedMb: 0, read: 0, polled: false, ...spec }
       this.sources.set(key, source)
       if (this.sources.size > SOURCES) this.sources.delete(this.sources.keys().next().value!)
       if (source.file || source.dir) this.later()
-    } else if (source.dir) source.relist = spec.relist ?? false
+    } else if (source.dir) source.relist = spec.relist
+    if (row.kind === 'run') this.later()
     this.source = source
-    if (kind === 'phase' || kind === 'run') this.staticBody(source, row)
   }
 
   /** Reads the newly selected source on the next turn of the event loop, not inside the key handler. */
@@ -355,27 +421,6 @@ export class Navigator {
       this.tick()
     }, 0)
     this.soon.unref?.()
-  }
-
-  private staticBody(source: Source, row: Row) {
-    const lines = row.kind === 'run' ? this.runBody(row.run) : row.phase!.lines
-    if (source.lines && source.lines.length === lines.length && source.lines.every((l, i) => l === lines[i])) return
-    source.lines = lines
-    source.linesVersion++
-  }
-
-  private runBody(tree: RunTree): string[] {
-    const run = this.runList().find(r => r.id === tree.id)
-    const status = this.caches.get(tree.id)?.status?.data ?? {}
-    const out = [`status   ${tree.status}`]
-    if (typeof status.repo === 'string') out.push(`repo     ${clean(status.repo)}`)
-    if (typeof status.branch === 'string') out.push(`branch   ${clean(status.branch)}`)
-    out.push(`started  ${stamp(status.startedAt) ?? stamp(tree.start) ?? '?'}`)
-    if (tree.status !== 'running') out.push(`ended    ${stamp(status.finishedAt) ?? stamp(tree.end) ?? '?'}`)
-    else out.push(`phase    ${tree.phase ?? '?'}`)
-    if (run) out.push(`result   ${join(run.dir, 'result.json')}`)
-    if (run?.reply !== undefined) out.push('', ...clean(run.reply).split('\n'))
-    return out
   }
 
   private pollSource(): void {
@@ -391,7 +436,6 @@ export class Navigator {
         if (!source.readers.has(path)) source.readers.set(path, new TailReader(path))
       }
     } else if (source.file && !source.readers.size) source.readers.set(source.file, new TailReader(source.file))
-    const render = source.kind === 'events' ? eventLines : sessionEntryLines
     source.polled = true
     for (const reader of source.readers.values()) {
       const before = reader.bytesRead
@@ -400,11 +444,25 @@ export class Navigator {
       if (reset) {
         source.readers.clear()
         source.buffer = new LineBuffer()
+        source.items = []
+        source.itemsVersion++
+        source.skippedMb = 0
         source.top = undefined
         return this.pollSource()
       }
-      if (skippedBytes) source.buffer.push([`… first ${Math.max(1, Math.round(skippedBytes / MB))} MB skipped`])
-      if (lines.length) source.buffer.push(lines.flatMap(render))
+      const skipped = skippedBytes ? Math.max(1, Math.round(skippedBytes / MB)) : 0
+      if (source.kind === 'events') {
+        source.skippedMb += skipped
+        const items = lines.map(eventLine).filter((i): i is ActivityItem => i !== undefined)
+        if (items.length) {
+          source.items.push(...items)
+          if (source.items.length > MAX_ITEMS) source.items.splice(0, source.items.length - MAX_ITEMS)
+          source.itemsVersion++
+        }
+      } else {
+        if (skipped) source.buffer.push([`… first ${skipped} MB skipped`])
+        if (lines.length) source.buffer.push(lines.flatMap(sessionEntryLines))
+      }
     }
   }
 
@@ -448,12 +506,15 @@ export class Navigator {
       case 'enter':
       case 'right': {
         const row = this.selectedRow()
-        if (row?.kind === 'run' && row.folded && key === 'enter') return this.fold()
+        if (row?.kind === 'run' && !row.shown && key === 'enter') return this.switchRun(row.run.id)
         this.focus = 'detail'
         return
       }
-      case 'space':
+      case 'space': {
+        const row = this.selectedRow()
+        if (row?.kind === 'run' && !row.shown) return this.switchRun(row.run.id)
         return this.fold()
+      }
       case 'tab':
       case 'next':
         return this.agentStep(1)
@@ -468,20 +529,22 @@ export class Navigator {
     }
   }
 
+  private switchRun(id: string) {
+    this.shown = id
+    this.later()
+    this.relayout()
+  }
+
   private fold() {
     const row = this.selectedRow()
-    if (!row) return
-    if (row.kind === 'run') {
-      if (row.run.id !== this.expanded) {
-        this.expanded = row.run.id
-        this.folded.delete(row.key)
-        this.later()
-      } else if (this.folded.has(row.key)) this.folded.delete(row.key)
-      else this.folded.add(row.key)
-    } else if (row.kind === 'phase') {
-      if (this.folded.has(row.key)) this.folded.delete(row.key)
-      else this.folded.add(row.key)
-    } else return
+    if (row?.kind !== 'group' || row.folded === undefined) return
+    if (row.folded) {
+      this.folded.delete(row.key)
+      this.opened.add(row.key)
+    } else {
+      this.opened.delete(row.key)
+      this.folded.add(row.key)
+    }
     this.relayout()
   }
 
@@ -497,30 +560,28 @@ export class Navigator {
       case 'pageDown':
         return this.scroll(Math.max(1, this.bodyHeight - 1))
       case 'home':
-        if (source) {
+        if (source && this.scrolls()) {
           source.follow = false
           source.top = 0
         }
         return
       case 'end':
-        if (source) {
+        if (source && this.scrolls()) {
           source.follow = true
           source.top = undefined
         }
         return
       case 'follow':
-        if (source) {
+        if (source && this.scrolls()) {
           source.follow = !source.follow
           if (source.follow) source.top = undefined
           else this.scroll(0)
         }
         return
-      case 'toggle': {
-        const row = this.selectedRow()
-        if (row?.kind !== 'agent' || !source) return
-        this.overrides.set(row.key, source.kind === 'events' ? 'transcript' : 'events')
-        return this.choose()
-      }
+      case 'toggle':
+        return this.switchMode('transcript')
+      case 'verbose':
+        return this.switchMode('verbose')
       case 'tab':
       case 'next':
         return this.agentStep(1)
@@ -536,11 +597,24 @@ export class Navigator {
     }
   }
 
+  /** `t` and `v` turn their view on, or back to the summary when it is on. */
+  private switchMode(mode: Mode) {
+    const row = this.selectedRow()
+    if (row?.kind !== 'agent') return
+    this.modes.set(row.key, this.modeOf(row) === mode ? 'summary' : mode)
+    this.choose()
+  }
+
+  /** Whether the detail shows a scrollable list (not an agent's summary). */
+  private scrolls(): boolean {
+    const row = this.selectedRow()
+    return row?.kind !== 'agent' || this.modeOf(row) !== 'summary'
+  }
+
   private scroll(delta: number) {
     const source = this.source
-    if (!source) return
-    const length = this.wrapped?.lines.length ?? 0
-    const max = Math.max(0, length - this.bodyHeight)
+    if (!source || !this.scrolls()) return
+    const max = Math.max(0, this.bodyLength - this.bodyHeight)
     const current = source.follow || source.top === undefined ? max : source.top
     source.top = clamp(current + delta, 0, max)
     if (delta < 0) source.follow = false
@@ -577,97 +651,166 @@ export class Navigator {
   }
 
   private draw(width: number, height: number): string[] {
-    const tree = this.trees.find(t => t.id === this.expanded) ?? this.trees[0]
+    const tree = this.shownTree() ?? this.trees[0]
     const now = this.deps.now()
-    const tag = this.focus === 'tree' ? '[tree]' : '[detail]'
-    const title = tree ? `granny ${tree.id} · ${tree.phase ?? 'Starting'} · ${tree.status} · ${duration((tree.end ?? now) - tree.start)}` : 'granny · no run'
-    const room = width - tag.length - 1
-    const header = room >= 10 ? `${fit(title, room).padEnd(room)} ${tag}` : fit(title, width)
-    const body = Math.max(1, height - 2)
-    let panes: string[]
-    if (width >= 100) {
-      const treeWidth = clamp(Math.round(width * 0.38), 36, 60)
-      const left = this.treePane(treeWidth, body, now)
-      const right = this.detailPane(width - treeWidth - SEPARATOR.length, body, now)
-      panes = left.map((l, i) => `${l}${this.paint('dim', SEPARATOR)}${right[i] ?? ''}`)
-    } else panes = this.focus === 'tree' ? this.treePane(width, body, now) : this.detailPane(width, body, now)
-    return [this.paint('accent', header), ...panes, this.paint('dim', fit(this.help(), width))]
+    const help: Cell[] = [{ text: this.help(), tone: 'muted' }]
+    if (!tree) return frame({ header: [{ text: 'granny · no run', tone: 'base' }], stepper: [], left: [], help, width, height }).map(r => this.paintRow(r))
+    const focus = focusStage(tree, this.selected)
+    const sizes = paneSizes(width, height, 0, true)
+    let left: Cell[]
+    let right: Cell[] | undefined
+    if (sizes.two) {
+      left = this.treePane(sizes.left.width, sizes.left.height, now)
+      right = this.detailPane(sizes.right.width, sizes.right.height, now)
+    } else left = this.focus === 'tree' ? this.treePane(sizes.left.width, sizes.left.height, now) : this.detailPane(sizes.left.width, sizes.left.height, now)
+    const rows = frame({
+      header: [{ text: headerText(tree, now, focus, width), tone: 'base' }],
+      stepper: stepperCells(stepsFor(tree, focus), width),
+      left,
+      ...(right ? { right } : {}),
+      help,
+      width,
+      height,
+    })
+    return rows.map(r => this.paintRow(r))
+  }
+
+  private paintRow(cells: readonly Cell[]): string {
+    return cells.map(c => (c.selected ? this.highlight(c.text) : this.paint(TONE_STYLES[c.tone], c.text))).join('')
   }
 
   private help(): string {
     if (this.focus === 'tree') return TREE_HELP
-    const source = this.source
-    const toggle = this.selectedRow()?.kind === 'agent' ? ` · t ${source?.kind === 'events' ? 'transcript' : 'events'}` : ''
-    return `↑↓ PgUp/PgDn Home/End scroll · f follow (${source?.follow ? 'on' : 'off'})${toggle} · Tab/] [ agent · ←/Esc back · q close`
-  }
-
-  private treePane(width: number, height: number, now: number): string[] {
-    const at = this.rows.findIndex(r => r.key === this.selected)
-    if (at >= 0) {
-      if (at < this.treeTop) this.treeTop = at
-      if (at >= this.treeTop + height) this.treeTop = at - height + 1
-    }
-    this.treeTop = clamp(this.treeTop, 0, Math.max(0, this.rows.length - height))
-    const out: string[] = []
-    for (const row of this.rows.slice(this.treeTop, this.treeTop + height)) {
-      const chosen = row.key === this.selected
-      const plain = fit(`${chosen ? '›' : ' '} ${rowText(row, now, width - 2)}`, width).padEnd(width)
-      out.push(chosen ? this.highlight(plain) : this.paint(styleOf(row), plain))
-    }
-    while (out.length < height) out.push(' '.repeat(width))
-    return out
-  }
-
-  private detailHeader(now: number): string {
     const row = this.selectedRow()
+    const mode = row?.kind === 'agent' ? this.modeOf(row) : undefined
+    const parts: string[] = []
+    if (mode !== 'summary') parts.push('↑↓ PgUp/PgDn Home/End scroll', `f follow (${this.source?.follow ? 'on' : 'off'})`)
+    if (mode) parts.push(`v ${mode === 'verbose' ? 'summary' : 'details'}`, `t ${mode === 'transcript' ? 'summary' : 'transcript'}`)
+    parts.push('Tab/] [ agent', '←/Esc back', 'q close')
+    return parts.join(' · ')
+  }
+
+  private treePane(width: number, height: number, now: number): Cell[] {
+    const { cells, top } = treeCells(this.rows, this.selected, now, width, height, this.treeTop)
+    this.treeTop = top
+    return cells
+  }
+
+  private detailPane(width: number, height: number, now: number): Cell[] {
+    const row = this.selectedRow()
+    if (!row || height < 1) return []
+    const head = this.headOf(row, width, now)
+    if (row.kind === 'agent' && this.modeOf(row) === 'summary') return [...head, ...this.summary(row, width, height - head.length, now)].slice(0, height)
+    const shown = head.slice(0, Math.max(1, height - 1))
+    const bodyHeight = Math.max(1, height - shown.length)
+    const body = this.bodyOf(row)
+    const key = `${body.key}:${width}`
+    if (this.wrapped?.key !== key) this.wrapped = { key, lines: wrap(body.lines.length || this.source?.kind === 'static' ? body.lines : [emptyText(this.source)], width) }
+    const lines = this.wrapped.lines
+    this.bodyHeight = bodyHeight
+    this.bodyLength = lines.length
+    const max = Math.max(0, lines.length - bodyHeight)
     const source = this.source
-    if (!row) return 'nothing selected'
-    const follow = `follow ${source?.follow ? 'on' : 'off'}`
+    const top = source?.follow ? max : clamp(source?.top ?? max, 0, max)
+    return [...shown, ...lines.slice(top, top + bodyHeight).map((text): Cell => ({ text, tone: 'base' }))]
+  }
+
+  /** The detail's fixed first rows, cut to `width`. */
+  private headOf(row: Row, width: number, now: number): Cell[] {
+    const tree = row.run
+    let cells: Cell[]
     switch (row.kind) {
-      case 'agent': {
-        const a = row.agent!
-        const view = this.runList().find(r => r.id === row.run.id)?.live.roles.find(r => r.info.session === a.session)
-        const state =
-          a.state === 'running' && view
-            ? `${view.state} ${duration(now - view.since)}${view.state === 'thinking' && view.heading ? ` · "${view.heading}"` : ''}`
-            : `${a.state} ${duration((a.end ?? now) - a.start)}`
-        return `${a.label} (${a.role}) · ${a.model ?? 'default model'}${a.effort ? `/${a.effort}` : ''} · ${state} · ${source?.kind ?? 'events'} · ${follow}`
-      }
+      case 'agent':
+        cells = agentHead(row.agent!, now)
+        break
       case 'sub':
-        return `${row.sub!.name} · subagent of ${row.agent!.label} · transcript · ${follow}`
-      case 'phase': {
-        const p = row.phase!
-        return `${p.marker} ${p.title} · ${duration((p.end ?? now) - p.start)} · journal`
+        cells = [{ text: `${row.sub!.name} · subagent of ${row.agent!.action}`, tone: 'base' }]
+        break
+      case 'group': {
+        const all = groupDetail(tree, row.group!, now, width)
+        const n = row.group!.lines.length
+        cells = all.slice(0, all.length - n)
+        break
+      }
+      case 'checks':
+        cells = checksDetail(row.group!).slice(0, 2)
+        break
+      case 'run':
+        cells = runDetail(tree, this.factsOf(tree))
+        break
+      default:
+        cells = []
+    }
+    return cells.map(c => ({ ...c, text: fit(c.text, width) }))
+  }
+
+  private factsOf(tree: RunTree): RunFacts {
+    const run = this.runList().find(r => r.id === tree.id)
+    const status = this.caches.get(tree.id)?.status?.data ?? {}
+    return {
+      ...(typeof status.repo === 'string' ? { repo: clean(status.repo) } : {}),
+      ...(run ? { dir: run.dir } : {}),
+      ...(tree.status === 'failed' && typeof status.error === 'string' ? { error: clean(status.error) } : {}),
+    }
+  }
+
+  /** The scrollable rows under the head, and a key that changes with them. */
+  private bodyOf(row: Row): Body {
+    const source = this.source
+    switch (row.kind) {
+      case 'agent':
+      case 'sub': {
+        if (source?.kind !== 'events') return { key: `${source?.key}:${source?.buffer.version}:${source?.polled}`, lines: source?.buffer.lines() ?? [] }
+        const lines = this.verboseLines(row)
+        return { key: `${this.verbose!.key}:${source.polled}`, lines }
+      }
+      case 'group':
+        return this.staticBody(row, row.group!.lines)
+      case 'checks':
+        return this.staticBody(row, row.group!.checks?.lines ?? [])
+      case 'run': {
+        const reply = this.runList().find(r => r.id === row.run.id)?.reply
+        return this.staticBody(row, reply === undefined ? [] : ['', ...clean(reply).split('\n')])
       }
       default:
-        return `run ${row.run.id} · ${row.run.status}`
+        return { key: row.key, lines: [] }
     }
   }
 
-  private detailPane(width: number, height: number, now: number): string[] {
-    const header = wrap([this.detailHeader(now)], width).slice(0, Math.max(1, height - 1))
-    const source = this.source
-    const bodyHeight = Math.max(1, height - header.length)
-    this.bodyHeight = bodyHeight
-    const raw = source?.lines ?? source?.buffer.lines() ?? []
-    const version = source?.lines ? source.linesVersion : (source?.buffer.version ?? 0)
-    const key = `${source?.key}:${width}:${version}`
-    if (this.wrapped?.key !== key) this.wrapped = { key, lines: wrap(raw.length ? raw : [emptyText(source)], width) }
-    const lines = this.wrapped.lines
-    const max = Math.max(0, lines.length - bodyHeight)
-    const top = source?.follow ? max : clamp(source?.top ?? max, 0, max)
-    const out = [...header.map(h => this.paint('accent', h)), ...lines.slice(top, top + bodyHeight)]
-    while (out.length < height) out.push('')
-    return out
+  private staticBody(row: Row, lines: string[]): Body {
+    return { key: `${row.key}:${lines.length}:${lines.at(-1) ?? ''}`, lines }
   }
-}
 
-function eventLines(line: string): string[] {
-  if (!line.trim()) return []
-  try {
-    return entryLines(JSON.parse(line) as Logged).map(clean)
-  } catch {
-    return []
+  /** The agent's events with its journal notes, in time order. */
+  private itemsOf(row: Row): ActivityItem[] {
+    const items = this.source?.kind === 'events' ? this.source.items : []
+    const notes = row.agent!.notes
+    if (!notes.length) return items
+    return [...items, ...notes.map((n): ActivityItem => ({ t: n.t, kind: 'note', text: n.text }))].sort((a, b) => (a.t ?? 0) - (b.t ?? 0))
+  }
+
+  private verboseLines(row: Row): string[] {
+    const source = this.source!
+    const key = `${source.key}:${source.itemsVersion}:${row.agent!.notes.length}`
+    if (this.verbose?.key !== key) {
+      const lines = activityLines(this.itemsOf(row), row.agent!.cwd, this.home)
+      this.verbose = { key, lines: source.skippedMb ? [`… first ${source.skippedMb} MB skipped`, ...lines] : lines }
+    }
+    return this.verbose.lines
+  }
+
+  private summary(row: Row, width: number, height: number, now: number): Cell[] {
+    if (height < 1) return []
+    const agent = row.agent!
+    const source = this.source
+    const end = agentEnd(agent)
+    const live = agent.state === 'running' ? this.liveRole(row.run.id, agent.session)?.now() : undefined
+    const summary = summarise(this.itemsOf(row), now, { ...(agent.cwd ? { cwd: agent.cwd } : {}), ...(this.home ? { home: this.home } : {}), ...(live ? { live } : {}), ...(end ? { end } : {}), max: height })
+    const blank: Cell = { text: '', tone: 'base' }
+    const cells = summaryCells(summary, width, height - 1)
+    if (!source?.polled && (source?.file || source?.dir)) cells.push({ text: '(reading …)', tone: 'muted' })
+    else if (!cells.length) cells.push({ text: '(no events yet)', tone: 'muted' })
+    return [blank, ...cells]
   }
 }
 
@@ -675,16 +818,5 @@ function emptyText(source: Source | undefined): string {
   if (!source) return ''
   if ((source.file || source.dir) && !source.polled) return '(reading …)'
   if (source.kind === 'events') return '(no events yet)'
-  if (source.kind === 'transcript') return source.file || source.dir ? '(no transcript yet)' : '(no transcript yet - the subagent has not written one)'
-  return '(nothing yet)'
-}
-
-function styleOf(row: Row): string {
-  if (row.kind === 'group') return 'dim'
-  const state = row.kind === 'agent' ? row.agent!.state : undefined
-  const marker = row.kind === 'phase' ? row.phase!.marker : state ? AGENT_MARKERS[state] : undefined
-  if (marker === '●') return 'accent'
-  if (marker === '✗') return 'error'
-  if (marker === '⊘' || marker === '…') return 'muted'
-  return 'text'
+  return source.file || source.dir ? '(no transcript yet)' : '(no transcript yet - the subagent has not written one)'
 }

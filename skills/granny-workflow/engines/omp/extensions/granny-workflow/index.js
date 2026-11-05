@@ -2749,6 +2749,14 @@ function fit(text, width) {
     return "";
   return flat.length > width ? `${flat.slice(0, width - 1)}\u2026` : flat;
 }
+var pad = (text, width) => fit(text, width).padEnd(Math.max(0, width));
+function shortModel(model, effort) {
+  if (!model)
+    return effort ? `default model/${effort}` : "default model";
+  const [main = "", variant] = model.split("#");
+  const id = main.slice(main.lastIndexOf("/") + 1);
+  return [id, variant && variant !== "default" ? variant : undefined, effort].filter(Boolean).join("/");
+}
 var CD = /^cd\s+('(?:[^']|'\\'')*'|"[^"]*"|\S+)\s*&&\s*/;
 var escape = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 var BOUNDARY = `(^|[\\s'"=(:])`;
@@ -2772,6 +2780,12 @@ function stamp2(value) {
 // src/adapters/runview/activity.ts
 var ARG_KEYS = ["path", "file_path", "file", "pattern", "command", "query", "url", "description", "op"];
 var ARG_CHARS = 400;
+var TEXT_CHARS = 120;
+var SAID_CHARS = 400;
+var COMMAND_CHARS = 40;
+var BURST_MS = 5000;
+var BURST_NAMES = 10;
+var MAX_ROWS = 200;
 var SHELLS = new Set(["bash", "shell", "sh"]);
 var oneLine = (text) => clean(text).replace(/\s+/g, " ").trim();
 function argOf(input) {
@@ -2780,6 +2794,235 @@ function argOf(input) {
   const args = input;
   const key = ARG_KEYS.find((k) => typeof args[k] === "string" && args[k].trim());
   return key ? oneLine(args[key]).slice(0, ARG_CHARS) : undefined;
+}
+var KINDS = {
+  thinking: "thinking",
+  writing: "writing",
+  starting: "starting",
+  "waiting for model": "waiting",
+  waiting: "waiting",
+  "preparing a tool call": "preparing",
+  preparing: "preparing"
+};
+var shortOf = (name, arg, cwd, home) => {
+  if (!arg)
+    return;
+  const short = shortArg(arg, cwd, home);
+  return SHELLS.has(name ?? "") ? fit(short, COMMAND_CHARS) : short;
+};
+var firstLine = (text) => clean(text).split(`
+`).map((l) => l.trim()).find(Boolean) ?? "";
+var TODO_MARKS = { done: "\u2713", active: "\u25CF", pending: "\xB7" };
+var todoText = (todos) => todos.map((t) => `${TODO_MARKS[t.state]} ${oneLine(t.text)}`).join("  ");
+function activityLines(items, cwd, home) {
+  const out = [];
+  let last = "";
+  for (const item of items) {
+    const body = lineOf(item, cwd, home);
+    if (body === undefined || body === last)
+      continue;
+    last = body;
+    out.push(`${clock(item.t)}  ${body}`);
+  }
+  return out;
+}
+function lineOf(item, cwd, home) {
+  const name = oneLine(item.name ?? "tool");
+  switch (item.kind) {
+    case "state":
+      return item.text ? `\xB7 ${oneLine(item.text)}` : undefined;
+    case "heading":
+      return item.text ? `\xBB ${oneLine(item.text)}` : undefined;
+    case "tool": {
+      const arg = item.arg ? shortArg(item.arg, cwd, home) : "";
+      const what = item.intent ? `${oneLine(item.intent)}${arg ? ` \xB7 ${arg}` : ""}` : arg;
+      return `\u25B8 ${name.padEnd(6)} ${what}`.trimEnd();
+    }
+    case "tool-end":
+      return item.failed ? `\u2717 ${name} failed${item.text ? `: ${firstLine(item.text)}` : ""}` : undefined;
+    case "error":
+      return `\u2717 ${name} failed${item.text ? `: ${firstLine(item.text)}` : ""}`;
+    case "subagents":
+      return `\u2514 task: ${(item.names ?? []).map(oneLine).join(", ")}`;
+    case "text": {
+      const said = firstLine(item.text ?? "");
+      return said ? `\u270E "${fit(said, TEXT_CHARS)}"` : undefined;
+    }
+    case "todo":
+      return `\u25B8 ${"todo".padEnd(6)} ${todoText(item.todos ?? [])}`;
+    case "note":
+      return item.text ? oneLine(item.text) : undefined;
+    case "exit":
+      return `\u25A0 process exited ${item.code ?? "?"}`;
+  }
+}
+var baseName2 = (path) => path.slice(path.lastIndexOf("/") + 1);
+var isRef = (arg) => arg.startsWith("skill://");
+function rowText(row) {
+  if (row.note !== undefined)
+    return row.note;
+  const mark = row.mark ? ` ${row.mark}` : "";
+  const error = row.error ? ` ${row.error}` : "";
+  if (row.names)
+    return `${row.names.join(", ")}${row.mark ? mark : " \u2026"}${error}`;
+  const unique = [...new Set(row.args)];
+  if (row.count > 1 && unique.length === 1)
+    return `${unique[0]}  (${row.count}\xD7)${mark}${error}`;
+  if (row.count > 1 && unique.length > 1) {
+    const refs = unique.every(isRef);
+    const shown = unique.slice(0, BURST_NAMES).map((a) => refs ? baseName2(a) : a);
+    return `${row.count} ${refs ? "skill refs" : "files"} \xB7 ${shown.join(", ")}${unique.length > BURST_NAMES ? ", \u2026" : ""}${mark}${error}`;
+  }
+  return `${row.intent ?? row.args[0] ?? ""}${mark}${error}`.trim();
+}
+function summarise(items, at, opts = {}) {
+  const { cwd, home } = opts;
+  const rows = [];
+  let state;
+  let heading;
+  let todo;
+  let said;
+  const openRow = (name, id) => {
+    for (let i = rows.length - 1;i >= 0; i--) {
+      const row = rows[i];
+      if (row.note === undefined && row.open && (id !== undefined ? row.id === id : row.tool === name))
+        return row;
+    }
+    return;
+  };
+  for (const item of items) {
+    const t = item.t ?? at;
+    switch (item.kind) {
+      case "state": {
+        const kind = KINDS[oneLine(item.text ?? "")];
+        if (kind)
+          state = { state: kind, since: t };
+        break;
+      }
+      case "heading":
+        if (item.text)
+          heading = oneLine(item.text);
+        break;
+      case "tool": {
+        const tool = oneLine(item.name ?? "tool");
+        const intent = item.intent ? oneLine(item.intent) : undefined;
+        const arg = isRef(item.arg ?? "") ? item.arg : shortOf(tool, item.arg, cwd, home);
+        state = { state: "running", tool, ...item.arg ? { arg: item.arg } : {}, ...intent ? { intent } : {}, since: t };
+        const prev = rows.at(-1);
+        const same = prev?.args.every((a) => a === arg) && prev.intent === intent;
+        const burst = prev && prev.note === undefined && prev.tool === tool && !prev.names && !prev.mark && !prev.error && tool !== "task" && arg !== undefined && prev.args.length === prev.count && prev.t !== undefined && t - prev.t <= BURST_MS && (same || !SHELLS.has(tool));
+        if (burst) {
+          prev.count++;
+          prev.args.push(arg);
+          prev.before = prev.t;
+          prev.t = t;
+          prev.id = item.id;
+          prev.open = true;
+          if (prev.intent !== intent)
+            delete prev.intent;
+          break;
+        }
+        rows.push({ t, tool, ...item.id ? { id: item.id } : {}, ...intent ? { intent } : {}, args: arg ? [arg] : [], count: 1, tone: "base", open: true });
+        break;
+      }
+      case "subagents": {
+        const row = openRow("task", undefined);
+        const names = (item.names ?? []).map(oneLine);
+        if (row)
+          row.names = names;
+        else
+          rows.push({ t, tool: "task", args: [], count: 1, names, tone: "base", open: true });
+        break;
+      }
+      case "tool-end": {
+        const row = openRow(item.name, item.id);
+        if (row) {
+          row.open = false;
+          if (item.failed) {
+            row.mark = "\u2717";
+            row.tone = "error";
+          } else if (row.names)
+            row.mark = "\u2713";
+        }
+        if (state?.state === "running" && (state.tool === item.name || item.name === undefined))
+          state = { state: "waiting", since: t };
+        break;
+      }
+      case "error": {
+        const row = openRow(item.name, item.id) ?? [...rows].reverse().find((r) => r.tool === item.name);
+        if (row) {
+          row.open = false;
+          row.mark = "\u2717";
+          row.tone = "error";
+          if (item.text)
+            row.error = firstLine(item.text);
+        }
+        break;
+      }
+      case "todo":
+        todo = (item.todos ?? []).map((x) => ({ text: oneLine(x.text), state: x.state }));
+        break;
+      case "text": {
+        const lines = clean(item.text ?? "").split(`
+`).map((l) => l.trim()).filter(Boolean);
+        if (lines.length)
+          said = fit(lines.join(" ").replace(/\s+/g, " "), SAID_CHARS);
+        if (state?.state === "writing")
+          state = { state: "waiting", since: t };
+        break;
+      }
+      case "note":
+        if (item.text)
+          rows.push({ t, tool: "", args: [], count: 1, note: oneLine(item.text), tone: "warning", open: false });
+        break;
+      case "exit":
+        state = undefined;
+        break;
+    }
+  }
+  const live = opts.live ?? state;
+  const last = rows.at(-1);
+  if (!opts.end && live?.state === "running" && last?.open && last.tool === live.tool && !last.names) {
+    if (last.count > 1) {
+      last.count--;
+      last.args.pop();
+      last.t = last.before;
+    } else
+      rows.pop();
+  }
+  const max = opts.max ?? MAX_ROWS;
+  const recent = rows.slice(-max).reverse().map((row) => ({ ...row.t !== undefined ? { t: row.t } : {}, tool: row.tool, text: rowText(row), tone: row.tone }));
+  const now = nowBlock(opts.end, live, opts.live?.heading ?? heading, at, cwd, home);
+  return { ...now ? { now } : {}, ...todo ? { todo } : {}, recent, ...said ? { lastSaid: said } : {} };
+}
+function nowBlock(end, state, heading, at, cwd, home) {
+  if (end) {
+    const took = duration((end.end ?? at) - end.start);
+    if (end.state === "done")
+      return { text: `\u2713 done in ${took}`, tone: "success" };
+    if (end.state === "cancelled")
+      return { text: `\u2298 cancelled after ${took}`, tone: "warning" };
+    return { text: `\u2717 failed after ${took}${end.error ? `: ${firstLine(end.error)}` : ""}`, tone: "error" };
+  }
+  if (!state)
+    return;
+  const took = duration(at - state.since);
+  const extra = heading ? { heading } : {};
+  switch (state.state) {
+    case "running": {
+      const detail = state.intent ? oneLine(state.intent) : shortOf(state.tool, state.arg, cwd, home);
+      return { text: `\u25CF ${state.tool ?? "tool"} \xB7 ${took}`, tone: "info", ...detail ? { detail } : {}, ...extra };
+    }
+    case "thinking":
+    case "writing":
+      return { text: `\u25CF ${state.state} ${took}`, tone: "info", ...extra };
+    case "preparing":
+      return { text: `\u25CF preparing a tool call ${took}`, tone: "info", ...extra };
+    case "waiting":
+      return { text: `\u2026 waiting for model ${took}`, tone: "muted", ...extra };
+    case "starting":
+      return { text: `\u2026 starting ${took}`, tone: "muted", ...extra };
+  }
 }
 
 // src/adapters/omp/panel.ts
@@ -3163,267 +3406,13 @@ class LiveRun {
 
 // src/adapters/omp/navigator.ts
 import { readdirSync as readdirSync3, readFileSync as readFileSync2 } from "fs";
+import { homedir as homedir2 } from "os";
 import { join as join3 } from "path";
-// src/adapters/runview/tail.ts
-import { closeSync, openSync, readSync, statSync } from "fs";
-var MB = 1024 * 1024;
-var NEWLINE = 10;
-
-class TailReader {
-  path;
-  position = 0;
-  read = 0;
-  started = false;
-  dropping = false;
-  inode;
-  pending = Buffer.alloc(0);
-  firstWindowBytes;
-  maxReadBytes;
-  constructor(path, { firstWindowBytes = 8 * MB, maxReadBytes = 4 * MB } = {}) {
-    this.path = path;
-    this.firstWindowBytes = firstWindowBytes;
-    this.maxReadBytes = Math.max(1, maxReadBytes);
-  }
-  get offset() {
-    return this.position;
-  }
-  get bytesRead() {
-    return this.read;
-  }
-  poll() {
-    const out = { lines: [], reset: false, skippedBytes: 0 };
-    let size;
-    let inode;
-    try {
-      const st = statSync(this.path);
-      if (!st.isFile())
-        return out;
-      size = st.size;
-      inode = st.ino;
-    } catch {
-      return out;
-    }
-    if (this.started && (size < this.position || this.inode !== undefined && inode !== this.inode)) {
-      this.position = 0;
-      this.pending = Buffer.alloc(0);
-      this.started = false;
-      this.dropping = false;
-      out.reset = true;
-    }
-    this.inode = inode;
-    if (!this.started) {
-      this.started = true;
-      if (size > this.firstWindowBytes) {
-        this.position = size - this.firstWindowBytes;
-        this.dropping = true;
-        out.skippedBytes = this.position;
-      }
-    }
-    if (size === this.position)
-      return out;
-    const length = Math.min(size - this.position, this.maxReadBytes);
-    const chunk = Buffer.alloc(length);
-    let got = 0;
-    let fd;
-    try {
-      fd = openSync(this.path, "r");
-      got = readSync(fd, chunk, 0, length, this.position);
-    } catch {
-      return out;
-    } finally {
-      if (fd !== undefined) {
-        try {
-          closeSync(fd);
-        } catch {}
-      }
-    }
-    if (got <= 0)
-      return out;
-    this.position += got;
-    this.read += got;
-    let data = chunk.subarray(0, got);
-    if (this.dropping) {
-      const nl = data.indexOf(NEWLINE);
-      if (nl < 0) {
-        out.skippedBytes += got;
-        return out;
-      }
-      out.skippedBytes += nl + 1;
-      data = data.subarray(nl + 1);
-      this.dropping = false;
-    }
-    const all = this.pending.length ? Buffer.concat([this.pending, data]) : data;
-    const last = all.lastIndexOf(NEWLINE);
-    if (last < 0) {
-      this.pending = Buffer.from(all);
-      return out;
-    }
-    this.pending = Buffer.from(all.subarray(last + 1));
-    out.lines = all.subarray(0, last).toString("utf8").split(`
-`);
-    return out;
-  }
-}
-
-// src/adapters/omp/subagents.ts
-import { readdirSync as readdirSync2 } from "fs";
-import { join as join2 } from "path";
-function subagentFiles(session) {
-  const out = new Map;
-  try {
-    for (const dir of readdirSync2(session, { withFileTypes: true })) {
-      if (!dir.isDirectory())
-        continue;
-      try {
-        for (const file of readdirSync2(join2(session, dir.name), { withFileTypes: true })) {
-          if (file.isFile() && file.name.endsWith(".jsonl"))
-            out.set(file.name.slice(0, -".jsonl".length), join2(session, dir.name, file.name));
-        }
-      } catch {}
-    }
-  } catch {}
-  return new Map([...out].sort(([a], [b]) => a.localeCompare(b)));
-}
-
-// src/adapters/omp/transcript.ts
-var MAX_ENTRY_CHARS = 2 * 1024 * 1024;
-var PROMPT_LINES = 12;
-var THINKING_LINES = 3;
-var RESULT_LINES = 8;
-var ARGS_CHARS = 300;
-var PAD = " ".repeat(10);
-var split2 = (text) => clean(text).split(`
-`);
-var cut = (text, max) => text.length > max ? `${text.slice(0, max - 1)}\u2026` : text;
-function head(lines, max, indent, tail = "") {
-  const out = lines.slice(0, max).map((l) => `${indent}${l}`);
-  if (lines.length > max)
-    out.push(`${indent}\u2026 ${lines.length - max} more lines${tail}`);
-  return out;
-}
-function textOf(content) {
-  if (typeof content === "string")
-    return content;
-  if (!Array.isArray(content))
-    return "";
-  return content.filter((p) => p?.type === "text" && typeof p.text === "string").map((p) => p.text).join(`
-`);
-}
-function toolCall(part) {
-  const args = part?.arguments && typeof part.arguments === "object" ? { ...part.arguments } : {};
-  const intent = typeof part?.intent === "string" && part.intent.trim() ? part.intent : typeof args.i === "string" && args.i.trim() ? args.i : undefined;
-  delete args.i;
-  delete args.intent;
-  let json;
-  try {
-    json = JSON.stringify(args) ?? "";
-  } catch {
-    json = "";
-  }
-  const name = clean(String(part?.name ?? "tool"));
-  return [`\u25B8 ${name}${intent ? `: ${clean(intent).replace(/\s+/g, " ").trim()}` : ""}`, `  ${cut(clean(json), ARGS_CHARS)}`];
-}
-function assistant(message) {
-  const out = [];
-  const parts = Array.isArray(message?.content) ? message.content : [];
-  for (const part of parts) {
-    if (part?.type === "thinking" && typeof part.thinking === "string" && part.thinking.trim()) {
-      const lines = split2(part.thinking.trim());
-      if (part.summary === true) {
-        const [first, ...rest] = lines.map((l) => l.replace(/\*\*/g, ""));
-        out.push(`\xBB ${first}`, ...rest.map((l) => `  ${l}`));
-      } else
-        out.push("\u2234 thinking", ...head(lines, THINKING_LINES, "  "));
-    } else if (part?.type === "text" && typeof part.text === "string" && part.text.trim()) {
-      const [first, ...rest] = split2(part.text.trim());
-      out.push(`\u270E ${first}`, ...rest.map((l) => `  ${l}`));
-    } else if (part?.type === "toolCall")
-      out.push(...toolCall(part));
-  }
-  if (message?.stopReason === "error")
-    out.push(`\u2717 error: ${clean(String(message.errorMessage ?? "unknown error"))}`);
-  return out;
-}
-function toolResult(message) {
-  const out = [`  \u2190 ${clean(String(message?.toolName ?? "tool"))} ${message?.isError === true ? "\u2717" : "\u2713"}`];
-  const parts = Array.isArray(message?.content) ? message.content : [];
-  const text = textOf(parts);
-  if (text)
-    out.push(...head(split2(text), RESULT_LINES, "    ", ` (${text.length} chars)`));
-  for (const part of parts)
-    if (part?.type === "image")
-      out.push("    [image]");
-  return out;
-}
-function messageLines(message) {
-  switch (message?.role) {
-    case "user":
-      return ["\u25B6 prompt", ...head(split2(textOf(message.content).trim()), PROMPT_LINES, "  ")];
-    case "assistant":
-      return assistant(message);
-    case "toolResult":
-      return toolResult(message);
-  }
-  return [];
-}
-function sessionEntryLines(line) {
-  if (line.length > MAX_ENTRY_CHARS)
-    return [`(entry of ${Math.round(line.length / 1024)} KB not shown)`];
-  if (!line.trim())
-    return [];
-  let entry;
-  try {
-    entry = JSON.parse(line);
-  } catch {
-    return [];
-  }
-  switch (entry?.type) {
-    case "session":
-      return [`\u2500\u2500 session ${clean(String(entry.id ?? "?"))} \xB7 ${clean(String(entry.cwd ?? ""))}`];
-    case "model_change":
-      return [`\xB7 model ${clean(String(entry.model ?? "?"))}`];
-    case "thinking_level_change":
-      return [`\xB7 thinking ${clean(String(entry.thinkingLevel ?? "?"))}`];
-    case "message": {
-      const lines = messageLines(entry.message);
-      return lines.map((l, i) => i === 0 ? `${clock(entry.timestamp)}  ${l}` : `${PAD}${l}`);
-    }
-  }
-  return [];
-}
-
-class LineBuffer {
-  max;
-  dropped = 0;
-  version = 0;
-  kept = [];
-  view;
-  constructor(max = 5000) {
-    this.max = max;
-  }
-  push(lines) {
-    if (!lines.length)
-      return;
-    for (const line of lines)
-      this.kept.push(line);
-    if (this.kept.length > this.max) {
-      const over = this.kept.length - this.max;
-      this.kept.splice(0, over);
-      this.dropped += over;
-    }
-    this.view = undefined;
-    this.version++;
-  }
-  lines() {
-    this.view ??= this.dropped ? [`\u2026 ${this.dropped} earlier lines not kept`, ...this.kept] : this.kept.slice();
-    return this.view;
-  }
-}
 
 // src/adapters/runview/tree.ts
 var MAX_PHASE_ENTRIES = 200;
-var COMMAND_CHARS = 160;
-var PAD2 = " ".repeat(10);
+var COMMAND_CHARS2 = 160;
+var PAD = " ".repeat(10);
 var AGENT_MARKERS = { running: "\u25CF", waiting: "\u2026", done: "\u2713", failed: "\u2717", cancelled: "\u2298" };
 var GROUP = /^(?:review|judge|fix|extract)\s+(.+?)\s+r(\d+)\b/;
 var STAGE = /^implement (.+)$/;
@@ -3440,7 +3429,7 @@ var timeOf = (entry) => {
 var at = (t, text) => {
   const [first, ...rest] = clean(text).split(`
 `);
-  return [`${clock(t)}  ${first}`, ...rest.map((l) => `${PAD2}${l}`)];
+  return [`${clock(t)}  ${first}`, ...rest.map((l) => `${PAD}${l}`)];
 };
 function lastOf(items, match) {
   for (let i = items.length - 1;i >= 0; i--)
@@ -3567,7 +3556,7 @@ function buildRunTree(run, entries, live, now, files = new Map, outline) {
         break;
       case "command":
         note(current(t), at(t, `$ ${String(entry.command ?? "").split(`
-`)[0].slice(0, COMMAND_CHARS)}`));
+`)[0].slice(0, COMMAND_CHARS2)}`));
         break;
       case "retry":
         note(current(t), at(t, `\u21BB ${entry.label} retry ${entry.attempt}: ${String(entry.reason ?? "").split(`
@@ -4099,39 +4088,102 @@ function stageStepStates(steps, group, latest, end) {
   steps.forEach((s, i) => out.set(s, i < index ? "done" : i === index ? state : "upcoming"));
   return out;
 }
-var runKey = (id) => `run:${id}`;
-var phaseKey = (id, index) => `phase:${id}:${index}`;
-var agentKey = (session) => `agent:${session}`;
-var subKey = (session, name) => `sub:${session}:${name}`;
-function phaseRows(runs, folded, expandedRun) {
+var groupKey = (runId, key) => `group:${runId}:${key}`;
+var checksKey = (runId, n) => `checks:${runId}:${n}`;
+function visibleRows(trees, view) {
   const rows = [];
-  for (const run of runs) {
-    const rk = runKey(run.id);
-    const open = run.id === expandedRun && !folded.has(rk);
-    rows.push({ key: rk, kind: "run", depth: 0, selectable: true, run, folded: !open });
-    if (!open)
-      continue;
-    for (const phase of run.phases) {
-      const pk = phaseKey(run.id, phase.index);
-      const shut = folded.has(pk);
-      rows.push({ key: pk, kind: "phase", depth: 1, selectable: true, run, phase, folded: shut, parent: rk });
-      if (shut)
+  const tree = trees.find((t) => t.id === view.run);
+  if (tree) {
+    for (const g of tree.groups) {
+      const gk = groupKey(tree.id, g.key);
+      if (g.state === "upcoming") {
+        rows.push({ key: gk, kind: "group", depth: 0, selectable: true, run: tree, group: g });
         continue;
-      for (const [g, group] of phase.groups.entries()) {
-        const depth = group.title ? 3 : 2;
-        if (group.title)
-          rows.push({ key: `group:${run.id}:${phase.index}:${g}`, kind: "group", depth: 2, selectable: false, run, phase, title: group.title, parent: pk });
-        for (const agent of group.agents) {
-          const ak = agentKey(agent.session);
-          rows.push({ key: ak, kind: "agent", depth, selectable: true, run, phase, agent, parent: pk });
-          for (const sub of agent.subagents)
-            rows.push({ key: subKey(agent.session, sub.name), kind: "sub", depth: depth + 1, selectable: true, run, phase, agent, sub, parent: ak });
+      }
+      const open = view.opened.has(gk) || !view.folded.has(gk) && (g.state === "running" || g.number !== undefined && g.number === view.focus);
+      rows.push({ key: gk, kind: "group", depth: 0, selectable: true, run: tree, group: g, folded: !open });
+      if (!open)
+        continue;
+      const checksRow = () => ({ key: checksKey(tree.id, g.number), kind: "checks", depth: 1, selectable: true, run: tree, group: g, parent: gk });
+      let placed = !g.checks;
+      if (g.checks && !g.checks.after) {
+        rows.push(checksRow());
+        placed = true;
+      }
+      for (const agent of g.agents) {
+        const ak = agentKey(agent.session);
+        rows.push({ key: ak, kind: "agent", depth: 1, selectable: true, run: tree, group: g, agent, parent: gk });
+        for (const sub of agent.subagents)
+          rows.push({ key: subKey(agent.session, sub.name), kind: "sub", depth: 2, selectable: true, run: tree, group: g, agent, sub, parent: ak });
+        if (!placed && g.checks?.after === agent) {
+          rows.push(checksRow());
+          placed = true;
         }
       }
     }
   }
+  if (view.runs === "list") {
+    rows.push({ key: "label:runs", kind: "label", depth: 0, selectable: false, run: tree ?? trees[0] });
+    for (const t of trees)
+      rows.push({ key: runKey(t.id), kind: "run", depth: 0, selectable: true, run: t, shown: t.id === view.run });
+  } else if (tree)
+    rows.push({ key: runKey(tree.id), kind: "run", depth: 0, selectable: true, run: tree, shown: true, details: true });
   return rows;
 }
+var GROUP_MARKERS = { upcoming: "", running: "\u25CF", done: "\u2713", failed: "\u2717", skipped: "\u2298", cancelled: "\u2298" };
+var RUN_MARKERS = { running: "\u25CF", done: "\u2713", failed: "\u2717", cancelled: "\u2298" };
+var MIN_ELAPSED_WIDTH = 24;
+var MIN_NAME = 8;
+function aligned(left, right, width) {
+  if (!right || width < MIN_ELAPSED_WIDTH)
+    return fit(left, width);
+  if (!Number.isFinite(width))
+    return `${left}  ${right}`;
+  const room = width - right.length - 2;
+  return `${fit(left, room).padEnd(room)}  ${right}`;
+}
+var span = (start, end, now) => start === undefined ? undefined : duration((end ?? now) - start);
+function rowText2(row, now, width = Number.POSITIVE_INFINITY) {
+  const indent = "  ".repeat(row.depth);
+  switch (row.kind) {
+    case "group": {
+      const g = row.group;
+      const name = g.number !== undefined ? `${g.number} ${g.title}` : g.title;
+      if (g.state === "upcoming")
+        return fit(`    ${name}`, width);
+      const head = `${row.folded ? "\u25B8" : "\u25BE"} ${GROUP_MARKERS[g.state]} `;
+      const right = span(g.start, g.end, now);
+      const tail = g.state === "failed" && g.outcome ? ` ${g.outcome}` : "";
+      const full = `${head}${name}${tail}`;
+      const room = !Number.isFinite(width) ? Number.POSITIVE_INFINITY : width - (right && width >= MIN_ELAPSED_WIDTH ? right.length + 2 : 0);
+      if (!tail || full.length <= room || room - head.length - tail.length < MIN_NAME)
+        return aligned(tail && full.length > room ? `${head}${name}` : full, right, width);
+      return aligned(`${head}${fit(name, room - head.length - tail.length)}${tail}`, right, width);
+    }
+    case "agent": {
+      const a = row.agent;
+      return aligned(`${indent}${AGENT_MARKERS[a.state]} ${a.action}`, span(a.start, a.end, now), width);
+    }
+    case "checks": {
+      const c = row.group.checks;
+      const text = !c ? "checks" : c.state === "running" ? "checks \u2026" : c.state === "passed" ? "checks \u2713" : `checks \u2717${c.failed.length ? ` ${c.failed.join(", ")}` : ""}`;
+      return fit(`${indent}${text}`, width);
+    }
+    case "sub":
+      return fit(`${indent}\u2514 ${AGENT_MARKERS[row.agent.state]} ${row.sub.name}`, width);
+    case "label":
+      return fit("runs", width);
+    case "run": {
+      const t = row.run;
+      if (row.details)
+        return fit("run details", width);
+      return aligned(`${RUN_MARKERS[t.status] ?? "\xB7"} ${t.id.slice(-4)} \xB7 ${t.status}${row.shown ? " (shown)" : ""}`, duration((t.end ?? now) - t.start), width);
+    }
+  }
+}
+var runKey = (id) => `run:${id}`;
+var agentKey = (session) => `agent:${session}`;
+var subKey = (session, name) => `sub:${session}:${name}`;
 function nextAgent(rows, key, dir) {
   const from = rows.findIndex((r) => r.key === key);
   let i = from < 0 ? dir > 0 ? -1 : rows.length : from;
@@ -4140,91 +4192,569 @@ function nextAgent(rows, key, dir) {
       return rows[i].key;
   return;
 }
-var elapsed = (start, end, now) => duration((end ?? now) - start);
-function phaseRowText(row, now, width = Number.POSITIVE_INFINITY) {
-  const indent = "  ".repeat(row.depth);
+
+// src/adapters/runview/layout.ts
+var STATUS_TONES = { running: "info", done: "success", failed: "error", cancelled: "warning" };
+var AGENT_TONES = { running: "info", waiting: "muted", done: "success", failed: "error", cancelled: "warning" };
+var GROUP_TONES = { upcoming: "muted", running: "info", done: "success", failed: "error", skipped: "muted", cancelled: "warning" };
+var STAGE_PHASES = new Set(["Implement", "Checks", "Review"]);
+function headerText(tree, now, focus, width = Number.POSITIVE_INFINITY) {
+  const { outline } = tree;
+  const elapsed = duration((tree.end ?? now) - tree.start);
+  const phase = tree.phase ?? "Starting";
+  let middle;
+  if (tree.status !== "running")
+    middle = [tree.status];
+  else if (outline?.kind === "plan")
+    middle = ["planning", phase];
+  else if (outline && outline.stages.length && (STAGE_PHASES.has(phase) || tree.running.length)) {
+    const total = outline.stages.length;
+    const k = tree.running.length > 1 ? undefined : focus ?? tree.running[0] ?? focusStage(tree);
+    middle = [tree.running.length > 1 ? `stages ${tree.running.join("+")}/${total}` : `stage ${k ?? 1}/${total}`, phase];
+  } else
+    middle = [phase];
+  const parts = (branch) => ["granny", ...branch && tree.branch ? [tree.branch] : [], ...middle, elapsed].join(" \xB7 ");
+  const full = parts(true);
+  if (full.length <= width)
+    return full;
+  return fit(parts(false), width);
+}
+var STEP_MARKS = { done: "\u2713", current: "\u25CF", failed: "\u2717", skipped: "\u2298", upcoming: "" };
+var STEP_TONES = { done: "success", current: "info", failed: "error", skipped: "muted", upcoming: "muted" };
+var SEPARATOR = { text: " \u203A ", tone: "muted" };
+var length = (cells) => cells.reduce((n, c) => n + c.text.length, 0);
+function stepperCells(steps, width) {
+  if (!steps.length)
+    return [];
+  const cell = (s, bare = false) => ({ text: bare ? STEP_MARKS[s.state] : `${s.title}${STEP_MARKS[s.state] ? ` ${STEP_MARKS[s.state]}` : ""}`, tone: STEP_TONES[s.state] });
+  const join = (cells) => cells.flatMap((c, i) => i ? [SEPARATOR, c] : [c]);
+  const full = join(steps.map((s) => cell(s)));
+  if (length(full) <= width)
+    return full;
+  const lastDone = steps.map((s) => s.state).lastIndexOf("done");
+  const bare = join(steps.map((s, i) => cell(s, s.state === "done" && i < lastDone)));
+  if (length(bare) <= width)
+    return bare;
+  let at = steps.findIndex((s) => s.state === "current" || s.state === "failed");
+  if (at < 0)
+    at = lastDone >= 0 ? lastDone : 0;
+  const s = steps[at];
+  const one = `${s.title}${STEP_MARKS[s.state] ? ` ${STEP_MARKS[s.state]}` : ""} (${at + 1}/${steps.length})`;
+  return [{ text: fit(one, width), tone: STEP_TONES[s.state] }];
+}
+function rowTone(row) {
   switch (row.kind) {
-    case "run": {
-      const { run } = row;
-      return `${row.folded ? "\u25B8" : "\u25BE"} run ${run.id} \xB7 ${run.status} \xB7 ${elapsed(run.start, run.end, now)}`;
-    }
-    case "phase": {
-      const phase = row.phase;
-      const count = phase.groups.reduce((n, g) => n + g.agents.length, 0);
-      return `${indent}${phase.marker} ${phase.title} \xB7 ${elapsed(phase.start, phase.end, now)}${row.folded && count ? ` \xB7 ${count} agent${count === 1 ? "" : "s"} folded` : ""}`;
-    }
     case "group":
-      return `${indent}${row.title}`;
-    case "agent": {
-      const a = row.agent;
-      const tail = ` \xB7 ${elapsed(a.start, a.end, now)}${a.activity ? ` \xB7 ${a.activity}` : ""}`;
-      const head = `${indent}${AGENT_MARKERS[a.state]} ${a.label}`;
-      const full = `${head}  ${a.role} \xB7 ${modelText(a.model, a.effort)}${tail}`;
-      if (full.length <= width)
-        return full;
-      const short = a.model?.includes("/") ? `${head}  ${a.role} \xB7 ${modelText(a.model.slice(a.model.lastIndexOf("/") + 1), a.effort)}${tail}` : full;
-      return short.length <= width ? short : `${head}${tail}`;
-    }
+      return GROUP_TONES[row.group.state];
+    case "agent":
     case "sub":
-      return `${indent}\u2514 ${row.sub.name}${row.sub.path ? "" : " (no transcript yet)"}`;
+      return AGENT_TONES[row.agent.state];
+    case "checks": {
+      const c = row.group.checks;
+      return !c ? "muted" : c.state === "running" ? "info" : c.state === "passed" ? "success" : "error";
+    }
+    case "label":
+      return "muted";
+    case "run":
+      return row.details ? "muted" : STATUS_TONES[row.run.status] ?? "base";
   }
 }
+function treeCells(rows, selectedKey, now, width, height, top) {
+  const at = rows.findIndex((r) => r.key === selectedKey);
+  let first = top;
+  if (at >= 0) {
+    if (at < first)
+      first = at;
+    if (at >= first + height)
+      first = at - height + 1;
+  }
+  first = Math.max(0, Math.min(first, Math.max(0, rows.length - height)));
+  const cells = rows.slice(first, first + Math.max(0, height)).map((row) => {
+    const chosen = row.key === selectedKey;
+    return { text: pad(`${chosen ? "\u203A" : " "} ${rowText2(row, now, width - 2)}`, width), tone: rowTone(row), ...chosen ? { selected: true } : {} };
+  });
+  while (cells.length < height)
+    cells.push({ text: pad("", width), tone: "base" });
+  return { cells, top: first };
+}
+function wrap(text, width) {
+  if (width < 1)
+    return [];
+  const out = [];
+  let line = "";
+  for (const word of text.split(" ")) {
+    const next = line ? `${line} ${word}` : word;
+    if (next.length <= width)
+      line = next;
+    else {
+      if (line)
+        out.push(line);
+      line = word.length > width ? fit(word, width) : word;
+    }
+  }
+  if (line || !out.length)
+    out.push(line);
+  return out;
+}
+var took = (start, end, now) => start === undefined ? "" : duration((end ?? now) - start);
+var checksText = (c) => c.state === "running" ? "checks running" : c.state === "passed" ? "checks \u2713" : `checks \u2717${c.failed.length ? ` ${c.failed.join(", ")}` : ""}`;
+var checksTone = (c) => c.state === "running" ? "info" : c.state === "passed" ? "success" : "error";
+function groupDetail(tree, group, now, width) {
+  const total = tree.outline?.stages.length;
+  const name = group.number !== undefined ? `stage ${group.number}${total ? `/${total}` : ""} \xB7 ${group.title}` : group.title;
+  const out = wrap(name, width).map((text) => ({ text, tone: "base" }));
+  out.push({ text: [group.state, took(group.start, group.end, now), group.outcome, group.note].filter(Boolean).join(" \xB7 "), tone: GROUP_TONES[group.state] });
+  if (group.checks)
+    out.push({ text: checksText(group.checks), tone: checksTone(group.checks) });
+  if (group.lines.length)
+    out.push({ text: "", tone: "base" }, ...group.lines.map((text) => ({ text, tone: "base" })));
+  return out;
+}
+function checksDetail(group) {
+  const head = { text: `checks \xB7 ${group.number !== undefined ? `stage ${group.number} \xB7 ` : ""}${group.title}`, tone: "base" };
+  const c = group.checks;
+  if (!c)
+    return [head, { text: "no checks result yet", tone: "muted" }];
+  return [head, { text: checksText(c), tone: checksTone(c) }, ...c.lines.map((text) => ({ text, tone: "base" }))];
+}
+function runDetail(tree, facts = {}) {
+  const out = [
+    { text: `run ${tree.id}`, tone: "base" },
+    { text: `status   ${tree.status}`, tone: STATUS_TONES[tree.status] ?? "base" }
+  ];
+  if (facts.repo)
+    out.push({ text: `repo     ${facts.repo}`, tone: "muted" });
+  if (tree.branch)
+    out.push({ text: `branch   ${tree.branch}`, tone: "muted" });
+  out.push({ text: `started  ${stamp2(tree.start) ?? "?"}`, tone: "muted" });
+  if (tree.status === "running")
+    out.push({ text: `phase    ${tree.phase ?? "Starting"}`, tone: "muted" });
+  else
+    out.push({ text: `ended    ${stamp2(tree.end) ?? "?"}`, tone: "muted" });
+  if (facts.dir)
+    out.push({ text: `result   ${facts.dir.replace(/\/+$/, "")}/result.json`, tone: "muted" });
+  if (facts.error)
+    out.push({ text: `error: ${facts.error.split(`
+`)[0]}`, tone: "error" });
+  if (facts.reply)
+    out.push({ text: "", tone: "base" }, ...facts.reply.split(`
+`).map((text) => ({ text, tone: "base" })));
+  return out;
+}
+var OUTCOME_MARKS = { done: "\u2713", failed: "\u2717", cancelled: "\u2298" };
+function agentHead(agent, now, live = {}) {
+  const mark = OUTCOME_MARKS[agent.state];
+  const time = `${mark ? `${mark} ` : ""}${duration((agent.end ?? now) - agent.start)}`;
+  const out = [{ text: `${agent.role} \xB7 ${shortModel(agent.model, agent.effort)} \xB7 ${time}`, tone: "base" }];
+  if (agent.state === "failed" && agent.error)
+    out.push({ text: `! ${agent.error.split(`
+`)[0]}`, tone: "error" });
+  if ((live.linked ?? agent.linked) === false)
+    out.push({ text: "! not linked to the parent session - it is in the session list", tone: "warning" });
+  return out;
+}
+function agentEnd(agent) {
+  if (agent.state === "running" || agent.state === "waiting")
+    return;
+  return { state: agent.state, start: agent.start, ...agent.end !== undefined ? { end: agent.end } : {}, ...agent.error ? { error: agent.error } : {} };
+}
+var LABEL = 6;
+var SAID3 = "LAST SAID  ";
+function summaryCells(summary, width, height) {
+  const indent = " ".repeat(LABEL);
+  const top = [];
+  if (summary.now) {
+    top.push({ text: fit(`${"NOW".padEnd(LABEL)}${summary.now.text}`, width), tone: summary.now.tone });
+    if (summary.now.detail)
+      top.push({ text: fit(`${indent}${summary.now.detail}`, width), tone: "base" });
+    if (summary.now.heading)
+      top.push({ text: fit(`${indent}\xBB ${summary.now.heading}`, width), tone: "muted" });
+  }
+  if (summary.todo?.length) {
+    if (top.length)
+      top.push({ text: "", tone: "base" });
+    top.push({ text: fit(`${"TODO".padEnd(LABEL)}${todoText(summary.todo)}`, width), tone: "base" });
+  }
+  const bottom = [];
+  if (summary.lastSaid) {
+    const room = Math.max(1, width - SAID3.length);
+    const quoted = `"${summary.lastSaid}"`;
+    const [first = "", second, ...more] = wrap(quoted, room);
+    bottom.push({ text: "", tone: "base" }, { text: fit(`${SAID3}${first}`, width), tone: "base" });
+    if (second !== undefined) {
+      const last = more.length ? `${fit(`${second} ${more.join(" ")}`, Math.max(1, room - 1))}"` : second;
+      bottom.push({ text: fit(`${" ".repeat(SAID3.length)}${last}`, width), tone: "base" });
+    }
+  }
+  const recent = summary.recent.map((r) => ({ text: fit(` ${clock(r.t)}  ${r.tool ? `${r.tool.padEnd(LABEL)} ` : ""}${r.text}`, width), tone: r.tone }));
+  const head = recent.length ? [...top.length ? [{ text: "", tone: "base" }] : [], { text: "RECENT", tone: "muted" }] : [];
+  if (height === undefined)
+    return [...top, ...head, ...recent, ...bottom];
+  const room = Math.max(0, height - top.length - bottom.length - head.length);
+  const shown = room > 0 ? [...head, ...recent.slice(0, room)] : [];
+  return [...top, ...shown, ...bottom].slice(0, Math.max(0, height));
+}
+var WIDE = 100;
+var RULES_FROM = 16;
+var PANE_SEPARATOR = " \u2502 ";
+var clamp = (n, lo, hi) => Math.max(lo, Math.min(hi, n));
+function paneSizes(width, height, split = 0, right = true) {
+  const w = Math.max(1, Math.floor(width));
+  const h = Math.max(3, Math.floor(height));
+  const rules = h >= RULES_FROM;
+  const body = Math.max(0, h - 3 - (rules ? 2 : 0));
+  if (right && w >= WIDE) {
+    const tree = clamp(Math.round(w * 0.38), 36, 60);
+    return { two: true, rules, body, left: { width: tree, height: body }, right: { width: w - tree - PANE_SEPARATOR.length, height: body } };
+  }
+  const lower = right ? Math.min(Math.max(0, split), Math.max(0, body - 1)) : 0;
+  return { two: false, rules, body, left: { width: w, height: body - lower }, right: { width: w, height: lower } };
+}
+function fitRow(cells, width) {
+  const out = [];
+  let used = 0;
+  for (const c of cells) {
+    if (used >= width)
+      break;
+    const text = fit(c.text, width - used);
+    out.push({ ...c, text });
+    used += text.length;
+  }
+  const last = out.at(-1);
+  if (used < width) {
+    if (last)
+      last.text = last.text.padEnd(last.text.length + width - used);
+    else
+      out.push({ text: " ".repeat(width), tone: "base" });
+  }
+  return out;
+}
+function frame(input) {
+  const w = Math.max(1, Math.floor(input.width));
+  const sizes = paneSizes(w, input.height, input.split, input.right !== undefined);
+  const paneRows = (cells, width, height) => Array.from({ length: height }, (_, i) => {
+    const c = cells?.[i];
+    return c ? { ...c, text: pad(c.text, width) } : { text: " ".repeat(width), tone: "base" };
+  });
+  const rule = (joint) => [{ text: sizes.two ? `${"\u2500".repeat(sizes.left.width)}\u2500${joint}\u2500${"\u2500".repeat(sizes.right.width)}` : "\u2500".repeat(w), tone: "muted" }];
+  const rows = [fitRow(input.header, w), fitRow(input.stepper, w)];
+  if (sizes.rules)
+    rows.push(rule("\u252C"));
+  if (sizes.two) {
+    const left = paneRows(input.left, sizes.left.width, sizes.body);
+    const right = paneRows(input.right, sizes.right.width, sizes.body);
+    for (let i = 0;i < sizes.body; i++)
+      rows.push([left[i], { text: PANE_SEPARATOR, tone: "muted" }, right[i]]);
+  } else {
+    for (const c of paneRows(input.left, w, sizes.left.height))
+      rows.push([c]);
+    for (const c of paneRows(input.right, w, sizes.right.height))
+      rows.push([c]);
+  }
+  if (sizes.rules)
+    rows.push(rule("\u2534"));
+  rows.push(fitRow(input.help, w));
+  return rows;
+}
 
-// src/adapters/omp/watch.ts
-import { appendFileSync as appendFileSync2 } from "fs";
-var TEXT_LINES = 12;
+// src/adapters/runview/tail.ts
+import { closeSync, openSync, readSync, statSync } from "fs";
+var MB = 1024 * 1024;
+var NEWLINE = 10;
 
-class EventLog {
+class TailReader {
   path;
-  now;
-  onError;
-  failed = false;
-  constructor(path, now, onError) {
+  position = 0;
+  read = 0;
+  started = false;
+  dropping = false;
+  inode;
+  pending = Buffer.alloc(0);
+  firstWindowBytes;
+  maxReadBytes;
+  constructor(path, { firstWindowBytes = 8 * MB, maxReadBytes = 4 * MB } = {}) {
     this.path = path;
-    this.now = now;
-    this.onError = onError;
+    this.firstWindowBytes = firstWindowBytes;
+    this.maxReadBytes = Math.max(1, maxReadBytes);
   }
-  write(entry) {
-    if (this.failed)
-      return;
+  get offset() {
+    return this.position;
+  }
+  get bytesRead() {
+    return this.read;
+  }
+  poll() {
+    const out = { lines: [], reset: false, skippedBytes: 0 };
+    let size;
+    let inode;
     try {
-      appendFileSync2(this.path, JSON.stringify({ t: new Date(this.now()).toISOString(), ...entry }) + `
-`);
-    } catch (e) {
-      this.failed = true;
-      try {
-        this.onError(e);
-      } catch {}
+      const st = statSync(this.path);
+      if (!st.isFile())
+        return out;
+      size = st.size;
+      inode = st.ino;
+    } catch {
+      return out;
     }
+    if (this.started && (size < this.position || this.inode !== undefined && inode !== this.inode)) {
+      this.position = 0;
+      this.pending = Buffer.alloc(0);
+      this.started = false;
+      this.dropping = false;
+      out.reset = true;
+    }
+    this.inode = inode;
+    if (!this.started) {
+      this.started = true;
+      if (size > this.firstWindowBytes) {
+        this.position = size - this.firstWindowBytes;
+        this.dropping = true;
+        out.skippedBytes = this.position;
+      }
+    }
+    if (size === this.position)
+      return out;
+    const length = Math.min(size - this.position, this.maxReadBytes);
+    const chunk = Buffer.alloc(length);
+    let got = 0;
+    let fd;
+    try {
+      fd = openSync(this.path, "r");
+      got = readSync(fd, chunk, 0, length, this.position);
+    } catch {
+      return out;
+    } finally {
+      if (fd !== undefined) {
+        try {
+          closeSync(fd);
+        } catch {}
+      }
+    }
+    if (got <= 0)
+      return out;
+    this.position += got;
+    this.read += got;
+    let data = chunk.subarray(0, got);
+    if (this.dropping) {
+      const nl = data.indexOf(NEWLINE);
+      if (nl < 0) {
+        out.skippedBytes += got;
+        return out;
+      }
+      out.skippedBytes += nl + 1;
+      data = data.subarray(nl + 1);
+      this.dropping = false;
+    }
+    const all = this.pending.length ? Buffer.concat([this.pending, data]) : data;
+    const last = all.lastIndexOf(NEWLINE);
+    if (last < 0) {
+      this.pending = Buffer.from(all);
+      return out;
+    }
+    this.pending = Buffer.from(all.subarray(last + 1));
+    out.lines = all.subarray(0, last).toString("utf8").split(`
+`);
+    return out;
   }
 }
-function entryLines(e) {
-  const at = clock(e.t);
+
+// src/adapters/omp/activity.ts
+var text = (value) => typeof value === "string" && value.trim() ? value : undefined;
+var TODO_STATES2 = new Set(["done", "active", "pending"]);
+function eventItem(entry) {
+  if (!entry || typeof entry !== "object")
+    return;
+  const e = entry;
+  const parsed = typeof e.t === "string" ? Date.parse(e.t) : Number.NaN;
+  const t = Number.isNaN(parsed) ? {} : { t: parsed };
+  const id = text(e.id) ? { id: e.id } : {};
+  const name = text(e.name) ?? "tool";
   switch (e.type) {
-    case "state":
-      return e.state.startsWith("running ") ? [] : [`${at}  \xB7 ${e.state}`];
-    case "heading":
-      return [`${at}  \xBB ${e.text}`];
-    case "tool": {
-      const what = e.intent ?? e.arg;
-      return [`${at}  \u25B8 ${e.name}${what ? `: ${what}` : ""}${e.intent && e.arg ? ` (${e.arg})` : ""}`];
+    case "state": {
+      const state = text(e.state);
+      return state && !state.startsWith("running ") ? { ...t, kind: "state", text: state } : undefined;
     }
+    case "heading":
+      return text(e.text) ? { ...t, kind: "heading", text: e.text } : undefined;
+    case "tool":
+      return { ...t, kind: "tool", name, ...id, ...text(e.intent) ? { intent: e.intent } : {}, ...text(e.arg) ? { arg: e.arg } : {} };
     case "tool-end":
-      return e.error ? [`${at}  \u2717 ${e.name} failed`] : [];
+      return { ...t, kind: "tool-end", name, ...id, ...e.error === true ? { failed: true } : {} };
+    case "text":
+      return text(e.text) ? { ...t, kind: "text", text: e.text } : undefined;
     case "subagents":
-      return [`${at}  \u2514 task: ${e.agents.join(", ")}`];
-    case "text": {
-      const lines = e.text.split(`
-`);
-      const shown = lines.slice(0, TEXT_LINES).map((l) => `          ${l}`);
-      if (lines.length > TEXT_LINES)
-        shown.push(`          \u2026 ${lines.length - TEXT_LINES} more line(s)`);
-      return [`${at}  \u270E answer:`, ...shown];
+      return { ...t, kind: "subagents", names: Array.isArray(e.agents) ? e.agents.filter((a) => typeof a === "string") : [] };
+    case "todo": {
+      const todos = Array.isArray(e.todos) ? e.todos.filter((x) => typeof x?.text === "string" && TODO_STATES2.has(x.state)) : [];
+      return todos.length ? { ...t, kind: "todo", todos } : undefined;
     }
     case "exit":
-      return [`${at}  \u25A0 process exited ${e.code}`];
+      return { ...t, kind: "exit", ...typeof e.code === "number" ? { code: e.code } : {} };
+  }
+  return;
+}
+function eventLine(line) {
+  if (!line.trim())
+    return;
+  try {
+    return eventItem(JSON.parse(line));
+  } catch {
+    return;
+  }
+}
+
+// src/adapters/omp/subagents.ts
+import { readdirSync as readdirSync2 } from "fs";
+import { join as join2 } from "path";
+function subagentFiles(session) {
+  const out = new Map;
+  try {
+    for (const dir of readdirSync2(session, { withFileTypes: true })) {
+      if (!dir.isDirectory())
+        continue;
+      try {
+        for (const file of readdirSync2(join2(session, dir.name), { withFileTypes: true })) {
+          if (file.isFile() && file.name.endsWith(".jsonl"))
+            out.set(file.name.slice(0, -".jsonl".length), join2(session, dir.name, file.name));
+        }
+      } catch {}
+    }
+  } catch {}
+  return new Map([...out].sort(([a], [b]) => a.localeCompare(b)));
+}
+// src/adapters/omp/transcript.ts
+var MAX_ENTRY_CHARS = 2 * 1024 * 1024;
+var PROMPT_LINES = 12;
+var THINKING_LINES = 3;
+var RESULT_LINES = 8;
+var ARGS_CHARS = 300;
+var PAD2 = " ".repeat(10);
+var split2 = (text) => clean(text).split(`
+`);
+var cut = (text, max) => text.length > max ? `${text.slice(0, max - 1)}\u2026` : text;
+function head(lines, max, indent, tail = "") {
+  const out = lines.slice(0, max).map((l) => `${indent}${l}`);
+  if (lines.length > max)
+    out.push(`${indent}\u2026 ${lines.length - max} more lines${tail}`);
+  return out;
+}
+function textOf(content) {
+  if (typeof content === "string")
+    return content;
+  if (!Array.isArray(content))
+    return "";
+  return content.filter((p) => p?.type === "text" && typeof p.text === "string").map((p) => p.text).join(`
+`);
+}
+function toolCall(part) {
+  const args = part?.arguments && typeof part.arguments === "object" ? { ...part.arguments } : {};
+  const intent = typeof part?.intent === "string" && part.intent.trim() ? part.intent : typeof args.i === "string" && args.i.trim() ? args.i : undefined;
+  delete args.i;
+  delete args.intent;
+  let json;
+  try {
+    json = JSON.stringify(args) ?? "";
+  } catch {
+    json = "";
+  }
+  const name = clean(String(part?.name ?? "tool"));
+  return [`\u25B8 ${name}${intent ? `: ${clean(intent).replace(/\s+/g, " ").trim()}` : ""}`, `  ${cut(clean(json), ARGS_CHARS)}`];
+}
+function assistant(message) {
+  const out = [];
+  const parts = Array.isArray(message?.content) ? message.content : [];
+  for (const part of parts) {
+    if (part?.type === "thinking" && typeof part.thinking === "string" && part.thinking.trim()) {
+      const lines = split2(part.thinking.trim());
+      if (part.summary === true) {
+        const [first, ...rest] = lines.map((l) => l.replace(/\*\*/g, ""));
+        out.push(`\xBB ${first}`, ...rest.map((l) => `  ${l}`));
+      } else
+        out.push("\u2234 thinking", ...head(lines, THINKING_LINES, "  "));
+    } else if (part?.type === "text" && typeof part.text === "string" && part.text.trim()) {
+      const [first, ...rest] = split2(part.text.trim());
+      out.push(`\u270E ${first}`, ...rest.map((l) => `  ${l}`));
+    } else if (part?.type === "toolCall")
+      out.push(...toolCall(part));
+  }
+  if (message?.stopReason === "error")
+    out.push(`\u2717 error: ${clean(String(message.errorMessage ?? "unknown error"))}`);
+  return out;
+}
+function toolResult(message) {
+  const out = [`  \u2190 ${clean(String(message?.toolName ?? "tool"))} ${message?.isError === true ? "\u2717" : "\u2713"}`];
+  const parts = Array.isArray(message?.content) ? message.content : [];
+  const text = textOf(parts);
+  if (text)
+    out.push(...head(split2(text), RESULT_LINES, "    ", ` (${text.length} chars)`));
+  for (const part of parts)
+    if (part?.type === "image")
+      out.push("    [image]");
+  return out;
+}
+function messageLines(message) {
+  switch (message?.role) {
+    case "user":
+      return ["\u25B6 prompt", ...head(split2(textOf(message.content).trim()), PROMPT_LINES, "  ")];
+    case "assistant":
+      return assistant(message);
+    case "toolResult":
+      return toolResult(message);
   }
   return [];
+}
+function sessionEntryLines(line) {
+  if (line.length > MAX_ENTRY_CHARS)
+    return [`(entry of ${Math.round(line.length / 1024)} KB not shown)`];
+  if (!line.trim())
+    return [];
+  let entry;
+  try {
+    entry = JSON.parse(line);
+  } catch {
+    return [];
+  }
+  switch (entry?.type) {
+    case "session":
+      return [`\u2500\u2500 session ${clean(String(entry.id ?? "?"))} \xB7 ${clean(String(entry.cwd ?? ""))}`];
+    case "model_change":
+      return [`\xB7 model ${clean(String(entry.model ?? "?"))}`];
+    case "thinking_level_change":
+      return [`\xB7 thinking ${clean(String(entry.thinkingLevel ?? "?"))}`];
+    case "message": {
+      const lines = messageLines(entry.message);
+      return lines.map((l, i) => i === 0 ? `${clock(entry.timestamp)}  ${l}` : `${PAD2}${l}`);
+    }
+  }
+  return [];
+}
+
+class LineBuffer {
+  max;
+  dropped = 0;
+  version = 0;
+  kept = [];
+  view;
+  constructor(max = 5000) {
+    this.max = max;
+  }
+  push(lines) {
+    if (!lines.length)
+      return;
+    for (const line of lines)
+      this.kept.push(line);
+    if (this.kept.length > this.max) {
+      const over = this.kept.length - this.max;
+      this.kept.splice(0, over);
+      this.dropped += over;
+    }
+    this.view = undefined;
+    this.version++;
+  }
+  lines() {
+    this.view ??= this.dropped ? [`\u2026 ${this.dropped} earlier lines not kept`, ...this.kept] : this.kept.slice();
+    return this.view;
+  }
 }
 
 // src/adapters/omp/navigator.ts
@@ -4272,14 +4802,17 @@ var RAW = {
   "[": "prev",
   f: "follow",
   t: "toggle",
+  v: "verbose",
   q: "quit"
 };
-var TREE_HELP = "\u2191\u2193 move \xB7 Enter/\u2192 open \xB7 Space fold \xB7 Tab/] next agent \xB7 [ prev \xB7 Esc close";
+var TREE_HELP = "\u2191\u2193 move \xB7 Enter/\u2192 open \xB7 Tab/] next agent \xB7 [ prev \xB7 Space fold \xB7 Esc close";
 var SOURCES = 8;
+var MAX_ITEMS = 5000;
 var MB2 = 1024 * 1024;
-var SEPARATOR = " \u2502 ";
-var clamp = (n, lo, hi) => Math.max(lo, Math.min(hi, n));
-function wrap(lines, width) {
+var TONE_STYLES = { base: "text", muted: "muted", success: "success", error: "error", warning: "warning", info: "accent" };
+var clamp2 = (n, lo, hi) => Math.max(lo, Math.min(hi, n));
+var isLive = (row) => row.agent?.state === "running" || row.agent?.state === "waiting";
+function wrap2(lines, width) {
   const out = [];
   const w = Math.max(1, width);
   for (const raw of lines) {
@@ -4292,24 +4825,35 @@ function wrap(lines, width) {
   }
   return out;
 }
+function home() {
+  try {
+    return homedir2();
+  } catch {
+    return;
+  }
+}
 
 class Navigator {
   deps;
   focus = "tree";
-  expanded;
+  shown;
   folded = new Set;
+  opened = new Set;
   selected = "";
   trees = [];
   rows = [];
   parents = new Map;
   caches = new Map;
   sources = new Map;
-  overrides = new Map;
+  modes = new Map;
+  home = home();
   source;
   version = 0;
   memo;
   wrapped;
+  verbose;
   bodyHeight = 10;
+  bodyLength = 0;
   treeTop = 0;
   closed = false;
   finished = false;
@@ -4317,12 +4861,10 @@ class Navigator {
   soon;
   constructor(deps) {
     this.deps = deps;
-    this.expanded = deps.runId;
+    this.shown = deps.runId;
     try {
       this.refresh();
-      const tree = this.trees.find((t) => t.id === this.expanded);
-      const agent = tree && ([...tree.agents].reverse().find((a) => a.state === "running") ?? tree.agents.at(-1));
-      this.selected = agent ? `agent:${agent.session}` : runKey(this.expanded);
+      this.selected = this.firstSelection();
       this.relayout();
       this.pollSource();
     } catch {}
@@ -4457,26 +4999,30 @@ class Navigator {
       return [];
     }
   }
+  liveRole(runId, session) {
+    return this.runList().find((r) => r.id === runId)?.live.roles.find((r) => r.info.session === session);
+  }
   refresh() {
     const now = this.deps.now();
     const runs = this.runList();
     this.trees = runs.map((run) => {
       const cache = this.cacheOf(run);
-      const open = run.id === this.expanded;
-      if (open || !cache.read && run.status !== "running")
+      const shown = run.id === this.shown;
+      if (shown || !cache.read && run.status !== "running")
         this.pollJournal(cache);
       const live = new Map;
       for (const role of run.live.roles)
         live.set(role.info.session, role);
-      const info = { id: run.id, status: run.status, startedAt: run.live.startedAt, ...run.reply !== undefined ? { reply: run.reply } : {} };
-      const tree = buildRunTree(info, cache.entries, live, now, cache.files);
-      if (!open)
-        return tree;
+      const info = { id: run.id, status: run.status, startedAt: run.live.startedAt, ...run.reply !== undefined ? { reply: run.reply } : {}, ...run.branch ? { branch: run.branch } : {} };
+      const build = () => buildRunTree(info, cache.entries, live, now, cache.files, run.outline);
       if (this.selected === runKey(run.id) && cache.status?.for !== run.status) {
         try {
           cache.status = { for: run.status, data: JSON.parse(readFileSync2(join3(run.dir, "status.json"), "utf8")) };
         } catch {}
       }
+      const tree = build();
+      if (!shown)
+        return tree;
       let found = false;
       for (const agent of tree.agents) {
         if (!agent.subagents.length)
@@ -4488,12 +5034,34 @@ class Navigator {
           found = true;
         cache.files.set(agent.session, files);
       }
-      return found ? buildRunTree(info, cache.entries, live, now, cache.files) : tree;
+      return found ? build() : tree;
     });
     this.relayout();
   }
+  shownTree() {
+    return this.trees.find((t) => t.id === this.shown);
+  }
+  firstSelection() {
+    const tree = this.shownTree();
+    const agent = tree && ([...tree.agents].reverse().find((a) => a.state === "running") ?? tree.agents.at(-1));
+    if (agent && tree) {
+      this.relayout();
+      for (const key of [agentKey(agent.session), groupKey(tree.id, agent.group)])
+        if (this.rows.some((r) => r.key === key))
+          return key;
+    }
+    return runKey(this.shown);
+  }
   relayout() {
-    this.rows = phaseRows(this.trees, this.folded, this.expanded);
+    const tree = this.shownTree();
+    const focus = tree && focusStage(tree);
+    const layout = () => visibleRows(this.trees, { run: this.shown, folded: this.folded, opened: this.opened, ...focus !== undefined ? { focus } : {}, runs: this.trees.length > 1 ? "list" : "one" });
+    this.rows = layout();
+    const hidden = this.hiddenGroup();
+    if (hidden) {
+      this.opened.add(hidden);
+      this.rows = layout();
+    }
     for (const row of this.rows)
       if (row.parent)
         this.parents.set(row.key, row.parent);
@@ -4503,40 +5071,49 @@ class Navigator {
     this.selected = key ?? this.rows.find((r) => r.selectable)?.key ?? "";
     this.choose();
   }
+  hiddenGroup() {
+    if (!this.selected || this.rows.some((r) => r.key === this.selected))
+      return;
+    for (let key = this.parents.get(this.selected);key; key = this.parents.get(key)) {
+      const row = this.rows.find((r) => r.key === key);
+      if (row)
+        return row.kind === "group" && row.folded && !this.folded.has(key) ? key : undefined;
+    }
+    return;
+  }
   selectedRow() {
     return this.rows.find((r) => r.key === this.selected);
+  }
+  modeOf(row) {
+    return this.modes.get(row.key) ?? "summary";
   }
   choose() {
     const row = this.selectedRow();
     if (!row)
       return void (this.source = undefined);
-    let kind;
-    let spec = {};
+    let spec;
     if (row.kind === "agent") {
       const agent = row.agent;
-      const live = agent.state === "running" || agent.state === "waiting";
-      kind = this.overrides.get(row.key) ?? (live ? "events" : "transcript");
-      spec = kind === "events" ? { file: join3(agent.session, "events.jsonl"), relist: false } : { dir: agent.session, relist: live };
-      spec.follow = live;
-    } else if (row.kind === "sub") {
-      kind = "transcript";
-      spec = { ...row.sub.path ? { file: row.sub.path } : {}, relist: false, follow: false };
-    } else
-      kind = row.kind === "run" ? "run" : "phase";
-    const key = `${row.key}|${kind}|${spec.file ?? spec.dir ?? ""}`;
+      const live = isLive(row);
+      spec = this.modeOf(row) === "transcript" ? { kind: "transcript", dir: agent.session, relist: live, follow: live } : { kind: "events", file: join3(agent.session, "events.jsonl"), relist: false, follow: live };
+    } else if (row.kind === "sub")
+      spec = { kind: "transcript", ...row.sub.path ? { file: row.sub.path } : {}, relist: false, follow: false };
+    else
+      spec = { kind: "static", relist: false, follow: false };
+    const key = `${row.key}|${spec.kind}|${spec.file ?? spec.dir ?? ""}`;
     let source = this.sources.get(key);
     if (!source) {
-      source = { key, kind, relist: false, readers: new Map, buffer: new LineBuffer, linesVersion: 0, follow: false, read: 0, polled: false, ...spec };
+      source = { key, readers: new Map, buffer: new LineBuffer, items: [], itemsVersion: 0, skippedMb: 0, read: 0, polled: false, ...spec };
       this.sources.set(key, source);
       if (this.sources.size > SOURCES)
         this.sources.delete(this.sources.keys().next().value);
       if (source.file || source.dir)
         this.later();
     } else if (source.dir)
-      source.relist = spec.relist ?? false;
+      source.relist = spec.relist;
+    if (row.kind === "run")
+      this.later();
     this.source = source;
-    if (kind === "phase" || kind === "run")
-      this.staticBody(source, row);
   }
   later() {
     if (this.soon || this.closed)
@@ -4546,33 +5123,6 @@ class Navigator {
       this.tick();
     }, 0);
     this.soon.unref?.();
-  }
-  staticBody(source, row) {
-    const lines = row.kind === "run" ? this.runBody(row.run) : row.phase.lines;
-    if (source.lines && source.lines.length === lines.length && source.lines.every((l, i) => l === lines[i]))
-      return;
-    source.lines = lines;
-    source.linesVersion++;
-  }
-  runBody(tree) {
-    const run = this.runList().find((r) => r.id === tree.id);
-    const status = this.caches.get(tree.id)?.status?.data ?? {};
-    const out = [`status   ${tree.status}`];
-    if (typeof status.repo === "string")
-      out.push(`repo     ${clean(status.repo)}`);
-    if (typeof status.branch === "string")
-      out.push(`branch   ${clean(status.branch)}`);
-    out.push(`started  ${stamp2(status.startedAt) ?? stamp2(tree.start) ?? "?"}`);
-    if (tree.status !== "running")
-      out.push(`ended    ${stamp2(status.finishedAt) ?? stamp2(tree.end) ?? "?"}`);
-    else
-      out.push(`phase    ${tree.phase ?? "?"}`);
-    if (run)
-      out.push(`result   ${join3(run.dir, "result.json")}`);
-    if (run?.reply !== undefined)
-      out.push("", ...clean(run.reply).split(`
-`));
-    return out;
   }
   pollSource() {
     const source = this.source;
@@ -4590,7 +5140,6 @@ class Navigator {
       }
     } else if (source.file && !source.readers.size)
       source.readers.set(source.file, new TailReader(source.file));
-    const render = source.kind === "events" ? eventLines : sessionEntryLines;
     source.polled = true;
     for (const reader of source.readers.values()) {
       const before = reader.bytesRead;
@@ -4599,13 +5148,28 @@ class Navigator {
       if (reset) {
         source.readers.clear();
         source.buffer = new LineBuffer;
+        source.items = [];
+        source.itemsVersion++;
+        source.skippedMb = 0;
         source.top = undefined;
         return this.pollSource();
       }
-      if (skippedBytes)
-        source.buffer.push([`\u2026 first ${Math.max(1, Math.round(skippedBytes / MB2))} MB skipped`]);
-      if (lines.length)
-        source.buffer.push(lines.flatMap(render));
+      const skipped = skippedBytes ? Math.max(1, Math.round(skippedBytes / MB2)) : 0;
+      if (source.kind === "events") {
+        source.skippedMb += skipped;
+        const items = lines.map(eventLine).filter((i) => i !== undefined);
+        if (items.length) {
+          source.items.push(...items);
+          if (source.items.length > MAX_ITEMS)
+            source.items.splice(0, source.items.length - MAX_ITEMS);
+          source.itemsVersion++;
+        }
+      } else {
+        if (skipped)
+          source.buffer.push([`\u2026 first ${skipped} MB skipped`]);
+        if (lines.length)
+          source.buffer.push(lines.flatMap(sessionEntryLines));
+      }
     }
   }
   select(key) {
@@ -4620,7 +5184,7 @@ class Navigator {
   moveBy(delta) {
     const rows = this.selectable();
     const at = rows.findIndex((r) => r.key === this.selected);
-    this.select(rows[clamp(at + delta, 0, rows.length - 1)]?.key);
+    this.select(rows[clamp2(at + delta, 0, rows.length - 1)]?.key);
   }
   agentStep(dir) {
     this.select(nextAgent(this.rows, this.selected, dir));
@@ -4643,13 +5207,17 @@ class Navigator {
       case "enter":
       case "right": {
         const row = this.selectedRow();
-        if (row?.kind === "run" && row.folded && key === "enter")
-          return this.fold();
+        if (row?.kind === "run" && !row.shown && key === "enter")
+          return this.switchRun(row.run.id);
         this.focus = "detail";
         return;
       }
-      case "space":
+      case "space": {
+        const row = this.selectedRow();
+        if (row?.kind === "run" && !row.shown)
+          return this.switchRun(row.run.id);
         return this.fold();
+      }
       case "tab":
       case "next":
         return this.agentStep(1);
@@ -4663,26 +5231,22 @@ class Navigator {
         return this.close();
     }
   }
+  switchRun(id) {
+    this.shown = id;
+    this.later();
+    this.relayout();
+  }
   fold() {
     const row = this.selectedRow();
-    if (!row)
+    if (row?.kind !== "group" || row.folded === undefined)
       return;
-    if (row.kind === "run") {
-      if (row.run.id !== this.expanded) {
-        this.expanded = row.run.id;
-        this.folded.delete(row.key);
-        this.later();
-      } else if (this.folded.has(row.key))
-        this.folded.delete(row.key);
-      else
-        this.folded.add(row.key);
-    } else if (row.kind === "phase") {
-      if (this.folded.has(row.key))
-        this.folded.delete(row.key);
-      else
-        this.folded.add(row.key);
-    } else
-      return;
+    if (row.folded) {
+      this.folded.delete(row.key);
+      this.opened.add(row.key);
+    } else {
+      this.opened.delete(row.key);
+      this.folded.add(row.key);
+    }
     this.relayout();
   }
   detailKey(key) {
@@ -4697,19 +5261,19 @@ class Navigator {
       case "pageDown":
         return this.scroll(Math.max(1, this.bodyHeight - 1));
       case "home":
-        if (source) {
+        if (source && this.scrolls()) {
           source.follow = false;
           source.top = 0;
         }
         return;
       case "end":
-        if (source) {
+        if (source && this.scrolls()) {
           source.follow = true;
           source.top = undefined;
         }
         return;
       case "follow":
-        if (source) {
+        if (source && this.scrolls()) {
           source.follow = !source.follow;
           if (source.follow)
             source.top = undefined;
@@ -4717,13 +5281,10 @@ class Navigator {
             this.scroll(0);
         }
         return;
-      case "toggle": {
-        const row = this.selectedRow();
-        if (row?.kind !== "agent" || !source)
-          return;
-        this.overrides.set(row.key, source.kind === "events" ? "transcript" : "events");
-        return this.choose();
-      }
+      case "toggle":
+        return this.switchMode("transcript");
+      case "verbose":
+        return this.switchMode("verbose");
       case "tab":
       case "next":
         return this.agentStep(1);
@@ -4738,14 +5299,24 @@ class Navigator {
         return this.close();
     }
   }
+  switchMode(mode) {
+    const row = this.selectedRow();
+    if (row?.kind !== "agent")
+      return;
+    this.modes.set(row.key, this.modeOf(row) === mode ? "summary" : mode);
+    this.choose();
+  }
+  scrolls() {
+    const row = this.selectedRow();
+    return row?.kind !== "agent" || this.modeOf(row) !== "summary";
+  }
   scroll(delta) {
     const source = this.source;
-    if (!source)
+    if (!source || !this.scrolls())
       return;
-    const length = this.wrapped?.lines.length ?? 0;
-    const max = Math.max(0, length - this.bodyHeight);
+    const max = Math.max(0, this.bodyLength - this.bodyHeight);
     const current = source.follow || source.top === undefined ? max : source.top;
-    source.top = clamp(current + delta, 0, max);
+    source.top = clamp2(current + delta, 0, max);
     if (delta < 0)
       source.follow = false;
   }
@@ -4779,98 +5350,166 @@ class Navigator {
     return text;
   }
   draw(width, height) {
-    const tree = this.trees.find((t) => t.id === this.expanded) ?? this.trees[0];
+    const tree = this.shownTree() ?? this.trees[0];
     const now = this.deps.now();
-    const tag = this.focus === "tree" ? "[tree]" : "[detail]";
-    const title = tree ? `granny ${tree.id} \xB7 ${tree.phase ?? "Starting"} \xB7 ${tree.status} \xB7 ${duration((tree.end ?? now) - tree.start)}` : "granny \xB7 no run";
-    const room = width - tag.length - 1;
-    const header = room >= 10 ? `${fit(title, room).padEnd(room)} ${tag}` : fit(title, width);
-    const body = Math.max(1, height - 2);
-    let panes;
-    if (width >= 100) {
-      const treeWidth = clamp(Math.round(width * 0.38), 36, 60);
-      const left = this.treePane(treeWidth, body, now);
-      const right = this.detailPane(width - treeWidth - SEPARATOR.length, body, now);
-      panes = left.map((l, i) => `${l}${this.paint("dim", SEPARATOR)}${right[i] ?? ""}`);
+    const help = [{ text: this.help(), tone: "muted" }];
+    if (!tree)
+      return frame({ header: [{ text: "granny \xB7 no run", tone: "base" }], stepper: [], left: [], help, width, height }).map((r) => this.paintRow(r));
+    const focus = focusStage(tree, this.selected);
+    const sizes = paneSizes(width, height, 0, true);
+    let left;
+    let right;
+    if (sizes.two) {
+      left = this.treePane(sizes.left.width, sizes.left.height, now);
+      right = this.detailPane(sizes.right.width, sizes.right.height, now);
     } else
-      panes = this.focus === "tree" ? this.treePane(width, body, now) : this.detailPane(width, body, now);
-    return [this.paint("accent", header), ...panes, this.paint("dim", fit(this.help(), width))];
+      left = this.focus === "tree" ? this.treePane(sizes.left.width, sizes.left.height, now) : this.detailPane(sizes.left.width, sizes.left.height, now);
+    const rows = frame({
+      header: [{ text: headerText(tree, now, focus, width), tone: "base" }],
+      stepper: stepperCells(stepsFor(tree, focus), width),
+      left,
+      ...right ? { right } : {},
+      help,
+      width,
+      height
+    });
+    return rows.map((r) => this.paintRow(r));
+  }
+  paintRow(cells) {
+    return cells.map((c) => c.selected ? this.highlight(c.text) : this.paint(TONE_STYLES[c.tone], c.text)).join("");
   }
   help() {
     if (this.focus === "tree")
       return TREE_HELP;
-    const source = this.source;
-    const toggle = this.selectedRow()?.kind === "agent" ? ` \xB7 t ${source?.kind === "events" ? "transcript" : "events"}` : "";
-    return `\u2191\u2193 PgUp/PgDn Home/End scroll \xB7 f follow (${source?.follow ? "on" : "off"})${toggle} \xB7 Tab/] [ agent \xB7 \u2190/Esc back \xB7 q close`;
+    const row = this.selectedRow();
+    const mode = row?.kind === "agent" ? this.modeOf(row) : undefined;
+    const parts = [];
+    if (mode !== "summary")
+      parts.push("\u2191\u2193 PgUp/PgDn Home/End scroll", `f follow (${this.source?.follow ? "on" : "off"})`);
+    if (mode)
+      parts.push(`v ${mode === "verbose" ? "summary" : "details"}`, `t ${mode === "transcript" ? "summary" : "transcript"}`);
+    parts.push("Tab/] [ agent", "\u2190/Esc back", "q close");
+    return parts.join(" \xB7 ");
   }
   treePane(width, height, now) {
-    const at = this.rows.findIndex((r) => r.key === this.selected);
-    if (at >= 0) {
-      if (at < this.treeTop)
-        this.treeTop = at;
-      if (at >= this.treeTop + height)
-        this.treeTop = at - height + 1;
-    }
-    this.treeTop = clamp(this.treeTop, 0, Math.max(0, this.rows.length - height));
-    const out = [];
-    for (const row of this.rows.slice(this.treeTop, this.treeTop + height)) {
-      const chosen = row.key === this.selected;
-      const plain = fit(`${chosen ? "\u203A" : " "} ${phaseRowText(row, now, width - 2)}`, width).padEnd(width);
-      out.push(chosen ? this.highlight(plain) : this.paint(styleOf(row), plain));
-    }
-    while (out.length < height)
-      out.push(" ".repeat(width));
-    return out;
-  }
-  detailHeader(now) {
-    const row = this.selectedRow();
-    const source = this.source;
-    if (!row)
-      return "nothing selected";
-    const follow = `follow ${source?.follow ? "on" : "off"}`;
-    switch (row.kind) {
-      case "agent": {
-        const a = row.agent;
-        const view = this.runList().find((r) => r.id === row.run.id)?.live.roles.find((r) => r.info.session === a.session);
-        const state = a.state === "running" && view ? `${view.state} ${duration(now - view.since)}${view.state === "thinking" && view.heading ? ` \xB7 "${view.heading}"` : ""}` : `${a.state} ${duration((a.end ?? now) - a.start)}`;
-        return `${a.label} (${a.role}) \xB7 ${a.model ?? "default model"}${a.effort ? `/${a.effort}` : ""} \xB7 ${state} \xB7 ${source?.kind ?? "events"} \xB7 ${follow}`;
-      }
-      case "sub":
-        return `${row.sub.name} \xB7 subagent of ${row.agent.label} \xB7 transcript \xB7 ${follow}`;
-      case "phase": {
-        const p = row.phase;
-        return `${p.marker} ${p.title} \xB7 ${duration((p.end ?? now) - p.start)} \xB7 journal`;
-      }
-      default:
-        return `run ${row.run.id} \xB7 ${row.run.status}`;
-    }
+    const { cells, top } = treeCells(this.rows, this.selected, now, width, height, this.treeTop);
+    this.treeTop = top;
+    return cells;
   }
   detailPane(width, height, now) {
-    const header = wrap([this.detailHeader(now)], width).slice(0, Math.max(1, height - 1));
-    const source = this.source;
-    const bodyHeight = Math.max(1, height - header.length);
-    this.bodyHeight = bodyHeight;
-    const raw = source?.lines ?? source?.buffer.lines() ?? [];
-    const version = source?.lines ? source.linesVersion : source?.buffer.version ?? 0;
-    const key = `${source?.key}:${width}:${version}`;
+    const row = this.selectedRow();
+    if (!row || height < 1)
+      return [];
+    const head = this.headOf(row, width, now);
+    if (row.kind === "agent" && this.modeOf(row) === "summary")
+      return [...head, ...this.summary(row, width, height - head.length, now)].slice(0, height);
+    const shown = head.slice(0, Math.max(1, height - 1));
+    const bodyHeight = Math.max(1, height - shown.length);
+    const body = this.bodyOf(row);
+    const key = `${body.key}:${width}`;
     if (this.wrapped?.key !== key)
-      this.wrapped = { key, lines: wrap(raw.length ? raw : [emptyText(source)], width) };
+      this.wrapped = { key, lines: wrap2(body.lines.length || this.source?.kind === "static" ? body.lines : [emptyText(this.source)], width) };
     const lines = this.wrapped.lines;
+    this.bodyHeight = bodyHeight;
+    this.bodyLength = lines.length;
     const max = Math.max(0, lines.length - bodyHeight);
-    const top = source?.follow ? max : clamp(source?.top ?? max, 0, max);
-    const out = [...header.map((h) => this.paint("accent", h)), ...lines.slice(top, top + bodyHeight)];
-    while (out.length < height)
-      out.push("");
-    return out;
+    const source = this.source;
+    const top = source?.follow ? max : clamp2(source?.top ?? max, 0, max);
+    return [...shown, ...lines.slice(top, top + bodyHeight).map((text) => ({ text, tone: "base" }))];
   }
-}
-function eventLines(line) {
-  if (!line.trim())
-    return [];
-  try {
-    return entryLines(JSON.parse(line)).map(clean);
-  } catch {
-    return [];
+  headOf(row, width, now) {
+    const tree = row.run;
+    let cells;
+    switch (row.kind) {
+      case "agent":
+        cells = agentHead(row.agent, now);
+        break;
+      case "sub":
+        cells = [{ text: `${row.sub.name} \xB7 subagent of ${row.agent.action}`, tone: "base" }];
+        break;
+      case "group": {
+        const all = groupDetail(tree, row.group, now, width);
+        const n = row.group.lines.length;
+        cells = all.slice(0, all.length - n);
+        break;
+      }
+      case "checks":
+        cells = checksDetail(row.group).slice(0, 2);
+        break;
+      case "run":
+        cells = runDetail(tree, this.factsOf(tree));
+        break;
+      default:
+        cells = [];
+    }
+    return cells.map((c) => ({ ...c, text: fit(c.text, width) }));
+  }
+  factsOf(tree) {
+    const run = this.runList().find((r) => r.id === tree.id);
+    const status = this.caches.get(tree.id)?.status?.data ?? {};
+    return {
+      ...typeof status.repo === "string" ? { repo: clean(status.repo) } : {},
+      ...run ? { dir: run.dir } : {},
+      ...tree.status === "failed" && typeof status.error === "string" ? { error: clean(status.error) } : {}
+    };
+  }
+  bodyOf(row) {
+    const source = this.source;
+    switch (row.kind) {
+      case "agent":
+      case "sub": {
+        if (source?.kind !== "events")
+          return { key: `${source?.key}:${source?.buffer.version}:${source?.polled}`, lines: source?.buffer.lines() ?? [] };
+        const lines = this.verboseLines(row);
+        return { key: `${this.verbose.key}:${source.polled}`, lines };
+      }
+      case "group":
+        return this.staticBody(row, row.group.lines);
+      case "checks":
+        return this.staticBody(row, row.group.checks?.lines ?? []);
+      case "run": {
+        const reply = this.runList().find((r) => r.id === row.run.id)?.reply;
+        return this.staticBody(row, reply === undefined ? [] : ["", ...clean(reply).split(`
+`)]);
+      }
+      default:
+        return { key: row.key, lines: [] };
+    }
+  }
+  staticBody(row, lines) {
+    return { key: `${row.key}:${lines.length}:${lines.at(-1) ?? ""}`, lines };
+  }
+  itemsOf(row) {
+    const items = this.source?.kind === "events" ? this.source.items : [];
+    const notes = row.agent.notes;
+    if (!notes.length)
+      return items;
+    return [...items, ...notes.map((n) => ({ t: n.t, kind: "note", text: n.text }))].sort((a, b) => (a.t ?? 0) - (b.t ?? 0));
+  }
+  verboseLines(row) {
+    const source = this.source;
+    const key = `${source.key}:${source.itemsVersion}:${row.agent.notes.length}`;
+    if (this.verbose?.key !== key) {
+      const lines = activityLines(this.itemsOf(row), row.agent.cwd, this.home);
+      this.verbose = { key, lines: source.skippedMb ? [`\u2026 first ${source.skippedMb} MB skipped`, ...lines] : lines };
+    }
+    return this.verbose.lines;
+  }
+  summary(row, width, height, now) {
+    if (height < 1)
+      return [];
+    const agent = row.agent;
+    const source = this.source;
+    const end = agentEnd(agent);
+    const live = agent.state === "running" ? this.liveRole(row.run.id, agent.session)?.now() : undefined;
+    const summary = summarise(this.itemsOf(row), now, { ...agent.cwd ? { cwd: agent.cwd } : {}, ...this.home ? { home: this.home } : {}, ...live ? { live } : {}, ...end ? { end } : {}, max: height });
+    const blank = { text: "", tone: "base" };
+    const cells = summaryCells(summary, width, height - 1);
+    if (!source?.polled && (source?.file || source?.dir))
+      cells.push({ text: "(reading \u2026)", tone: "muted" });
+    else if (!cells.length)
+      cells.push({ text: "(no events yet)", tone: "muted" });
+    return [blank, ...cells];
   }
 }
 function emptyText(source) {
@@ -4880,22 +5519,7 @@ function emptyText(source) {
     return "(reading \u2026)";
   if (source.kind === "events")
     return "(no events yet)";
-  if (source.kind === "transcript")
-    return source.file || source.dir ? "(no transcript yet)" : "(no transcript yet - the subagent has not written one)";
-  return "(nothing yet)";
-}
-function styleOf(row) {
-  if (row.kind === "group")
-    return "dim";
-  const state = row.kind === "agent" ? row.agent.state : undefined;
-  const marker = row.kind === "phase" ? row.phase.marker : state ? AGENT_MARKERS[state] : undefined;
-  if (marker === "\u25CF")
-    return "accent";
-  if (marker === "\u2717")
-    return "error";
-  if (marker === "\u2298" || marker === "\u2026")
-    return "muted";
-  return "text";
+  return source.file || source.dir ? "(no transcript yet)" : "(no transcript yet - the subagent has not written one)";
 }
 
 // src/adapters/runview/outline.ts
@@ -4921,11 +5545,39 @@ function runOutline(input, config) {
   };
 }
 
+// src/adapters/omp/watch.ts
+import { appendFileSync as appendFileSync2 } from "fs";
+
+class EventLog {
+  path;
+  now;
+  onError;
+  failed = false;
+  constructor(path, now, onError) {
+    this.path = path;
+    this.now = now;
+    this.onError = onError;
+  }
+  write(entry) {
+    if (this.failed)
+      return;
+    try {
+      appendFileSync2(this.path, JSON.stringify({ t: new Date(this.now()).toISOString(), ...entry }) + `
+`);
+    } catch (e) {
+      this.failed = true;
+      try {
+        this.onError(e);
+      } catch {}
+    }
+  }
+}
+
 // src/adapters/omp/extension.ts
 var SHARED = Symbol.for("granny-workflow.omp.state");
 var shared = globalThis[SHARED] ??= { runs: new Map };
 var { runs } = shared;
-var text = (t) => ({ content: [{ type: "text", text: t }] });
+var text2 = (t) => ({ content: [{ type: "text", text: t }] });
 var WAIT_DEFAULT_SECONDS = 1800;
 var WAIT_MAX_SECONDS = 7200;
 function waitSeconds(value) {
@@ -5157,10 +5809,10 @@ function registerChild(pi, spec) {
     loadMode: "essential",
     async execute(_id, params, _signal, _onUpdate, ctx) {
       if (ctx?.agent?.kind === "sub")
-        return text(SUBAGENT_SUBMIT);
+        return text2(SUBAGENT_SUBMIT);
       mkdirSync2(dirname(spec.out), { recursive: true });
       writeFileSync(spec.out, JSON.stringify(params));
-      return text("Recorded. You are done - stop now.");
+      return text2("Recorded. You are done - stop now.");
     }
   });
   pi.on("tool_call", async (event) => {
@@ -5441,9 +6093,9 @@ To wait in this turn, call granny_wait { runId: "${id}" }; otherwise end your tu
     loadMode: "essential",
     async execute(_id, params, _signal, _onUpdate, ctx) {
       try {
-        return text(startRun(dropPlaceholders(params), ctx));
+        return text2(startRun(dropPlaceholders(params), ctx));
       } catch (e) {
-        return text(`granny_run failed to start: ${e.message}`);
+        return text2(`granny_run failed to start: ${e.message}`);
       }
     }
   });
@@ -5461,13 +6113,13 @@ To wait in this turn, call granny_wait { runId: "${id}" }; otherwise end your tu
         const status = runStatus(runs, params.runId, params.repo);
         const dir = runDir(runs, params.runId, params.repo);
         const run = [...runs.values()].find((r) => r.dir === dir && r.status === "running");
-        return text(run ? `${status}
+        return text2(run ? `${status}
 
 live (this omp process):
 ${run.live.lines(Number.POSITIVE_INFINITY).join(`
 `)}` : status);
       } catch (e) {
-        return text(`granny_status failed: ${e.message}`);
+        return text2(`granny_status failed: ${e.message}`);
       }
     }
   });
@@ -5488,20 +6140,20 @@ ${run.live.lines(Number.POSITIVE_INFINITY).join(`
     async execute(_id, params, signal) {
       const run = runs.get(params.runId);
       if (!run) {
-        return text(`No granny run "${params.runId}" in this omp process. granny_wait waits only for a run started in this process - the run table is in memory; call granny_status({ repo }) to read a run's files.`);
+        return text2(`No granny run "${params.runId}" in this omp process. granny_wait waits only for a run started in this process - the run table is in memory; call granny_status({ repo }) to read a run's files.`);
       }
       if (run.reply !== undefined)
-        return text(run.reply);
+        return text2(run.reply);
       const stopped = `Stopped waiting; run ${run.id} is still running.`;
       if (signal?.aborted)
-        return text(stopped);
+        return text2(stopped);
       const seconds = waitSeconds(params.timeoutSeconds);
       return new Promise((resolve) => {
         const done = (reply) => {
           clearTimeout(timer);
           signal?.removeEventListener("abort", onAbort);
           run.waiters.delete(done);
-          resolve(text(reply));
+          resolve(text2(reply));
         };
         const onAbort = () => done(stopped);
         const timer = setTimeout(() => done(`Run ${run.id} is still running after ${seconds} s. Call granny_wait again to keep waiting, or end your turn - the finish message will start a new one.`), seconds * 1000);
@@ -5593,14 +6245,14 @@ ${run.live.lines(Number.POSITIVE_INFINITY).join(`
     async execute(_id, params) {
       const run = runs.get(params.runId);
       if (!run || run.status !== "running")
-        return text(`No running granny run "${params.runId}".`);
+        return text2(`No running granny run "${params.runId}".`);
       run.cancelled = true;
       run.abort.abort();
       for (const proc of run.children) {
         signalGroup(proc, "SIGTERM");
         setTimeout(() => run.children.has(proc) && signalGroup(proc, "SIGKILL"), killGraceMs).unref();
       }
-      return text(`Cancelling ${params.runId}; every running step is interrupted and nothing further starts.`);
+      return text2(`Cancelling ${params.runId}; every running step is interrupted and nothing further starts.`);
     }
   });
 };
