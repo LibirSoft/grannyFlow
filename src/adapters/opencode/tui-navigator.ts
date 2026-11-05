@@ -3,7 +3,7 @@
 // It reads only the hub's cached snapshots and opencode's in-memory session store.
 import { join } from 'node:path'
 import { clean, duration, pad, stamp } from '../runview/format'
-import { type AgentNode, AGENT_MARKERS, agentKey, nextAgent, type PhaseNode, type Row, rowText, runKey, type RunTree, visibleRows } from '../runview/tree'
+import { type AgentNode, AGENT_MARKERS, agentKey, nextAgent, type PhaseNode, type PhaseRow as Row, phaseRowText as rowText, runKey, type RunTree, phaseRows as visibleRows } from '../runview/tree'
 import { AGENT_TONES, type RunSnapshot, STATUS_TONES, type Tone } from './runwatch'
 import { attempt, type Cell } from './tui-view'
 

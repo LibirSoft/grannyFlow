@@ -8,7 +8,7 @@ import { duration, type LiveRun, type RoleActivity } from './panel'
 import { TailReader } from '../runview/tail'
 import { subagentFiles } from './subagents'
 import { LineBuffer, sessionEntryLines } from './transcript'
-import { AGENT_MARKERS, buildRunTree, type JournalEntry, nextAgent, type Row, rowText, runKey, type RunTree, visibleRows } from '../runview/tree'
+import { AGENT_MARKERS, buildRunTree, type JournalEntry, nextAgent, type PhaseRow as Row, phaseRowText as rowText, runKey, type RunTree, phaseRows as visibleRows } from '../runview/tree'
 import { entryLines, fit, type Logged } from './watch'
 
 export interface NavRun {

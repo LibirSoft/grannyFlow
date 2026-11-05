@@ -3,7 +3,7 @@ import { clock, fit, pad, shortArg, shortModel } from '../src/adapters/runview/f
 import { readOutline, runOutline } from '../src/adapters/runview/outline'
 import { resolveConfig } from '../src/core/config'
 import type { RunInput } from '../src/core/engine'
-import { buildRunTree, type JournalEntry, type LiveView, rowText, visibleRows } from '../src/adapters/runview/tree'
+import { buildRunTree, type JournalEntry, type LiveView, phaseRowText as rowText, phaseRows as visibleRows } from '../src/adapters/runview/tree'
 
 const BASE = Date.parse('2026-11-05T18:23:28.000Z')
 const S = 1000

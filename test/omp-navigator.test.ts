@@ -7,7 +7,7 @@ import { TailReader } from '../src/adapters/runview/tail'
 import { LineBuffer, sessionEntryLines } from '../src/adapters/omp/transcript'
 import { LiveRun, RoleActivity } from '../src/adapters/omp/panel'
 import { Navigator, type NavRun } from '../src/adapters/omp/navigator'
-import { buildRunTree, groupOf, type JournalEntry, nextAgent, rowText, visibleRows } from '../src/adapters/runview/tree'
+import { buildRunTree, type JournalEntry, nextAgent, phaseRowText as rowText, phaseRows as visibleRows } from '../src/adapters/runview/tree'
 import { subagentFiles } from '../src/adapters/omp/subagents'
 
 let tmp: string
@@ -343,20 +343,6 @@ const activity = (session: string, label: string, opts: { active: boolean; state
 
 const NOW = BASE + 500_000
 const listing = (rows: ReturnType<typeof visibleRows>, now = NOW, width?: number) => rows.map(r => rowText(r, now, width))
-
-describe('groupOf', () => {
-  it('groups review, judge, fix and extraction agents by subject and round, and implementers by stage', () => {
-    expect(groupOf('review one r1 terra')).toBe('one · round 1')
-    expect(groupOf('review plan review r2 terra #2')).toBe('plan review · round 2')
-    expect(groupOf('review final review r1 terra')).toBe('final review · round 1')
-    expect(groupOf('judge plan review r1 retry')).toBe('plan review · round 1')
-    expect(groupOf('fix one r3')).toBe('one · round 3')
-    expect(groupOf('extract one r1 codex')).toBe('one · round 1')
-    expect(groupOf('extract one r1 codex retry')).toBe('one · round 1')
-    expect(groupOf('implement stage two')).toBe('stage two')
-    for (const label of ['plan', 'pr-ready check', 'commit one fix r1', 'resolve merge one', 'review']) expect(groupOf(label)).toBeUndefined()
-  })
-})
 
 describe('buildRunTree / visibleRows', () => {
   it('lays out phases, groups, agents and subagents with markers and elapsed times', () => {

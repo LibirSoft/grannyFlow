@@ -3369,7 +3369,7 @@ var PAD2 = " ".repeat(10);
 var AGENT_MARKERS = { running: "\u25CF", waiting: "\u2026", done: "\u2713", failed: "\u2717", cancelled: "\u2298" };
 var GROUP = /^(?:review|judge|fix|extract)\s+(.+?)\s+r(\d+)\b/;
 var STAGE = /^implement (.+)$/;
-function groupOf(label) {
+function roundOf(label) {
   const round = GROUP.exec(label);
   if (round)
     return `${round[1]} \xB7 round ${round[2]}`;
@@ -3401,7 +3401,7 @@ function modelOf(model) {
     return;
   return `${providerID}/${id}${typeof variant === "string" && variant ? `#${variant}` : ""}`;
 }
-function buildRunTree(run, entries, live, now, files = new Map) {
+function buildRunTree(run, entries, live, now, files = new Map, outline) {
   const running = run.status === "running";
   const phases = [];
   const agents = [];
@@ -3460,13 +3460,18 @@ function buildRunTree(run, entries, live, now, files = new Map) {
           phase: phase.title,
           start: t,
           state: "waiting",
-          subagents: []
+          subagents: [],
+          action: clean(String(entry.label ?? "?")),
+          group: "",
+          ...typeof entry.cwd === "string" && entry.cwd ? { cwd: clean(entry.cwd) } : {},
+          notes: [],
+          ...typeof entry.linked === "boolean" ? { linked: entry.linked } : {}
         };
         agents.push(agent);
         bySession.set(agent.session, agent);
         phase.agentNodes.push(agent);
         phaseOf.set(agent, phase);
-        const name = groupOf(agent.label);
+        const name = roundOf(agent.label);
         const key = name ?? "";
         let group = phase.byGroup.get(key);
         if (!group) {
@@ -3575,21 +3580,464 @@ function buildRunTree(run, entries, live, now, files = new Map) {
       phase.marker = "\u2713";
     phase.lines = phase.entries.flat();
   });
-  return {
+  const tree = {
     id: run.id,
     status: run.status,
     start,
     ...end !== undefined ? { end } : {},
     ...phases.length ? { phase: phases.at(-1).title } : {},
+    ...run.branch ?? outline?.branch ? { branch: clean(run.branch ?? outline.branch) } : {},
+    ...outline ? { outline } : {},
     phases: phases.map(({ entries: _e, byGroup: _g, agentNodes: _a, ...phase }) => phase),
-    agents
+    agents,
+    groups: [],
+    steps: [],
+    running: []
   };
+  workGroups(tree, entries, now);
+  tree.steps = stepsFor(tree, focusStage(tree));
+  return tree;
+}
+var VERBS = ["resolve merge", "implement", "commit", "repair", "review", "judge", "fix", "extract"];
+var AT = "(?:implement|fix r\\d+|final)";
+var SHAPES = {
+  "resolve merge": /^$/,
+  implement: /^$/,
+  commit: new RegExp(`^${AT}(?: (#\\d+))?$`),
+  repair: new RegExp(`^${AT} (#\\d+)$`),
+  review: /^(r\d+) (\S+)((?: #\d+)?(?: wait \d+| read| stop)?)$/,
+  judge: /^(r\d+)((?: retry)?)$/,
+  fix: /^(r\d+)$/,
+  extract: /^(r\d+) (\S+)((?: retry)?)$/
+};
+function actionOf(verb, rest, reviewers) {
+  const m = SHAPES[verb].exec(rest);
+  if (!m)
+    return;
+  switch (verb) {
+    case "commit":
+    case "repair":
+      return m[1] ? `${verb} ${m[1]}` : verb;
+    case "review":
+      return `review ${m[1]}${reviewers === 1 ? "" : ` ${m[2]}`}${m[3]}`;
+    case "judge":
+      return `judge ${m[1]}${m[2]}`;
+    case "fix":
+      return `fix ${m[1]}`;
+    case "extract":
+      return `extract ${m[1]} ${m[2]}${m[3]}`;
+    default:
+      return verb;
+  }
+}
+var SUBJECTS = [
+  ["plan review", "plan-review"],
+  ["final review", "final-review"]
+];
+function placeOf(label, stages, reviewers, pick = (n) => n[0]) {
+  if (label === "plan")
+    return { group: "plan", action: "plan" };
+  if (label === "pr-ready check" || label.startsWith("pr-ready check "))
+    return { group: "pr-ready", action: label };
+  const subjects = [
+    ...SUBJECTS.map(([name, group]) => [name, group]),
+    ...[...new Set(stages.map((s) => s.name))].map((name) => [name, stages.filter((s) => s.name === name).map((s) => s.number).sort((a, b) => a - b)])
+  ].sort((a, b) => b[0].length - a[0].length);
+  for (const verb of VERBS) {
+    if (!label.startsWith(`${verb} `))
+      continue;
+    const tail = label.slice(verb.length + 1);
+    for (const [name, target] of subjects) {
+      if (tail !== name && !tail.startsWith(`${name} `))
+        continue;
+      const rest = tail.slice(name.length + 1);
+      if (typeof target === "string") {
+        const action = actionOf(verb, rest, reviewers) ?? (target === "final-review" ? actionOf(verb, rest.replace(/^\S+ /, ""), reviewers) : undefined);
+        if (action)
+          return { group: target, action };
+        continue;
+      }
+      const action = actionOf(verb, rest, reviewers);
+      if (action)
+        return { group: `stage:${pick(target)}`, action };
+    }
+  }
+  return;
+}
+var FIXED_GROUPS = { plan: "Plan", "plan-review": "Plan review", "final-review": "Final review", "pr-ready": "PR ready" };
+var PHASE_GROUPS = { Plan: "plan", "Plan review": "plan-review", "Final review": "final-review", "PR ready": "pr-ready" };
+var DONE_OUTCOMES = new Set(["clean", "residual-only", "review-skipped"]);
+var MAX_GROUP_LINES = 200;
+var BUSY = new Set(["running", "waiting"]);
+var rankOf = (key, number) => key === "plan" ? 0 : key === "plan-review" ? 1 : number !== undefined ? 2 + number / 1e6 : key === "final-review" ? 3 : key === "pr-ready" ? 4 : 5;
+var stageNumber = (key) => key.startsWith("stage:") ? Number(key.slice("stage:".length)) : undefined;
+function stageNames(entries, outline) {
+  const names = new Map;
+  for (const st of outline?.stages ?? [])
+    names.set(st.number, st.name);
+  for (const e of entries)
+    if (e.type === "stage" && typeof e.number === "number" && typeof e.name === "string" && !names.has(e.number))
+      names.set(e.number, clean(e.name));
+  if (!names.size) {
+    for (const e of entries) {
+      const m = e.type === "agent" ? STAGE.exec(clean(String(e.label ?? ""))) : null;
+      if (m && ![...names.values()].includes(m[1]))
+        names.set(names.size + 1, m[1]);
+    }
+  }
+  return [...names].map(([number, name]) => ({ number, name })).sort((a, b) => a.number - b.number);
+}
+function workGroups(tree, entries, now) {
+  const { outline } = tree;
+  const stages = stageNames(entries, outline);
+  const reviewers = outline?.reviewers.length;
+  const groups = new Map;
+  const ensure = (key, number) => {
+    let g = groups.get(key);
+    if (!g) {
+      const title = number !== undefined ? stages.find((s) => s.number === number)?.name ?? `stage ${number}` : FIXED_GROUPS[key] ?? key.slice("other:".length);
+      g = { key, title, ...number !== undefined ? { number } : {}, state: "upcoming", agents: [], lines: [] };
+      groups.set(key, g);
+    }
+    return g;
+  };
+  if (outline?.kind === "plan")
+    ensure("plan");
+  if (outline?.planReview)
+    ensure("plan-review");
+  for (const st of stages)
+    ensure(`stage:${st.number}`, st.number);
+  if (outline?.finalReview)
+    ensure("final-review");
+  if (outline?.kind === "implement")
+    ensure("pr-ready");
+  const marks = new Map;
+  const reached = new Set;
+  const pendingLinks = new Map;
+  const lastChecks = new Map;
+  const byLabel = (label) => lastOf(tree.agents, (a) => a.label === label);
+  const runningNow = () => [...marks].filter(([, m]) => m.start !== undefined && m.end === undefined).map(([n]) => n);
+  const pick = (numbers) => numbers.find((n) => marks.get(n)?.end === undefined) ?? numbers[0];
+  const timed = new Map;
+  const push = (g, t, text) => {
+    const list = timed.get(g) ?? [];
+    list.push({ t: t ?? Number.POSITIVE_INFINITY, lines: at(t, text) });
+    if (list.length > MAX_GROUP_LINES)
+      list.shift();
+    timed.set(g, list);
+  };
+  const note = (agent, t, text) => {
+    if (agent)
+      agent.notes.push({ t, text: clean(text) });
+  };
+  const logGroup = (message) => {
+    const named = [...stages].sort((a, b) => b.name.length - a.name.length);
+    for (const st of named) {
+      if (message.startsWith(`${st.name}:`) || new RegExp(`^${escapeRe(st.name)} r\\d+\\b`).test(message)) {
+        const numbers = stages.filter((s) => s.name === st.name).map((s) => s.number);
+        const n = pick(numbers);
+        return { group: ensure(`stage:${n}`, n), rest: message.slice(st.name.length).replace(/^:\s*/, "") };
+      }
+    }
+    if (message.startsWith("plan review"))
+      return { group: ensure("plan-review"), rest: message };
+    if (message.startsWith("final review"))
+      return { group: ensure("final-review"), rest: message };
+    if (message.startsWith("plan:"))
+      return { group: ensure("plan"), rest: message };
+    if (message.startsWith("pr-ready check"))
+      return { group: ensure("pr-ready"), rest: message };
+    return;
+  };
+  let agentIndex = 0;
+  let lastTime = tree.start;
+  for (const entry of entries) {
+    const t = (entry.t ? Date.parse(entry.t) : Number.NaN) || lastTime;
+    lastTime = Math.max(lastTime, t);
+    switch (entry.type) {
+      case "stage": {
+        const n = Number(entry.number);
+        if (!Number.isInteger(n))
+          break;
+        const mark = marks.get(n) ?? {};
+        if (entry.event === "start")
+          mark.start = t;
+        else if (entry.event === "end") {
+          mark.end = t;
+          if (typeof entry.outcome === "string")
+            mark.outcome = clean(entry.outcome);
+        }
+        marks.set(n, mark);
+        ensure(`stage:${n}`, n);
+        break;
+      }
+      case "phase": {
+        const title = String(entry.title ?? "");
+        const key = PHASE_GROUPS[title];
+        if (key) {
+          reached.add(key);
+          const g = ensure(key);
+          g.start ??= t;
+        }
+        if (title === "Checks") {
+          const run = runningNow();
+          const n = run.length === 1 ? run[0] : !marks.size ? stageNumber(lastOf(tree.agents.slice(0, agentIndex), (a) => a.group.startsWith("stage:"))?.group ?? "") : undefined;
+          if (n !== undefined) {
+            const g = ensure(`stage:${n}`, n);
+            g.checks = { state: "running", failed: [], lines: g.checks?.lines ?? [], t };
+            lastChecks.set(n, { kind: "other" });
+          }
+        }
+        break;
+      }
+      case "agent": {
+        const agent = tree.agents[agentIndex++];
+        if (!agent)
+          break;
+        const placed = placeOf(agent.label, stages, reviewers, pick);
+        const run = runningNow();
+        const group = placed?.group ?? (run.length === 1 ? `stage:${run[0]}` : `other:${agent.phase}`);
+        agent.group = group;
+        agent.action = placed?.action ?? agent.label;
+        const g = ensure(group, stageNumber(group));
+        g.agents.push(agent);
+        push(g, agent.start, `\u25B8 ${agent.action} started`);
+        for (const n of pendingLinks.get(agent.label) ?? [])
+          agent.notes.push(n);
+        pendingLinks.delete(agent.label);
+        break;
+      }
+      case "retry":
+        note(byLabel(clean(String(entry.label ?? ""))), t, `\u21BB retry ${entry.attempt}: ${String(entry.reason ?? "").split(`
+`)[0]}`);
+        break;
+      case "provider-error":
+        note(byLabel(clean(String(entry.label ?? ""))), t, `! provider error${entry.backoffMs !== undefined ? ` (retry in ${duration(Number(entry.backoffMs))})` : ""}: ${String(entry.error?.message ?? entry.error ?? "").split(`
+`)[0]}`);
+        break;
+      case "agent-failed":
+        note(tree.agents.find((a) => a.session === String(entry.session)), t, `\u2717 failed${typeof entry.error === "string" ? `: ${entry.error.split(`
+`)[0]}` : ""}`);
+        break;
+      case "link-failed": {
+        const label = clean(String(entry.label ?? ""));
+        const list = pendingLinks.get(label) ?? [];
+        list.push({ t, text: clean(`! not linked to the parent session: ${String(entry.error ?? "").split(`
+`)[0]}`) });
+        pendingLinks.set(label, list);
+        break;
+      }
+      case "log": {
+        const message = clean(String(entry.message ?? ""));
+        const found = logGroup(message);
+        if (!found)
+          break;
+        const { group: g } = found;
+        push(g, t, message);
+        if (g.number === undefined)
+          break;
+        const n = g.number;
+        const name = escapeRe(stages.find((s) => s.number === n)?.name ?? "");
+        const green = new RegExp(`^${name}: checks green`).test(message);
+        const failedCheck = new RegExp(`^${name}: check (.+?) failed \\(`).exec(message);
+        const gaveUp = new RegExp(`^${name}: checks-failed - `).test(message);
+        if (!green && !failedCheck && !gaveUp && !new RegExp(`^${name}: .*\\bcheck`).test(message))
+          break;
+        const lines = [...g.checks?.lines ?? [], ...at(t, message)];
+        if (green) {
+          g.checks = { state: "passed", failed: [], lines, t };
+          lastChecks.set(n, { kind: "other" });
+        } else if (failedCheck) {
+          const batch = lastChecks.get(n)?.kind === "batch" && g.checks?.state === "failed";
+          g.checks = { state: "failed", failed: batch ? [...g.checks.failed, failedCheck[1]] : [failedCheck[1]], lines, t };
+          lastChecks.set(n, { kind: "batch" });
+        } else if (gaveUp) {
+          g.checks = { state: "failed", failed: g.checks?.state === "failed" ? g.checks.failed : [], lines, t };
+          lastChecks.set(n, { kind: "other" });
+        } else if (g.checks)
+          g.checks.lines = lines;
+        else
+          g.checks = undefined;
+        break;
+      }
+    }
+  }
+  const { status } = tree;
+  const ended = status === "failed" || status === "cancelled";
+  const lastPhase = tree.phases.at(-1)?.title;
+  const currentKey = lastPhase ? PHASE_GROUPS[lastPhase] : undefined;
+  const list = [...groups.values()].sort((a, b) => rankOf(a.key, a.number) - rankOf(b.key, b.number));
+  for (const g of list) {
+    for (const a of g.agents)
+      if (a.state !== "running" && a.state !== "waiting")
+        push(g, a.end, `\u25A0 ${a.action} ${a.state}${a.end === undefined ? "" : ` ${duration(a.end - a.start)}`}`);
+    g.lines = (timed.get(g) ?? []).sort((x, y) => x.t - y.t).flatMap((e) => e.lines);
+    const busy = g.agents.some((a) => BUSY.has(a.state));
+    const starts = g.agents.map((a) => a.start);
+    const ends = g.agents.map((a) => a.end).filter((e) => e !== undefined);
+    if (g.number !== undefined) {
+      const mark = marks.get(g.number);
+      if (outline && g.number < outline.fromStage) {
+        g.state = "skipped";
+        g.note = `resumed from stage ${outline.fromStage}`;
+      } else if (mark?.end !== undefined) {
+        g.outcome = mark.outcome;
+        g.state = mark.outcome === "skipped" ? "skipped" : DONE_OUTCOMES.has(mark.outcome ?? "clean") ? "done" : "failed";
+        if (g.state === "done" || g.state === "skipped")
+          delete g.outcome;
+        if (mark.start !== undefined)
+          g.start = mark.start;
+        if (mark.start !== undefined || g.state !== "skipped")
+          g.end = mark.end;
+      } else if (mark?.start !== undefined) {
+        g.state = "running";
+        g.start = mark.start;
+      } else if (g.agents.length) {
+        g.state = busy ? "running" : "done";
+        g.start = Math.min(...starts);
+        if (!busy && ends.length)
+          g.end = Math.max(...ends);
+      }
+    } else {
+      const phases = tree.phases.filter((p) => PHASE_GROUPS[p.title] === g.key);
+      const was = reached.has(g.key) || g.agents.length > 0;
+      if (was) {
+        g.start = Math.min(...[...phases.map((p) => p.start), ...starts]);
+        const last = phases.at(-1);
+        const end = Math.max(...[...last?.end !== undefined ? [last.end] : [], ...ends]);
+        g.state = busy || status === "running" && currentKey === g.key ? "running" : "done";
+        if (g.state === "done" && Number.isFinite(end))
+          g.end = end;
+      }
+    }
+    if (g.state === "running" && ended) {
+      g.state = status === "cancelled" ? "cancelled" : "failed";
+      g.end ??= tree.end;
+    }
+    if (g.state === "running" && status === "done") {
+      g.state = "done";
+      g.end ??= tree.end;
+    }
+    if (g.checks && g.checks.state === "running" && g.state !== "running")
+      delete g.checks;
+    if (g.checks) {
+      const t = g.checks.t;
+      const after = lastOf(g.agents, (a) => a.end !== undefined && a.end <= t) ?? lastOf(g.agents, (a) => a.start <= t);
+      if (after)
+        g.checks.after = after;
+    }
+  }
+  if (ended && !list.some((g) => g.state === "failed" || g.state === "cancelled")) {
+    const last = lastOf(list, (g) => g.state === "done" && g.number === undefined && g.key === currentKey);
+    if (last)
+      last.state = status === "cancelled" ? "cancelled" : "failed";
+  }
+  tree.groups = list;
+  tree.running = list.filter((g) => g.number !== undefined && g.state === "running").sort((a, b) => (a.start ?? now) - (b.start ?? now)).map((g) => g.number);
+}
+var escapeRe = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+function focusStage(tree, selectedKey) {
+  if (selectedKey) {
+    const groupKey = selectedKey.startsWith(`group:${tree.id}:`) ? selectedKey.slice(`group:${tree.id}:`.length) : undefined;
+    const checks = selectedKey.startsWith(`checks:${tree.id}:`) ? Number(selectedKey.slice(`checks:${tree.id}:`.length)) : undefined;
+    const session = selectedKey.startsWith("agent:") ? selectedKey.slice("agent:".length) : selectedKey.startsWith("sub:") ? selectedKey.slice("sub:".length, selectedKey.lastIndexOf(":")) : undefined;
+    const agent = session !== undefined ? tree.agents.find((a) => a.session === session) : undefined;
+    const n = groupKey ? stageNumber(groupKey) : checks !== undefined && Number.isInteger(checks) ? checks : agent ? stageNumber(agent.group) : undefined;
+    if (n !== undefined && tree.groups.some((g) => g.number === n))
+      return n;
+  }
+  if (tree.running.length)
+    return tree.running.at(-1);
+  const started = tree.groups.filter((g) => g.number !== undefined && g.start !== undefined).sort((a, b) => a.start - b.start);
+  return started.at(-1)?.number;
+}
+var ORDER = { Worktree: 0, Plan: 1, "Plan review": 2, Implement: 3, Checks: 3, Review: 3, "Final review": 4, "PR ready": 5 };
+var REVIEWING = /^(review|judge|fix|extract) /;
+var IMPLEMENTING = /^implement$/;
+var FAILED_STEP = { "checks-failed": "Checks", "round-cap": "Review", "review-failed": "Review", "no-changes": "Implement", "gates-red": "Implement" };
+function stepsFor(tree, focus) {
+  const { outline, status } = tree;
+  const titles = tree.phases.map((p) => p.title);
+  const seen = new Set(titles);
+  if (!outline) {
+    const unique = [...new Set(titles)];
+    return unique.map((title, i) => ({
+      title,
+      state: i < unique.length - 1 ? "done" : status === "running" ? "current" : status === "failed" ? "failed" : status === "cancelled" ? "skipped" : "done"
+    }));
+  }
+  const firstStage = outline.stages.find((s) => s.number >= outline.fromStage) ?? outline.stages[0];
+  const stage = outline.stages.find((s) => s.number === focus) ?? firstStage;
+  const group = tree.groups.find((g) => g.number === (focus ?? -1));
+  const run = [];
+  if (outline.worktree || seen.has("Worktree"))
+    run.push("Worktree");
+  if (outline.kind === "plan") {
+    run.push("Plan");
+    if (outline.planReview || seen.has("Plan review"))
+      run.push("Plan review");
+  } else {
+    if (outline.planReview || seen.has("Plan review"))
+      run.push("Plan review");
+    if (stage?.implement !== false)
+      run.push("Implement");
+    if (stage?.checks || group?.checks)
+      run.push("Checks");
+    if (stage?.review !== false)
+      run.push("Review");
+    if (outline.finalReview || seen.has("Final review"))
+      run.push("Final review");
+    run.push("PR ready");
+  }
+  const latest = titles.length ? ORDER[titles.at(-1)] ?? -1 : -1;
+  const end = status === "failed" ? "failed" : status === "cancelled" ? "skipped" : status === "running" ? "current" : "done";
+  const stageSteps = run.filter((t) => ORDER[t] === 3);
+  const stageStates = stageStepStates(stageSteps, group, latest, end);
+  return run.map((title) => {
+    const o = ORDER[title];
+    if (o === 3)
+      return { title, state: stageStates.get(title) ?? "upcoming" };
+    return { title, state: o < latest ? "done" : o === latest ? end : "upcoming" };
+  });
+}
+function stageStepStates(steps, group, latest, end) {
+  const out = new Map;
+  const all = (state) => steps.forEach((s) => out.set(s, state));
+  if (!group || group.state === "upcoming" || latest < 3) {
+    all(latest > 3 && group?.state !== "upcoming" ? "done" : "upcoming");
+    return out;
+  }
+  if (group.state === "skipped")
+    return all("skipped"), out;
+  if (group.state === "done")
+    return all("done"), out;
+  let at;
+  let state;
+  if (group.state === "failed" && group.outcome) {
+    at = FAILED_STEP[group.outcome] ?? steps.at(-1);
+    state = "failed";
+  } else {
+    const reviewing = group.agents.some((a) => REVIEWING.test(`${a.action} `));
+    const implemented = group.agents.some((a) => IMPLEMENTING.test(a.action) && a.end !== undefined);
+    at = reviewing ? "Review" : group.checks || implemented ? "Checks" : "Implement";
+    state = group.state === "running" ? "current" : group.state === "cancelled" ? "skipped" : group.state === "failed" ? "failed" : end;
+  }
+  const order = ["Implement", "Checks", "Review"];
+  let index = steps.indexOf(at);
+  if (index < 0) {
+    const want = order.indexOf(at);
+    index = steps.findIndex((s) => order.indexOf(s) > want);
+    if (index < 0)
+      index = steps.length - 1;
+  }
+  steps.forEach((s, i) => out.set(s, i < index ? "done" : i === index ? state : "upcoming"));
+  return out;
 }
 var runKey = (id) => `run:${id}`;
 var phaseKey = (id, index) => `phase:${id}:${index}`;
 var agentKey = (session) => `agent:${session}`;
 var subKey = (session, name) => `sub:${session}:${name}`;
-function visibleRows(runs, folded, expandedRun) {
+function phaseRows(runs, folded, expandedRun) {
   const rows = [];
   for (const run of runs) {
     const rk = runKey(run.id);
@@ -3627,7 +4075,7 @@ function nextAgent(rows, key, dir) {
   return;
 }
 var elapsed = (start, end, now) => duration((end ?? now) - start);
-function rowText(row, now, width = Number.POSITIVE_INFINITY) {
+function phaseRowText(row, now, width = Number.POSITIVE_INFINITY) {
   const indent = "  ".repeat(row.depth);
   switch (row.kind) {
     case "run": {
@@ -3979,7 +4427,7 @@ class Navigator {
     this.relayout();
   }
   relayout() {
-    this.rows = visibleRows(this.trees, this.folded, this.expanded);
+    this.rows = phaseRows(this.trees, this.folded, this.expanded);
     for (const row of this.rows)
       if (row.parent)
         this.parents.set(row.key, row.parent);
@@ -4301,7 +4749,7 @@ class Navigator {
     const out = [];
     for (const row of this.rows.slice(this.treeTop, this.treeTop + height)) {
       const chosen = row.key === this.selected;
-      const plain = fit(`${chosen ? "\u203A" : " "} ${rowText(row, now, width - 2)}`, width).padEnd(width);
+      const plain = fit(`${chosen ? "\u203A" : " "} ${phaseRowText(row, now, width - 2)}`, width).padEnd(width);
       out.push(chosen ? this.highlight(plain) : this.paint(styleOf(row), plain));
     }
     while (out.length < height)

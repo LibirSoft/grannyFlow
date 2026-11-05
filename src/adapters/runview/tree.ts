@@ -1,6 +1,8 @@
-// A granny run as a tree: phases, round/stage groups, agents and their task subagents, built from the
-// run's journal entries with what the host knows live about each role laid over them.
-import { clean, clock, duration } from './format'
+// A granny run as a tree, built from the run's journal entries with what the host knows live about each
+// role laid over them: work groups (plan, plan review, each stage, final review, PR ready) with their agents,
+// checks and task subagents, the stepper of the run's steps, and the older phase tree.
+import { clean, clock, duration, fit } from './format'
+import type { RunOutline } from './outline'
 
 export interface JournalEntry {
   t?: string
@@ -25,6 +27,11 @@ export interface SubagentNode {
   path?: string
 }
 
+export interface AgentNote {
+  t: number
+  text: string
+}
+
 export interface AgentNode {
   label: string
   role: string
@@ -38,6 +45,14 @@ export interface AgentNode {
   activity?: string
   error?: string
   subagents: SubagentNode[]
+  /** The label without its subject: `implement`, `review r1`, `commit #2`. */
+  action: string
+  /** The key of the work group it belongs to. */
+  group: string
+  cwd?: string
+  /** Its retries, provider errors, failure and failed link, from the journal. */
+  notes: AgentNote[]
+  linked?: boolean
 }
 
 export interface GroupNode {
@@ -62,6 +77,40 @@ export interface RunInfo {
   startedAt?: number
   endedAt?: number
   reply?: string
+  branch?: string
+}
+
+export type GroupState = 'upcoming' | 'running' | 'done' | 'failed' | 'skipped' | 'cancelled'
+
+export interface ChecksNode {
+  state: 'running' | 'passed' | 'failed'
+  failed: string[]
+  lines: string[]
+  /** The agent the checks ran after; the checks row follows it. */
+  after?: AgentNode
+  t: number
+}
+
+export interface WorkGroup {
+  /** `plan`, `plan-review`, `stage:<n>`, `final-review`, `pr-ready` or `other:<phase>`. */
+  key: string
+  title: string
+  number?: number
+  state: GroupState
+  outcome?: string
+  note?: string
+  start?: number
+  end?: number
+  agents: AgentNode[]
+  checks?: ChecksNode
+  lines: string[]
+}
+
+export type StepState = 'done' | 'current' | 'upcoming' | 'failed' | 'skipped'
+
+export interface Step {
+  title: string
+  state: StepState
 }
 
 export interface RunTree {
@@ -70,16 +119,23 @@ export interface RunTree {
   start: number
   end?: number
   phase?: string
+  branch?: string
+  outline?: RunOutline
   phases: PhaseNode[]
   /** Every agent, in start order. */
   agents: AgentNode[]
+  groups: WorkGroup[]
+  /** The stepper for the focus stage. */
+  steps: Step[]
+  /** The numbers of the stages running now, oldest start first. */
+  running: number[]
 }
 
-export type RowKind = 'run' | 'phase' | 'group' | 'agent' | 'sub'
+export type PhaseRowKind = 'run' | 'phase' | 'group' | 'agent' | 'sub'
 
-export interface Row {
+export interface PhaseRow {
   key: string
-  kind: RowKind
+  kind: PhaseRowKind
   depth: number
   selectable: boolean
   run: RunTree
@@ -101,8 +157,7 @@ export const AGENT_MARKERS: Record<AgentState, string> = { running: '●', waiti
 const GROUP = /^(?:review|judge|fix|extract)\s+(.+?)\s+r(\d+)\b/
 const STAGE = /^implement (.+)$/
 
-/** The round or stage group an agent label belongs to, if any. */
-export function groupOf(label: string): string | undefined {
+function roundOf(label: string): string | undefined {
   const round = GROUP.exec(label)
   if (round) return `${round[1]} · round ${round[2]}`
   return STAGE.exec(label)?.[1]
@@ -147,6 +202,7 @@ export function buildRunTree(
   live: ReadonlyMap<string, LiveView>,
   now: number,
   files: ReadonlyMap<string, ReadonlyMap<string, string>> = new Map(),
+  outline?: RunOutline,
 ): RunTree {
   const running = run.status === 'running'
   const phases: PhaseBuild[] = []
@@ -206,12 +262,17 @@ export function buildRunTree(
           start: t,
           state: 'waiting',
           subagents: [],
+          action: clean(String(entry.label ?? '?')),
+          group: '',
+          ...(typeof entry.cwd === 'string' && entry.cwd ? { cwd: clean(entry.cwd) } : {}),
+          notes: [],
+          ...(typeof entry.linked === 'boolean' ? { linked: entry.linked } : {}),
         }
         agents.push(agent)
         bySession.set(agent.session, agent)
         phase.agentNodes.push(agent)
         phaseOf.set(agent, phase)
-        const name = groupOf(agent.label)
+        const name = roundOf(agent.label)
         const key = name ?? ''
         let group = phase.byGroup.get(key)
         if (!group) {
@@ -305,14 +366,578 @@ export function buildRunTree(
     phase.lines = phase.entries.flat()
   })
 
-  return {
+  const tree: RunTree = {
     id: run.id,
     status: run.status,
     start,
     ...(end !== undefined ? { end } : {}),
     ...(phases.length ? { phase: phases.at(-1)!.title } : {}),
+    ...(run.branch ?? outline?.branch ? { branch: clean(run.branch ?? outline!.branch) } : {}),
+    ...(outline ? { outline } : {}),
     phases: phases.map(({ entries: _e, byGroup: _g, agentNodes: _a, ...phase }) => phase),
     agents,
+    groups: [],
+    steps: [],
+    running: [],
+  }
+  workGroups(tree, entries, now)
+  tree.steps = stepsFor(tree, focusStage(tree))
+  return tree
+}
+
+// --- work groups ----------------------------------------------------------------------------------
+
+export interface StageName {
+  number: number
+  name: string
+}
+
+export interface Placement {
+  group: string
+  action: string
+}
+
+const VERBS = ['resolve merge', 'implement', 'commit', 'repair', 'review', 'judge', 'fix', 'extract'] as const
+type Verb = (typeof VERBS)[number]
+const AT = '(?:implement|fix r\\d+|final)'
+const SHAPES: Record<Verb, RegExp> = {
+  'resolve merge': /^$/,
+  implement: /^$/,
+  commit: new RegExp(`^${AT}(?: (#\\d+))?$`),
+  repair: new RegExp(`^${AT} (#\\d+)$`),
+  review: /^(r\d+) (\S+)((?: #\d+)?(?: wait \d+| read| stop)?)$/,
+  judge: /^(r\d+)((?: retry)?)$/,
+  fix: /^(r\d+)$/,
+  extract: /^(r\d+) (\S+)((?: retry)?)$/,
+}
+
+function actionOf(verb: Verb, rest: string, reviewers: number | undefined): string | undefined {
+  const m = SHAPES[verb].exec(rest)
+  if (!m) return undefined
+  switch (verb) {
+    case 'commit':
+    case 'repair':
+      return m[1] ? `${verb} ${m[1]}` : verb
+    case 'review':
+      return `review ${m[1]}${reviewers === 1 ? '' : ` ${m[2]}`}${m[3]}`
+    case 'judge':
+      return `judge ${m[1]}${m[2]}`
+    case 'fix':
+      return `fix ${m[1]}`
+    case 'extract':
+      return `extract ${m[1]} ${m[2]}${m[3]}`
+    default:
+      return verb
+  }
+}
+
+const SUBJECTS: Array<[string, string]> = [
+  ['plan review', 'plan-review'],
+  ['final review', 'final-review'],
+]
+
+/**
+ * The work group of an agent label and its action without the subject. `stages` are matched longest name
+ * first; `pick` chooses among stages that share a name. `reviewers` drops the reviewer from `review r1 <name>`
+ * when the run has exactly one.
+ */
+export function placeOf(label: string, stages: readonly StageName[], reviewers?: number, pick: (numbers: number[]) => number = n => n[0]!): Placement | undefined {
+  if (label === 'plan') return { group: 'plan', action: 'plan' }
+  if (label === 'pr-ready check' || label.startsWith('pr-ready check ')) return { group: 'pr-ready', action: label }
+  const subjects: Array<[string, string | number[]]> = [
+    ...SUBJECTS.map(([name, group]): [string, string] => [name, group]),
+    ...[...new Set(stages.map(s => s.name))].map((name): [string, number[]] => [name, stages.filter(s => s.name === name).map(s => s.number).sort((a, b) => a - b)]),
+  ].sort((a, b) => b[0].length - a[0].length)
+  for (const verb of VERBS) {
+    if (!label.startsWith(`${verb} `)) continue
+    const tail = label.slice(verb.length + 1)
+    for (const [name, target] of subjects) {
+      if (tail !== name && !tail.startsWith(`${name} `)) continue
+      const rest = tail.slice(name.length + 1)
+      if (typeof target === 'string') {
+        const action = actionOf(verb, rest, reviewers) ?? (target === 'final-review' ? actionOf(verb, rest.replace(/^\S+ /, ''), reviewers) : undefined)
+        if (action) return { group: target, action }
+        continue
+      }
+      const action = actionOf(verb, rest, reviewers)
+      if (action) return { group: `stage:${pick(target)}`, action }
+    }
+  }
+  return undefined
+}
+
+const FIXED_GROUPS: Record<string, string> = { plan: 'Plan', 'plan-review': 'Plan review', 'final-review': 'Final review', 'pr-ready': 'PR ready' }
+const PHASE_GROUPS: Record<string, string> = { Plan: 'plan', 'Plan review': 'plan-review', 'Final review': 'final-review', 'PR ready': 'pr-ready' }
+const DONE_OUTCOMES = new Set(['clean', 'residual-only', 'review-skipped'])
+const MAX_GROUP_LINES = 200
+const BUSY = new Set<AgentState>(['running', 'waiting'])
+
+const rankOf = (key: string, number?: number) =>
+  key === 'plan' ? 0 : key === 'plan-review' ? 1 : number !== undefined ? 2 + number / 1e6 : key === 'final-review' ? 3 : key === 'pr-ready' ? 4 : 5
+
+const stageNumber = (key: string) => (key.startsWith('stage:') ? Number(key.slice('stage:'.length)) : undefined)
+
+/** The stage names of a run: its outline's and its `stage` entries', else those its `implement <name>` labels give. */
+function stageNames(entries: readonly JournalEntry[], outline?: RunOutline): StageName[] {
+  const names = new Map<number, string>()
+  for (const st of outline?.stages ?? []) names.set(st.number, st.name)
+  for (const e of entries) if (e.type === 'stage' && typeof e.number === 'number' && typeof e.name === 'string' && !names.has(e.number)) names.set(e.number, clean(e.name))
+  if (!names.size) {
+    for (const e of entries) {
+      const m = e.type === 'agent' ? STAGE.exec(clean(String(e.label ?? ''))) : null
+      if (m && ![...names.values()].includes(m[1]!)) names.set(names.size + 1, m[1]!)
+    }
+  }
+  return [...names].map(([number, name]) => ({ number, name })).sort((a, b) => a.number - b.number)
+}
+
+interface StageMark {
+  start?: number
+  end?: number
+  outcome?: string
+}
+
+interface ChecksEvent {
+  kind: 'batch' | 'other'
+}
+
+function workGroups(tree: RunTree, entries: readonly JournalEntry[], now: number) {
+  const { outline } = tree
+  const stages = stageNames(entries, outline)
+  const reviewers = outline?.reviewers.length
+  const groups = new Map<string, WorkGroup>()
+  const ensure = (key: string, number?: number): WorkGroup => {
+    let g = groups.get(key)
+    if (!g) {
+      const title = number !== undefined ? (stages.find(s => s.number === number)?.name ?? `stage ${number}`) : (FIXED_GROUPS[key] ?? key.slice('other:'.length))
+      g = { key, title, ...(number !== undefined ? { number } : {}), state: 'upcoming', agents: [], lines: [] }
+      groups.set(key, g)
+    }
+    return g
+  }
+  if (outline?.kind === 'plan') ensure('plan')
+  if (outline?.planReview) ensure('plan-review')
+  for (const st of stages) ensure(`stage:${st.number}`, st.number)
+  if (outline?.finalReview) ensure('final-review')
+  if (outline?.kind === 'implement') ensure('pr-ready')
+
+  const marks = new Map<number, StageMark>()
+  const reached = new Set<string>()
+  const pendingLinks = new Map<string, AgentNote[]>()
+  const lastChecks = new Map<number, ChecksEvent>()
+  const byLabel = (label: string) => lastOf(tree.agents, a => a.label === label)
+  const runningNow = () => [...marks].filter(([, m]) => m.start !== undefined && m.end === undefined).map(([n]) => n)
+  const pick = (numbers: number[]) => numbers.find(n => marks.get(n)?.end === undefined) ?? numbers[0]!
+  const timed = new Map<WorkGroup, Array<{ t: number; lines: string[] }>>()
+  const push = (g: WorkGroup, t: number | undefined, text: string) => {
+    const list = timed.get(g) ?? []
+    list.push({ t: t ?? Number.POSITIVE_INFINITY, lines: at(t, text) })
+    if (list.length > MAX_GROUP_LINES) list.shift()
+    timed.set(g, list)
+  }
+  const note = (agent: AgentNode | undefined, t: number, text: string) => {
+    if (agent) agent.notes.push({ t, text: clean(text) })
+  }
+  const logGroup = (message: string): { group: WorkGroup; rest: string } | undefined => {
+    const named = [...stages].sort((a, b) => b.name.length - a.name.length)
+    for (const st of named) {
+      if (message.startsWith(`${st.name}:`) || new RegExp(`^${escapeRe(st.name)} r\\d+\\b`).test(message)) {
+        const numbers = stages.filter(s => s.name === st.name).map(s => s.number)
+        const n = pick(numbers)
+        return { group: ensure(`stage:${n}`, n), rest: message.slice(st.name.length).replace(/^:\s*/, '') }
+      }
+    }
+    if (message.startsWith('plan review')) return { group: ensure('plan-review'), rest: message }
+    if (message.startsWith('final review')) return { group: ensure('final-review'), rest: message }
+    if (message.startsWith('plan:')) return { group: ensure('plan'), rest: message }
+    if (message.startsWith('pr-ready check')) return { group: ensure('pr-ready'), rest: message }
+    return undefined
+  }
+  let agentIndex = 0
+  let lastTime = tree.start
+  for (const entry of entries) {
+    const t = (entry.t ? Date.parse(entry.t) : Number.NaN) || lastTime
+    lastTime = Math.max(lastTime, t)
+    switch (entry.type) {
+      case 'stage': {
+        const n = Number(entry.number)
+        if (!Number.isInteger(n)) break
+        const mark = marks.get(n) ?? {}
+        if (entry.event === 'start') mark.start = t
+        else if (entry.event === 'end') {
+          mark.end = t
+          if (typeof entry.outcome === 'string') mark.outcome = clean(entry.outcome)
+        }
+        marks.set(n, mark)
+        ensure(`stage:${n}`, n)
+        break
+      }
+      case 'phase': {
+        const title = String(entry.title ?? '')
+        const key = PHASE_GROUPS[title]
+        if (key) {
+          reached.add(key)
+          const g = ensure(key)
+          g.start ??= t
+        }
+        if (title === 'Checks') {
+          const run = runningNow()
+          const n = run.length === 1 ? run[0] : !marks.size ? stageNumber(lastOf(tree.agents.slice(0, agentIndex), a => a.group.startsWith('stage:'))?.group ?? '') : undefined
+          if (n !== undefined) {
+            const g = ensure(`stage:${n}`, n)
+            g.checks = { state: 'running', failed: [], lines: g.checks?.lines ?? [], t }
+            lastChecks.set(n, { kind: 'other' })
+          }
+        }
+        break
+      }
+      case 'agent': {
+        const agent = tree.agents[agentIndex++]
+        if (!agent) break
+        const placed = placeOf(agent.label, stages, reviewers, pick)
+        const run = runningNow()
+        const group = placed?.group ?? (run.length === 1 ? `stage:${run[0]}` : `other:${agent.phase}`)
+        agent.group = group
+        agent.action = placed?.action ?? agent.label
+        const g = ensure(group, stageNumber(group))
+        g.agents.push(agent)
+        push(g, agent.start, `▸ ${agent.action} started`)
+        for (const n of pendingLinks.get(agent.label) ?? []) agent.notes.push(n)
+        pendingLinks.delete(agent.label)
+        break
+      }
+      case 'retry':
+        note(byLabel(clean(String(entry.label ?? ''))), t, `↻ retry ${entry.attempt}: ${String(entry.reason ?? '').split('\n')[0]}`)
+        break
+      case 'provider-error':
+        note(byLabel(clean(String(entry.label ?? ''))), t, `! provider error${entry.backoffMs !== undefined ? ` (retry in ${duration(Number(entry.backoffMs))})` : ''}: ${String(entry.error?.message ?? entry.error ?? '').split('\n')[0]}`)
+        break
+      case 'agent-failed':
+        note(tree.agents.find(a => a.session === String(entry.session)), t, `✗ failed${typeof entry.error === 'string' ? `: ${entry.error.split('\n')[0]}` : ''}`)
+        break
+      case 'link-failed': {
+        const label = clean(String(entry.label ?? ''))
+        const list = pendingLinks.get(label) ?? []
+        list.push({ t, text: clean(`! not linked to the parent session: ${String(entry.error ?? '').split('\n')[0]}`) })
+        pendingLinks.set(label, list)
+        break
+      }
+      case 'log': {
+        const message = clean(String(entry.message ?? ''))
+        const found = logGroup(message)
+        if (!found) break
+        const { group: g } = found
+        push(g, t, message)
+        if (g.number === undefined) break
+        const n = g.number
+        const name = escapeRe(stages.find(s => s.number === n)?.name ?? '')
+        const green = new RegExp(`^${name}: checks green`).test(message)
+        const failedCheck = new RegExp(`^${name}: check (.+?) failed \\(`).exec(message)
+        const gaveUp = new RegExp(`^${name}: checks-failed - `).test(message)
+        if (!green && !failedCheck && !gaveUp && !new RegExp(`^${name}: .*\\bcheck`).test(message)) break
+        const lines = [...(g.checks?.lines ?? []), ...at(t, message)]
+        if (green) {
+          g.checks = { state: 'passed', failed: [], lines, t }
+          lastChecks.set(n, { kind: 'other' })
+        } else if (failedCheck) {
+          const batch = lastChecks.get(n)?.kind === 'batch' && g.checks?.state === 'failed'
+          g.checks = { state: 'failed', failed: batch ? [...g.checks!.failed, failedCheck[1]!] : [failedCheck[1]!], lines, t }
+          lastChecks.set(n, { kind: 'batch' })
+        } else if (gaveUp) {
+          g.checks = { state: 'failed', failed: g.checks?.state === 'failed' ? g.checks.failed : [], lines, t }
+          lastChecks.set(n, { kind: 'other' })
+        } else if (g.checks) g.checks.lines = lines
+        else g.checks = undefined
+        break
+      }
+    }
+  }
+
+  const { status } = tree
+  const ended = status === 'failed' || status === 'cancelled'
+  const lastPhase = tree.phases.at(-1)?.title
+  const currentKey = lastPhase ? PHASE_GROUPS[lastPhase] : undefined
+  const list = [...groups.values()].sort((a, b) => rankOf(a.key, a.number) - rankOf(b.key, b.number))
+  for (const g of list) {
+    for (const a of g.agents) if (a.state !== 'running' && a.state !== 'waiting') push(g, a.end, `■ ${a.action} ${a.state}${a.end === undefined ? '' : ` ${duration(a.end - a.start)}`}`)
+    g.lines = (timed.get(g) ?? []).sort((x, y) => x.t - y.t).flatMap(e => e.lines)
+    const busy = g.agents.some(a => BUSY.has(a.state))
+    const starts = g.agents.map(a => a.start)
+    const ends = g.agents.map(a => a.end).filter((e): e is number => e !== undefined)
+    if (g.number !== undefined) {
+      const mark = marks.get(g.number)
+      if (outline && g.number < outline.fromStage) {
+        g.state = 'skipped'
+        g.note = `resumed from stage ${outline.fromStage}`
+      } else if (mark?.end !== undefined) {
+        g.outcome = mark.outcome
+        g.state = mark.outcome === 'skipped' ? 'skipped' : DONE_OUTCOMES.has(mark.outcome ?? 'clean') ? 'done' : 'failed'
+        if (g.state === 'done' || g.state === 'skipped') delete g.outcome
+        if (mark.start !== undefined) g.start = mark.start
+        if (mark.start !== undefined || g.state !== 'skipped') g.end = mark.end
+      } else if (mark?.start !== undefined) {
+        g.state = 'running'
+        g.start = mark.start
+      } else if (g.agents.length) {
+        g.state = busy ? 'running' : 'done'
+        g.start = Math.min(...starts)
+        if (!busy && ends.length) g.end = Math.max(...ends)
+      }
+    } else {
+      const phases = tree.phases.filter(p => PHASE_GROUPS[p.title] === g.key)
+      const was = reached.has(g.key) || g.agents.length > 0
+      if (was) {
+        g.start = Math.min(...[...phases.map(p => p.start), ...starts])
+        const last = phases.at(-1)
+        const end = Math.max(...[...(last?.end !== undefined ? [last.end] : []), ...ends])
+        g.state = busy || (status === 'running' && currentKey === g.key) ? 'running' : 'done'
+        if (g.state === 'done' && Number.isFinite(end)) g.end = end
+      }
+    }
+    if (g.state === 'running' && ended) {
+      g.state = status === 'cancelled' ? 'cancelled' : 'failed'
+      g.end ??= tree.end
+    }
+    if (g.state === 'running' && status === 'done') {
+      g.state = 'done'
+      g.end ??= tree.end
+    }
+    if (g.checks && g.checks.state === 'running' && g.state !== 'running') delete g.checks
+    if (g.checks) {
+      const t = g.checks.t
+      const after = lastOf(g.agents, a => a.end !== undefined && a.end <= t) ?? lastOf(g.agents, a => a.start <= t)
+      if (after) g.checks.after = after
+    }
+  }
+  if (ended && !list.some(g => g.state === 'failed' || g.state === 'cancelled')) {
+    const last = lastOf(list, g => g.state === 'done' && g.number === undefined && g.key === currentKey)
+    if (last) last.state = status === 'cancelled' ? 'cancelled' : 'failed'
+  }
+  tree.groups = list
+  tree.running = list
+    .filter(g => g.number !== undefined && g.state === 'running')
+    .sort((a, b) => (a.start ?? now) - (b.start ?? now))
+    .map(g => g.number!)
+}
+
+const escapeRe = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+
+// --- focus and stepper ----------------------------------------------------------------------------
+
+/** The stage the stepper shows: the selected row's, else the newest running one, else the last started one. */
+export function focusStage(tree: RunTree, selectedKey?: string): number | undefined {
+  if (selectedKey) {
+    const groupKey = selectedKey.startsWith(`group:${tree.id}:`) ? selectedKey.slice(`group:${tree.id}:`.length) : undefined
+    const checks = selectedKey.startsWith(`checks:${tree.id}:`) ? Number(selectedKey.slice(`checks:${tree.id}:`.length)) : undefined
+    const session = selectedKey.startsWith('agent:') ? selectedKey.slice('agent:'.length) : selectedKey.startsWith('sub:') ? selectedKey.slice('sub:'.length, selectedKey.lastIndexOf(':')) : undefined
+    const agent = session !== undefined ? tree.agents.find(a => a.session === session) : undefined
+    const n = groupKey ? stageNumber(groupKey) : checks !== undefined && Number.isInteger(checks) ? checks : agent ? stageNumber(agent.group) : undefined
+    if (n !== undefined && tree.groups.some(g => g.number === n)) return n
+  }
+  if (tree.running.length) return tree.running.at(-1)
+  const started = tree.groups.filter(g => g.number !== undefined && g.start !== undefined).sort((a, b) => a.start! - b.start!)
+  return started.at(-1)?.number
+}
+
+const ORDER: Record<string, number> = { Worktree: 0, Plan: 1, 'Plan review': 2, Implement: 3, Checks: 3, Review: 3, 'Final review': 4, 'PR ready': 5 }
+const REVIEWING = /^(review|judge|fix|extract) /
+const IMPLEMENTING = /^implement$/
+const FAILED_STEP: Record<string, string> = { 'checks-failed': 'Checks', 'round-cap': 'Review', 'review-failed': 'Review', 'no-changes': 'Implement', 'gates-red': 'Implement' }
+
+/** The steps of the run in order with their state, the stage steps for stage `focus`. */
+export function stepsFor(tree: RunTree, focus?: number): Step[] {
+  const { outline, status } = tree
+  const titles = tree.phases.map(p => p.title)
+  const seen = new Set(titles)
+  if (!outline) {
+    const unique = [...new Set(titles)]
+    return unique.map((title, i) => ({
+      title,
+      state: i < unique.length - 1 ? 'done' : status === 'running' ? 'current' : status === 'failed' ? 'failed' : status === 'cancelled' ? 'skipped' : 'done',
+    }))
+  }
+  const firstStage = outline.stages.find(s => s.number >= outline.fromStage) ?? outline.stages[0]
+  const stage = outline.stages.find(s => s.number === focus) ?? firstStage
+  const group = tree.groups.find(g => g.number === (focus ?? -1))
+  const run: string[] = []
+  if (outline.worktree || seen.has('Worktree')) run.push('Worktree')
+  if (outline.kind === 'plan') {
+    run.push('Plan')
+    if (outline.planReview || seen.has('Plan review')) run.push('Plan review')
+  } else {
+    if (outline.planReview || seen.has('Plan review')) run.push('Plan review')
+    if (stage?.implement !== false) run.push('Implement')
+    if (stage?.checks || group?.checks) run.push('Checks')
+    if (stage?.review !== false) run.push('Review')
+    if (outline.finalReview || seen.has('Final review')) run.push('Final review')
+    run.push('PR ready')
+  }
+  const latest = titles.length ? ORDER[titles.at(-1)!] ?? -1 : -1
+  const end: StepState = status === 'failed' ? 'failed' : status === 'cancelled' ? 'skipped' : status === 'running' ? 'current' : 'done'
+  const stageSteps = run.filter(t => ORDER[t] === 3)
+  const stageStates = stageStepStates(stageSteps, group, latest, end)
+  return run.map(title => {
+    const o = ORDER[title]!
+    if (o === 3) return { title, state: stageStates.get(title) ?? 'upcoming' }
+    return { title, state: o < latest ? 'done' : o === latest ? end : 'upcoming' }
+  })
+}
+
+function stageStepStates(steps: string[], group: WorkGroup | undefined, latest: number, end: StepState): Map<string, StepState> {
+  const out = new Map<string, StepState>()
+  const all = (state: StepState) => steps.forEach(s => out.set(s, state))
+  if (!group || group.state === 'upcoming' || latest < 3) {
+    all(latest > 3 && group?.state !== 'upcoming' ? 'done' : 'upcoming')
+    return out
+  }
+  if (group.state === 'skipped') return (all('skipped'), out)
+  if (group.state === 'done') return (all('done'), out)
+  let at: string
+  let state: StepState
+  if (group.state === 'failed' && group.outcome) {
+    at = FAILED_STEP[group.outcome] ?? steps.at(-1)!
+    state = 'failed'
+  } else {
+    const reviewing = group.agents.some(a => REVIEWING.test(`${a.action} `))
+    const implemented = group.agents.some(a => IMPLEMENTING.test(a.action) && a.end !== undefined)
+    at = reviewing ? 'Review' : group.checks || implemented ? 'Checks' : 'Implement'
+    state = group.state === 'running' ? 'current' : group.state === 'cancelled' ? 'skipped' : group.state === 'failed' ? 'failed' : end
+  }
+  const order = ['Implement', 'Checks', 'Review']
+  let index = steps.indexOf(at)
+  if (index < 0) {
+    const want = order.indexOf(at)
+    index = steps.findIndex(s => order.indexOf(s) > want)
+    if (index < 0) index = steps.length - 1
+  }
+  steps.forEach((s, i) => out.set(s, i < index ? 'done' : i === index ? state : 'upcoming'))
+  return out
+}
+
+// --- rows -----------------------------------------------------------------------------------------
+
+export type RowKind = 'group' | 'agent' | 'checks' | 'sub' | 'run' | 'label'
+
+export interface Row {
+  key: string
+  kind: RowKind
+  depth: number
+  selectable: boolean
+  run: RunTree
+  group?: WorkGroup
+  agent?: AgentNode
+  sub?: SubagentNode
+  folded?: boolean
+  /** The key of the row this one hangs under. */
+  parent?: string
+  /** A run row of the run the page shows. */
+  shown?: boolean
+  /** The one run row of a page that lists no other run. */
+  details?: boolean
+}
+
+export interface RowView {
+  /** The id of the run the page shows. */
+  run: string
+  /** Groups the user folded. */
+  folded: ReadonlySet<string>
+  /** Groups the user opened. */
+  opened: ReadonlySet<string>
+  focus?: number
+  /** `list`: a runs section with every run; `one`: one `run details` row. */
+  runs: 'list' | 'one'
+}
+
+export const groupKey = (runId: string, key: string) => `group:${runId}:${key}`
+export const checksKey = (runId: string, n: number) => `checks:${runId}:${n}`
+
+/** The rows of the tree pane: the shown run's work groups with their agents, checks and subagents, then the runs. */
+export function visibleRows(trees: readonly RunTree[], view: RowView): Row[] {
+  const rows: Row[] = []
+  const tree = trees.find(t => t.id === view.run)
+  if (tree) {
+    for (const g of tree.groups) {
+      const gk = groupKey(tree.id, g.key)
+      if (g.state === 'upcoming') {
+        rows.push({ key: gk, kind: 'group', depth: 0, selectable: true, run: tree, group: g })
+        continue
+      }
+      const open = view.opened.has(gk) || (!view.folded.has(gk) && (g.state === 'running' || (g.number !== undefined && g.number === view.focus)))
+      rows.push({ key: gk, kind: 'group', depth: 0, selectable: true, run: tree, group: g, folded: !open })
+      if (!open) continue
+      const checksRow = (): Row => ({ key: checksKey(tree.id, g.number!), kind: 'checks', depth: 1, selectable: true, run: tree, group: g, parent: gk })
+      let placed = !g.checks
+      if (g.checks && !g.checks.after) {
+        rows.push(checksRow())
+        placed = true
+      }
+      for (const agent of g.agents) {
+        const ak = agentKey(agent.session)
+        rows.push({ key: ak, kind: 'agent', depth: 1, selectable: true, run: tree, group: g, agent, parent: gk })
+        for (const sub of agent.subagents) rows.push({ key: subKey(agent.session, sub.name), kind: 'sub', depth: 2, selectable: true, run: tree, group: g, agent, sub, parent: ak })
+        if (!placed && g.checks?.after === agent) {
+          rows.push(checksRow())
+          placed = true
+        }
+      }
+    }
+  }
+  if (view.runs === 'list') {
+    rows.push({ key: 'label:runs', kind: 'label', depth: 0, selectable: false, run: tree ?? trees[0]! })
+    for (const t of trees) rows.push({ key: runKey(t.id), kind: 'run', depth: 0, selectable: true, run: t, shown: t.id === view.run })
+  } else if (tree) rows.push({ key: runKey(tree.id), kind: 'run', depth: 0, selectable: true, run: tree, shown: true, details: true })
+  return rows
+}
+
+export const GROUP_MARKERS: Record<GroupState, string> = { upcoming: '', running: '●', done: '✓', failed: '✗', skipped: '⊘', cancelled: '⊘' }
+const RUN_MARKERS: Record<string, string> = { running: '●', done: '✓', failed: '✗', cancelled: '⊘' }
+const MIN_ELAPSED_WIDTH = 24
+const MIN_NAME = 8
+
+/** `left` cut to leave room for `right`, right-aligned at `width`; `right` is dropped below 24 columns. */
+function aligned(left: string, right: string | undefined, width: number): string {
+  if (!right || width < MIN_ELAPSED_WIDTH) return fit(left, width)
+  if (!Number.isFinite(width)) return `${left}  ${right}`
+  const room = width - right.length - 2
+  return `${fit(left, room).padEnd(room)}  ${right}`
+}
+
+const span = (start: number | undefined, end: number | undefined, now: number) => (start === undefined ? undefined : duration((end ?? now) - start))
+
+/** A row's plain text, the elapsed time right-aligned at `width`. */
+export function rowText(row: Row, now: number, width = Number.POSITIVE_INFINITY): string {
+  const indent = '  '.repeat(row.depth)
+  switch (row.kind) {
+    case 'group': {
+      const g = row.group!
+      const name = g.number !== undefined ? `${g.number} ${g.title}` : g.title
+      if (g.state === 'upcoming') return fit(`    ${name}`, width)
+      const head = `${row.folded ? '▸' : '▾'} ${GROUP_MARKERS[g.state]} `
+      const right = span(g.start, g.end, now)
+      const tail = g.state === 'failed' && g.outcome ? ` ${g.outcome}` : ''
+      const full = `${head}${name}${tail}`
+      const room = !Number.isFinite(width) ? Number.POSITIVE_INFINITY : width - (right && width >= MIN_ELAPSED_WIDTH ? right.length + 2 : 0)
+      if (!tail || full.length <= room || room - head.length - tail.length < MIN_NAME) return aligned(tail && full.length > room ? `${head}${name}` : full, right, width)
+      return aligned(`${head}${fit(name, room - head.length - tail.length)}${tail}`, right, width)
+    }
+    case 'agent': {
+      const a = row.agent!
+      return aligned(`${indent}${AGENT_MARKERS[a.state]} ${a.action}`, span(a.start, a.end, now), width)
+    }
+    case 'checks': {
+      const c = row.group!.checks
+      const text = !c ? 'checks' : c.state === 'running' ? 'checks …' : c.state === 'passed' ? 'checks ✓' : `checks ✗${c.failed.length ? ` ${c.failed.join(', ')}` : ''}`
+      return fit(`${indent}${text}`, width)
+    }
+    case 'sub':
+      return fit(`${indent}└ ${AGENT_MARKERS[row.agent!.state]} ${row.sub!.name}`, width)
+    case 'label':
+      return fit('runs', width)
+    case 'run': {
+      const t = row.run
+      if (row.details) return fit('run details', width)
+      return aligned(`${RUN_MARKERS[t.status] ?? '·'} ${t.id.slice(-4)} · ${t.status}${row.shown ? ' (shown)' : ''}`, duration((t.end ?? now) - t.start), width)
+    }
   }
 }
 
@@ -321,9 +946,9 @@ export const phaseKey = (id: string, index: number) => `phase:${id}:${index}`
 export const agentKey = (session: string) => `agent:${session}`
 export const subKey = (session: string, name: string) => `sub:${session}:${name}`
 
-/** The flat list of rows the tree pane draws. */
-export function visibleRows(runs: readonly RunTree[], folded: ReadonlySet<string>, expandedRun: string): Row[] {
-  const rows: Row[] = []
+/** The rows of the older phase tree: run, phases, round groups, agents. */
+export function phaseRows(runs: readonly RunTree[], folded: ReadonlySet<string>, expandedRun: string): PhaseRow[] {
+  const rows: PhaseRow[] = []
   for (const run of runs) {
     const rk = runKey(run.id)
     const open = run.id === expandedRun && !folded.has(rk)
@@ -348,8 +973,8 @@ export function visibleRows(runs: readonly RunTree[], folded: ReadonlySet<string
   return rows
 }
 
-/** The next (`dir` 1) or previous (-1) agent row from `key`, across phases; undefined at the end. */
-export function nextAgent(rows: readonly Row[], key: string, dir: 1 | -1): string | undefined {
+/** The next (`dir` 1) or previous (-1) agent row from `key`; undefined at the end. */
+export function nextAgent(rows: readonly { key: string; kind: string }[], key: string, dir: 1 | -1): string | undefined {
   const from = rows.findIndex(r => r.key === key)
   let i = from < 0 ? (dir > 0 ? -1 : rows.length) : from
   for (i += dir; i >= 0 && i < rows.length; i += dir) if (rows[i]!.kind === 'agent') return rows[i]!.key
@@ -358,8 +983,8 @@ export function nextAgent(rows: readonly Row[], key: string, dir: 1 | -1): strin
 
 const elapsed = (start: number, end: number | undefined, now: number) => duration((end ?? now) - start)
 
-/** A row's plain text; an agent row that would not fit `width` drops the model's provider prefix, then its role and model. */
-export function rowText(row: Row, now: number, width = Number.POSITIVE_INFINITY): string {
+/** A phase row's plain text; an agent row that would not fit `width` drops the model's provider prefix, then its role and model. */
+export function phaseRowText(row: PhaseRow, now: number, width = Number.POSITIVE_INFINITY): string {
   const indent = '  '.repeat(row.depth)
   switch (row.kind) {
     case 'run': {
