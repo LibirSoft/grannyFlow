@@ -301,7 +301,7 @@ export class NavModel {
     const room = Math.max(0, height - head.length - 1)
     if (this.verbose) {
       const lines = activityLines(items, agent.cwd, this.deps.home)
-      const body: Cell[] = lines.length ? lines.slice(-room).map(text => ({ text, tone: 'base' })) : [{ text: 'no activity yet', tone: 'muted' }]
+      const body: Cell[] = lines.length ? lines.slice(lines.length - room).map(text => ({ text, tone: 'base' })) : [{ text: 'no activity yet', tone: 'muted' }]
       return [...head, BLANK, ...body]
     }
     const end = agentEnd(agent)

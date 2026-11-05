@@ -886,6 +886,19 @@ describe('opencode TUI plugin: the /granny navigator', () => {
       expect(v.text()).toContain('RECENT')
     })
 
+    it('keeps the newest events of the verbose list when the pane is short', () => {
+      const v = staged({}, { width: 160, height: 8 })
+      v.key('v')
+      const right = v.lines().slice(2, -1).map(l => l.split(' │ ')[1]!.trimEnd())
+      expect(right).toEqual([
+        'implementer · k3.1-pro · 1m40s',
+        '',
+        `${clock(at(21))}  ▸ edit   src/game/protocol.ts`,
+        `${clock(at(40))}  ✎ "Added pause/resume messages to the protocol."`,
+        `${clock(at(87))}  ▸ shell  bun test test/GameService.test.ts`,
+      ])
+    })
+
     it('moves the stepper and the header with the selected stage', () => {
       const v = staged()
       v.key('down,j')
