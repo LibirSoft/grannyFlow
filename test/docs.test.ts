@@ -147,6 +147,21 @@ describe('skill docs', () => {
     expect(() => read('engines/omp/extensions/granny-workflow/index.js')).not.toThrow()
   })
 
+  it('installs both opencode plugin entries and documents watching a run on opencode', () => {
+    const opencode = read('references/opencode.md')
+    for (const entry of ['index.js', 'tui.js']) {
+      expect(opencode).toContain(`\`${entry}\``)
+      expect(() => read(`engines/opencode/plugin/granny-workflow/${entry}`)).not.toThrow()
+    }
+    expect(opencode).toContain('features: { server: true, tui: true }')
+    expect(opencode).toContain('## Watching a run')
+    expect(opencode).toContain('`<leader>j`')
+    const config = read('references/config.md')
+    expect(config).toMatch(/^\| `watch` \| `"full"` \| omp and opencode:/m)
+    expect(config).toContain('[opencode.md](opencode.md#watching-a-run)')
+    expect(config).not.toMatch(/and opencode (accept|have their own views)/)
+  })
+
   it('names omp in the README, the package description and the hosts diagram', () => {
     expect(readRoot('README.md')).toContain(OMP_INSTALL)
     expect(readRoot('README.md')).toMatch(/^\| omp \|/m)

@@ -36,7 +36,7 @@ Layers, later wins:
 | `language` | `"English"` | language of code, comments, commits and the PR body; the planner writes the plan and the `agent` reviewers their findings in it |
 | `aiAttribution` | `false` | `false` forbids Co-Authored-By / "Generated with" lines and the final check greps for them |
 | `readOnlyAgent` | `false` | Claude Code only: `true` runs `agent` reviewers, the judge and the extraction agent as the `granny-readonly` agent type (Read, Grep, Glob and Bash; no Edit or Write) with a PreToolUse hook that lets their Bash run only read-only git and shell commands - see [Read-only roles](#read-only-roles). Install the agent and the hook first; without the agent the run stops at the first reviewer with `agent type 'granny-readonly' not found`. opencode enforces read-only with permissions and ignores it |
-| `watch` | `"full"` | omp only: how much of a running run you can watch - `"full"` the live panel, an event log per role and the `/granny` command; `"panel"` the panel only; `"off"` none of them. The run itself is the same in every mode - see [Watching a run](#watching-a-run). Claude Code and opencode accept it and ignore it |
+| `watch` | `"full"` | omp and opencode: how much of a running run you can watch - `"full"` everything: on omp the live panel, an event log per role and the run navigator, on opencode the sidebar section, the prompt-footer chip, toasts and the `/granny` navigator; `"panel"` the omp panel, or the opencode sidebar section and chip, only; `"off"` none of them. The run itself is the same in every mode - see [Watching a run](#watching-a-run). Claude Code accepts it and ignores it |
 | `rules` | red-green tests; code comments default none | extra house rules appended to every agent prompt that carries the run's header (the implementer's, the planner's and an `agent` reviewer's); `[]` removes them |
 | `$schema` | | accepted and ignored, so an editor can point a config file at a JSON schema of your own; granny ships none |
 
@@ -503,17 +503,27 @@ The word severities map to `critical` → P0, `high` → P1, `medium` → P2, `l
 
 ## Watching a run
 
-`watch` (omp only) decides what the omp session that started a run shows of it. The run, its journal, `granny_status` and its live view are the same in every mode.
+`watch` decides what the session that started a run shows of it, on omp and on opencode. The run, its journal and `granny_status` are the same in every mode.
+
+On omp:
 
 - `"full"` (default): the live panel and status line, plus a condensed event log per role process (`sessions/<n>-<label>/events.jsonl`: state changes, reasoning headings, tool calls, the final text of each answer) and the run navigator (`/granny`, `alt+w`): the run's phases and agents, each agent's live log or transcript.
 - `"panel"`: the live panel and status line only; no event log, and `/granny` and `alt+w` say watching is off for that run.
 - `"off"`: no panel, no status line, no event log.
 
+On opencode, where the TUI plugin entry `tui.js` draws the view:
+
+- `"full"` (default): a sidebar section with the run's phase and its agents, a chip in the prompt footer, toasts on phase changes, failed roles and the run's end, and the run navigator (`/granny`, `<leader>j`): the run's phases and agents beside a detail pane, and Enter opens a role's opencode session.
+- `"panel"`: the sidebar section and the chip only; `/granny` says watching is off for that run.
+- `"off"`: none of them.
+
+The role sessions are children of the session that called `granny_run` in every mode, so opencode's Subagents tab lists them even with `"off"`.
+
 ```json
 { "watch": "panel" }
 ```
 
-Claude Code (`/workflows`) and opencode have their own views of a run; they accept the key and ignore it. Details: [omp.md](omp.md#watching-a-role).
+Claude Code (`/workflows`) has its own view of a run; it accepts the key and ignores it. Details: [omp.md](omp.md#watching-a-role), [opencode.md](opencode.md#watching-a-run).
 
 ## Example: everything set
 
