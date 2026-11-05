@@ -624,7 +624,7 @@ var shortId = (id) => id.slice(-4);
 var terminal = (s) => TERMINAL.has(s.status);
 var fresh = (s, now) => s.end !== undefined && now - s.end < FRESH_MS;
 var elapsed2 = (s, now) => duration((s.end ?? now) - s.start);
-var STATUS_TONES = { done: "success", failed: "error", cancelled: "warning" };
+var STATUS_TONES = { running: "info", done: "success", failed: "error", cancelled: "warning" };
 var AGENT_TONES = { running: "info", waiting: "muted", done: "success", failed: "error", cancelled: "warning" };
 function fit(text, width) {
   if (text.length <= width)
@@ -707,6 +707,93 @@ function stamp(value) {
   return Number.isNaN(d.getTime()) ? undefined : `${d.toISOString().slice(0, 10)} ${d.toTimeString().slice(0, 8)}`;
 }
 
+// src/adapters/opencode/tui-view.ts
+var attempt = (fn) => {
+  try {
+    return fn();
+  } catch {
+    return;
+  }
+};
+
+class View {
+  rt;
+  theme;
+  constructor(rt, theme) {
+    this.rt = rt;
+    this.theme = theme;
+  }
+  color(tone) {
+    return attempt(() => {
+      const text = this.theme()?.text;
+      if (tone === "base" || tone === "muted")
+        return text?.[tone];
+      return text?.feedback?.[tone]?.base;
+    });
+  }
+  selection() {
+    return attempt(() => this.theme()?.background?.raised?.base);
+  }
+  cell(cell) {
+    const { ui } = this.rt;
+    const node = ui.createElement("text");
+    const fg = this.color(cell.tone);
+    if (fg !== undefined)
+      ui.setProp(node, "fg", fg);
+    if (cell.selected) {
+      const bg = this.selection();
+      if (bg !== undefined)
+        ui.setProp(node, "bg", bg);
+    }
+    ui.setProp(node, "wrapMode", "none");
+    ui.insertNode(node, ui.createTextNode(cell.text));
+    return node;
+  }
+  row(cells) {
+    const { ui } = this.rt;
+    const node = ui.createElement("box");
+    ui.setProp(node, "flexDirection", "row");
+    for (const cell of cells)
+      ui.insertNode(node, this.cell(cell));
+    return node;
+  }
+  lines(accessor, onClick) {
+    const { ui } = this.rt;
+    const box = ui.createElement("box");
+    ui.setProp(box, "flexDirection", "column");
+    if (onClick)
+      ui.setProp(box, "onMouseDown", () => {
+        try {
+          onClick();
+        } catch {}
+      });
+    ui.insert(box, () => attempt(() => accessor().map((line) => this.cell(line))) ?? []);
+    return box;
+  }
+  chip(accessor) {
+    const { ui } = this.rt;
+    const box = ui.createElement("box");
+    ui.setProp(box, "flexDirection", "row");
+    ui.insert(box, () => attempt(() => {
+      const cell = accessor();
+      return cell && cell.text ? [this.cell(cell)] : [];
+    }) ?? []);
+    return box;
+  }
+  screen(accessor) {
+    const { ui } = this.rt;
+    const box = ui.createElement("box");
+    ui.setProp(box, "flexDirection", "column");
+    ui.setProp(box, "width", "100%");
+    ui.setProp(box, "height", "100%");
+    const bg = attempt(() => this.theme()?.background?.base);
+    if (bg !== undefined)
+      ui.setProp(box, "backgroundColor", bg);
+    ui.insert(box, () => attempt(() => accessor().map((cells) => this.row(cells))) ?? []);
+    return box;
+  }
+}
+
 // src/adapters/opencode/tui-navigator.ts
 var NAV_HELP = "\u2191\u2193 move \xB7 Enter open \xB7 Space fold \xB7 Tab/] next agent \xB7 [ prev \xB7 p parent \xB7 Esc back";
 var SEPARATOR = " \u2502 ";
@@ -715,8 +802,6 @@ var NARROW_DETAIL = 4;
 var AGENT_LINES = 40;
 var PHASE_LINES = 200;
 var UNREADABLE = "run files not readable from this TUI - showing the role sessions only";
-var AGENT_TONES2 = { running: "info", waiting: "muted", done: "success", failed: "error", cancelled: "warning" };
-var STATUS_TONES2 = { running: "info", done: "success", failed: "error", cancelled: "warning" };
 var clamp = (n, lo, hi) => Math.max(lo, Math.min(hi, n));
 function fit2(text, width) {
   if (width < 1)
@@ -760,28 +845,23 @@ class NavModel {
       this.runs = [];
     }
     this.subs.clear();
-    const trees = this.runs.map((r) => this.withChildren(r.snapshot.tree));
+    const sessions = [...new Set(this.runs.flatMap((r) => r.snapshot.tree.agents.map((a) => a.session)))];
+    const children = attempt(() => this.deps.children(sessions)) ?? new Map;
+    const trees = this.runs.map((r) => this.withChildren(r.snapshot.tree, children));
     this.rows = visibleRows(trees, this.folded, this.expanded);
     for (const row of this.rows)
       if (row.parent)
         this.parents.set(row.key, row.parent);
   }
-  childrenOf(session) {
-    try {
-      return this.deps.children(session);
-    } catch {
-      return [];
-    }
-  }
-  withChildren(tree) {
+  withChildren(tree, children) {
     const copies = new Map;
     const copy = (agent) => {
       let out = copies.get(agent);
       if (!out) {
-        const children = this.childrenOf(agent.session);
-        for (const child of children)
+        const mine = children.get(agent.session) ?? [];
+        for (const child of mine)
           this.subs.set(child.id, child);
-        out = { ...agent, subagents: children.map((c) => ({ name: c.id, path: c.id })) };
+        out = { ...agent, subagents: mine.map((c) => ({ name: c.id, path: c.id })) };
         copies.set(agent, out);
       }
       return out;
@@ -929,7 +1009,7 @@ class NavModel {
         const head = [
           ...note,
           { text: `${a.label} (${a.role})`, tone: "base" },
-          { text: `${a.model ?? "default model"}${a.effort ? `/${a.effort}` : ""} \xB7 ${state}`, tone: AGENT_TONES2[a.state] },
+          { text: `${a.model ?? "default model"}${a.effort ? `/${a.effort}` : ""} \xB7 ${state}`, tone: AGENT_TONES[a.state] },
           { text: `session ${a.session}${linked === undefined ? "" : linked ? " \xB7 linked" : " \xB7 not linked"}`, tone: "muted" }
         ];
         if (a.error)
@@ -963,7 +1043,7 @@ class NavModel {
       }
       default: {
         const s = run.snapshot;
-        const head = [...note, { text: `run ${s.id}`, tone: "base" }, { text: `status   ${s.status}`, tone: STATUS_TONES2[s.status] ?? "base" }];
+        const head = [...note, { text: `run ${s.id}`, tone: "base" }, { text: `status   ${s.status}`, tone: STATUS_TONES[s.status] ?? "base" }];
         if (s.repo)
           head.push({ text: `repo     ${s.repo}`, tone: "muted" });
         if (s.branch)
@@ -982,13 +1062,6 @@ class NavModel {
     }
   }
 }
-var attempt = (fn) => {
-  try {
-    return fn();
-  } catch {
-    return;
-  }
-};
 var MARKS = ["\u25B8", "\u25A0", "\u21BB", "!"];
 function mentions(line, label) {
   return MARKS.some((mark) => line.includes(`${mark} ${label} `) || line.includes(`${mark} ${label}:`));
@@ -1005,104 +1078,17 @@ function compose(detail, height) {
 function toneOf(row, subs) {
   switch (row.kind) {
     case "run":
-      return STATUS_TONES2[row.run.status] ?? "base";
+      return STATUS_TONES[row.run.status] ?? "base";
     case "group":
       return "muted";
     case "agent":
-      return AGENT_TONES2[row.agent.state];
+      return AGENT_TONES[row.agent.state];
     case "sub":
       return subs.get(row.sub.name)?.running ? "info" : "muted";
     case "phase": {
       const marker = row.phase.marker;
       return marker === AGENT_MARKERS.running ? "info" : marker === AGENT_MARKERS.failed ? "error" : marker === AGENT_MARKERS.cancelled ? "warning" : "base";
     }
-  }
-}
-
-// src/adapters/opencode/tui-view.ts
-var guard = (fn, fallback) => {
-  try {
-    return fn();
-  } catch {
-    return fallback;
-  }
-};
-
-class View {
-  rt;
-  theme;
-  constructor(rt, theme) {
-    this.rt = rt;
-    this.theme = theme;
-  }
-  color(tone) {
-    return guard(() => {
-      const text = this.theme()?.text;
-      if (tone === "base" || tone === "muted")
-        return text?.[tone];
-      return text?.feedback?.[tone]?.base;
-    }, undefined);
-  }
-  selection() {
-    return guard(() => this.theme()?.background?.raised?.base, undefined);
-  }
-  cell(cell) {
-    const { ui } = this.rt;
-    const node = ui.createElement("text");
-    const fg = this.color(cell.tone);
-    if (fg !== undefined)
-      ui.setProp(node, "fg", fg);
-    if (cell.selected) {
-      const bg = this.selection();
-      if (bg !== undefined)
-        ui.setProp(node, "bg", bg);
-    }
-    ui.setProp(node, "wrapMode", "none");
-    ui.insertNode(node, ui.createTextNode(cell.text));
-    return node;
-  }
-  row(cells) {
-    const { ui } = this.rt;
-    const node = ui.createElement("box");
-    ui.setProp(node, "flexDirection", "row");
-    for (const cell of cells)
-      ui.insertNode(node, this.cell(cell));
-    return node;
-  }
-  lines(accessor, onClick) {
-    const { ui } = this.rt;
-    const box = ui.createElement("box");
-    ui.setProp(box, "flexDirection", "column");
-    if (onClick)
-      ui.setProp(box, "onMouseDown", () => {
-        try {
-          onClick();
-        } catch {}
-      });
-    ui.insert(box, () => guard(() => accessor().map((line) => this.cell(line)), []));
-    return box;
-  }
-  chip(accessor) {
-    const { ui } = this.rt;
-    const box = ui.createElement("box");
-    ui.setProp(box, "flexDirection", "row");
-    ui.insert(box, () => guard(() => {
-      const cell = accessor();
-      return cell && cell.text ? [this.cell(cell)] : [];
-    }, []));
-    return box;
-  }
-  screen(accessor) {
-    const { ui } = this.rt;
-    const box = ui.createElement("box");
-    ui.setProp(box, "flexDirection", "column");
-    ui.setProp(box, "width", "100%");
-    ui.setProp(box, "height", "100%");
-    const bg = guard(() => this.theme()?.background?.base, undefined);
-    if (bg !== undefined)
-      ui.setProp(box, "backgroundColor", bg);
-    ui.insert(box, () => guard(() => accessor().map((cells) => this.row(cells)), []));
-    return box;
   }
 }
 
@@ -1118,7 +1104,6 @@ var LIST_LIMIT = 50;
 var WAKE_TICKS = 3;
 var FRESH_MS2 = 60000;
 var TERMINAL2 = new Set(["done", "failed", "cancelled"]);
-var STATUS_TONES3 = { done: "success", failed: "error", cancelled: "warning" };
 var WAKE_EVENTS = ["session.created", "session.updated"];
 var DEFAULT_SIZE = { width: 100, height: 30 };
 var NAV_KEYS = [
@@ -1150,13 +1135,6 @@ var realTimers = {
     return handle;
   },
   clearTimeout: (handle) => clearTimeout(handle)
-};
-var attempt2 = (fn) => {
-  try {
-    return fn();
-  } catch {
-    return;
-  }
 };
 
 class Hub {
@@ -1196,12 +1174,12 @@ class Hub {
   }
   install() {
     const ui = this.ctx?.ui;
-    attempt2(() => ui.router.register({ name: ROUTE, render: (input) => this.navigator(input?.data) }));
-    attempt2(() => ui.slot({
+    attempt(() => ui.router.register({ name: ROUTE, render: (input) => this.navigator(input?.data) }));
+    attempt(() => ui.slot({
       append: "sidebar.content",
       render: (input) => {
         this.wake();
-        const [view, setView] = attempt2(() => this.ctx.storage.store("view", { initial: { open: true } })) ?? [{ open: true }, undefined];
+        const [view, setView] = attempt(() => this.ctx.storage.store("view", { initial: { open: true } })) ?? [{ open: true }, undefined];
         return this.view.lines(() => {
           this.version();
           if (this.hidden.get())
@@ -1221,7 +1199,7 @@ class Hub {
         });
       }
     }));
-    attempt2(() => ui.slot({
+    attempt(() => ui.slot({
       append: "prompt.footer.status",
       render: (input) => {
         this.wake();
@@ -1233,11 +1211,11 @@ class Hub {
           if (!run)
             return;
           const s = run.watch.snapshot;
-          return { text: chipText(s, this.now()), tone: STATUS_TONES3[s.status] ?? "muted" };
+          return { text: chipText(s, this.now()), tone: s.status === "running" ? "muted" : STATUS_TONES[s.status] ?? "muted" };
         });
       }
     }));
-    attempt2(() => ui.slot({
+    attempt(() => ui.slot({
       append: "app",
       render: () => {
         this.registerCommand();
@@ -1245,7 +1223,7 @@ class Hub {
       }
     }));
     for (const type of WAKE_EVENTS) {
-      const off = attempt2(() => this.ctx.data.on(type, () => this.wake()));
+      const off = attempt(() => this.ctx.data.on(type, () => this.wake()));
       if (typeof off === "function")
         this.unsubscribe.push(off);
     }
@@ -1255,10 +1233,10 @@ class Hub {
     this.disposed = true;
     this.stop();
     if (this.expiry !== undefined)
-      attempt2(() => this.timers.clearTimeout(this.expiry));
+      attempt(() => this.timers.clearTimeout(this.expiry));
     this.expiry = undefined;
     for (const off of this.unsubscribe.splice(0))
-      attempt2(off);
+      attempt(off);
   }
   wake() {
     if (this.disposed)
@@ -1266,12 +1244,12 @@ class Hub {
     this.wakeTicks = WAKE_TICKS;
     if (this.interval !== undefined)
       return;
-    this.interval = attempt2(() => this.timers.setInterval(() => this.tick(), this.tickMs));
+    this.interval = attempt(() => this.timers.setInterval(() => this.tick(), this.tickMs));
   }
   stop() {
     if (this.interval === undefined)
       return;
-    attempt2(() => this.timers.clearInterval(this.interval));
+    attempt(() => this.timers.clearInterval(this.interval));
     this.interval = undefined;
   }
   mount() {
@@ -1338,8 +1316,8 @@ class Hub {
     if (wait <= 0)
       return;
     if (this.expiry !== undefined)
-      attempt2(() => this.timers.clearTimeout(this.expiry));
-    this.expiry = attempt2(() => this.timers.setTimeout(() => {
+      attempt(() => this.timers.clearTimeout(this.expiry));
+    this.expiry = attempt(() => this.timers.setTimeout(() => {
       this.expiry = undefined;
       this.bump();
     }, wait + 1));
@@ -1348,7 +1326,7 @@ class Hub {
     const live = new Map;
     const sessions = new Set([...run.found.sessions, ...run.watch.snapshot.tree.agents.map((a) => a.session)]);
     for (const session of sessions) {
-      const status = attempt2(() => this.ctx.data.session.status(session));
+      const status = attempt(() => this.ctx.data.session.status(session));
       live.set(session, { active: status === "running" });
     }
     return live;
@@ -1359,14 +1337,14 @@ class Hub {
       this.show(toast);
   }
   show(toast) {
-    attempt2(() => this.ctx.ui.toast.show(toast));
+    attempt(() => this.ctx.ui.toast.show(toast));
   }
   rootOf(session) {
-    const root = attempt2(() => this.ctx.data.session.root(session));
+    const root = attempt(() => this.ctx.data.session.root(session));
     return typeof root === "string" && root ? root : session;
   }
   current() {
-    const route = attempt2(() => this.ctx.ui.router.current());
+    const route = attempt(() => this.ctx.ui.router.current());
     return route && typeof route === "object" ? route : undefined;
   }
   discover() {
@@ -1378,10 +1356,10 @@ class Hub {
       roots.add(this.lastRoot);
     let changed = false;
     for (const root of roots) {
-      const ids = attempt2(() => this.ctx.data.session.family(root));
+      const ids = attempt(() => this.ctx.data.session.family(root));
       const sessions = [];
       for (const id of Array.isArray(ids) ? ids : []) {
-        const info = attempt2(() => this.ctx.data.session.get(id));
+        const info = attempt(() => this.ctx.data.session.get(id));
         if (info)
           sessions.push({ id, metadata: info.metadata });
       }
@@ -1398,7 +1376,7 @@ class Hub {
     if (now - this.lastList < LIST_EVERY_MS)
       return;
     this.lastList = now;
-    const pending = attempt2(() => this.ctx.client.session.list({ parentID: null, order: "desc", limit: LIST_LIMIT }));
+    const pending = attempt(() => this.ctx.client.session.list({ parentID: null, order: "desc", limit: LIST_LIMIT }));
     if (!pending || typeof pending.then !== "function")
       return;
     pending.then((result) => {
@@ -1464,20 +1442,20 @@ class Hub {
     const first = typeof runId === "string" && this.runs.has(runId) ? runId : [...this.runs.keys()].at(-1);
     const model = new NavModel({
       runs: () => [...this.runs.values()].map((run) => ({ dir: run.watch.dir, snapshot: run.watch.snapshot })),
-      children: (session) => this.childSessions(session),
+      children: (sessions) => this.childSessions(sessions),
       linked: (session) => {
-        const info = attempt2(() => this.ctx.data.session.get(session));
+        const info = attempt(() => this.ctx.data.session.get(session));
         return info ? typeof info.parentID === "string" && info.parentID.length > 0 : undefined;
       },
       now: this.now
     }, first ?? "", typeof select === "string" ? select : undefined);
     const [keys, setKeys] = this.rt.solid.createSignal(0, { equals: false });
     this.mount();
-    attempt2(() => this.rt.solid.onCleanup(() => this.unmount()));
-    const dims = attempt2(() => this.rt.ui.useTerminalDimensions?.());
+    attempt(() => this.rt.solid.onCleanup(() => this.unmount()));
+    const dims = attempt(() => this.rt.ui.useTerminalDimensions?.());
     const size = () => {
-      const d = attempt2(() => typeof dims === "function" ? dims() : undefined);
-      const r = attempt2(() => this.ctx.renderer);
+      const d = attempt(() => typeof dims === "function" ? dims() : undefined);
+      const r = attempt(() => this.ctx.renderer);
       const width = Number(d?.width ?? r?.width ?? DEFAULT_SIZE.width);
       const height = Number(d?.height ?? r?.height ?? DEFAULT_SIZE.height);
       return { width: Number.isFinite(width) && width > 0 ? width : DEFAULT_SIZE.width, height: Number.isFinite(height) && height > 0 ? height : DEFAULT_SIZE.height };
@@ -1493,7 +1471,7 @@ class Hub {
       this.ctx.keymap.layer(() => ({ commands }));
     } catch {
       for (const command of commands)
-        attempt2(() => this.ctx.keymap.layer(() => ({ commands: [command] })));
+        attempt(() => this.ctx.keymap.layer(() => ({ commands: [command] })));
     }
     return this.view.screen(() => {
       this.version();
@@ -1521,17 +1499,21 @@ class Hub {
     if (parent)
       return router.navigate({ type: "session", sessionID: parent });
   }
-  childSessions(session) {
+  childSessions(sessions) {
+    const out = new Map;
     const data = this.ctx?.data?.session;
     if (!data)
-      return [];
-    const ids = attempt2(() => data.family(this.rootOf(session)));
-    const out = [];
-    for (const id of Array.isArray(ids) ? ids : []) {
-      const info = attempt2(() => data.get(id));
-      if (!info || info.parentID !== session)
-        continue;
-      out.push({ id, title: typeof info.title === "string" ? info.title : id, running: attempt2(() => data.status(id)) === "running" });
+      return out;
+    const wanted = new Set(sessions);
+    for (const root of new Set(sessions.map((s) => this.rootOf(s)))) {
+      const ids = attempt(() => data.family(root));
+      for (const id of Array.isArray(ids) ? ids : []) {
+        const info = attempt(() => data.get(id));
+        if (!info || !wanted.has(info.parentID))
+          continue;
+        const child = { id, title: typeof info.title === "string" ? info.title : id, running: attempt(() => data.status(id)) === "running" };
+        out.set(info.parentID, [...out.get(info.parentID) ?? [], child]);
+      }
     }
     return out;
   }
@@ -1550,7 +1532,7 @@ class Hub {
       this.ctx.keymap.layer(() => ({ mode: "global", commands: [command] }));
     } catch {
       const { bind: _bind, ...unbound } = command;
-      attempt2(() => this.ctx.keymap.layer(() => ({ mode: "global", commands: [unbound] })));
+      attempt(() => this.ctx.keymap.layer(() => ({ mode: "global", commands: [unbound] })));
     }
   }
   command(arg) {
@@ -1565,29 +1547,29 @@ class Hub {
       if (route?.type === "plugin" && route.name === ROUTE)
         return;
       this.wake();
-      attempt2(() => this.discover());
+      attempt(() => this.discover());
       const session = route?.type === "session" && typeof route.sessionID === "string" ? route.sessionID : undefined;
       const run = (text ? this.runs.get(text) : undefined) ?? this.runFor(session);
       if (!run)
         return this.show({ message: NO_RUN, variant: "warning" });
       if (!run.polled)
-        attempt2(() => this.poll(run));
+        attempt(() => this.poll(run));
       const mode = run.watch.snapshot.watch;
       if (mode !== "full")
         return this.show({ message: watchingOff(run.id, mode), variant: "info" });
       const select = session && run.found.sessions.includes(session) ? agentKey(session) : this.selection.get(run.id);
       this.savedRoute = route ? { ...route } : undefined;
-      attempt2(() => this.ctx.ui.dialog?.clear?.());
+      attempt(() => this.ctx.ui.dialog?.clear?.());
       this.ctx.ui.router.navigate({ type: "plugin", name: ROUTE, data: { runId: run.id, ...select ? { select } : {} } });
     } catch {}
   }
   memoryFlag() {
-    const stored = attempt2(() => this.ctx.storage.memory("hidden", { initial: { off: false } }));
+    const stored = attempt(() => this.ctx.storage.memory("hidden", { initial: { off: false } }));
     if (Array.isArray(stored) && stored[0] && typeof stored[1] === "function") {
       const [state, set] = stored;
       return {
-        get: () => attempt2(() => state.off === true) ?? false,
-        set: (off) => void attempt2(() => set((draft) => {
+        get: () => attempt(() => state.off === true) ?? false,
+        set: (off) => void attempt(() => set((draft) => {
           draft.off = off;
         }))
       };

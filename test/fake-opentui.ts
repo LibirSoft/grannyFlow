@@ -184,6 +184,7 @@ export function fakeCtx(options: FakeCtxOptions = {}) {
   const layers: Array<{ mode?: string; commands: any[] }> = []
   const navigations: unknown[] = []
   const listCalls: unknown[] = []
+  const familyCalls: string[] = []
   const listeners = new Map<string, Array<(event: unknown) => void>>()
   const stores = new Map<string, Record<string, unknown>>()
   const opts = { ...options }
@@ -256,6 +257,7 @@ export function fakeCtx(options: FakeCtxOptions = {}) {
         get: (id: string) => sessions.get(id),
         root,
         family(id: string) {
+          familyCalls.push(id)
           if (opts.throwFamily) throw new Error('family broke')
           const top = root(id)
           return [...sessions.values()].filter(s => root(s.id) === top).map(s => s.id)
@@ -285,6 +287,7 @@ export function fakeCtx(options: FakeCtxOptions = {}) {
     layers,
     navigations,
     listCalls,
+    familyCalls,
     listeners,
     stores,
     get route() {

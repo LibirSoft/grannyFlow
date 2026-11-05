@@ -4,9 +4,9 @@
 // guarded, so a broken or missing TUI API loses the view, never the run.
 import { agentKey } from '../runview/tree'
 import type { LiveView } from '../runview/tree'
-import { chipText, discoverRuns, type FoundRun, type FsLike, type RoleSession, RunWatch, type SessionLike, sidebarLines, type Toast, toastFor, type Tone } from './runwatch'
+import { chipText, discoverRuns, type FoundRun, type FsLike, type RoleSession, RunWatch, type SessionLike, STATUS_TONES, sidebarLines, type Toast, toastFor } from './runwatch'
 import { type ChildSession, type NavAction, type NavKey, NavModel } from './tui-navigator'
-import { type TuiRuntime, View } from './tui-view'
+import { attempt, type TuiRuntime, View } from './tui-view'
 
 export type { TuiRuntime } from './tui-view'
 
@@ -35,7 +35,6 @@ const LIST_LIMIT = 50
 const WAKE_TICKS = 3
 const FRESH_MS = 60_000
 const TERMINAL = new Set(['done', 'failed', 'cancelled'])
-const STATUS_TONES: Record<string, Tone> = { done: 'success', failed: 'error', cancelled: 'warning' }
 const WAKE_EVENTS = ['session.created', 'session.updated']
 const DEFAULT_SIZE = { width: 100, height: 30 }
 
@@ -70,14 +69,6 @@ const realTimers: Timers = {
     return handle
   },
   clearTimeout: handle => clearTimeout(handle as ReturnType<typeof setTimeout>),
-}
-
-const attempt = <T>(fn: () => T): T | undefined => {
-  try {
-    return fn()
-  } catch {
-    return undefined
-  }
 }
 
 export interface KnownRun {
@@ -171,7 +162,7 @@ export class Hub {
             const run = this.runFor(input?.sessionID)
             if (!run) return undefined
             const s = run.watch.snapshot
-            return { text: chipText(s, this.now()), tone: STATUS_TONES[s.status] ?? 'muted' }
+            return { text: chipText(s, this.now()), tone: s.status === 'running' ? 'muted' : (STATUS_TONES[s.status] ?? 'muted') }
           })
         },
       }),
@@ -412,7 +403,7 @@ export class Hub {
     const model = new NavModel(
       {
         runs: () => [...this.runs.values()].map(run => ({ dir: run.watch.dir, snapshot: run.watch.snapshot })),
-        children: session => this.childSessions(session),
+        children: sessions => this.childSessions(sessions),
         linked: session => {
           const info = attempt(() => this.ctx.data.session.get(session))
           return info ? typeof info.parentID === 'string' && info.parentID.length > 0 : undefined
@@ -468,15 +459,20 @@ export class Hub {
     if (parent) return router.navigate({ type: 'session', sessionID: parent })
   }
 
-  private childSessions(session: string): ChildSession[] {
+  /** Reads each root's family once, however many of `sessions` share it. */
+  private childSessions(sessions: readonly string[]): Map<string, ChildSession[]> {
+    const out = new Map<string, ChildSession[]>()
     const data = this.ctx?.data?.session
-    if (!data) return []
-    const ids = attempt(() => data.family(this.rootOf(session)))
-    const out: ChildSession[] = []
-    for (const id of Array.isArray(ids) ? ids : []) {
-      const info = attempt(() => data.get(id))
-      if (!info || info.parentID !== session) continue
-      out.push({ id, title: typeof info.title === 'string' ? info.title : id, running: attempt(() => data.status(id)) === 'running' })
+    if (!data) return out
+    const wanted = new Set(sessions)
+    for (const root of new Set(sessions.map(s => this.rootOf(s)))) {
+      const ids = attempt(() => data.family(root))
+      for (const id of Array.isArray(ids) ? ids : []) {
+        const info = attempt(() => data.get(id))
+        if (!info || !wanted.has(info.parentID)) continue
+        const child = { id, title: typeof info.title === 'string' ? info.title : id, running: attempt(() => data.status(id)) === 'running' }
+        out.set(info.parentID, [...(out.get(info.parentID) ?? []), child])
+      }
     }
     return out
   }

@@ -300,8 +300,8 @@ const terminal = (s: RunSnapshot) => TERMINAL.has(s.status)
 const fresh = (s: RunSnapshot, now: number) => s.end !== undefined && now - s.end < FRESH_MS
 const elapsed = (s: RunSnapshot, now: number) => duration((s.end ?? now) - s.start)
 
-const STATUS_TONES: Record<string, Tone> = { done: 'success', failed: 'error', cancelled: 'warning' }
-const AGENT_TONES: Record<AgentState, Tone> = { running: 'info', waiting: 'muted', done: 'success', failed: 'error', cancelled: 'warning' }
+export const STATUS_TONES: Record<string, Tone> = { running: 'info', done: 'success', failed: 'error', cancelled: 'warning' }
+export const AGENT_TONES: Record<AgentState, Tone> = { running: 'info', waiting: 'muted', done: 'success', failed: 'error', cancelled: 'warning' }
 
 function fit(text: string, width: number): string {
   if (text.length <= width) return text

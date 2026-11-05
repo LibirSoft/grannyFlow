@@ -27,11 +27,12 @@ export interface Cell {
   selected?: boolean
 }
 
-const guard = <T>(fn: () => T, fallback: T): T => {
+/** `fn()`, or undefined when it throws. */
+export const attempt = <T>(fn: () => T): T | undefined => {
   try {
     return fn()
   } catch {
-    return fallback
+    return undefined
   }
 }
 
@@ -42,15 +43,15 @@ export class View {
   ) {}
 
   color(tone: Tone): unknown {
-    return guard(() => {
+    return attempt(() => {
       const text = this.theme()?.text
       if (tone === 'base' || tone === 'muted') return text?.[tone]
       return text?.feedback?.[tone]?.base
-    }, undefined)
+    })
   }
 
   private selection(): unknown {
-    return guard(() => this.theme()?.background?.raised?.base, undefined)
+    return attempt(() => this.theme()?.background?.raised?.base)
   }
 
   private cell(cell: Cell): any {
@@ -86,7 +87,7 @@ export class View {
           onClick()
         } catch {}
       })
-    ui.insert(box, () => guard(() => accessor().map(line => this.cell(line)), []))
+    ui.insert(box, () => attempt(() => accessor().map(line => this.cell(line))) ?? [])
     return box
   }
 
@@ -96,10 +97,10 @@ export class View {
     const box = ui.createElement('box')
     ui.setProp(box, 'flexDirection', 'row')
     ui.insert(box, () =>
-      guard(() => {
+      attempt(() => {
         const cell = accessor()
         return cell && cell.text ? [this.cell(cell)] : []
-      }, []),
+      }) ?? [],
     )
     return box
   }
@@ -111,9 +112,9 @@ export class View {
     ui.setProp(box, 'flexDirection', 'column')
     ui.setProp(box, 'width', '100%')
     ui.setProp(box, 'height', '100%')
-    const bg = guard(() => this.theme()?.background?.base, undefined)
+    const bg = attempt(() => this.theme()?.background?.base)
     if (bg !== undefined) ui.setProp(box, 'backgroundColor', bg)
-    ui.insert(box, () => guard(() => accessor().map(cells => this.row(cells)), []))
+    ui.insert(box, () => attempt(() => accessor().map(cells => this.row(cells))) ?? [])
     return box
   }
 }

@@ -523,6 +523,23 @@ describe('opencode TUI plugin: the /granny navigator', () => {
     expect(v.m.fc.navigations.at(-1)).toEqual({ type: 'session', sessionID: 'ses_sub' })
   })
 
+  it('reads the session family once per refresh, however many agents the run has', () => {
+    const v = open()
+    const perKey = () => {
+      const before = v.m.fc.familyCalls.length
+      v.key('down,j')
+      return v.m.fc.familyCalls.length - before
+    }
+    const few = perKey()
+    const more = ['ses_x', 'ses_y', 'ses_z']
+    for (const id of more) v.m.fc.sessions.set(id, role(id, { label: `review plan review r2 ${id}`, role: 'reviewer', phase: 'Plan review' }))
+    journal(...more.map((id, i) => line(33 * M + i, 'agent', { label: `review plan review r2 ${id}`, role: 'reviewer', session: id, model: kimi, phase: 'Plan review', linked: true })))
+    v.m.timers.tick()
+    expect(v.lines().join('\n')).toContain('review plan review r2 ses_z')
+    expect(perKey()).toBe(few)
+    expect(few).toBeLessThanOrEqual(2)
+  })
+
   it('shows a new agent after a journal append and a tick, and re-renders without reading files', () => {
     const v = open()
     journal(line(33 * M, 'agent', { label: 'review plan review r2 zeta', role: 'reviewer', session: 'ses_z', model: kimi, phase: 'Plan review', linked: true }))

@@ -4,9 +4,9 @@
 import { join } from 'node:path'
 import { clean, stamp } from '../omp/format'
 import { duration } from '../runview/format'
-import { type AgentNode, AGENT_MARKERS, type AgentState, agentKey, nextAgent, type PhaseNode, type Row, rowText, runKey, type RunTree, visibleRows } from '../runview/tree'
-import type { RunSnapshot, Tone } from './runwatch'
-import type { Cell } from './tui-view'
+import { type AgentNode, AGENT_MARKERS, agentKey, nextAgent, type PhaseNode, type Row, rowText, runKey, type RunTree, visibleRows } from '../runview/tree'
+import { AGENT_TONES, type RunSnapshot, STATUS_TONES, type Tone } from './runwatch'
+import { attempt, type Cell } from './tui-view'
 
 export interface NavRun {
   dir: string
@@ -21,8 +21,8 @@ export interface ChildSession {
 
 export interface NavDeps {
   runs(): NavRun[]
-  /** The sessions whose parent is `session`. */
-  children(session: string): ChildSession[]
+  /** The child sessions of each of `sessions`, keyed by parent; a session with none may be left out. */
+  children(sessions: readonly string[]): ReadonlyMap<string, readonly ChildSession[]>
   /** Whether a role session is a child of the run's parent; undefined when the store does not know it. */
   linked(session: string): boolean | undefined
   now(): number
@@ -39,9 +39,6 @@ const NARROW_DETAIL = 4
 const AGENT_LINES = 40
 const PHASE_LINES = 200
 const UNREADABLE = 'run files not readable from this TUI - showing the role sessions only'
-
-const AGENT_TONES: Record<AgentState, Tone> = { running: 'info', waiting: 'muted', done: 'success', failed: 'error', cancelled: 'warning' }
-const STATUS_TONES: Record<string, Tone> = { running: 'info', done: 'success', failed: 'error', cancelled: 'warning' }
 
 const clamp = (n: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, n))
 
@@ -99,28 +96,22 @@ export class NavModel {
       this.runs = []
     }
     this.subs.clear()
-    const trees = this.runs.map(r => this.withChildren(r.snapshot.tree))
+    const sessions = [...new Set(this.runs.flatMap(r => r.snapshot.tree.agents.map(a => a.session)))]
+    const children = attempt(() => this.deps.children(sessions)) ?? new Map<string, readonly ChildSession[]>()
+    const trees = this.runs.map(r => this.withChildren(r.snapshot.tree, children))
     this.rows = visibleRows(trees, this.folded, this.expanded)
     for (const row of this.rows) if (row.parent) this.parents.set(row.key, row.parent)
   }
 
-  private childrenOf(session: string): ChildSession[] {
-    try {
-      return this.deps.children(session)
-    } catch {
-      return []
-    }
-  }
-
   /** The tree with each agent's subagents taken from its session's children, leaving the snapshot as it was. */
-  private withChildren(tree: RunTree): RunTree {
+  private withChildren(tree: RunTree, children: ReadonlyMap<string, readonly ChildSession[]>): RunTree {
     const copies = new Map<AgentNode, AgentNode>()
     const copy = (agent: AgentNode): AgentNode => {
       let out = copies.get(agent)
       if (!out) {
-        const children = this.childrenOf(agent.session)
-        for (const child of children) this.subs.set(child.id, child)
-        out = { ...agent, subagents: children.map(c => ({ name: c.id, path: c.id })) }
+        const mine = children.get(agent.session) ?? []
+        for (const child of mine) this.subs.set(child.id, child)
+        out = { ...agent, subagents: mine.map(c => ({ name: c.id, path: c.id })) }
         copies.set(agent, out)
       }
       return out
@@ -311,14 +302,6 @@ export class NavModel {
         return { head, body: [], foot: [{ text: `ask the agent for granny_status { runId: "${s.id}" } for the full record`, tone: 'muted' }] }
       }
     }
-  }
-}
-
-const attempt = <T>(fn: () => T): T | undefined => {
-  try {
-    return fn()
-  } catch {
-    return undefined
   }
 }
 
