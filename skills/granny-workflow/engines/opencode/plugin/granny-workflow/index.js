@@ -2497,7 +2497,48 @@ function hostModelErrors(config, layers, host, problem, sources) {
   const reviewers = config.reviewers.flatMap((rv, i) => rv.engine === "agent" ? check(`reviewers[${i}] "${rv.name}": model`, rv.model, from((l) => Array.isArray(l.reviewers))) : []);
   return [...roles, ...reviewers];
 }
-var RUN_TOOL_DESCRIPTION = 'granny-workflow: start the implement \u2192 review \u2192 judge \u2192 fix loop in the background and return a run id. The granny-workflow skill, when installed, describes the inputs and the preflight. Send only the fields you set: leave an optional field out instead of sending "", [], {} or a default - an empty value is not a missing one (stages[].checks [] runs no checks, stages[].after [] starts the stage at once). Set config planReview only when the user asked for a plan review in this request - it costs many tokens and much time.';
+var USER_SETTINGS = "roles.*.model, roles.*.effort, reviewers, threshold, maxRounds and checks come from the user's config files: override them in config only when the user asked for that change in this conversation. If a provider limit or error blocks the run, stop and ask the user which model to use instead of switching models yourself.";
+var RUN_TOOL_DESCRIPTION = `granny-workflow: start the implement \u2192 review \u2192 judge \u2192 fix loop in the background and return a run id. The granny-workflow skill, when installed, describes the inputs and the preflight. Send only the fields you set: leave an optional field out instead of sending "", [], {} or a default - an empty value is not a missing one (stages[].checks [] runs no checks, stages[].after [] starts the stage at once). Set config planReview only when the user asked for a plan review in this request - it costs many tokens and much time. ${USER_SETTINGS}`;
+var shown = (value) => {
+  if (value === undefined)
+    return "default";
+  if (typeof value === "string")
+    return value;
+  return JSON.stringify(value);
+};
+var reviewersText = (list, host) => list.map((rv) => `${rv.name} (${[rv.engine, resolveModel(rv.model, host)].filter(Boolean).join(", ")})`).join(", ");
+function overridesNotice(layers, host) {
+  if (layers.at(-1) === undefined)
+    return "";
+  const after = resolveConfig(layers, host);
+  let before;
+  try {
+    before = resolveConfig(layers.slice(0, -1), host);
+  } catch {
+    before = resolveConfig([], host);
+  }
+  const changes = [];
+  const note = (key, now, was) => {
+    if (now !== was)
+      changes.push(`${key} ${now} (config: ${was})`);
+  };
+  for (const role of Object.keys(after.roles)) {
+    note(`roles.${role}.model`, shown(resolveModel(after.roles[role].model, host)), shown(resolveModel(before.roles[role].model, host)));
+    note(`roles.${role}.effort`, shown(after.roles[role].effort), shown(before.roles[role].effort));
+  }
+  for (const key of Object.keys(after)) {
+    if (key === "roles")
+      continue;
+    if (key === "reviewers")
+      note(key, reviewersText(after.reviewers, host), reviewersText(before.reviewers, host));
+    else if (key === "checks")
+      note(key, after.checks.map((c) => c.name).join(", ") || "none", before.checks.map((c) => c.name).join(", ") || "none");
+    else
+      note(key, shown(after[key]), shown(before[key]));
+  }
+  return changes.length ? `
+overrides: ${changes.join(", ")} - show this line to the user in your next message; they did not set these values in their config files.` : "";
+}
 var isEmpty = (v) => v === "" || Array.isArray(v) && !v.length || !!v && typeof v === "object" && !Array.isArray(v) && !Object.keys(v).length;
 function dropPlaceholders(input) {
   if (!input || typeof input !== "object")
@@ -2574,7 +2615,11 @@ var RUN_INPUT_SCHEMA = {
       }
     },
     fromStage: { type: "number", description: "Only to resume an interrupted run: 1-based stage to resume from; earlier stages are skipped. Leave it out on a new run" },
-    config: { type: "object", additionalProperties: true, description: "Per-run overrides of granny.config.json (same shape). planReview is off by default: set it only when the user explicitly asked for a plan review in this request - it costs many tokens and much time" }
+    config: {
+      type: "object",
+      additionalProperties: true,
+      description: `Per-run overrides of granny.config.json (same shape). planReview is off by default: set it only when the user explicitly asked for a plan review in this request - it costs many tokens and much time. ${USER_SETTINGS}`
+    }
   },
   required: ["repo", "branch"]
 };
@@ -3005,7 +3050,7 @@ Call granny_status with runId "${id}" and report to the user.`);
       });
       return `granny run ${id} started on ${input.repo} (${input.branch}), ${input.goal !== undefined ? "planning only" : `${input.stages?.length ?? 0} stage(s)${config.parallel ? `, up to ${config.maxParallel} in parallel` : ""}`}, threshold ${config.threshold}, maxRounds ${config.maxRounds}.
 Journal: ${join2(dir, "journal.jsonl")}
-You will receive a message when it finishes. Use granny_status { runId: "${id}" } to check progress and granny_cancel to stop it. Do not poll in a loop.${planReviewNotice(input, config)}`;
+You will receive a message when it finishes. Use granny_status { runId: "${id}" } to check progress and granny_cancel to stop it. Do not poll in a loop.${planReviewNotice(input, config)}${overridesNotice(layers, "opencode")}`;
     };
     await ctx.tool.transform((editor) => {
       for (const [kind, name] of Object.entries(SUBMIT)) {

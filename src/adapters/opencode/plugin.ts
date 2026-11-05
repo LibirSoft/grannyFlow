@@ -5,7 +5,7 @@ import { GrannyCancelled, isCancelled } from '../../core/cancel'
 import { checkInput, runGranny, stageCheckErrors, type RunInput } from '../../core/engine'
 import { checkShape, SCHEMAS } from '../../core/schemas'
 import type { AgentRequest, Host, ResultKind } from '../../core/types'
-import { DEFAULT_DELAYS, dropPlaceholders, globalConfigPath, HEARTBEAT_MS, hostModelErrors, type HostOptions, KILL_GRACE_MS, layerSources, pause, planReviewNotice, preflight, readJson, RUN_INPUT_SCHEMA, RUN_TOOL_DESCRIPTION, runCommand, runDir, runId, runStatus, stageRepos, stamp, statusError, SUBMIT, summarize, withHeartbeat } from '../common'
+import { DEFAULT_DELAYS, dropPlaceholders, globalConfigPath, HEARTBEAT_MS, hostModelErrors, type HostOptions, KILL_GRACE_MS, layerSources, overridesNotice, pause, planReviewNotice, preflight, readJson, RUN_INPUT_SCHEMA, RUN_TOOL_DESCRIPTION, runCommand, runDir, runId, runStatus, stageRepos, stamp, statusError, SUBMIT, summarize, withHeartbeat } from '../common'
 import { duration } from '../runview/format'
 import { runOutline } from '../runview/outline'
 
@@ -324,7 +324,7 @@ export const createGrannyPlugin = ({ delays = DEFAULT_DELAYS, sleep = pause, kil
 
       return `granny run ${id} started on ${input.repo} (${input.branch}), ${input.goal !== undefined ? 'planning only' : `${input.stages?.length ?? 0} stage(s)${config.parallel ? `, up to ${config.maxParallel} in parallel` : ''}`}, threshold ${config.threshold}, maxRounds ${config.maxRounds}.
 Journal: ${join(dir, 'journal.jsonl')}
-You will receive a message when it finishes. Use granny_status { runId: "${id}" } to check progress and granny_cancel to stop it. Do not poll in a loop.${planReviewNotice(input, config)}`
+You will receive a message when it finishes. Use granny_status { runId: "${id}" } to check progress and granny_cancel to stop it. Do not poll in a loop.${planReviewNotice(input, config)}${overridesNotice(layers, 'opencode')}`
     }
 
     await ctx.tool.transform((editor: any) => {

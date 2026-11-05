@@ -127,6 +127,14 @@ describe('skill docs', () => {
     expect(read('SKILL.md')).toContain('plan review on or off')
   })
 
+  it("tells the agent in SKILL.md to keep the user's models and loop settings unless the user asked, and to ask on a provider error", () => {
+    const row = read('SKILL.md').split('\n').find(l => l.startsWith('| `config` |'))!
+    for (const key of ['roles.*.model', 'roles.*.effort', 'reviewers', 'threshold', 'maxRounds', 'checks']) expect(row).toContain(key)
+    expect(row).toContain('only when the user asked for that change in this conversation')
+    expect(row).toContain('stop and ask the user which model to use')
+    expect(row).toContain('overrides:')
+  })
+
   it('documents granny setup with the same threshold presets in the README, setup.md and the config reference', () => {
     expect(read('SKILL.md')).toContain('granny setup')
     expect(read('engines/opencode/agents/granny.md')).toContain('granny setup')

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test'
-import { dropPlaceholders, HEARTBEAT_MS, planReviewWarning, RUN_INPUT_SCHEMA, RUN_TOOL_DESCRIPTION, withHeartbeat } from '../src/adapters/common'
+import { dropPlaceholders, HEARTBEAT_MS, overridesNotice, planReviewWarning, RUN_INPUT_SCHEMA, RUN_TOOL_DESCRIPTION, withHeartbeat } from '../src/adapters/common'
 import { checkInput, type RunInput } from '../src/core/engine'
 
 // The granny_run arguments gpt-5.6-luna sent through omp for a plain one-stage run: every optional
@@ -61,6 +61,37 @@ describe('the plan review warning', () => {
       expect(text).toContain('only when the user')
       expect(text).toContain('tokens')
     }
+  })
+})
+
+describe('the user\'s models and loop settings', () => {
+  it('tells the agent in the tool schema to keep them unless the user asked, and to ask on a provider error', () => {
+    const props = RUN_INPUT_SCHEMA.properties as Record<string, { description: string }>
+    for (const text of [props.config!.description, RUN_TOOL_DESCRIPTION]) {
+      for (const key of ['roles.*.model', 'roles.*.effort', 'reviewers', 'threshold', 'maxRounds', 'checks']) expect(text).toContain(key)
+      expect(text).toContain("user's config files")
+      expect(text).toContain('only when the user asked for that change in this conversation')
+      expect(text).toContain('stop and ask the user which model to use')
+    }
+  })
+})
+
+describe('overridesNotice', () => {
+  const files = [{ roles: { implementer: { model: { omp: 'openai-codex/gpt-6.1-sol' }, effort: 'xhigh' } }, reviewers: [{ name: 'codex', engine: 'agent', model: 'openai-codex/gpt-6.1-sol' }] }, { threshold: 70 }]
+
+  it('names every value the run config changed, with the value from the config files', () => {
+    const run = { roles: { implementer: { model: 'kimi-code/k3.1-pro', effort: 'high' }, judge: { model: 'kimi-code/k3.1-pro' } }, threshold: 50, maxRounds: 2, reviewers: [{ name: 'kimi', engine: 'agent', model: 'kimi-code/k3.1-pro' }], checks: [{ name: 'test', run: 'bun test' }] }
+    const notice = overridesNotice([...files, run], 'omp')
+    expect(notice).toBe(
+      '\noverrides: roles.implementer.model kimi-code/k3.1-pro (config: openai-codex/gpt-6.1-sol), roles.implementer.effort high (config: xhigh), roles.judge.model kimi-code/k3.1-pro (config: default), ' +
+        'reviewers kimi (agent, kimi-code/k3.1-pro) (config: codex (agent, openai-codex/gpt-6.1-sol)), threshold 50 (config: 70), maxRounds 2 (config: 4), checks test (config: none) - ' +
+        'show this line to the user in your next message; they did not set these values in their config files.',
+    )
+  })
+
+  it('says nothing without a run config, or when it changes nothing', () => {
+    expect(overridesNotice([...files, undefined], 'omp')).toBe('')
+    expect(overridesNotice([...files, { threshold: 70 }], 'omp')).toBe('')
   })
 })
 

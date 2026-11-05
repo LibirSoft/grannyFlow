@@ -524,6 +524,7 @@ describe('opencode plugin', () => {
     const started = await f.tools.get('granny_run').execute({ repo, branch: 'feat/x', stages: [{ name: 'one', task: 'Do it.' }] }, { sessionID: 'parent' })
     const id = /granny run (\S+) started/.exec(started.content)?.[1]
     expect(id).toBeDefined()
+    expect(started.content).not.toContain('overrides:')
 
     const dir = join(repo, '.granny/runs', id!)
     await waitFor(() => existsSync(join(dir, 'result.json'))).catch(e => {
@@ -593,6 +594,18 @@ describe('opencode plugin', () => {
     for (const beat of beats) expect(beat.command).toContain('sleep 0.3')
     await Bun.sleep(150)
     expect(journalOf(dir).filter(e => e.type === 'heartbeat')).toHaveLength(beats.length)
+  })
+
+  it('lists in its start reply what the run config changed from the config files, for the agent to show the user', async () => {
+    writeFileSync(join(repo, 'granny.config.json'), JSON.stringify({ reviewers: [{ name: 'codex', engine: 'command', command: REVIEW_ONCE }], roles: { implementer: { model: { opencode: 'openai/gpt-x' } } } }))
+    git(repo, 'add', 'granny.config.json')
+    git(repo, 'commit', '-qm', 'cfg')
+    const f = fakeContext()
+    await plugin.setup(f.ctx)
+    const config = { roles: { implementer: { model: 'kimi-code/k3.1-pro' } }, threshold: 50 }
+    const started = (await f.tools.get('granny_run').execute({ repo, branch: 'feat/x', stages: [{ name: 'one', task: 'Do it.' }], config }, { sessionID: 'parent' })).content
+    expect(started).toContain('\noverrides: roles.implementer.model kimi-code/k3.1-pro (config: openai/gpt-x), threshold 50 (config: 70) - show this line to the user in your next message')
+    await finished(join(repo, '.granny/runs', /granny run (\S+) started/.exec(started)![1]!))
   })
 
   it('writes the run outline to status.json from the start, and a planning run as kind plan', async () => {
