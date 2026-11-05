@@ -181,6 +181,32 @@ describe('skill docs', () => {
     expect(config).not.toMatch(/and opencode (accept|have their own views)/)
   })
 
+  it('describes the run navigator page, its detail and its keys on omp and opencode', () => {
+    const page = ['granny · <branch> · stage <k>/<n> · <phase> · <elapsed>', 'Worktree ✓ › Implement ● › Checks › Review › Final review › PR ready', 'checks ✓', '`run details`', 'NOW', 'TODO', 'RECENT', 'LAST SAID', '✓ done in', '`v`', '`f`', 'short model']
+    for (const file of ['references/omp.md', 'references/opencode.md']) {
+      const text = read(file)
+      expect({ file, missing: page.filter(piece => !text.includes(piece)) }).toEqual({ file, missing: [] })
+      expect({ file, phases: text.includes('round and stage groups') }).toEqual({ file, phases: false })
+    }
+    const omp = read('references/omp.md')
+    const navigator = omp.slice(omp.indexOf('**Run navigator.**'))
+    expect(navigator.startsWith('**Run navigator.** `/granny` or `alt+w` in the omp TUI opens it; the run panel says so.')).toBe(true)
+    expect(omp).toContain('`t` opens')
+    const opencode = read('references/opencode.md')
+    expect(opencode).toContain('`data.session.message`')
+    expect(opencode).toContain('granny · stage <k>/<n> · <phase> · <n> running · <time>')
+    expect(opencode).toContain('Enter opens the session')
+  })
+
+  it('names the run files the views read in both host references', () => {
+    for (const file of ['references/omp.md', 'references/opencode.md']) {
+      const text = read(file)
+      const pieces = ['`outline`', 'stage { number, name, event, outcome? }', 'heartbeat { command }', '`cwd`']
+      expect({ file, missing: pieces.filter(piece => !text.includes(piece)) }).toEqual({ file, missing: [] })
+    }
+    expect(read('references/omp.md')).toContain('{ type: "todo", todos }')
+  })
+
   it("states the model refusal and the rule on the user's models in both host references", () => {
     for (const file of ['references/omp.md', 'references/opencode.md']) {
       const text = read(file)

@@ -509,13 +509,13 @@ The word severities map to `critical` → P0, `high` → P1, `medium` → P2, `l
 
 On omp:
 
-- `"full"` (default): the live panel and status line, plus a condensed event log per role process (`sessions/<n>-<label>/events.jsonl`: state changes, reasoning headings, tool calls, the final text of each answer) and the run navigator (`/granny`, `alt+w`): the run's phases and agents, each agent's live log or transcript.
+- `"full"` (default): the live panel and status line, plus a condensed event log per role process (`sessions/<n>-<label>/events.jsonl`: state changes, reasoning headings, tool calls, the final text of each answer) and the run navigator (`/granny`, `alt+w`): the run's stages and agents, what the selected agent is doing now, its full event list or its transcript.
 - `"panel"`: the live panel and status line only; no event log, and `/granny` and `alt+w` say watching is off for that run.
 - `"off"`: no panel, no status line, no event log.
 
 On opencode, where the TUI plugin entry `tui.js` draws the view:
 
-- `"full"` (default): a sidebar section with the run's phase and its agents, a chip in the prompt footer, toasts on phase changes, failed roles and the run's end, and the run navigator (`/granny`, `<leader>j`): the run's phases and agents beside a detail pane, and Enter opens a role's opencode session.
+- `"full"` (default): a sidebar section with the run's stage, phase and agents, a chip in the prompt footer, toasts on phase changes, failed roles and the run's end, and the run navigator (`/granny`, `<leader>j`): the run's stages and agents beside what the selected agent is doing now, and Enter opens a role's opencode session.
 - `"panel"`: the sidebar section and the chip only; `/granny` says watching is off for that run.
 - `"off"`: none of them.
 
