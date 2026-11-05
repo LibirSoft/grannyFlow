@@ -217,10 +217,6 @@ export class LiveRun {
 
   constructor(readonly id: string, private readonly ui: PanelUi | undefined, private readonly options: LiveOptions) {
     this.startedAt = options.now()
-    if (ui) {
-      this.timer = setInterval(() => this.touch(), Math.max(10, Math.min(250, options.renderEveryMs)))
-      this.timer.unref?.()
-    }
   }
 
   get key(): string {
@@ -282,6 +278,10 @@ export class LiveRun {
   /** Redraws the widget, at most once per `renderEveryMs`. */
   touch() {
     if (!this.ui || this.closed) return
+    if (!this.timer) {
+      this.timer = setInterval(() => this.touch(), Math.max(10, Math.min(250, this.options.renderEveryMs)))
+      this.timer.unref?.()
+    }
     const now = this.options.now()
     if (now - this.lastDraw < this.options.renderEveryMs) return
     this.lastDraw = now

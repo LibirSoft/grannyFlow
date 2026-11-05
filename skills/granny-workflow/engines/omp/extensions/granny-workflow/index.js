@@ -2772,10 +2772,6 @@ class LiveRun {
     this.ui = ui;
     this.options = options;
     this.startedAt = options.now();
-    if (ui) {
-      this.timer = setInterval(() => this.touch(), Math.max(10, Math.min(250, options.renderEveryMs)));
-      this.timer.unref?.();
-    }
   }
   get key() {
     return `granny-${this.id}`;
@@ -2829,6 +2825,10 @@ class LiveRun {
   touch() {
     if (!this.ui || this.closed)
       return;
+    if (!this.timer) {
+      this.timer = setInterval(() => this.touch(), Math.max(10, Math.min(250, this.options.renderEveryMs)));
+      this.timer.unref?.();
+    }
     const now = this.options.now();
     if (now - this.lastDraw < this.options.renderEveryMs)
       return;

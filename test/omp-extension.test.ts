@@ -344,10 +344,13 @@ describe('live panel', () => {
     }
   })
 
-  it('draws at most once per renderEveryMs, refreshes on its own, and stops when closed', async () => {
+  it('draws at most once per renderEveryMs, refreshes on its own from the first draw, and stops when closed', async () => {
     let t = 1_000_000
     const u = fakeUi()
     const live = new LiveRun('r2', u.ui, { now: () => t, renderEveryMs: 1000 })
+    t += 1000
+    await Bun.sleep(300)
+    expect(u.calls).toEqual([])
     const role = live.role({ label: 'implement one', role: 'implementer', model: 'm' })
     live.start(role)
     for (let i = 0; i < 500; i++) {
@@ -362,7 +365,7 @@ describe('live panel', () => {
     live.touch()
     expect(u.widgets('granny-r2')).toHaveLength(2)
     expect(u.widgets('granny-r2')[0]!.options).toEqual({ placement: 'aboveEditor' })
-    expect(u.status('granny-r2')).toBe('granny r2 · Starting · 1 active · 1s')
+    expect(u.status('granny-r2')).toBe('granny r2 · Starting · 1 active · 2s')
 
     t += 1000
     await Bun.sleep(300)
