@@ -181,6 +181,30 @@ describe('skill docs', () => {
     expect(config).not.toMatch(/and opencode (accept|have their own views)/)
   })
 
+  it("states the model refusal and the rule on the user's models in both host references", () => {
+    for (const file of ['references/omp.md', 'references/opencode.md']) {
+      const text = read(file)
+      const pieces = ['`granny_run refused:`', 'host-keyed', 'only when the user asked for that change in this conversation', 'stop and ask the user which model to use', 'overrides: roles.implementer.model']
+      expect({ file, missing: pieces.filter(piece => !text.includes(piece)) }).toEqual({ file, missing: [] })
+    }
+    expect(read('SKILL.md')).toContain('`granny_run` refuses a model the host cannot run')
+    expect(read('references/config.md')).toContain('`granny_run` refuses')
+  })
+
+  it('shows no Claude Code alias as a model for every host in a JSON example, since opencode and omp refuse the run', () => {
+    const docs: Record<string, string> = { 'README.md': readRoot('README.md'), 'SKILL.md': read('SKILL.md') }
+    for (const f of readdirSync(join(skill, 'references'))) docs[`references/${f}`] = read(`references/${f}`)
+    const alias = /^(default|sonnet|opus|haiku|opusplan)(\[1m\])?$/i
+    const plain = Object.entries(docs).flatMap(([file, md]) =>
+      jsonBlocks(md).flatMap(block => {
+        const config = JSON.parse(block)
+        const models = [...Object.values<any>(config.roles ?? {}).map(r => r?.model), ...(config.reviewers ?? []).filter((r: any) => r?.engine === 'agent').map((r: any) => r.model)]
+        return models.filter(m => typeof m === 'string' && alias.test(m)).map(model => ({ file, model }))
+      }),
+    )
+    expect(plain).toEqual([])
+  })
+
   it('names omp in the README, the package description and the hosts diagram', () => {
     expect(readRoot('README.md')).toContain(OMP_INSTALL)
     expect(readRoot('README.md')).toMatch(/^\| omp \|/m)

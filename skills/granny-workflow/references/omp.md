@@ -96,6 +96,10 @@ The prompt ends by asking the role to call its submit tool exactly once. When th
 
 Models are what omp's `--model` takes: `provider/id` (exact, such as `anthropic/claude-sonnet-5-5`), a fuzzy id (`opus`), or a model role from your omp settings (`slow`, `@slow`). List them with `omp models`. A role or agent reviewer without a model uses the model of the session that called `granny_run`; when that is unknown, omp picks its default. `effort` is passed as `--thinking <effort>`: `low`, `medium`, `high`, `xhigh` and `max` are all omp thinking levels.
 
+`granny_run` checks every role's and every `agent` reviewer's model before anything starts. A Claude Code alias (`default`, `sonnet`, `opus`, `haiku`, `opusplan`) written as one string for every host gets `granny_run refused:` with one line per entry, the config layer it came from and the fix, a host-keyed model: `{ "claude-code": "sonnet", "omp": "<provider/model>" }`. Keyed to omp (`{ "omp": "opus" }`) the same word is your choice and goes to `--model` as a fuzzy id.
+
+`roles.*.model`, `roles.*.effort`, `reviewers`, `threshold`, `maxRounds` and `checks` come from your config files. The agent that calls `granny_run` overrides them in `config` only when the user asked for that change in this conversation; when a provider limit or error blocks a run, it must stop and ask the user which model to use. The `granny_run` schema says so, and the start reply lists every value the run's `config` changed from the config files, for the agent to show you: `overrides: roles.implementer.model kimi-code/k3.1-pro (config: openai-codex/gpt-6.1-sol), ...`. Without a change there is no such line.
+
 Role processes run with `--approval-mode yolo`: they never wait for an approval, and granny's guard, a `tool_call` handler, is what limits them. For every role it blocks:
 
 - the `ask` tool - no one answers a role;

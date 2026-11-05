@@ -55,8 +55,10 @@ A role's or a reviewer's `model` is either one string for every host, or an obje
 
 - **Claude Code** passes it to `agent({ model })`: `opus`, `sonnet`, `haiku`, or a model ID the session accepts. `effort` (`low`, `medium`, `high`, `xhigh`, `max`) is passed as the agent's reasoning effort.
 - **opencode** needs `provider/model`, optionally `#variant` (`anthropic/claude-sonnet-5-5#high`); list them with `opencode models`. `effort` is ignored - use the variant suffix. A role with no model uses the model of the session that called `granny_run`.
-- **omp** takes what `omp --model` takes: `provider/id` (exact, `anthropic/claude-sonnet-5-5`), a fuzzy id (`opus`) or a model role from the omp settings (`slow`); list them with `omp models`. `effort` is passed as `--thinking <effort>`. A role with no model uses the model of the session that called `granny_run`.
+- **omp** takes what `omp --model` takes: `provider/id` (exact, `anthropic/claude-sonnet-5-5`), a fuzzy id (keyed to omp, `{ "omp": "opus" }`) or a model role from the omp settings (`slow`); list them with `omp models`. `effort` is passed as `--thinking <effort>`. A role with no model uses the model of the session that called `granny_run`.
 - **Cursor** reads no config; set `model:` in the subagent files (see cursor.md).
+
+On opencode and omp `granny_run` refuses a run with a model the host cannot run, before anything starts, with one line per entry, the config layer it came from and the fix. A Claude Code alias (`sonnet`, `opus`, ...) written as one string for every host is refused on both, so key it to `claude-code` in a config you share between hosts. Claude Code takes its aliases.
 
 A host key that is missing means "inherit" on that host. Reviewers take `model` and `effort` from their own entry, never from a role.
 
@@ -237,7 +239,7 @@ On Claude Code it goes through `opencode run`, because a Claude Code agent runs 
 {
   "reviewers": [
     { "name": "codex", "engine": "auto" },
-    { "name": "opus", "engine": "agent", "model": "opus", "effort": "high" },
+    { "name": "opus", "engine": "agent", "model": { "claude-code": "opus" }, "effort": "high" },
     { "name": "glm", "engine": "command", "command": "opencode run -m opencode/glm-5.3-flash-free {prompt}" }
   ]
 }
@@ -368,7 +370,7 @@ On Claude Code the judge runs on `haiku` by default. Since it only classifies an
 The deciding case was a fail-open `git status` probe the user fixed later: Haiku classified it `major` (fix) in both runs, Sonnet `moderate` (residual) in both, reasoning that it was a rare failure - likelihood lowering impact, which the rubric forbids. To trade the extra fix rounds for Sonnet's fewer ones, set:
 
 ```json
-{ "roles": { "judge": { "model": "sonnet" } } }
+{ "roles": { "judge": { "model": { "claude-code": "sonnet" } } } }
 ```
 
 On opencode and omp the judge keeps the session model unless `roles.judge.model` names one.
@@ -530,7 +532,7 @@ Claude Code (`/workflows`) has its own view of a run; it accepts the key and ign
 ```json
 {
   "roles": {
-    "granny": { "model": "sonnet", "effort": "medium" },
+    "granny": { "model": { "claude-code": "sonnet", "opencode": "anthropic/claude-sonnet-5-5", "omp": "anthropic/claude-sonnet-5-5" }, "effort": "medium" },
     "implementer": { "model": { "claude-code": "opus", "opencode": "anthropic/claude-opus-5-5#high", "omp": "anthropic/claude-opus-5-5" }, "effort": "high" },
     "judge": { "model": { "claude-code": "sonnet", "opencode": "anthropic/claude-sonnet-5-5", "omp": "anthropic/claude-sonnet-5-5" } }
   },

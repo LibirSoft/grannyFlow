@@ -102,6 +102,10 @@ The plan review runs after the worktree step and before stage 1 ([config.md](con
 
 Models are `provider/model[#variant]` (`opencode models`). A role or agent reviewer without a model uses the model of the session that called `granny_run`. `effort` is ignored here; use the `#variant` suffix.
 
+`granny_run` checks every role's and every `agent` reviewer's model before anything starts. Any other form, such as a Claude Code alias like `sonnet` written as one string for every host, gets `granny_run refused:` with one line per entry, the config layer it came from and the fix, a host-keyed model: `{ "claude-code": "sonnet", "opencode": "<provider/model>" }`.
+
+`roles.*.model`, `roles.*.effort`, `reviewers`, `threshold`, `maxRounds` and `checks` come from your config files. The agent that calls `granny_run` overrides them in `config` only when the user asked for that change in this conversation; when a provider limit or error blocks a run, it must stop and ask the user which model to use. The `granny_run` schema says so, and the start reply lists every value the run's `config` changed from the config files, for the agent to show you: `overrides: roles.implementer.model kimi-code/k3.1-pro (config: openai-codex/gpt-6.1-sol), ...`. Without a change there is no such line.
+
 Every child session runs the `build` agent with these session rules: everything allowed except questions, `git push`, `git remote add`, `git stash`, `git rebase`, `git reset --hard` and `gh pr`. Read-only roles (judge, agent reviewers, extraction) additionally cannot edit, `git add` or `git commit`.
 
 Review commands run in the opencode server's environment: `codex`, and the CLI of every `command` reviewer, must be on that PATH and logged in.

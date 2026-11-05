@@ -99,7 +99,7 @@ Three layers, later wins: `~/.config/granny/config.json` (user), `<repo>/granny.
 {
   "roles": {
     "granny":      { "model": { "claude-code": "opus", "opencode": "anthropic/claude-opus-5-5", "omp": "anthropic/claude-opus-5-5" } },
-    "implementer": { "model": "opus", "effort": "high" },
+    "implementer": { "model": { "claude-code": "opus", "opencode": "anthropic/claude-opus-5-5", "omp": "anthropic/claude-opus-5-5" }, "effort": "high" },
     "judge":       { "model": { "claude-code": "sonnet", "opencode": "anthropic/claude-sonnet-5-5", "omp": "anthropic/claude-sonnet-5-5" } }
   },
   "reviewers": [
@@ -136,7 +136,7 @@ Checks are off by default. When the project has commands that must pass - tests,
    - On omp: no Codex engine - `auto`, `codex`, `codex-plugin` and an entry without `engine` are refused; offer an `agent` reviewer on an `openai-codex/...` model instead.
    - Codex CLI (engine `codex`, or `auto` on opencode, or `auto` on Claude Code without the plugin or without `node`): `codex --version` works and Codex is logged in (`codex login status`).
    - Codex plugin (engine `codex-plugin`, or `auto` on Claude Code when it is installed and `command -v node` finds `node`): `node --version` works; `ls "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/cache/openai-codex/codex/*/scripts/codex-companion.mjs` finds the companion (for `codex-plugin` on opencode: with the opencode server's `HOME` and `CLAUDE_CONFIG_DIR`); `codex --version` works and Codex is logged in - the companion drives the CLI.
-   - Engine `agent`: the model exists on this host - on Claude Code only Claude models; for any other provider there, the reviewer needs engine `command`. `opencode models` and `omp models` list theirs.
+   - Engine `agent`: the model exists on this host - on Claude Code only Claude models; for any other provider there, the reviewer needs engine `command`. `opencode models` and `omp models` list theirs. On opencode and omp `granny_run` refuses a model the host cannot run before anything starts, such as `sonnet` written as one string for every host, and names the fix: a host-keyed model ([references/config.md](references/config.md#models-per-host)). Pass the refusal on to the user; do not pick another model yourself.
    - Engine `command`: the CLI in the template is on `PATH` where the review runs (on opencode: the server's; on omp: the omp session's) and logged in to its provider.
    Tell the user which reviewers will run and what `auto` will pick. A reviewer that fails twice in a round ends the stage `review-failed`. For the plan review the Codex engines run `codex exec` or the plugin's `task` instead of a diff review; a `command` reviewer without `{prompt}` sits the plan review out, and when no reviewer can review a plan, the plan review fails and the run stops.
 5. `"readOnlyAgent": true` on Claude Code: `ls "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/agents/granny-readonly.md "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/hooks/granny-readonly-guard.mjs` finds both files (or the agent is in the project's `.claude/agents/`), the settings have the PreToolUse hook that runs the guard, and `node --version` works ([references/config.md](references/config.md#read-only-roles)). Without the agent the run stops at the first reviewer; without the hook or `node`, the read-only roles' Bash is not limited - tell the user.
@@ -144,7 +144,7 @@ Checks are off by default. When the project has commands that must pass - tests,
 
 ## 4. Launch
 
-Follow your host reference. Then tell the user, in their language: the run id, the worktree the run will work in, the stages, threshold and round cap, plan review on or off (on: its token and time cost with the round cap - omp and opencode put that warning in the `granny_run` reply), the models per role, the reviewers, and that nothing will be pushed. Do not poll; you are notified when the run ends.
+Follow your host reference. Then tell the user, in their language: the run id, the worktree the run will work in, the stages, threshold and round cap, plan review on or off (on: its token and time cost with the round cap - omp and opencode put that warning in the `granny_run` reply), the models per role, the reviewers, any `overrides:` line of the reply, where to watch the run when the reply names it (the run navigator on omp and opencode), and that nothing will be pushed. Do not poll; you are notified when the run ends.
 
 ## 5. When it completes
 
