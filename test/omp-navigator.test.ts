@@ -4,7 +4,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { TailReader } from '../src/adapters/omp/tail'
 import { LineBuffer, sessionEntryLines } from '../src/adapters/omp/transcript'
-import { RoleActivity } from '../src/adapters/omp/panel'
+import { LiveRun, RoleActivity } from '../src/adapters/omp/panel'
+import { Navigator, type NavRun } from '../src/adapters/omp/navigator'
 import { buildRunTree, groupOf, type JournalEntry, nextAgent, rowText, subagentFiles, visibleRows } from '../src/adapters/omp/tree'
 
 let tmp: string
@@ -466,10 +467,13 @@ describe('buildRunTree / visibleRows', () => {
     expect(nextAgent(rows, `agent:${sess['pr-ready check']}`, 1)).toBeUndefined()
   })
 
-  it('drops the provider prefix of a model when the row is narrow', () => {
+  it('drops the provider prefix of a model when the row is narrow, then the role and model', () => {
     const { entries } = fixture()
     const rows = visibleRows([buildRunTree({ id: 'R', status: 'running', startedAt: BASE }, entries, new Map(), NOW)], new Set(), 'R')
-    expect(rowText(rows[3]!, NOW, 40)).toBe('    ✓ plan  planner · gpt-6.1-sol/xhigh · 59s')
+    expect(rowText(rows[3]!, NOW, 58)).toBe('    ✓ plan  planner · openai-codex/gpt-6.1-sol/xhigh · 59s')
+    expect(rowText(rows[3]!, NOW, 57)).toBe('    ✓ plan  planner · gpt-6.1-sol/xhigh · 59s')
+    expect(rowText(rows[3]!, NOW, 44)).toBe('    ✓ plan · 59s')
+    expect(rowText(rows.at(-1)!, NOW, 30)).toBe('    … pr-ready check · 49s')
   })
 
   it('reads a journal written before agents had a phase into the current phase', () => {
@@ -495,5 +499,391 @@ describe('subagentFiles', () => {
       ['PublishedContracts', join(session, '2026-01-01T00-00-00-000Z_u', 'PublishedContracts.jsonl')],
     ])
     expect(subagentFiles(join(tmp, 'missing')).size).toBe(0)
+  })
+})
+
+describe('Navigator', () => {
+  const T0 = Date.parse('2026-11-05T17:00:00.000Z')
+  const iso = (sec: number) => new Date(T0 + sec * 1000).toISOString()
+  const line = (value: unknown) => `${JSON.stringify(value)}\n`
+  const TREE_HELP = '↑↓ move · Enter/→ open · Space fold · Tab/] next agent · [ prev · Esc close'
+
+  function setup(options: { theme?: any; matches?: (data: string, name: string) => boolean; rows?: number; twoRuns?: boolean } = {}) {
+    const dir = join(tmp, 'runs', 'R1')
+    const plan = join(dir, 'sessions', '1-plan')
+    const impl = join(dir, 'sessions', '2-implement-one')
+    mkdirSync(join(plan, '2026-11-05T17-00-01-000Z_u'), { recursive: true })
+    mkdirSync(impl, { recursive: true })
+    const journal = [
+      { t: iso(0), type: 'phase', title: 'Plan' },
+      { t: iso(1), type: 'agent', label: 'plan', role: 'planner', phase: 'Plan', session: plan, model: 'openai/gpt-x', effort: 'high' },
+      { t: iso(2), type: 'subagent', label: 'plan', agents: ['BaselineGates'] },
+      { t: iso(60), type: 'agent-end', label: 'plan', session: plan, outcome: 'done' },
+      { t: iso(61), type: 'phase', title: 'Implement' },
+      { t: iso(61), type: 'log', message: 'implementing stage one' },
+      { t: iso(62), type: 'agent', label: 'implement one', role: 'implementer', phase: 'Implement', session: impl, model: 'openai/gpt-x' },
+    ]
+    writeFileSync(join(dir, 'journal.jsonl'), journal.map(line).join(''))
+    writeFileSync(join(dir, 'status.json'), JSON.stringify({ id: 'R1', status: 'running', repo: '/repo', branch: 'feat/x', startedAt: iso(0) }))
+    writeFileSync(
+      join(plan, '2026-11-05T17-00-01-000Z_u.jsonl'),
+      [
+        { type: 'title', v: 1, title: 'plan' },
+        { type: 'session', version: 3, id: 'u', timestamp: iso(1), cwd: '/repo' },
+        { type: 'message', timestamp: iso(2), message: { role: 'user', content: [{ type: 'text', text: 'Write the plan.' }] } },
+        { type: 'message', timestamp: iso(59), message: { role: 'assistant', content: [{ type: 'text', text: 'Plan written.' }], stopReason: 'stop' } },
+      ]
+        .map(line)
+        .join(''),
+    )
+    writeFileSync(join(plan, '2026-11-05T17-00-01-000Z_u', 'BaselineGates.jsonl'), line({ type: 'message', timestamp: iso(5), message: { role: 'assistant', content: [{ type: 'text', text: 'Gates are green.' }] } }))
+    writeFileSync(join(plan, 'events.jsonl'), line({ t: iso(3), type: 'heading', text: 'Drafting the stages' }))
+    writeFileSync(join(impl, 'events.jsonl'), [line({ t: iso(63), type: 'heading', text: 'Reading the plan' }), line({ t: iso(64), type: 'tool', name: 'read', intent: 'Reading the plan', arg: 'plan.md' })].join(''))
+
+    const clock = { t: T0 }
+    const live = new LiveRun('R1', undefined, { now: () => clock.t, renderEveryMs: 1000 })
+    clock.t = T0 + 90_000
+    const planRole = live.role({ label: 'plan', role: 'planner', session: plan, phase: 'Plan' })
+    live.start(planRole)
+    live.stop(planRole)
+    planRole.outcome = 'done'
+    const implRole = live.role({ label: 'implement one', role: 'implementer', session: impl, phase: 'Implement' })
+    live.start(implRole)
+    implRole.state = 'thinking'
+    implRole.since = T0 + 80_000
+    const run: NavRun = { id: 'R1', dir, status: 'running', live }
+    const oldDir = join(tmp, 'runs', 'R0')
+    mkdirSync(oldDir, { recursive: true })
+    writeFileSync(
+      join(oldDir, 'journal.jsonl'),
+      [
+        { t: iso(-600), type: 'phase', title: 'Plan' },
+        { t: iso(-599), type: 'agent', label: 'plan', role: 'planner', phase: 'Plan', session: join(oldDir, 'sessions', '1-plan'), model: null },
+        { t: iso(-500), type: 'agent-end', label: 'plan', session: join(oldDir, 'sessions', '1-plan'), outcome: 'done' },
+        { t: iso(-480), type: 'phase', title: 'PR ready' },
+      ]
+        .map(line)
+        .join(''),
+    )
+    const earlier: NavRun = { id: 'R0', dir: oldDir, status: 'done', reply: 'R0 finished.', live: new LiveRun('R0', undefined, { now: () => T0 - 600_000, renderEveryMs: 1000 }) }
+    const all = options.twoRuns ? [earlier, run] : [run]
+    const renders = { count: 0, fail: false }
+    const tui = {
+      requestRender: () => {
+        renders.count++
+        if (renders.fail) throw new Error('stale tui')
+      },
+      terminal: { rows: options.rows ?? 30 },
+    }
+    let closed = 0
+    const nav = new Navigator({
+      runs: () => all,
+      runId: 'R1',
+      tui,
+      theme: options.theme ?? {},
+      keys: { matches: options.matches ?? (() => false) },
+      done: () => void closed++,
+      now: () => clock.t,
+      tickMs: 60_000,
+    })
+    const text = (width = 160) => nav.render(width).join('\n')
+    const selected = (width = 160) => nav.render(width).find(l => l.startsWith('›'))
+    return { dir, plan, impl, run, live, clock, renders, nav, text, selected, closed: () => closed, implRole }
+  }
+
+  let nav: Navigator | undefined
+  afterEach(() => nav?.dispose())
+  const open = (options?: Parameters<typeof setup>[0]) => {
+    const s = setup(options)
+    nav = s.nav
+    return s
+  }
+
+  it('opens on the run\'s running agent with its live events in the detail and the tree key help last', () => {
+    const s = open()
+    const lines = s.nav.render(160)
+    expect(lines).toHaveLength(30)
+    expect(lines[0]).toStartWith('granny R1 · Implement · running · 1m30s')
+    expect(lines[0]).toEndWith('[tree]')
+    expect(lines[1]).toStartWith('  ▾ run R1 · running · 1m30s')
+    expect(s.selected()).toStartWith('›       ● implement one')
+    const body = lines.join('\n')
+    expect(body).toContain('│ implement one (implementer) · openai/gpt-x · thinking 10s · events · follow on')
+    expect(body).toContain('» Reading the plan')
+    expect(body).toContain('▸ read: Reading the plan (plan.md)')
+    expect(lines.at(-1)).toBe(TREE_HELP)
+  })
+
+  it('keeps every row within the width and shows one pane below 100 columns', () => {
+    const s = open()
+    for (const width of [20, 60, 99, 100, 160]) {
+      const lines = s.nav.render(width)
+      expect(lines.every(l => l.length <= width)).toBe(true)
+      expect(lines.some(l => l.includes(' │ '))).toBe(width >= 100)
+    }
+    const narrow = s.nav.render(60).join('\n')
+    expect(narrow).toContain('run R1')
+    expect(narrow).not.toContain('» Reading the plan')
+    s.nav.handleInput('\r')
+    const detail = s.nav.render(60).join('\n')
+    expect(detail).toContain('» Reading the plan')
+    expect(detail).not.toContain('run R1 · running')
+  })
+
+  it('moves the selection with the arrows, Home, End and the page keys, skipping group rows, and previews it', () => {
+    const s = open()
+    s.nav.handleInput('\x1b[A')
+    expect(s.selected()).toStartWith('›   ● Implement')
+    s.nav.tick()
+    expect(s.text()).toContain('implementing stage one')
+    s.nav.handleInput('k')
+    expect(s.selected()).toStartWith('›       └ BaselineGates')
+    s.nav.tick()
+    expect(s.text()).toContain('✎ Gates are green.')
+    s.nav.handleInput('\x1b[B')
+    expect(s.selected()).toStartWith('›   ● Implement')
+    s.nav.handleInput('\x1b[H')
+    expect(s.selected()).toStartWith('› ▾ run R1')
+    s.nav.handleInput('\x1b[F')
+    expect(s.selected()).toStartWith('›       ● implement one')
+    s.nav.handleInput('\x1b[5~')
+    expect(s.selected()).toStartWith('› ▾ run R1')
+    s.nav.handleInput('\x1b[6~')
+    expect(s.selected()).toStartWith('›       ● implement one')
+    s.nav.handleInput('j')
+    expect(s.selected()).toStartWith('›       ● implement one')
+  })
+
+  it('opens the detail with Enter or →, goes back with Esc, closes once with Esc again or q', () => {
+    const s = open()
+    s.nav.handleInput('\r')
+    let lines = s.nav.render(160)
+    expect(lines[0]).toEndWith('[detail]')
+    expect(lines.at(-1)).toBe('↑↓ PgUp/PgDn Home/End scroll · f follow (on) · t transcript · Tab/] [ agent · ←/Esc back · q close')
+    s.nav.handleInput('\x1b')
+    lines = s.nav.render(160)
+    expect(lines[0]).toEndWith('[tree]')
+    expect(lines.at(-1)).toBe(TREE_HELP)
+    s.nav.handleInput('\x1b[C')
+    expect(s.nav.render(160)[0]).toEndWith('[detail]')
+    s.nav.handleInput('\x1b[D')
+    s.nav.handleInput('\x1b')
+    expect(s.closed()).toBe(1)
+    expect(s.nav.disposed).toBe(true)
+    s.nav.handleInput('\x1b')
+    s.nav.handleInput('q')
+    expect(s.closed()).toBe(1)
+    const before = s.renders.count
+    s.nav.tick()
+    expect(s.renders.count).toBe(before)
+
+    const t = open()
+    t.nav.handleInput('\r')
+    t.nav.handleInput('q')
+    expect(t.closed()).toBe(1)
+  })
+
+  it('switches agents from the detail with Tab, ] and [, across phases, staying in the detail', () => {
+    const s = open()
+    s.nav.handleInput('\r')
+    s.nav.handleInput('[')
+    s.nav.tick()
+    let lines = s.nav.render(160)
+    expect(lines[0]).toEndWith('[detail]')
+    expect(lines.join('\n')).toContain('│ plan (planner) · openai/gpt-x/high · done 59s · transcript · follow off')
+    expect(lines.join('\n')).toContain('✎ Plan written.')
+    s.nav.handleInput(']')
+    expect(s.text()).toContain('│ implement one (implementer)')
+    s.nav.handleInput('\x1b[Z')
+    expect(s.text()).toContain('│ plan (planner)')
+    s.nav.handleInput('\t')
+    lines = s.nav.render(160)
+    expect(lines.join('\n')).toContain('│ implement one (implementer)')
+    expect(lines[0]).toEndWith('[detail]')
+    s.nav.handleInput('\t')
+    expect(s.text()).toContain('│ implement one (implementer)')
+  })
+
+  it('follows a running agent\'s new events, holds the view after scrolling up, and follows again with f', () => {
+    const s = open({ rows: 20 })
+    s.nav.handleInput('\r')
+    const events = join(s.impl, 'events.jsonl')
+    const read0 = s.nav.bytesRead
+    const batch = Array.from({ length: 40 }, (_, i) => line({ t: iso(70 + i), type: 'heading', text: `step ${i}` })).join('')
+    appendFileSync(events, batch)
+    s.nav.tick()
+    expect(s.nav.bytesRead - read0).toBe(Buffer.byteLength(batch))
+    let lines = s.nav.render(160)
+    expect(lines.at(-2)).toEndWith('» step 39')
+    s.nav.handleInput('\x1b[A')
+    lines = s.nav.render(160)
+    expect(lines.at(-2)).toEndWith('» step 38')
+    expect(lines.at(-1)).toContain('f follow (off)')
+    const detailOf = (rows: readonly string[]) => rows.slice(2, -1).map(l => l.slice(l.indexOf(' │ ') + 3))
+    const held = detailOf(lines)
+    appendFileSync(events, line({ t: iso(200), type: 'heading', text: 'step 40' }))
+    s.clock.t += 1000
+    s.nav.tick()
+    lines = s.nav.render(160)
+    expect(detailOf(lines)).toEqual(held)
+    s.nav.handleInput('f')
+    lines = s.nav.render(160)
+    expect(lines.at(-2)).toEndWith('» step 40')
+    expect(lines.at(-1)).toContain('f follow (on)')
+    s.nav.handleInput('\x1b[H')
+    expect(s.nav.render(160).join('\n')).not.toContain('step 40')
+    s.nav.handleInput('\x1b[F')
+    expect(s.nav.render(160).at(-2)).toEndWith('» step 40')
+  })
+
+  it('shows a finished agent\'s transcript, toggles to its events with t, and opens a subagent\'s file', () => {
+    const s = open()
+    s.nav.handleInput('\x1b[H')
+    s.nav.handleInput('\x1b[B')
+    s.nav.handleInput('\x1b[B')
+    expect(s.selected()).toStartWith('›     ✓ plan')
+    s.nav.tick()
+    expect(s.text()).toContain('▶ prompt')
+    expect(s.text()).toContain('✎ Plan written.')
+    s.nav.handleInput('\r')
+    s.nav.handleInput('t')
+    s.nav.tick()
+    expect(s.text()).toContain('· events · follow off')
+    expect(s.text()).toContain('» Drafting the stages')
+    expect(s.text()).not.toContain('Plan written.')
+    s.nav.handleInput('t')
+    s.nav.tick()
+    expect(s.text()).toContain('✎ Plan written.')
+    s.nav.handleInput('\x1b')
+    s.nav.handleInput('\x1b[B')
+    s.nav.tick()
+    expect(s.text()).toContain('BaselineGates · subagent of plan')
+    expect(s.text()).toContain('✎ Gates are green.')
+  })
+
+  it('reads a newly selected source right after the key, outside the key handler', async () => {
+    const s = open()
+    s.nav.handleInput('[')
+    expect(s.text()).toContain('(reading …)')
+    await Bun.sleep(20)
+    expect(s.text()).toContain('✎ Plan written.')
+  })
+
+  it('shows a phase\'s journal lines and the run\'s result once it ends', () => {
+    const s = open()
+    s.nav.handleInput('\x1b[A')
+    s.nav.tick()
+    expect(s.text()).toContain('implementing stage one')
+    expect(s.text()).toContain('▸ implement one started (implementer · openai/gpt-x)')
+    s.nav.handleInput('\x1b[H')
+    s.nav.tick()
+    expect(s.text()).toContain('repo     /repo')
+    expect(s.text()).toContain('branch   feat/x')
+    expect(s.text()).toContain(`result   ${join(s.dir, 'result.json')}`)
+    expect(s.text()).not.toContain('[granny] Run R1 finished.')
+    s.run.status = 'done'
+    s.run.reply = '[granny] Run R1 finished.\n- one: clean'
+    s.live.stop(s.implRole)
+    s.implRole.outcome = 'done'
+    s.nav.tick()
+    expect(s.text()).toContain('[granny] Run R1 finished.')
+    expect(s.text()).toContain('- one: clean')
+  })
+
+  it('redraws once per tick however much was written, at once on a key, and never reads files in render', () => {
+    const s = open()
+    const events = join(s.impl, 'events.jsonl')
+    s.nav.tick()
+    let before = s.renders.count
+    for (let i = 0; i < 50; i++) appendFileSync(events, line({ t: iso(70), type: 'heading', text: `n${i}` }))
+    expect(s.renders.count).toBe(before)
+    s.nav.tick()
+    expect(s.renders.count).toBe(before + 1)
+    before = s.renders.count
+    s.nav.handleInput('\x1b[A')
+    expect(s.renders.count).toBe(before + 1)
+    s.nav.handleInput('\x1b[B')
+    s.nav.tick()
+    const first = s.nav.render(160)
+    expect(s.nav.render(160)).toBe(first)
+    rmSync(s.dir, { recursive: true, force: true })
+    s.nav.invalidate()
+    expect(s.nav.render(160)).toEqual(first)
+    expect(first.join('\n')).toContain('» n49')
+  })
+
+  it('consults the named key bindings and captures exactly the keys it handles', () => {
+    const s = open({ matches: (data, name) => data === 'X!' && name === 'tui.select.up' })
+    s.nav.handleInput('X!')
+    expect(s.selected()).toStartWith('›   ● Implement')
+    for (const key of ['\x1b[D', 'f', 't', '[', ']', '\t', '\x1b[Z', ' ', 'q', '\x1b', '\r', 'j', 'k', '\x1b[5~', 'X!']) expect(s.nav.capturesInput(key)).toBe(true)
+    for (const key of ['x', 'c', 'b', '\x1b[1;5C']) expect(s.nav.capturesInput(key)).toBe(false)
+  })
+
+  it('lists the other runs folded and expands one with Enter or Space, folding the others', () => {
+    const s = open({ twoRuns: true })
+    let lines = s.nav.render(160)
+    expect(lines[1]).toStartWith('  ▸ run R0 · done · 2m00s')
+    expect(lines[2]).toStartWith('  ▾ run R1 · running · 1m30s')
+    s.nav.handleInput('\x1b[H')
+    expect(s.selected()).toStartWith('› ▸ run R0')
+    s.nav.handleInput('\r')
+    s.nav.tick()
+    lines = s.nav.render(160)
+    expect(lines[0]).toStartWith('granny R0 · PR ready · done · 2m00s')
+    expect(lines[0]).toEndWith('[tree]')
+    expect(lines.join('\n')).toContain('✓ plan  planner · default model · 1m39s')
+    expect(lines.join('\n')).toContain('R0 finished.')
+    expect(lines.some(l => l.startsWith('  ▸ run R1 · running'))).toBe(true)
+    s.nav.handleInput('\x1b[F')
+    expect(s.selected()).toStartWith('› ▸ run R1')
+    s.nav.handleInput(' ')
+    expect(s.nav.render(160)[0]).toStartWith('granny R1 · Implement')
+    expect(s.text()).toContain('● implement one')
+  })
+
+  it('folds a phase with Space and jumps to the parent with ←', () => {
+    const s = open()
+    s.nav.handleInput('\x1b[D')
+    expect(s.selected()).toStartWith('›   ● Implement')
+    s.nav.handleInput(' ')
+    expect(s.text()).not.toContain('● implement one')
+    expect(s.text()).toContain('● Implement · 29s · 1 agent folded')
+    s.nav.handleInput(' ')
+    expect(s.text()).toContain('● implement one')
+  })
+
+  it('survives a throwing requestRender by disposing itself, and a throwing theme by drawing plain text', () => {
+    const s = open()
+    s.renders.fail = true
+    expect(() => s.nav.tick()).not.toThrow()
+    expect(s.nav.disposed).toBe(true)
+    expect(() => s.nav.handleInput('\x1b[A')).not.toThrow()
+    const count = s.renders.count
+    s.nav.tick()
+    expect(s.renders.count).toBe(count)
+    expect(s.closed()).toBe(0)
+
+    const t = open({
+      theme: {
+        fg: () => {
+          throw new Error('theme gone')
+        },
+        bg: () => {
+          throw new Error('theme gone')
+        },
+      },
+    })
+    const lines = t.nav.render(160)
+    expect(lines[0]).toStartWith('granny R1 · Implement')
+    expect(t.selected()).toStartWith('›       ● implement one')
+  })
+
+  it('colours rows through the theme without changing their text', () => {
+    const theme = { fg: (c: string, x: string) => `<${c}>${x}</>`, bg: (c: string, x: string) => `[${c}]${x}[/]`, bold: (x: string) => x }
+    const s = open({ theme })
+    const lines = s.nav.render(160)
+    expect(lines[0]).toContain('<accent>granny R1')
+    expect(lines.some(l => l.includes('[selectedBg]›       ● implement one'))).toBe(true)
   })
 })

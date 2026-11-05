@@ -60,7 +60,7 @@ const clock = (t: string) => {
   return Number.isNaN(d.getTime()) ? '--:--:--' : d.toTimeString().slice(0, 8)
 }
 
-function entryLines(e: Logged): string[] {
+export function entryLines(e: Logged): string[] {
   const at = clock(e.t)
   switch (e.type) {
     case 'state':

@@ -335,7 +335,7 @@ export function nextAgent(rows: readonly Row[], key: string, dir: 1 | -1): strin
 
 const elapsed = (start: number, end: number | undefined, now: number) => duration((end ?? now) - start)
 
-/** A row's plain text; the model loses its provider prefix when the row would not fit `width`. */
+/** A row's plain text; an agent row that would not fit `width` drops the model's provider prefix, then its role and model. */
 export function rowText(row: Row, now: number, width = Number.POSITIVE_INFINITY): string {
   const indent = '  '.repeat(row.depth)
   switch (row.kind) {
@@ -353,9 +353,11 @@ export function rowText(row: Row, now: number, width = Number.POSITIVE_INFINITY)
     case 'agent': {
       const a = row.agent!
       const tail = ` · ${elapsed(a.start, a.end, now)}${a.activity ? ` · ${a.activity}` : ''}`
-      const full = `${indent}${AGENT_MARKERS[a.state]} ${a.label}  ${a.role} · ${modelText(a.model, a.effort)}${tail}`
-      if (full.length <= width || !a.model?.includes('/')) return full
-      return `${indent}${AGENT_MARKERS[a.state]} ${a.label}  ${a.role} · ${modelText(a.model.slice(a.model.lastIndexOf('/') + 1), a.effort)}${tail}`
+      const head = `${indent}${AGENT_MARKERS[a.state]} ${a.label}`
+      const full = `${head}  ${a.role} · ${modelText(a.model, a.effort)}${tail}`
+      if (full.length <= width) return full
+      const short = a.model?.includes('/') ? `${head}  ${a.role} · ${modelText(a.model.slice(a.model.lastIndexOf('/') + 1), a.effort)}${tail}` : full
+      return short.length <= width ? short : `${head}${tail}`
     }
     case 'sub':
       return `${indent}└ ${row.sub!.name}${row.sub!.path ? '' : ' (no transcript yet)'}`
