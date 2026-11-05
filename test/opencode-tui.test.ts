@@ -380,3 +380,191 @@ describe('opencode TUI plugin: sidebar, chip and toasts', () => {
     expect(() => m.fc.command('granny.open').run('')).not.toThrow()
   })
 })
+
+describe('opencode TUI plugin: the /granny navigator', () => {
+  const HELP = '↑↓ move · Enter open · Space fold · Tab/] next agent · [ prev · p parent · Esc back'
+
+  function open(options: FakeCtxOptions = {}, dims = { width: 160, height: 30 }) {
+    planRun()
+    const fr = fakeRuntime(dims)
+    const m = mount(options, fr)
+    m.app()
+    m.timers.tick()
+    m.fc.command('granny.open').run('')
+    const target = m.fc.navigations.at(-1) as { data: unknown }
+    const node = m.fc.routes.get('granny')!.render({ data: target.data })
+    return {
+      m,
+      node,
+      lines: () => texts(node),
+      rows: () => render(node),
+      key: (bind: string) => m.fc.bound(bind)!.run(),
+      selected: () => render(node).find(r => r.parts?.some(p => p.bg !== undefined))?.text ?? '',
+    }
+  }
+
+  it('registers the granny route', () => {
+    const m = mount()
+    expect(m.fc.routes.has('granny')).toBe(true)
+  })
+
+  it('opens on the running agent with its detail', () => {
+    const v = open()
+    const lines = v.lines()
+    expect(lines[0]).toStartWith(`granny ${RUN} · Plan review · running · 33m00s`)
+    expect(lines.at(-1)).toStartWith(HELP)
+    expect(v.selected()).toContain('› ')
+    expect(v.selected()).toContain('review plan review r2 terra')
+    const text = lines.join('\n')
+    expect(text).toContain('review plan review r2 terra (reviewer)')
+    expect(text).toContain('opencode/kimi-k3.1-pro · running')
+    expect(text).toContain('session ses_r · linked')
+    expect(text).toContain('▸ review plan review r2 terra started')
+    expect(text).toContain('Enter open session · p parent session')
+    expect(text).toContain('▾ run 20261105-182328-523r · running')
+  })
+
+  it('fits every row to the width and splits the panes from 100 columns', () => {
+    for (const width of [60, 99, 100, 160]) {
+      const v = open({}, { width, height: 24 })
+      const lines = v.lines()
+      expect(lines.length).toBe(24)
+      for (const l of lines) expect(l.length).toBeLessThanOrEqual(width)
+      expect(lines.some(l => l.includes(' │ '))).toBe(width >= 100)
+      expect(lines.join('\n')).toContain('review plan review r2 terra (reviewer)')
+      v.m.cleanup()
+      rmSync(join(dir, 'journal.jsonl'))
+    }
+  })
+
+  it('moves with the keys and the detail follows', () => {
+    const v = open()
+    v.key('down,j')
+    expect(v.selected()).toContain('review plan review r2 codex')
+    expect(v.lines().join('\n')).toContain('review plan review r2 codex (reviewer)')
+    v.key('up,k')
+    expect(v.selected()).toContain('review plan review r2 terra')
+    v.key('up,k')
+    expect(v.selected()).toContain('● Plan review')
+    v.key('down,j')
+    expect(v.selected()).toContain('review plan review r2 terra')
+    v.key('[')
+    expect(v.selected()).toContain('✓ plan  planner')
+    v.key('tab,]')
+    expect(v.selected()).toContain('review plan review r2 terra')
+    v.key('home')
+    expect(v.selected()).toContain('▾ run')
+    v.key('end')
+    expect(v.selected()).toContain('review plan review r2 codex')
+    v.key('pageup')
+    expect(v.selected()).toContain('▾ run')
+    v.key('pagedown')
+    expect(v.selected()).toContain('review plan review r2 codex')
+  })
+
+  it('folds a phase with space and the run with Enter', () => {
+    const v = open()
+    v.key('home')
+    v.key('down,j')
+    expect(v.selected()).toContain('✓ Plan')
+    v.key('space')
+    expect(v.selected()).toContain('1 agent folded')
+    expect(v.lines().join('\n')).not.toContain('plan  planner')
+    v.key('space')
+    expect(v.lines().join('\n')).toContain('plan  planner')
+    v.key('home')
+    v.key('return')
+    expect(v.selected()).toContain('▸ run')
+    expect(v.lines().join('\n')).not.toContain('● Plan review')
+    v.key('return')
+    expect(v.lines().join('\n')).toContain('● Plan review')
+  })
+
+  it('opens the role session with Enter, comes back to it, and goes to the parent with p and back with Esc', () => {
+    const v = open()
+    v.key('return')
+    expect(v.m.fc.navigations.at(-1)).toEqual({ type: 'session', sessionID: 'ses_r' })
+    v.m.fc.route = { type: 'session', sessionID: 'parent' }
+    v.m.fc.command('granny.open').run('')
+    expect(v.m.fc.navigations.at(-1)).toEqual({ type: 'plugin', name: 'granny', data: { runId: RUN, select: 'agent:ses_r' } })
+
+    v.m.fc.route = { type: 'session', sessionID: 'ses_c' }
+    v.m.fc.command('granny.open').run('')
+    const data = (v.m.fc.navigations.at(-1) as any).data
+    expect(data).toEqual({ runId: RUN, select: 'agent:ses_c' })
+    const node = v.m.fc.routes.get('granny')!.render({ data })
+    expect(render(node).find(r => r.parts?.some(p => p.bg !== undefined))?.text).toContain('review plan review r2 codex')
+
+    v.m.fc.bound('p')!.run()
+    expect(v.m.fc.navigations.at(-1)).toEqual({ type: 'session', sessionID: 'parent' })
+    v.m.fc.bound('escape,q')!.run()
+    expect(v.m.fc.navigations.at(-1)).toEqual({ type: 'session', sessionID: 'ses_c' })
+  })
+
+  it('goes back to the parent session on Esc when no route was saved', () => {
+    planRun()
+    const m = mount()
+    m.timers.tick()
+    m.fc.routes.get('granny')!.render({ data: { runId: RUN } })
+    m.fc.bound('escape,q')!.run()
+    expect(m.fc.navigations.at(-1)).toEqual({ type: 'session', sessionID: 'parent' })
+  })
+
+  it("lists a role session's own child sessions as subagents and opens them", () => {
+    const sessions = [...familySessions(), { id: 'ses_sub', parentID: 'ses_r', title: 'Analyze pause architecture risks' }]
+    const v = open({ sessions, running: ['ses_r', 'ses_sub'] })
+    const text = v.lines().join('\n')
+    expect(text).toContain('└ ● Analyze pause architecture risks')
+    expect(text).toContain('subagents: Analyze pause architecture risks ●')
+    v.key('down,j')
+    expect(v.selected()).toContain('Analyze pause architecture risks')
+    expect(v.lines().join('\n')).toContain('session ses_sub · subagent of review plan review r2 terra')
+    v.key('return')
+    expect(v.m.fc.navigations.at(-1)).toEqual({ type: 'session', sessionID: 'ses_sub' })
+  })
+
+  it('shows a new agent after a journal append and a tick, and re-renders without reading files', () => {
+    const v = open()
+    journal(line(33 * M, 'agent', { label: 'review plan review r2 zeta', role: 'reviewer', session: 'ses_z', model: kimi, phase: 'Plan review', linked: true }))
+    v.m.timers.tick()
+    expect(v.lines().join('\n')).toContain('review plan review r2 zeta')
+    const before = { ...v.m.counts }
+    const first = v.lines()
+    expect(v.lines()).toEqual(first)
+    expect(v.m.counts).toEqual(before)
+  })
+
+  it('keeps the timer running while mounted and releases it on unmount', () => {
+    const v = open()
+    status({ status: 'done', finishedAt: new Date(BASE + 34 * M).toISOString() })
+    v.m.now = BASE + 34 * M + S
+    for (let i = 0; i < 5; i++) v.m.timers.tick()
+    expect(v.m.timers.intervals).toBe(1)
+    v.m.fr.unmount()
+    for (let i = 0; i < 5 && v.m.timers.intervals; i++) v.m.timers.tick()
+    expect(v.m.timers.intervals).toBe(0)
+  })
+
+  it('shows the run detail with its files and the degraded note when the files are unreadable', () => {
+    const v = open()
+    v.key('home')
+    const text = v.lines().join('\n')
+    expect(text).toContain('repo     /repo')
+    expect(text).toContain('branch   feat/x')
+    expect(text).toContain(`result   ${join(dir, 'result.json')}`)
+    expect(text).toContain(`granny_status { runId: "${RUN}" }`)
+
+    const m = mount({ sessions: [{ id: 'parent' }, role('ses_q', { dir: join(tmp, 'missing') })], running: ['ses_q'] })
+    m.timers.tick()
+    const node = m.fc.routes.get('granny')!.render({ data: { runId: RUN } })
+    expect(texts(node).join('\n')).toContain('run files not readable from this TUI - showing the role sessions only')
+  })
+
+  it('does not throw when navigating from a key fails', () => {
+    const v = open({ throwNavigate: false })
+    v.m.fc.opts.throwNavigate = true
+    expect(() => v.key('return')).not.toThrow()
+    expect(() => v.key('p')).not.toThrow()
+    expect(() => v.key('escape,q')).not.toThrow()
+  })
+})

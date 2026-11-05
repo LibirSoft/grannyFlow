@@ -51,6 +51,8 @@ export interface RunSnapshot {
   start: number
   end?: number
   error?: string
+  repo?: string
+  branch?: string
   tree: RunTree
   readable: boolean
 }
@@ -130,6 +132,8 @@ interface StatusFile {
   startedAt?: number
   finishedAt?: number
   error?: string
+  repo?: string
+  branch?: string
 }
 
 export interface RunWatchOptions {
@@ -228,6 +232,8 @@ export class RunWatch {
         ...(MODES.includes(raw.watch as WatchMode) ? { watch: raw.watch as WatchMode } : {}),
         ...(finishedAt !== undefined ? { finishedAt } : {}),
         ...(typeof raw.error === 'string' ? { error: raw.error } : {}),
+        ...(typeof raw.repo === 'string' ? { repo: raw.repo } : {}),
+        ...(typeof raw.branch === 'string' ? { branch: raw.branch } : {}),
       }
       this.statusStamp = stamp
       return true
@@ -259,6 +265,8 @@ export class RunWatch {
       start: tree.start,
       ...(tree.end !== undefined ? { end: tree.end } : {}),
       ...(status?.error !== undefined ? { error: status.error } : {}),
+      ...(status?.repo !== undefined ? { repo: status.repo } : {}),
+      ...(status?.branch !== undefined ? { branch: status.branch } : {}),
       tree,
       readable,
     }

@@ -139,7 +139,7 @@ describe('RunWatch', () => {
     const watch = new RunWatch(dir, { now: () => BASE + 33 * M })
     watch.poll(running('ses_r'))
     const s = watch.snapshot
-    expect(s).toMatchObject({ id: RUN, status: 'running', watch: 'full', parent: 'parent', phase: 'Plan review', start: BASE, readable: true })
+    expect(s).toMatchObject({ id: RUN, status: 'running', watch: 'full', parent: 'parent', phase: 'Plan review', start: BASE, readable: true, repo: '/repo', branch: 'feat/x' })
     expect(s.end).toBeUndefined()
     expect(s.tree.agents.map(a => [a.label, a.state, a.model])).toEqual([
       ['plan', 'done', 'opencode/kimi-k3.1-pro'],

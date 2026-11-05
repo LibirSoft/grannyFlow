@@ -244,6 +244,73 @@ function buildRunTree(run, entries, live, now, files = new Map) {
 var runKey = (id) => `run:${id}`;
 var phaseKey = (id, index) => `phase:${id}:${index}`;
 var agentKey = (session) => `agent:${session}`;
+var subKey = (session, name) => `sub:${session}:${name}`;
+function visibleRows(runs, folded, expandedRun) {
+  const rows = [];
+  for (const run of runs) {
+    const rk = runKey(run.id);
+    const open = run.id === expandedRun && !folded.has(rk);
+    rows.push({ key: rk, kind: "run", depth: 0, selectable: true, run, folded: !open });
+    if (!open)
+      continue;
+    for (const phase of run.phases) {
+      const pk = phaseKey(run.id, phase.index);
+      const shut = folded.has(pk);
+      rows.push({ key: pk, kind: "phase", depth: 1, selectable: true, run, phase, folded: shut, parent: rk });
+      if (shut)
+        continue;
+      for (const [g, group] of phase.groups.entries()) {
+        const depth = group.title ? 3 : 2;
+        if (group.title)
+          rows.push({ key: `group:${run.id}:${phase.index}:${g}`, kind: "group", depth: 2, selectable: false, run, phase, title: group.title, parent: pk });
+        for (const agent of group.agents) {
+          const ak = agentKey(agent.session);
+          rows.push({ key: ak, kind: "agent", depth, selectable: true, run, phase, agent, parent: pk });
+          for (const sub of agent.subagents)
+            rows.push({ key: subKey(agent.session, sub.name), kind: "sub", depth: depth + 1, selectable: true, run, phase, agent, sub, parent: ak });
+        }
+      }
+    }
+  }
+  return rows;
+}
+function nextAgent(rows, key, dir) {
+  const from = rows.findIndex((r) => r.key === key);
+  let i = from < 0 ? dir > 0 ? -1 : rows.length : from;
+  for (i += dir;i >= 0 && i < rows.length; i += dir)
+    if (rows[i].kind === "agent")
+      return rows[i].key;
+  return;
+}
+var elapsed = (start, end, now) => duration((end ?? now) - start);
+function rowText(row, now, width = Number.POSITIVE_INFINITY) {
+  const indent = "  ".repeat(row.depth);
+  switch (row.kind) {
+    case "run": {
+      const { run } = row;
+      return `${row.folded ? "\u25B8" : "\u25BE"} run ${run.id} \xB7 ${run.status} \xB7 ${elapsed(run.start, run.end, now)}`;
+    }
+    case "phase": {
+      const phase = row.phase;
+      const count = phase.groups.reduce((n, g) => n + g.agents.length, 0);
+      return `${indent}${phase.marker} ${phase.title} \xB7 ${elapsed(phase.start, phase.end, now)}${row.folded && count ? ` \xB7 ${count} agent${count === 1 ? "" : "s"} folded` : ""}`;
+    }
+    case "group":
+      return `${indent}${row.title}`;
+    case "agent": {
+      const a = row.agent;
+      const tail = ` \xB7 ${elapsed(a.start, a.end, now)}${a.activity ? ` \xB7 ${a.activity}` : ""}`;
+      const head = `${indent}${AGENT_MARKERS[a.state]} ${a.label}`;
+      const full = `${head}  ${a.role} \xB7 ${modelText(a.model, a.effort)}${tail}`;
+      if (full.length <= width)
+        return full;
+      const short = a.model?.includes("/") ? `${head}  ${a.role} \xB7 ${modelText(a.model.slice(a.model.lastIndexOf("/") + 1), a.effort)}${tail}` : full;
+      return short.length <= width ? short : `${head}${tail}`;
+    }
+    case "sub":
+      return `${indent}\u2514 ${row.sub.name}${row.sub.path ? "" : " (no transcript yet)"}`;
+  }
+}
 
 // src/adapters/opencode/runwatch.ts
 import { readFileSync, statSync as statSync2 } from "fs";
@@ -491,7 +558,9 @@ class RunWatch {
         ...typeof raw.parent === "string" ? { parent: raw.parent } : {},
         ...MODES.includes(raw.watch) ? { watch: raw.watch } : {},
         ...finishedAt !== undefined ? { finishedAt } : {},
-        ...typeof raw.error === "string" ? { error: raw.error } : {}
+        ...typeof raw.error === "string" ? { error: raw.error } : {},
+        ...typeof raw.repo === "string" ? { repo: raw.repo } : {},
+        ...typeof raw.branch === "string" ? { branch: raw.branch } : {}
       };
       this.statusStamp = stamp;
       return true;
@@ -520,6 +589,8 @@ class RunWatch {
       start: tree.start,
       ...tree.end !== undefined ? { end: tree.end } : {},
       ...status?.error !== undefined ? { error: status.error } : {},
+      ...status?.repo !== undefined ? { repo: status.repo } : {},
+      ...status?.branch !== undefined ? { branch: status.branch } : {},
       tree,
       readable
     };
@@ -552,7 +623,7 @@ class RunWatch {
 var shortId = (id) => id.slice(-4);
 var terminal = (s) => TERMINAL.has(s.status);
 var fresh = (s, now) => s.end !== undefined && now - s.end < FRESH_MS;
-var elapsed = (s, now) => duration((s.end ?? now) - s.start);
+var elapsed2 = (s, now) => duration((s.end ?? now) - s.start);
 var STATUS_TONES = { done: "success", failed: "error", cancelled: "warning" };
 var AGENT_TONES = { running: "info", waiting: "muted", done: "success", failed: "error", cancelled: "warning" };
 function fit(text, width) {
@@ -580,7 +651,7 @@ function sidebarLines(s, now, width) {
   if (terminal(s)) {
     if (!fresh(s, now))
       return [];
-    return [{ text: fit(`granny ${short} \xB7 ${s.status} \xB7 ${elapsed(s, now)}`, width), tone: STATUS_TONES[s.status] ?? "base", key: runKey(s.id) }];
+    return [{ text: fit(`granny ${short} \xB7 ${s.status} \xB7 ${elapsed2(s, now)}`, width), tone: STATUS_TONES[s.status] ?? "base", key: runKey(s.id) }];
   }
   const lines = [{ text: fit(`granny ${short} \xB7 ${s.status}`, width), tone: "base", key: runKey(s.id) }];
   if (!s.readable)
@@ -604,7 +675,7 @@ function chipText(s, now) {
   if (terminal(s))
     return fresh(s, now) ? `granny \xB7 ${s.status}` : "";
   const running = s.tree.agents.filter((a) => a.state === "running").length;
-  return `granny \xB7 ${s.phase ?? "Starting"} \xB7 ${running} running \xB7 ${elapsed(s, now)}`;
+  return `granny \xB7 ${s.phase ?? "Starting"} \xB7 ${running} running \xB7 ${elapsed2(s, now)}`;
 }
 function toastFor(e, s) {
   if (s.watch !== "full")
@@ -619,6 +690,331 @@ function toastFor(e, s) {
       const took = s.end !== undefined ? ` \xB7 ${duration(s.end - s.start)}` : "";
       const message = e.status === "failed" && s.error ? `run ${s.id} failed: ${firstLine(s.error)}` : `run ${s.id} ${e.status}${took}`;
       return { ...base, message, variant: e.status === "done" ? "success" : e.status === "cancelled" ? "warning" : "error" };
+    }
+  }
+}
+
+// src/adapters/opencode/tui-navigator.ts
+import { join as join2 } from "path";
+
+// src/adapters/omp/format.ts
+var ANSI = /\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[@-Z\\-_])/g;
+var CONTROL = /[\x00-\x08\x0b-\x1f\x7f]/g;
+var clean = (text) => text.replace(/\t/g, "  ").replace(ANSI, "").replace(CONTROL, "");
+var dateOf = (value) => new Date(typeof value === "number" || typeof value === "string" ? value : Number.NaN);
+function stamp(value) {
+  const d = dateOf(value);
+  return Number.isNaN(d.getTime()) ? undefined : `${d.toISOString().slice(0, 10)} ${d.toTimeString().slice(0, 8)}`;
+}
+
+// src/adapters/opencode/tui-navigator.ts
+var NAV_HELP = "\u2191\u2193 move \xB7 Enter open \xB7 Space fold \xB7 Tab/] next agent \xB7 [ prev \xB7 p parent \xB7 Esc back";
+var SEPARATOR = " \u2502 ";
+var WIDE = 100;
+var NARROW_DETAIL = 4;
+var AGENT_LINES = 40;
+var PHASE_LINES = 200;
+var UNREADABLE = "run files not readable from this TUI - showing the role sessions only";
+var AGENT_TONES2 = { running: "info", waiting: "muted", done: "success", failed: "error", cancelled: "warning" };
+var STATUS_TONES2 = { running: "info", done: "success", failed: "error", cancelled: "warning" };
+var clamp = (n, lo, hi) => Math.max(lo, Math.min(hi, n));
+function fit2(text, width) {
+  if (width < 1)
+    return "";
+  return text.length <= width ? text : `${text.slice(0, width - 1)}\u2026`;
+}
+var pad = (text, width) => fit2(text, width).padEnd(Math.max(0, width));
+
+class NavModel {
+  deps;
+  expanded;
+  selected = "";
+  folded = new Set;
+  parents = new Map;
+  subs = new Map;
+  runs = [];
+  rows = [];
+  top = 0;
+  page = 10;
+  constructor(deps, runId, select) {
+    this.deps = deps;
+    this.expanded = runId;
+    this.refresh();
+    this.selected = select && this.rows.some((r) => r.key === select && r.selectable) ? select : this.defaultSelection();
+    this.relayout();
+  }
+  run() {
+    return this.runs.find((r) => r.snapshot.id === this.expanded);
+  }
+  defaultSelection() {
+    const tree = this.run()?.snapshot.tree;
+    if (!tree)
+      return this.rows.find((r) => r.selectable)?.key ?? "";
+    const agent = [...tree.agents].reverse().find((a) => a.state === "running") ?? tree.agents.at(-1);
+    return agent ? agentKey(agent.session) : runKey(tree.id);
+  }
+  refresh() {
+    try {
+      this.runs = [...this.deps.runs()].sort((a, b) => a.snapshot.start - b.snapshot.start);
+    } catch {
+      this.runs = [];
+    }
+    this.subs.clear();
+    const trees = this.runs.map((r) => this.withChildren(r.snapshot.tree));
+    this.rows = visibleRows(trees, this.folded, this.expanded);
+    for (const row of this.rows)
+      if (row.parent)
+        this.parents.set(row.key, row.parent);
+  }
+  childrenOf(session) {
+    try {
+      return this.deps.children(session);
+    } catch {
+      return [];
+    }
+  }
+  withChildren(tree) {
+    const copies = new Map;
+    const copy = (agent) => {
+      let out = copies.get(agent);
+      if (!out) {
+        const children = this.childrenOf(agent.session);
+        for (const child of children)
+          this.subs.set(child.id, child);
+        out = { ...agent, subagents: children.map((c) => ({ name: c.id, path: c.id })) };
+        copies.set(agent, out);
+      }
+      return out;
+    };
+    const phases = tree.phases.map((phase) => ({ ...phase, groups: phase.groups.map((group) => ({ ...group, agents: group.agents.map(copy) })) }));
+    return { ...tree, phases, agents: tree.agents.map(copy) };
+  }
+  relayout() {
+    let key = this.selected;
+    while (key && !this.rows.some((r) => r.key === key && r.selectable))
+      key = this.parents.get(key);
+    this.selected = key ?? this.rows.find((r) => r.selectable)?.key ?? "";
+  }
+  selectedRow() {
+    return this.rows.find((r) => r.key === this.selected);
+  }
+  key(key) {
+    this.refresh();
+    this.relayout();
+    const selectable = this.rows.filter((r) => r.selectable);
+    const at = selectable.findIndex((r) => r.key === this.selected);
+    const move = (delta) => {
+      const next = selectable[clamp(at + delta, 0, selectable.length - 1)];
+      if (next)
+        this.selected = next.key;
+    };
+    switch (key) {
+      case "up":
+        return void move(-1);
+      case "down":
+        return void move(1);
+      case "pageup":
+        return void move(-this.page);
+      case "pagedown":
+        return void move(this.page);
+      case "home":
+        return void (this.selected = selectable[0]?.key ?? this.selected);
+      case "end":
+        return void (this.selected = selectable.at(-1)?.key ?? this.selected);
+      case "next":
+      case "prev":
+        return void (this.selected = nextAgent(this.rows, this.selected, key === "next" ? 1 : -1) ?? this.selected);
+      case "space":
+        return void this.fold();
+      case "return": {
+        const row = this.selectedRow();
+        if (row?.kind === "agent" && row.agent.session)
+          return { type: "open", sessionID: row.agent.session };
+        if (row?.kind === "sub")
+          return { type: "open", sessionID: row.sub.name };
+        return void this.fold();
+      }
+      case "parent": {
+        const parent = this.run()?.snapshot.parent;
+        return parent ? { type: "parent", sessionID: parent } : undefined;
+      }
+      case "back":
+        return { type: "back" };
+    }
+  }
+  fold() {
+    const row = this.selectedRow();
+    if (!row || row.kind !== "run" && row.kind !== "phase")
+      return;
+    if (row.kind === "run" && row.run.id !== this.expanded) {
+      this.expanded = row.run.id;
+      this.folded.delete(row.key);
+    } else if (this.folded.has(row.key))
+      this.folded.delete(row.key);
+    else
+      this.folded.add(row.key);
+    this.refresh();
+    this.relayout();
+  }
+  frame(width, height) {
+    this.refresh();
+    this.relayout();
+    const now = this.deps.now();
+    const w = Math.max(1, Math.floor(width));
+    const h = Math.max(3, Math.floor(height));
+    const body = h - 2;
+    const header = [{ text: pad(this.title(now), w), tone: "base" }];
+    const help = [{ text: pad(NAV_HELP, w), tone: "muted" }];
+    const detail = this.detail(now);
+    let rows;
+    if (w >= WIDE) {
+      const treeWidth = clamp(Math.round(w * 0.38), 36, 60);
+      const detailWidth = w - treeWidth - SEPARATOR.length;
+      const left = this.treePane(treeWidth, body, now);
+      const right = compose(detail, body).map((c) => ({ ...c, text: pad(c.text, detailWidth) }));
+      rows = left.map((cell, i) => [cell, { text: SEPARATOR, tone: "muted" }, right[i] ?? { text: pad("", detailWidth), tone: "base" }]);
+    } else {
+      const lower = Math.min(NARROW_DETAIL, Math.max(0, body - 1));
+      const left = this.treePane(w, body - lower, now);
+      const below = compose(detail, lower).map((c) => ({ ...c, text: pad(c.text, w) }));
+      while (below.length < lower)
+        below.push({ text: pad("", w), tone: "base" });
+      rows = [...left.map((cell) => [cell]), ...below.map((cell) => [cell])];
+    }
+    return [header, ...rows, help];
+  }
+  title(now) {
+    const s = this.run()?.snapshot;
+    if (!s)
+      return "granny \xB7 no run";
+    return `granny ${s.id} \xB7 ${s.phase ?? "Starting"} \xB7 ${s.status} \xB7 ${duration((s.end ?? now) - s.start)}`;
+  }
+  treePane(width, height, now) {
+    this.page = Math.max(1, height - 1);
+    const at = this.rows.findIndex((r) => r.key === this.selected);
+    if (at >= 0) {
+      if (at < this.top)
+        this.top = at;
+      if (at >= this.top + height)
+        this.top = at - height + 1;
+    }
+    this.top = clamp(this.top, 0, Math.max(0, this.rows.length - height));
+    const out = [];
+    for (const row of this.rows.slice(this.top, this.top + Math.max(0, height))) {
+      const chosen = row.key === this.selected;
+      out.push({ text: pad(`${chosen ? "\u203A" : " "} ${this.rowLabel(row, now, width - 2)}`, width), tone: toneOf(row, this.subs), ...chosen ? { selected: true } : {} });
+    }
+    while (out.length < height)
+      out.push({ text: pad("", width), tone: "base" });
+    return out;
+  }
+  rowLabel(row, now, width) {
+    if (row.kind !== "sub")
+      return rowText(row, now, width);
+    const child = this.subs.get(row.sub.name);
+    return `${"  ".repeat(row.depth)}\u2514 ${child?.running ? "\u25CF" : "\u2713"} ${clean(child?.title || row.sub.name)}`;
+  }
+  detail(now) {
+    const row = this.selectedRow();
+    const run = this.runs.find((r) => r.snapshot.id === row?.run.id) ?? this.run();
+    const note = run && !run.snapshot.readable ? [{ text: UNREADABLE, tone: "warning" }] : [];
+    if (!row || !run)
+      return { head: [{ text: "no granny run here", tone: "muted" }], body: [], foot: [] };
+    const open = [{ text: "Enter open session \xB7 p parent session", tone: "muted" }];
+    switch (row.kind) {
+      case "agent": {
+        const a = row.agent;
+        const state = a.activity ?? `${a.state} ${duration((a.end ?? now) - a.start)}`;
+        const linked = attempt(() => this.deps.linked(a.session));
+        const head = [
+          ...note,
+          { text: `${a.label} (${a.role})`, tone: "base" },
+          { text: `${a.model ?? "default model"}${a.effort ? `/${a.effort}` : ""} \xB7 ${state}`, tone: AGENT_TONES2[a.state] },
+          { text: `session ${a.session}${linked === undefined ? "" : linked ? " \xB7 linked" : " \xB7 not linked"}`, tone: "muted" }
+        ];
+        if (a.error)
+          head.push({ text: `error: ${a.error.split(`
+`)[0]}`, tone: "error" });
+        if (a.subagents.length)
+          head.push({ text: `subagents: ${a.subagents.map((s) => `${clean(this.subs.get(s.name)?.title || s.name)} ${this.subs.get(s.name)?.running ? "\u25CF" : "\u2713"}`).join(", ")}`, tone: "muted" });
+        const lines = (row.phase?.lines ?? []).filter((l) => mentions(l, a.label)).slice(-AGENT_LINES);
+        return { head, body: lines.map((text) => ({ text, tone: "base" })), foot: open };
+      }
+      case "sub": {
+        const child = this.subs.get(row.sub.name);
+        return {
+          head: [
+            ...note,
+            { text: clean(child?.title || row.sub.name), tone: "base" },
+            { text: child?.running ? "running" : "idle", tone: child?.running ? "info" : "muted" },
+            { text: `session ${row.sub.name} \xB7 subagent of ${row.agent.label}`, tone: "muted" }
+          ],
+          body: [],
+          foot: open
+        };
+      }
+      case "phase": {
+        const p = row.phase;
+        return {
+          head: [...note, { text: `${p.marker} ${p.title} \xB7 ${duration((p.end ?? now) - p.start)}`, tone: "base" }],
+          body: p.lines.slice(-PHASE_LINES).map((text) => ({ text, tone: "base" })),
+          foot: []
+        };
+      }
+      default: {
+        const s = run.snapshot;
+        const head = [...note, { text: `run ${s.id}`, tone: "base" }, { text: `status   ${s.status}`, tone: STATUS_TONES2[s.status] ?? "base" }];
+        if (s.repo)
+          head.push({ text: `repo     ${s.repo}`, tone: "muted" });
+        if (s.branch)
+          head.push({ text: `branch   ${s.branch}`, tone: "muted" });
+        head.push({ text: `started  ${stamp(s.start) ?? "?"}`, tone: "muted" });
+        if (s.status === "running")
+          head.push({ text: `phase    ${s.phase ?? "Starting"}`, tone: "muted" });
+        else
+          head.push({ text: `ended    ${stamp(s.end) ?? "?"}`, tone: "muted" });
+        head.push({ text: `result   ${join2(run.dir, "result.json")}`, tone: "muted" });
+        if (s.error)
+          head.push({ text: `error: ${s.error.split(`
+`)[0]}`, tone: "error" });
+        return { head, body: [], foot: [{ text: `ask the agent for granny_status { runId: "${s.id}" } for the full record`, tone: "muted" }] };
+      }
+    }
+  }
+}
+var attempt = (fn) => {
+  try {
+    return fn();
+  } catch {
+    return;
+  }
+};
+var MARKS = ["\u25B8", "\u25A0", "\u21BB", "!"];
+function mentions(line, label) {
+  return MARKS.some((mark) => line.includes(`${mark} ${label} `) || line.includes(`${mark} ${label}:`));
+}
+function compose(detail, height) {
+  if (height <= 0)
+    return [];
+  const head = detail.head.slice(0, height);
+  const foot = detail.foot.slice(0, Math.max(0, height - head.length));
+  const room = Math.max(0, height - head.length - foot.length);
+  const body = room ? detail.body.slice(-room) : [];
+  return [...head, ...body, ...foot];
+}
+function toneOf(row, subs) {
+  switch (row.kind) {
+    case "run":
+      return STATUS_TONES2[row.run.status] ?? "base";
+    case "group":
+      return "muted";
+    case "agent":
+      return AGENT_TONES2[row.agent.state];
+    case "sub":
+      return subs.get(row.sub.name)?.running ? "info" : "muted";
+    case "phase": {
+      const marker = row.phase.marker;
+      return marker === AGENT_MARKERS.running ? "info" : marker === AGENT_MARKERS.failed ? "error" : marker === AGENT_MARKERS.cancelled ? "warning" : "base";
     }
   }
 }
@@ -722,8 +1118,23 @@ var LIST_LIMIT = 50;
 var WAKE_TICKS = 3;
 var FRESH_MS2 = 60000;
 var TERMINAL2 = new Set(["done", "failed", "cancelled"]);
-var STATUS_TONES2 = { done: "success", failed: "error", cancelled: "warning" };
+var STATUS_TONES3 = { done: "success", failed: "error", cancelled: "warning" };
 var WAKE_EVENTS = ["session.created", "session.updated"];
+var DEFAULT_SIZE = { width: 100, height: 30 };
+var NAV_KEYS = [
+  ["up,k", "up", "up"],
+  ["down,j", "down", "down"],
+  ["pageup", "page up", "pageup"],
+  ["pagedown", "page down", "pagedown"],
+  ["home", "first", "home"],
+  ["end", "last", "end"],
+  ["return", "open the session or fold", "return"],
+  ["space", "fold or unfold", "space"],
+  ["tab,]", "next agent", "next"],
+  ["[", "previous agent", "prev"],
+  ["p", "parent session", "parent"],
+  ["escape,q", "back", "back"]
+];
 var NO_RUN = "granny: no granny run in this session yet - role sessions appear once the run starts its first agent.";
 var watchingOff = (id, mode) => `granny: watching is off for run ${id} (watch: "${mode}") - set "watch": "full" in granny.config.json for the navigator.`;
 var realTimers = {
@@ -740,7 +1151,7 @@ var realTimers = {
   },
   clearTimeout: (handle) => clearTimeout(handle)
 };
-var attempt = (fn) => {
+var attempt2 = (fn) => {
   try {
     return fn();
   } catch {
@@ -785,11 +1196,12 @@ class Hub {
   }
   install() {
     const ui = this.ctx?.ui;
-    attempt(() => ui.slot({
+    attempt2(() => ui.router.register({ name: ROUTE, render: (input) => this.navigator(input?.data) }));
+    attempt2(() => ui.slot({
       append: "sidebar.content",
       render: (input) => {
         this.wake();
-        const [view, setView] = attempt(() => this.ctx.storage.store("view", { initial: { open: true } })) ?? [{ open: true }, undefined];
+        const [view, setView] = attempt2(() => this.ctx.storage.store("view", { initial: { open: true } })) ?? [{ open: true }, undefined];
         return this.view.lines(() => {
           this.version();
           if (this.hidden.get())
@@ -809,7 +1221,7 @@ class Hub {
         });
       }
     }));
-    attempt(() => ui.slot({
+    attempt2(() => ui.slot({
       append: "prompt.footer.status",
       render: (input) => {
         this.wake();
@@ -821,11 +1233,11 @@ class Hub {
           if (!run)
             return;
           const s = run.watch.snapshot;
-          return { text: chipText(s, this.now()), tone: STATUS_TONES2[s.status] ?? "muted" };
+          return { text: chipText(s, this.now()), tone: STATUS_TONES3[s.status] ?? "muted" };
         });
       }
     }));
-    attempt(() => ui.slot({
+    attempt2(() => ui.slot({
       append: "app",
       render: () => {
         this.registerCommand();
@@ -833,7 +1245,7 @@ class Hub {
       }
     }));
     for (const type of WAKE_EVENTS) {
-      const off = attempt(() => this.ctx.data.on(type, () => this.wake()));
+      const off = attempt2(() => this.ctx.data.on(type, () => this.wake()));
       if (typeof off === "function")
         this.unsubscribe.push(off);
     }
@@ -843,10 +1255,10 @@ class Hub {
     this.disposed = true;
     this.stop();
     if (this.expiry !== undefined)
-      attempt(() => this.timers.clearTimeout(this.expiry));
+      attempt2(() => this.timers.clearTimeout(this.expiry));
     this.expiry = undefined;
     for (const off of this.unsubscribe.splice(0))
-      attempt(off);
+      attempt2(off);
   }
   wake() {
     if (this.disposed)
@@ -854,12 +1266,12 @@ class Hub {
     this.wakeTicks = WAKE_TICKS;
     if (this.interval !== undefined)
       return;
-    this.interval = attempt(() => this.timers.setInterval(() => this.tick(), this.tickMs));
+    this.interval = attempt2(() => this.timers.setInterval(() => this.tick(), this.tickMs));
   }
   stop() {
     if (this.interval === undefined)
       return;
-    attempt(() => this.timers.clearInterval(this.interval));
+    attempt2(() => this.timers.clearInterval(this.interval));
     this.interval = undefined;
   }
   mount() {
@@ -926,8 +1338,8 @@ class Hub {
     if (wait <= 0)
       return;
     if (this.expiry !== undefined)
-      attempt(() => this.timers.clearTimeout(this.expiry));
-    this.expiry = attempt(() => this.timers.setTimeout(() => {
+      attempt2(() => this.timers.clearTimeout(this.expiry));
+    this.expiry = attempt2(() => this.timers.setTimeout(() => {
       this.expiry = undefined;
       this.bump();
     }, wait + 1));
@@ -936,7 +1348,7 @@ class Hub {
     const live = new Map;
     const sessions = new Set([...run.found.sessions, ...run.watch.snapshot.tree.agents.map((a) => a.session)]);
     for (const session of sessions) {
-      const status = attempt(() => this.ctx.data.session.status(session));
+      const status = attempt2(() => this.ctx.data.session.status(session));
       live.set(session, { active: status === "running" });
     }
     return live;
@@ -947,14 +1359,14 @@ class Hub {
       this.show(toast);
   }
   show(toast) {
-    attempt(() => this.ctx.ui.toast.show(toast));
+    attempt2(() => this.ctx.ui.toast.show(toast));
   }
   rootOf(session) {
-    const root = attempt(() => this.ctx.data.session.root(session));
+    const root = attempt2(() => this.ctx.data.session.root(session));
     return typeof root === "string" && root ? root : session;
   }
   current() {
-    const route = attempt(() => this.ctx.ui.router.current());
+    const route = attempt2(() => this.ctx.ui.router.current());
     return route && typeof route === "object" ? route : undefined;
   }
   discover() {
@@ -966,10 +1378,10 @@ class Hub {
       roots.add(this.lastRoot);
     let changed = false;
     for (const root of roots) {
-      const ids = attempt(() => this.ctx.data.session.family(root));
+      const ids = attempt2(() => this.ctx.data.session.family(root));
       const sessions = [];
       for (const id of Array.isArray(ids) ? ids : []) {
-        const info = attempt(() => this.ctx.data.session.get(id));
+        const info = attempt2(() => this.ctx.data.session.get(id));
         if (info)
           sessions.push({ id, metadata: info.metadata });
       }
@@ -986,7 +1398,7 @@ class Hub {
     if (now - this.lastList < LIST_EVERY_MS)
       return;
     this.lastList = now;
-    const pending = attempt(() => this.ctx.client.session.list({ parentID: null, order: "desc", limit: LIST_LIMIT }));
+    const pending = attempt2(() => this.ctx.client.session.list({ parentID: null, order: "desc", limit: LIST_LIMIT }));
     if (!pending || typeof pending.then !== "function")
       return;
     pending.then((result) => {
@@ -1047,6 +1459,82 @@ class Hub {
     });
     return mine[0];
   }
+  navigator(data) {
+    const { runId, select } = data && typeof data === "object" ? data : {};
+    const first = typeof runId === "string" && this.runs.has(runId) ? runId : [...this.runs.keys()].at(-1);
+    const model = new NavModel({
+      runs: () => [...this.runs.values()].map((run) => ({ dir: run.watch.dir, snapshot: run.watch.snapshot })),
+      children: (session) => this.childSessions(session),
+      linked: (session) => {
+        const info = attempt2(() => this.ctx.data.session.get(session));
+        return info ? typeof info.parentID === "string" && info.parentID.length > 0 : undefined;
+      },
+      now: this.now
+    }, first ?? "", typeof select === "string" ? select : undefined);
+    const [keys, setKeys] = this.rt.solid.createSignal(0, { equals: false });
+    this.mount();
+    attempt2(() => this.rt.solid.onCleanup(() => this.unmount()));
+    const dims = attempt2(() => this.rt.ui.useTerminalDimensions?.());
+    const size = () => {
+      const d = attempt2(() => typeof dims === "function" ? dims() : undefined);
+      const r = attempt2(() => this.ctx.renderer);
+      const width = Number(d?.width ?? r?.width ?? DEFAULT_SIZE.width);
+      const height = Number(d?.height ?? r?.height ?? DEFAULT_SIZE.height);
+      return { width: Number.isFinite(width) && width > 0 ? width : DEFAULT_SIZE.width, height: Number.isFinite(height) && height > 0 ? height : DEFAULT_SIZE.height };
+    };
+    const press = (key) => () => {
+      try {
+        this.act(model, model.key(key));
+      } catch {}
+      setKeys(0);
+    };
+    const commands = NAV_KEYS.map(([bind, title, key]) => ({ bind, title: `granny: ${title}`, group: "granny", run: press(key) }));
+    try {
+      this.ctx.keymap.layer(() => ({ commands }));
+    } catch {
+      for (const command of commands)
+        attempt2(() => this.ctx.keymap.layer(() => ({ commands: [command] })));
+    }
+    return this.view.screen(() => {
+      this.version();
+      keys();
+      const { width, height } = size();
+      return model.frame(width, height);
+    });
+  }
+  act(model, action) {
+    if (!action)
+      return;
+    const run = model.run();
+    const router = this.ctx.ui.router;
+    if (action.type === "open") {
+      if (run)
+        this.selection.set(run.snapshot.id, model.selected);
+      return router.navigate({ type: "session", sessionID: action.sessionID });
+    }
+    if (action.type === "parent")
+      return router.navigate({ type: "session", sessionID: action.sessionID });
+    const parent = run?.snapshot.parent;
+    const saved = this.savedRoute;
+    if (saved && !(saved.type === "plugin" && saved.name === ROUTE))
+      return router.navigate({ ...saved });
+    if (parent)
+      return router.navigate({ type: "session", sessionID: parent });
+  }
+  childSessions(session) {
+    const data = this.ctx?.data?.session;
+    if (!data)
+      return [];
+    const ids = attempt2(() => data.family(this.rootOf(session)));
+    const out = [];
+    for (const id of Array.isArray(ids) ? ids : []) {
+      const info = attempt2(() => data.get(id));
+      if (!info || info.parentID !== session)
+        continue;
+      out.push({ id, title: typeof info.title === "string" ? info.title : id, running: attempt2(() => data.status(id)) === "running" });
+    }
+    return out;
+  }
   registerCommand() {
     const command = {
       id: "granny.open",
@@ -1062,7 +1550,7 @@ class Hub {
       this.ctx.keymap.layer(() => ({ mode: "global", commands: [command] }));
     } catch {
       const { bind: _bind, ...unbound } = command;
-      attempt(() => this.ctx.keymap.layer(() => ({ mode: "global", commands: [unbound] })));
+      attempt2(() => this.ctx.keymap.layer(() => ({ mode: "global", commands: [unbound] })));
     }
   }
   command(arg) {
@@ -1077,29 +1565,29 @@ class Hub {
       if (route?.type === "plugin" && route.name === ROUTE)
         return;
       this.wake();
-      attempt(() => this.discover());
+      attempt2(() => this.discover());
       const session = route?.type === "session" && typeof route.sessionID === "string" ? route.sessionID : undefined;
       const run = (text ? this.runs.get(text) : undefined) ?? this.runFor(session);
       if (!run)
         return this.show({ message: NO_RUN, variant: "warning" });
       if (!run.polled)
-        attempt(() => this.poll(run));
+        attempt2(() => this.poll(run));
       const mode = run.watch.snapshot.watch;
       if (mode !== "full")
         return this.show({ message: watchingOff(run.id, mode), variant: "info" });
       const select = session && run.found.sessions.includes(session) ? agentKey(session) : this.selection.get(run.id);
       this.savedRoute = route ? { ...route } : undefined;
-      attempt(() => this.ctx.ui.dialog?.clear?.());
+      attempt2(() => this.ctx.ui.dialog?.clear?.());
       this.ctx.ui.router.navigate({ type: "plugin", name: ROUTE, data: { runId: run.id, ...select ? { select } : {} } });
     } catch {}
   }
   memoryFlag() {
-    const stored = attempt(() => this.ctx.storage.memory("hidden", { initial: { off: false } }));
+    const stored = attempt2(() => this.ctx.storage.memory("hidden", { initial: { off: false } }));
     if (Array.isArray(stored) && stored[0] && typeof stored[1] === "function") {
       const [state, set] = stored;
       return {
-        get: () => attempt(() => state.off === true) ?? false,
-        set: (off) => void attempt(() => set((draft) => {
+        get: () => attempt2(() => state.off === true) ?? false,
+        set: (off) => void attempt2(() => set((draft) => {
           draft.off = off;
         }))
       };

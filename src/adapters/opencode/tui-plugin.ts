@@ -5,6 +5,7 @@
 import { agentKey } from '../runview/tree'
 import type { LiveView } from '../runview/tree'
 import { chipText, discoverRuns, type FoundRun, type FsLike, type RoleSession, RunWatch, type SessionLike, sidebarLines, type Toast, toastFor, type Tone } from './runwatch'
+import { type ChildSession, type NavAction, type NavKey, NavModel } from './tui-navigator'
 import { type TuiRuntime, View } from './tui-view'
 
 export type { TuiRuntime } from './tui-view'
@@ -36,6 +37,22 @@ const FRESH_MS = 60_000
 const TERMINAL = new Set(['done', 'failed', 'cancelled'])
 const STATUS_TONES: Record<string, Tone> = { done: 'success', failed: 'error', cancelled: 'warning' }
 const WAKE_EVENTS = ['session.created', 'session.updated']
+const DEFAULT_SIZE = { width: 100, height: 30 }
+
+const NAV_KEYS: Array<[string, string, NavKey]> = [
+  ['up,k', 'up', 'up'],
+  ['down,j', 'down', 'down'],
+  ['pageup', 'page up', 'pageup'],
+  ['pagedown', 'page down', 'pagedown'],
+  ['home', 'first', 'home'],
+  ['end', 'last', 'end'],
+  ['return', 'open the session or fold', 'return'],
+  ['space', 'fold or unfold', 'space'],
+  ['tab,]', 'next agent', 'next'],
+  ['[', 'previous agent', 'prev'],
+  ['p', 'parent session', 'parent'],
+  ['escape,q', 'back', 'back'],
+]
 
 export const NO_RUN = 'granny: no granny run in this session yet - role sessions appear once the run starts its first agent.'
 export const watchingOff = (id: string, mode: string) => `granny: watching is off for run ${id} (watch: "${mode}") - set "watch": "full" in granny.config.json for the navigator.`
@@ -116,6 +133,7 @@ export class Hub {
 
   install() {
     const ui = this.ctx?.ui
+    attempt(() => ui.router.register({ name: ROUTE, render: (input: any) => this.navigator(input?.data) }))
     attempt(() =>
       ui.slot({
         append: 'sidebar.content',
@@ -384,6 +402,83 @@ export class Hub {
       return ra - rb || b.watch.snapshot.start - a.watch.snapshot.start
     })
     return mine[0]
+  }
+
+  // --- the navigator route ----------------------------------------------------------------------
+
+  private navigator(data: unknown): any {
+    const { runId, select } = (data && typeof data === 'object' ? data : {}) as { runId?: unknown; select?: unknown }
+    const first = typeof runId === 'string' && this.runs.has(runId) ? runId : [...this.runs.keys()].at(-1)
+    const model = new NavModel(
+      {
+        runs: () => [...this.runs.values()].map(run => ({ dir: run.watch.dir, snapshot: run.watch.snapshot })),
+        children: session => this.childSessions(session),
+        linked: session => {
+          const info = attempt(() => this.ctx.data.session.get(session))
+          return info ? typeof info.parentID === 'string' && info.parentID.length > 0 : undefined
+        },
+        now: this.now,
+      },
+      first ?? '',
+      typeof select === 'string' ? select : undefined,
+    )
+    const [keys, setKeys] = this.rt.solid.createSignal(0, { equals: false })
+    this.mount()
+    attempt(() => this.rt.solid.onCleanup(() => this.unmount()))
+    const dims = attempt(() => this.rt.ui.useTerminalDimensions?.())
+    const size = () => {
+      const d = attempt(() => (typeof dims === 'function' ? dims() : undefined))
+      const r = attempt(() => this.ctx.renderer)
+      const width = Number(d?.width ?? r?.width ?? DEFAULT_SIZE.width)
+      const height = Number(d?.height ?? r?.height ?? DEFAULT_SIZE.height)
+      return { width: Number.isFinite(width) && width > 0 ? width : DEFAULT_SIZE.width, height: Number.isFinite(height) && height > 0 ? height : DEFAULT_SIZE.height }
+    }
+    const press = (key: NavKey) => () => {
+      try {
+        this.act(model, model.key(key))
+      } catch {}
+      setKeys(0)
+    }
+    const commands = NAV_KEYS.map(([bind, title, key]) => ({ bind, title: `granny: ${title}`, group: 'granny', run: press(key) }))
+    try {
+      this.ctx.keymap.layer(() => ({ commands }))
+    } catch {
+      for (const command of commands) attempt(() => this.ctx.keymap.layer(() => ({ commands: [command] })))
+    }
+    return this.view.screen(() => {
+      this.version()
+      keys()
+      const { width, height } = size()
+      return model.frame(width, height)
+    })
+  }
+
+  private act(model: NavModel, action: NavAction | undefined) {
+    if (!action) return
+    const run = model.run()
+    const router = this.ctx.ui.router
+    if (action.type === 'open') {
+      if (run) this.selection.set(run.snapshot.id, model.selected)
+      return router.navigate({ type: 'session', sessionID: action.sessionID })
+    }
+    if (action.type === 'parent') return router.navigate({ type: 'session', sessionID: action.sessionID })
+    const parent = run?.snapshot.parent
+    const saved = this.savedRoute
+    if (saved && !(saved.type === 'plugin' && saved.name === ROUTE)) return router.navigate({ ...saved })
+    if (parent) return router.navigate({ type: 'session', sessionID: parent })
+  }
+
+  private childSessions(session: string): ChildSession[] {
+    const data = this.ctx?.data?.session
+    if (!data) return []
+    const ids = attempt(() => data.family(this.rootOf(session)))
+    const out: ChildSession[] = []
+    for (const id of Array.isArray(ids) ? ids : []) {
+      const info = attempt(() => data.get(id))
+      if (!info || info.parentID !== session) continue
+      out.push({ id, title: typeof info.title === 'string' ? info.title : id, running: attempt(() => data.status(id)) === 'running' })
+    }
+    return out
   }
 
   // --- the /granny command ----------------------------------------------------------------------
