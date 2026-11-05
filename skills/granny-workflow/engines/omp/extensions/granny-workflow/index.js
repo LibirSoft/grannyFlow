@@ -2703,6 +2703,8 @@ class RoleActivity {
   startedAt;
   endedAt;
   active = false;
+  outcome;
+  error;
   thinking = "";
   unscanned = false;
   running = new Map;
@@ -3534,11 +3536,29 @@ When done, call the \`${tool}\` tool exactly once with your result. That call is
           ...model ? ["--model", model] : [],
           ...req.effort ? ["--thinking", req.effort] : []
         ];
-        journal("agent", { label: req.label, role: req.role, session, model: model ?? null, ...req.effort ? { effort: req.effort } : {} });
+        journal("agent", { label: req.label, role: req.role, phase: req.phase, session, model: model ?? null, ...req.effort ? { effort: req.effort } : {} });
         const path = join2(session, "events.jsonl");
         const log = watch === "full" ? new EventLog(path, now, (e) => journal("event-log-failed", { label: req.label, path, error: String(e?.message ?? e) })) : undefined;
-        const view = live.role({ label: req.label, role: req.role, model, effort: req.effort, ...log ? { log: path } : {} }, log && ((entry) => log.write(entry)));
-        return converse(req, spec, args, session, view);
+        const view = live.role({ label: req.label, role: req.role, model, effort: req.effort, session, phase: req.phase, ...log ? { log: path } : {} }, log && ((entry) => log.write(entry)));
+        const end = (outcome, error) => {
+          view.outcome = outcome;
+          if (error !== undefined)
+            view.error = error;
+          try {
+            journal("agent-end", { label: req.label, session, outcome, ...error !== undefined ? { error } : {} });
+          } catch {}
+        };
+        try {
+          const result = await converse(req, spec, args, session, view);
+          end(result === null ? "failed" : "done");
+          return result;
+        } catch (e) {
+          if (isCancelled(e))
+            end("cancelled");
+          else
+            end("failed", String(e?.message ?? e));
+          throw e;
+        }
       },
       cancelled: () => run.cancelled,
       async run(command, cwd) {

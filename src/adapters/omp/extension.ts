@@ -3,12 +3,12 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileS
 import { basename, dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { resolveConfig, type WatchMode } from '../../core/config'
-import { GrannyCancelled } from '../../core/cancel'
+import { GrannyCancelled, isCancelled } from '../../core/cancel'
 import { checkInput, runGranny, stageCheckErrors, type RunInput } from '../../core/engine'
 import { checkShape, SCHEMAS } from '../../core/schemas'
 import type { AgentRequest, Host, ResultKind } from '../../core/types'
 import { DEFAULT_DELAYS, dropPlaceholders, globalConfigPath, type HostOptions, KILL_GRACE_MS, pause, preflight, readJson, RUN_INPUT_SCHEMA, RUN_TOOL_DESCRIPTION, runCommand, runDir, runId, runStatus, signalGroup, stageRepos, stamp, SUBMIT, summarize } from '../common'
-import { lineType, LiveRun, type LiveOptions, PARSED_EVENTS, type RoleActivity } from './panel'
+import { lineType, LiveRun, type LiveOptions, PARSED_EVENTS, type RoleActivity, type RoleOutcome } from './panel'
 import { EventLog, LogView } from './watch'
 
 // The omp (oh-my-pi) host. One file, two modes: in the user's omp session it registers granny_run,
@@ -470,14 +470,29 @@ export const createGrannyExtension =
             ...(model ? ['--model', model] : []),
             ...(req.effort ? ['--thinking', req.effort] : []),
           ]
-          journal('agent', { label: req.label, role: req.role, session, model: model ?? null, ...(req.effort ? { effort: req.effort } : {}) })
+          journal('agent', { label: req.label, role: req.role, phase: req.phase, session, model: model ?? null, ...(req.effort ? { effort: req.effort } : {}) })
           const path = join(session, 'events.jsonl')
           const log =
             watch === 'full'
               ? new EventLog(path, now, e => journal('event-log-failed', { label: req.label, path, error: String((e as Error)?.message ?? e) }))
               : undefined
-          const view = live.role({ label: req.label, role: req.role, model, effort: req.effort, ...(log ? { log: path } : {}) }, log && (entry => log.write(entry)))
-          return converse(req, spec, args, session, view)
+          const view = live.role({ label: req.label, role: req.role, model, effort: req.effort, session, phase: req.phase, ...(log ? { log: path } : {}) }, log && (entry => log.write(entry)))
+          const end = (outcome: RoleOutcome, error?: string) => {
+            view.outcome = outcome
+            if (error !== undefined) view.error = error
+            try {
+              journal('agent-end', { label: req.label, session, outcome, ...(error !== undefined ? { error } : {}) })
+            } catch {}
+          }
+          try {
+            const result = await converse(req, spec, args, session, view)
+            end(result === null ? 'failed' : 'done')
+            return result
+          } catch (e) {
+            if (isCancelled(e)) end('cancelled')
+            else end('failed', String((e as Error)?.message ?? e))
+            throw e
+          }
         },
         cancelled: () => run.cancelled,
         async run(command, cwd) {

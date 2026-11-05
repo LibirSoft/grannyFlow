@@ -17,9 +17,15 @@ export interface RoleInfo {
   role: string
   model?: string
   effort?: string
+  /** The role's `sessions/<n>-<label>` directory. */
+  session: string
+  /** The engine phase the role was called in. */
+  phase: string
   /** The role's events.jsonl, when the run keeps one. */
   log?: string
 }
+
+export type RoleOutcome = 'done' | 'failed' | 'cancelled'
 
 /** One condensed entry of a role's event log. */
 export type LogEntry =
@@ -143,6 +149,8 @@ export class RoleActivity {
   startedAt?: number
   endedAt?: number
   active = false
+  outcome?: RoleOutcome
+  error?: string
   private thinking = ''
   private unscanned = false
   private running = new Map<string, ToolCall>()

@@ -73,6 +73,8 @@ function feed(role: RoleActivity, line: string, now: number) {
   else role.event(JSON.parse(line), now)
 }
 
+const liveRoles = (id: string): RoleActivity[] => (globalThis as any)[Symbol.for('granny-workflow.omp.state')].runs.get(id).live.roles
+
 const readRun = (dir: string, file: string) => (existsSync(join(dir, file)) ? readFileSync(join(dir, file), 'utf8') : '')
 const journalOf = (dir: string) => readRun(dir, 'journal.jsonl').trim().split('\n').filter(Boolean).map(l => JSON.parse(l))
 
@@ -269,7 +271,7 @@ describe('live panel', () => {
   it('follows a role from waiting through thinking, writing and its tool calls, with how long each state has lasted', () => {
     let t = 0
     const live = new LiveRun('r1', undefined, { now: () => t, renderEveryMs: 1000 })
-    const role = live.role({ label: 'plan', role: 'planner', model: 'openai/gpt', effort: 'max' })
+    const role = live.role({ label: 'plan', role: 'planner', model: 'openai/gpt', effort: 'max', session: 's', phase: 'p' })
     live.start(role)
     const lines = () => live.lines(Number.POSITIVE_INFINITY).slice(1)
     expect(lines()).toEqual(['  plan (planner) · openai/gpt/max · starting 0s'])
@@ -305,7 +307,7 @@ describe('live panel', () => {
 
   it('lists the subagents of a task call and marks them when it ends', () => {
     const live = new LiveRun('r1', undefined, { now: () => 0, renderEveryMs: 1000 })
-    const role = live.role({ label: 'plan', role: 'planner' })
+    const role = live.role({ label: 'plan', role: 'planner', session: 's', phase: 'p' })
     live.start(role)
     const batch = { context: 'c', tasks: [{ name: 'BaselineGates', agent: 'explore', task: 'a' }, { agent: 'reviewer', task: 'b' }] }
     expect(role.event({ type: 'tool_execution_start', toolCallId: 't1', toolName: 'task', args: batch }, 0)).toEqual(['BaselineGates', 'reviewer'])
@@ -329,7 +331,7 @@ describe('live panel', () => {
     expect(PARSED_EVENTS.has('message_update')).toBe(false)
 
     const live = new LiveRun('r1', undefined, { now: () => 0, renderEveryMs: 1000 })
-    const role = live.role({ label: 'judge', role: 'judge' })
+    const role = live.role({ label: 'judge', role: 'judge', session: 's', phase: 'p' })
     live.start(role)
     const parse = spyOn(JSON, 'parse')
     try {
@@ -349,7 +351,7 @@ describe('live panel', () => {
 
   it('keeps a bounded tail of the thinking text, not the raw lines, between draws, and still finds the heading', () => {
     const live = new LiveRun('r1', undefined, { now: () => 0, renderEveryMs: 1000 })
-    const role = live.role({ label: 'plan', role: 'planner' })
+    const role = live.role({ label: 'plan', role: 'planner', session: 's', phase: 'p' })
     live.start(role)
     role.stream('message_update', update('thinking_start'), 0)
     const partial = `,"partial":{"content":[{"type":"thinking","thinking":"${'y'.repeat(100_000)}"}]}`
@@ -371,7 +373,7 @@ describe('live panel', () => {
     t += 1000
     await Bun.sleep(300)
     expect(u.calls).toEqual([])
-    const role = live.role({ label: 'implement one', role: 'implementer', model: 'm' })
+    const role = live.role({ label: 'implement one', role: 'implementer', model: 'm', session: 's', phase: 'p' })
     live.start(role)
     for (let i = 0; i < 500; i++) {
       role.stream('message_update', update('text_delta', { delta: 'x' }), t)
@@ -409,7 +411,7 @@ describe('live panel', () => {
   it('keeps the widget to 8 lines, collapsing the other roles into "+N more"', () => {
     const live = new LiveRun('r3', undefined, { now: () => 0, renderEveryMs: 1000 })
     for (let i = 1; i <= 6; i++) {
-      const role = live.role({ label: `review one r1 reviewer${i}`, role: 'reviewer' })
+      const role = live.role({ label: `review one r1 reviewer${i}`, role: 'reviewer', session: 's', phase: 'p' })
       live.start(role)
       role.event({ type: 'tool_execution_start', toolCallId: 't', toolName: 'read', args: { path: 'a.ts' } }, 0)
       role.event({ type: 'tool_execution_end', toolCallId: 't', toolName: 'read', result: {} }, 0)
@@ -423,7 +425,7 @@ describe('live panel', () => {
 
   it('makes no UI call and keeps no timer without a UI', async () => {
     const live = new LiveRun('r4', undefined, { now: () => 0, renderEveryMs: 1 })
-    const role = live.role({ label: 'judge one r1', role: 'judge' })
+    const role = live.role({ label: 'judge one r1', role: 'judge', session: 's', phase: 'p' })
     live.start(role)
     live.setPhase('Review')
     expect(live.lines()[0]).toBe('granny r4 · Review · 0s')
@@ -437,7 +439,7 @@ describe('role event log', () => {
   it('condenses a role\'s stream into state, heading, tool, tool-end, text, subagents and exit entries', () => {
     const entries: LogEntry[] = []
     const live = new LiveRun('r1', undefined, { now: () => 0, renderEveryMs: 1000 })
-    const role = live.role({ label: 'plan', role: 'planner' }, entry => void entries.push(entry))
+    const role = live.role({ label: 'plan', role: 'planner', session: 's', phase: 'p' }, entry => void entries.push(entry))
     live.start(role)
     const huge = `,"partial":{"content":[{"type":"thinking","thinking":"HUGE${'z'.repeat(50_000)}"}]}`
     for (const line of [
@@ -491,7 +493,7 @@ describe('role event log', () => {
   it('logs each new heading once, as it arrives, without a draw', () => {
     const headings: string[] = []
     const live = new LiveRun('r1', undefined, { now: () => 0, renderEveryMs: 1000 })
-    const role = live.role({ label: 'plan', role: 'planner' }, e => void (e.type === 'heading' && headings.push(e.text)))
+    const role = live.role({ label: 'plan', role: 'planner', session: 's', phase: 'p' }, e => void (e.type === 'heading' && headings.push(e.text)))
     live.start(role)
     role.stream('message_update', update('thinking_start'), 0)
     for (const delta of ['**First**\n', 'body *x* ', 'more\n', '**Second', ' one**\n', 'tail']) role.stream('message_update', update('thinking_delta', { delta }), 0)
@@ -701,6 +703,14 @@ describe('omp extension in the user session (parent mode)', () => {
     expect(agents.map(e => e.label)).toEqual(['implement one', 'review one r1 reviewer', 'judge one r1', 'fix one r1', 'review one r2 reviewer', 'pr-ready check'])
     expect(agents[0]).toMatchObject({ role: 'implementer', model: 'omp-test/parent-model' })
     expect(agents[2]).toMatchObject({ role: 'judge', model: 'anthropic/judge-model', effort: 'high' })
+    expect(agents.map(e => e.phase)).toEqual(['Implement', 'Review', 'Review', 'Implement', 'Review', 'PR ready'])
+    const ends = journalOf(dir).filter(e => e.type === 'agent-end')
+    for (const agent of agents) {
+      expect(ends.filter(e => e.session === agent.session)).toEqual([{ t: expect.any(String), type: 'agent-end', label: agent.label, session: agent.session, outcome: 'done' }])
+    }
+    expect(ends).toHaveLength(agents.length)
+    const roles = liveRoles(id)
+    expect(roles.map(r => [r.info.label, r.info.phase, r.info.session, r.outcome])).toEqual(agents.map(e => [e.label, e.phase, e.session, 'done']))
 
     await waitFor(() => f.sent.length > 0)
     expect(f.sent).toHaveLength(1)
@@ -782,11 +792,15 @@ describe('omp extension in the user session (parent mode)', () => {
     const slept: number[] = []
     const f = fakePi()
     await createGrannyExtension({ delays: [5, 10], sleep: async ms => void slept.push(ms) })(f.pi as any)
-    const { dir } = await start(f)
+    const { id, dir } = await start(f)
     await finished(dir)
     expect(slept.slice(0, 2)).toEqual([5, 10])
     expect(callsTo('judge-one-r1')).toHaveLength(3)
     expect(journalOf(dir)).toContainEqual(expect.objectContaining({ type: 'agent-failed', label: 'judge one r1', error: '503 Service Unavailable' }))
+    expect(journalOf(dir).filter(e => e.type === 'agent-end' && e.label === 'judge one r1')).toEqual([
+      { t: expect.any(String), type: 'agent-end', label: 'judge one r1', session: join(dir, 'sessions/3-judge-one-r1'), outcome: 'failed' },
+    ])
+    expect(liveRoles(id).find(r => r.info.label === 'judge one r1')?.outcome).toBe('failed')
   })
 
   it('does not retry a provider error that waiting cannot fix', async () => {
@@ -927,6 +941,34 @@ describe('omp extension in the user session (parent mode)', () => {
     expect(logs.filter(m => /retrying once|review failed/.test(m))).toEqual([])
     expect(callsTo('review-one-r1-reviewer')).toHaveLength(1)
     expect(calls().map(c => c.slug)).toEqual(['implement-one', 'review-one-r1-reviewer'])
+    expect(journalOf(dir).filter(e => e.type === 'agent-end').map(e => [e.label, e.outcome])).toEqual([
+      ['implement one', 'done'],
+      ['review one r1 reviewer', 'cancelled'],
+    ])
+    expect(liveRoles(id).map(r => r.outcome)).toEqual(['done', 'cancelled'])
+  })
+
+  it('keeps the run\'s outcome when journalling an agent\'s end throws', async () => {
+    behave({})
+    const real = fs.appendFileSync
+    let refused = 0
+    const spy = spyOn(fs, 'appendFileSync').mockImplementation(((path: any, data: any, options?: any) => {
+      if (String(data).includes('"type":"agent-end"')) {
+        refused++
+        throw new Error('disk full')
+      }
+      return real(path, data, options)
+    }) as typeof fs.appendFileSync)
+    try {
+      const f = fakePi()
+      await extension(f.pi as any)
+      const { id, dir } = await start(f)
+      expect((await finished(dir)).stages[0].outcome).toBe('clean')
+      expect(refused).toBe(6)
+      expect(liveRoles(id).map(r => r.outcome)).toEqual(Array(6).fill('done'))
+    } finally {
+      spy.mockRestore()
+    }
   })
 
   it('tells the agent to wait with granny_wait or end its turn, never with a watcher of its own', async () => {
