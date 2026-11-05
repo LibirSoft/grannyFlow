@@ -3,6 +3,7 @@
 // only in the tick; render() lays out cached lines.
 import { readdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { stamp } from './format'
 import { duration, type LiveRun, type RoleActivity } from './panel'
 import { TailReader } from './tail'
 import { LineBuffer, sessionEntryLines } from './transcript'
@@ -104,11 +105,6 @@ function wrap(lines: readonly string[], width: number): string[] {
     else for (let i = 0; i < line.length; i += w) out.push(line.slice(i, i + w))
   }
   return out
-}
-
-const stampOf = (value: unknown) => {
-  const d = new Date(typeof value === 'string' || typeof value === 'number' ? value : Number.NaN)
-  return Number.isNaN(d.getTime()) ? undefined : `${d.toISOString().slice(0, 10)} ${d.toTimeString().slice(0, 8)}`
 }
 
 export class Navigator {
@@ -373,8 +369,8 @@ export class Navigator {
     const out = [`status   ${tree.status}`]
     if (typeof status.repo === 'string') out.push(`repo     ${status.repo}`)
     if (typeof status.branch === 'string') out.push(`branch   ${status.branch}`)
-    out.push(`started  ${stampOf(status.startedAt) ?? stampOf(tree.start) ?? '?'}`)
-    if (tree.status !== 'running') out.push(`ended    ${stampOf(status.finishedAt) ?? stampOf(tree.end) ?? '?'}`)
+    out.push(`started  ${stamp(status.startedAt) ?? stamp(tree.start) ?? '?'}`)
+    if (tree.status !== 'running') out.push(`ended    ${stamp(status.finishedAt) ?? stamp(tree.end) ?? '?'}`)
     else out.push(`phase    ${tree.phase ?? '?'}`)
     if (run) out.push(`result   ${join(run.dir, 'result.json')}`)
     if (run?.reply !== undefined) out.push('', ...run.reply.split('\n'))

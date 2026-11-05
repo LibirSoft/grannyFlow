@@ -1,6 +1,7 @@
 // A role's event log (`sessions/<n>-<label>/events.jsonl`) and the /granny view of it: condensed
 // entries appended while the role process streams, read back from the file's tail.
 import { appendFileSync, closeSync, existsSync, openSync, readSync, statSync } from 'node:fs'
+import { clock } from './format'
 import type { LogEntry } from './panel'
 
 export const VIEW_LINES = 40
@@ -53,11 +54,6 @@ export function readTail(path: string, maxBytes = TAIL_BYTES): Logged[] {
     } catch {}
   }
   return out
-}
-
-const clock = (t: string) => {
-  const d = new Date(t)
-  return Number.isNaN(d.getTime()) ? '--:--:--' : d.toTimeString().slice(0, 8)
 }
 
 export function entryLines(e: Logged): string[] {

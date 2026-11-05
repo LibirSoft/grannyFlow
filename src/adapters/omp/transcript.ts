@@ -1,5 +1,6 @@
 // A role's omp session file (`sessions/<n>-<label>/<time>_<uuid>.jsonl`) as readable lines, one
 // session entry at a time.
+import { clean, clock } from './format'
 
 const MAX_ENTRY_CHARS = 2 * 1024 * 1024
 const PROMPT_LINES = 12
@@ -8,19 +9,9 @@ const RESULT_LINES = 8
 const ARGS_CHARS = 300
 const PAD = ' '.repeat(10)
 
-const ANSI = /\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[@-Z\\-_])/g
-const CONTROL = /[\x00-\x08\x0b-\x1f\x7f]/g
-
-const clean = (text: string) => text.replace(/\t/g, '  ').replace(ANSI, '').replace(CONTROL, '')
-
 const split = (text: string) => clean(text).split('\n')
 
 const cut = (text: string, max: number) => (text.length > max ? `${text.slice(0, max - 1)}…` : text)
-
-function clock(value: unknown): string {
-  const d = new Date(typeof value === 'number' || typeof value === 'string' ? value : Number.NaN)
-  return Number.isNaN(d.getTime()) ? '--:--:--' : d.toTimeString().slice(0, 8)
-}
 
 function head(lines: string[], max: number, indent: string, tail = ''): string[] {
   const out = lines.slice(0, max).map(l => `${indent}${l}`)

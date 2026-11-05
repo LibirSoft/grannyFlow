@@ -2,6 +2,7 @@
 // run's journal entries with the live state of its role processes laid over them.
 import { readdirSync } from 'node:fs'
 import { join } from 'node:path'
+import { clock } from './format'
 import { duration, type RoleActivity } from './panel'
 
 export interface JournalEntry {
@@ -104,8 +105,6 @@ const timeOf = (entry: JournalEntry): number | undefined => {
   const t = entry.t ? Date.parse(entry.t) : Number.NaN
   return Number.isNaN(t) ? undefined : t
 }
-
-const clock = (t: number | undefined) => (t === undefined ? '--:--:--' : new Date(t).toTimeString().slice(0, 8))
 
 const at = (t: number | undefined, text: string): string[] => {
   const [first, ...rest] = text.replace(/\t/g, '  ').split('\n')

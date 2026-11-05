@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, spyOn } from 'bun:test'
 import { appendFileSync, mkdirSync, mkdtempSync, renameSync, rmSync, truncateSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { clean, clock, stamp } from '../src/adapters/omp/format'
 import { TailReader } from '../src/adapters/omp/tail'
 import { LineBuffer, sessionEntryLines } from '../src/adapters/omp/transcript'
 import { LiveRun, RoleActivity } from '../src/adapters/omp/panel'
@@ -114,6 +115,29 @@ describe('TailReader', () => {
     const r = new TailReader(path)
     expect(() => r.poll()).not.toThrow()
     expect(r.poll().lines).toEqual([])
+  })
+})
+
+describe('format', () => {
+  it('clock gives the local HH:MM:SS of a date string or epoch ms, else a placeholder', () => {
+    const iso = '2026-11-05T17:37:50.000Z'
+    const local = new Date(iso).toTimeString().slice(0, 8)
+    expect(clock(iso)).toBe(local)
+    expect(clock(Date.parse(iso))).toBe(local)
+    for (const bad of [undefined, null, 'not a date', Number.NaN, {}]) expect(clock(bad)).toBe('--:--:--')
+  })
+
+  it('stamp gives the date and local time, or undefined', () => {
+    const iso = '2026-11-05T17:37:50.000Z'
+    const d = new Date(iso)
+    expect(stamp(iso)).toBe(`${d.toISOString().slice(0, 10)} ${d.toTimeString().slice(0, 8)}`)
+    expect(stamp(d.getTime())).toBe(stamp(iso))
+    expect(stamp('nope')).toBeUndefined()
+    expect(stamp(undefined)).toBeUndefined()
+  })
+
+  it('clean turns tabs into two spaces and drops ANSI and control codes', () => {
+    expect(clean('a\tb \x1b[31mred\x1b[0m \x1b]8;;http://x\x07link\x1b]8;;\x07 \x07bell\r\nnext')).toBe('a  b red link bell\nnext')
   })
 })
 

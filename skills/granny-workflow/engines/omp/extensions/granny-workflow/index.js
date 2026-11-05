@@ -2969,6 +2969,15 @@ class LiveRun {
 
 // src/adapters/omp/watch.ts
 import { appendFileSync as appendFileSync2, closeSync, existsSync as existsSync2, openSync, readSync, statSync } from "fs";
+
+// src/adapters/omp/format.ts
+var dateOf = (value) => new Date(typeof value === "number" || typeof value === "string" ? value : Number.NaN);
+function clock(value) {
+  const d = dateOf(value);
+  return Number.isNaN(d.getTime()) ? "--:--:--" : d.toTimeString().slice(0, 8);
+}
+
+// src/adapters/omp/watch.ts
 var VIEW_LINES = 40;
 var TAIL_BYTES = 256 * 1024;
 var TEXT_LINES = 12;
@@ -3023,10 +3032,6 @@ function readTail(path, maxBytes = TAIL_BYTES) {
   }
   return out;
 }
-var clock = (t) => {
-  const d = new Date(t);
-  return Number.isNaN(d.getTime()) ? "--:--:--" : d.toTimeString().slice(0, 8);
-};
 function entryLines(e) {
   const at = clock(e.t);
   switch (e.type) {
