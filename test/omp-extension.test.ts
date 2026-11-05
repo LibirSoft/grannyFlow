@@ -602,6 +602,24 @@ describe('omp extension in the user session (parent mode)', () => {
     expect(f.sent).toEqual([])
   })
 
+  it('tells the agent to wait with granny_wait or end its turn, never with a watcher of its own', async () => {
+    behave({})
+    const f = fakePi()
+    await extension(f.pi as any)
+    writeFileSync(join(repo, 'granny.config.json'), '{}')
+    git(repo, 'add', 'granny.config.json')
+    git(repo, 'commit', '-qm', 'cfg')
+    const started = textOf(await exec(f.tools.get('granny_run'), { repo, branch: 'feat/x', stages: [{ name: 'one', task: 'Do it.' }] }))
+    const id = /granny run (\S+) started/.exec(started)![1]!
+    expect(started).toContain(`call granny_wait { runId: "${id}" }`)
+    expect(started).toContain('end your turn - the finish message starts a new one')
+    expect(started).toContain('Never write your own watcher, sleep or poll loop on the run files')
+    expect(started).toContain('granny_status')
+    expect(started).toContain('granny_cancel')
+    expect(f.tools.get('granny_wait').description).toContain('instead of your own watcher, sleep or poll loop')
+    await finished(join(repo, '.granny/runs', id))
+  })
+
   const wait = (f: ReturnType<typeof fakePi>, params: Record<string, unknown>, signal?: AbortSignal) =>
     f.tools.get('granny_wait').execute('call-w', params, signal, undefined, CTX).then(textOf) as Promise<string>
   const waitsJournalled = (dir: string) => journalOf(dir).filter(e => e.type === 'notified-via-wait')

@@ -478,7 +478,7 @@ export const createGrannyExtension =
 
       return `granny run ${id} started on ${input.repo} (${input.branch}), ${input.goal !== undefined ? 'planning only' : `${input.stages?.length ?? 0} stage(s)${config.parallel ? `, up to ${config.maxParallel} in parallel` : ''}`}, threshold ${config.threshold}, maxRounds ${config.maxRounds}.
 Journal: ${join(dir, 'journal.jsonl')}
-You will receive a message when it finishes. Use granny_status { runId: "${id}" } to check progress and granny_cancel to stop it. Do not poll in a loop.`
+To wait in this turn, call granny_wait { runId: "${id}" }; otherwise end your turn - the finish message starts a new one. Never write your own watcher, sleep or poll loop on the run files. Use granny_status { runId: "${id}" } for progress and granny_cancel to stop it.`
     }
 
     pi.registerTool({
