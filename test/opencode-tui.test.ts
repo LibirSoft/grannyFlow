@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { clock } from '../src/adapters/runview/format'
 import type { FsLike, RoleMeta } from '../src/adapters/opencode/runwatch'
-import { createTuiPlugin } from '../src/adapters/opencode/tui-plugin'
+import { createTuiPlugin, Hub } from '../src/adapters/opencode/tui-plugin'
 import { fakeCtx, type FakeCtxOptions, type FakeSession, fakeRuntime, fakeTimers, render, texts } from './fake-opentui'
 
 const BASE = Date.parse('2026-11-05T18:23:28.000Z')
@@ -884,6 +884,30 @@ describe('opencode TUI plugin: the /granny navigator', () => {
       expect(v.lines().at(-1)!.trimEnd()).toBe(HELP.replace('v details', 'v summary'))
       v.key('v')
       expect(v.text()).toContain('RECENT')
+    })
+
+    it('keeps what it read of the last 8 agents only', () => {
+      status()
+      const ids = Array.from({ length: 10 }, (_, i) => `ses_${i}`)
+      journal(line(0, 'phase', { title: 'Review' }), ...ids.map((id, i) => line(i * S, 'agent', { label: `review one r1 a${i}`, role: 'reviewer', session: id, model: kimi, phase: 'Review' })))
+      const timers = fakeTimers()
+      const fc = fakeCtx({
+        sessions: [{ id: 'parent' }, ...ids.map(id => role(id, { label: id, role: 'reviewer', phase: 'Review' }))],
+        running: ids,
+        messages: Object.fromEntries(ids.map(id => [id, [msg(`m_${id}`, at(1), [{ type: 'text', text: id }], at(2))]])),
+      })
+      const hub = new Hub(fakeRuntime({ width: 160, height: 30 }).rt, fc.ctx, { now: () => NOW, tickMs: 10, timers })
+      hub.install()
+      timers.tick()
+      fc.routes.get('granny')!.render({ data: { runId: RUN } })
+      timers.tick()
+      fc.bound('home')!.run()
+      for (const _ of ids) {
+        fc.bound('tab,]')!.run()
+        timers.tick()
+      }
+      expect(ids.filter(id => hub.activity(id)).sort()).toEqual(ids.slice(2).sort())
+      expect(hub.activity('ses_9')?.items).toEqual([{ t: at(1), kind: 'text', text: 'ses_9' }])
     })
 
     it('keeps the newest events of the verbose list when the pane is short', () => {
