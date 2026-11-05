@@ -1,6 +1,6 @@
 # granny on omp
 
-The engine is an omp (oh-my-pi) extension (`engines/omp/extensions/granny-workflow/`). In your omp session it adds `granny_run`, `granny_status` and `granny_cancel`. The loop is code inside the extension, which runs in your omp process. Every role runs as its own `omp` process on its own model and answers through a `granny_submit_*` tool. The review commands and the checks run directly in your omp process.
+The engine is an omp (oh-my-pi) extension (`engines/omp/extensions/granny-workflow/`). In your omp session it adds `granny_run`, `granny_status`, `granny_wait` and `granny_cancel`. The loop is code inside the extension, which runs in your omp process. Every role runs as its own `omp` process on its own model and answers through a `granny_submit_*` tool. The review commands and the checks run directly in your omp process.
 
 ## Install
 
@@ -14,7 +14,7 @@ The engine is an omp (oh-my-pi) extension (`engines/omp/extensions/granny-workfl
 
    Install it globally. omp loads project extensions only from `<cwd>/.omp/extensions/`, and with `worktree` on (the default) the run works in the branch's worktree. The role processes do not need the install: they load the extension file by its absolute path. `granny_run` itself must be in your session, though, and a per-project copy is missing in every other directory you start omp in.
 
-3. Quit omp and start it again. `granny_run`, `granny_status` and `granny_cancel` should be listed among the tools of the new session.
+3. Quit omp and start it again. `granny_run`, `granny_status`, `granny_wait` and `granny_cancel` should be listed among the tools of the new session.
 
 There is no `granny` agent definition for omp: omp's agent files define task subagents, not the agent of your session. To run granny's roles on a particular model, start the session on that model - a role without its own model uses the model of the session that called `granny_run` - or set `model` on each role ([config.md](config.md#models-per-host)). `roles.granny` is only the model of the extraction fallback and the final PR-ready check; it does not change your session's model.
 
@@ -35,9 +35,10 @@ The extension reads `~/.config/granny/config.json` (or `$GRANNY_CONFIG`) and `<r
 
 Independent stages run at the same time, up to `maxParallel` ([config.md](config.md#parallel-stages)), each with its own role processes. With `checks` in the config ([config.md](config.md#checks)) the extension runs each check command itself (`bash -c` in the stage's worktree, its exit code is the real one) after the implementer, after every fix, once per repo before the final review, and once more without repairs when the final check moved HEAD. The completion message is the same as on opencode ([opencode.md](opencode.md#launch) lists its lines).
 
-`granny_run` returns a run id at once, and the run goes on in the background. When it ends, the extension posts a `[granny] Run … finished` message into the session that called `granny_run`, with a `- worktree: <path>` line - that is your cue to report. The message is queued behind a turn that is running and starts a turn when the session is idle. When it cannot be posted, the journal has a `notify-failed` entry, and `granny_status` still has the result.
+`granny_run` returns a run id at once, and the run goes on in the background. When it ends, the extension posts a `[granny] Run … finished` message into the session that called `granny_run`, with a `- worktree: <path>` line - that is your cue to report. The message is queued behind a turn that is running and starts a turn when the session is idle, so a turn that never ends - one blocked on its own watcher, sleep or poll loop - never gets it. When it cannot be posted, the journal has a `notify-failed` entry, and `granny_status` still has the result.
 
 - `granny_status({ runId })` - status, journal tail, result. `granny_status({ repo })` finds the latest run in that repo.
+- `granny_wait({ runId, timeoutSeconds? })` - blocks the turn until the run ends and returns what the message would carry: the finish summary, the failure, or `Run <id> was cancelled.` A run that has already ended returns at once. After `timeoutSeconds` (default 1800, clamped to 1-7200) it returns `Run <id> is still running after <n> s. ...`; Esc returns `Stopped waiting; run <id> is still running.` A run that ends while a `granny_wait` for it is pending reports only through those waits: no message is posted, and the journal has `notified-via-wait`. It waits only for a run of this omp process (the run table is in memory); for any other run it points to `granny_status({ repo })`.
 - `granny_cancel({ runId })` - interrupts every running step; nothing further starts. Every role process and every review command runs in its own process group. Each group gets SIGTERM, then SIGKILL 5 s later when it is still running.
 
 Run files: `<repo>/.granny/runs/<id>/` - `input.json`, `status.json`, `journal.jsonl`, `result.json` - in the main checkout you passed as `repo`, also when the run works in another worktree. Every terminal state writes `result.json`, after `status.json`, so a `result.json` means the run has ended and `status.json` already says how: `done` writes the run's result, `failed` and `cancelled` write `{ id, status, finishedAt, error }` with the error message (the stack is in `status.json`). Each role process has its own directory there, `sessions/<n>-<label>/`, which holds its omp session and `submission.json`, the arguments of its submit call. The PR body and the review outputs are in the worktree's `.granny/`.
@@ -73,9 +74,9 @@ Review commands and checks run in your omp process's environment: the CLI of eve
 
 The run lives in your omp process; its role processes and review commands do not. Each is in its own process group, so when omp exits - you quit it, its terminal closes, or it crashes - nothing signals them. A review command runs to the end and writes `<workDir>/review-<stage>-r<n>-<reviewer>.md` and `.log`, but nobody reads them. A role process that was mid-turn is not stopped either and may keep editing and committing in the worktree. Find leftovers with `pgrep -af 'runs/<id>/sessions'` (every role process has its session dir on its command line) and stop them yourself.
 
-Everything else stops with omp: `status.json` keeps `"status": "running"` without `finishedAt`, and since the run never reaches a terminal state there is no `result.json` and no message to your session. In a new omp process `granny_status({ repo })` still reads the run's files, but `granny_cancel` answers `No running granny run "<id>"`, because the run table is in memory. Call `granny_cancel` before you quit omp. After an unplanned exit, stop the leftovers and relaunch with the same arguments and `fromStage`; the next review round deletes and rewrites the orphaned review files.
+Everything else stops with omp: `status.json` keeps `"status": "running"` without `finishedAt`, and since the run never reaches a terminal state there is no `result.json` and no message to your session. In a new omp process `granny_status({ repo })` still reads the run's files, but `granny_cancel` answers `No running granny run "<id>"` and `granny_wait` does not know the run, because the run table is in memory. Call `granny_cancel` before you quit omp. After an unplanned exit, stop the leftovers and relaunch with the same arguments and `fromStage`; the next review round deletes and rewrites the orphaned review files.
 
-A new session inside the same omp process still sees the run: `granny_status` and `granny_cancel` find it there.
+A new session inside the same omp process still sees the run: `granny_status`, `granny_wait` and `granny_cancel` find it there.
 
 ## Reviewers
 

@@ -4,7 +4,7 @@ import * as fs from 'node:fs'
 import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import extension, { blockReason, createGrannyExtension, isTransient } from '../src/adapters/omp/extension'
+import extension, { blockReason, createGrannyExtension, isTransient, waitSeconds } from '../src/adapters/omp/extension'
 import { SCHEMAS } from '../src/core/schemas'
 import type { FakeOmpBehaviour } from './fake-omp'
 
@@ -229,6 +229,13 @@ describe('isTransient', () => {
   })
 })
 
+describe('waitSeconds', () => {
+  it('clamps granny_wait\'s timeout to 1..7200 s and defaults to 1800 s', () => {
+    expect([waitSeconds(undefined), waitSeconds(null), waitSeconds('soon'), waitSeconds(Number.NaN), waitSeconds(Infinity)]).toEqual([1800, 1800, 1800, 1800, 1800])
+    expect([waitSeconds(0), waitSeconds(-5), waitSeconds(0.2), waitSeconds(60), waitSeconds('90'), waitSeconds(7200), waitSeconds(99_999)]).toEqual([1, 1, 1, 60, 90, 7200, 7200])
+  })
+})
+
 describe('omp extension in a role process (child mode)', () => {
   let dir: string
   beforeEach(() => {
@@ -320,10 +327,11 @@ describe('omp extension in the user session (parent mode)', () => {
     return { id, dir: join(repo, '.granny/runs', id) }
   }
 
-  it('registers granny_run, granny_status and granny_cancel as essential tools, and no submit tool', async () => {
+  it('registers granny_run, granny_status, granny_wait and granny_cancel as essential tools, and no submit tool', async () => {
     const f = fakePi()
     await extension(f.pi as any)
-    expect([...f.tools.keys()].sort()).toEqual(['granny_cancel', 'granny_run', 'granny_status'])
+    expect([...f.tools.keys()].sort()).toEqual(['granny_cancel', 'granny_run', 'granny_status', 'granny_wait'])
+    expect(f.tools.get('granny_wait').parameters.required).toEqual(['runId'])
     for (const tool of f.tools.values()) {
       expect(tool.loadMode).toBe('essential')
       expect(tool.label).toBeString()
@@ -592,6 +600,105 @@ describe('omp extension in the user session (parent mode)', () => {
     expect(result).toEqual({ id, status: 'cancelled', finishedAt: expect.any(String), error: 'cancelled' })
     expect(JSON.parse(readRun(dir, 'status.json')).status).toBe('cancelled')
     expect(f.sent).toEqual([])
+  })
+
+  const wait = (f: ReturnType<typeof fakePi>, params: Record<string, unknown>, signal?: AbortSignal) =>
+    f.tools.get('granny_wait').execute('call-w', params, signal, undefined, CTX).then(textOf) as Promise<string>
+  const waitsJournalled = (dir: string) => journalOf(dir).filter(e => e.type === 'notified-via-wait')
+
+  it('granny_wait returns the finish summary instead of the notice when the run ends during the wait', async () => {
+    behave({})
+    const f = fakePi()
+    await extension(f.pi as any)
+    const { id, dir } = await start(f)
+    const [first, second] = await Promise.all([wait(f, { runId: id }), wait(f, { runId: id })])
+    expect(first).toContain(`[granny] Run ${id} finished.`)
+    expect(first).toContain('- one: clean, 2 review round(s)')
+    expect(first).toContain(`Call granny_status with runId "${id}"`)
+    expect(second).toBe(first)
+    expect(JSON.parse(readRun(dir, 'status.json')).status).toBe('done')
+    expect(existsSync(join(dir, 'result.json'))).toBe(true)
+    expect(f.sent).toEqual([])
+    expect(waitsJournalled(dir)).toEqual([expect.objectContaining({ waits: 2 })])
+  })
+
+  it('granny_wait returns at once for a run that has already ended, and the notice went out as before', async () => {
+    behave({})
+    const f = fakePi()
+    await extension(f.pi as any)
+    const { id, dir } = await start(f)
+    await finished(dir)
+    expect(f.sent).toHaveLength(1)
+    expect(await wait(f, { runId: id })).toBe(f.sent[0]!.message.content)
+    expect(waitsJournalled(dir)).toEqual([])
+  })
+
+  it('granny_wait returns the failure text when the run fails during the wait, without a second report', async () => {
+    process.env.GRANNY_OMP_BIN = join(fake, 'no-such-omp')
+    const f = fakePi()
+    await extension(f.pi as any)
+    const { id, dir } = await start(f)
+    const reply = await wait(f, { runId: id })
+    expect(reply).toStartWith(`[granny] Run ${id} failed: `)
+    expect(reply).toContain('GRANNY_OMP_BIN')
+    expect(f.sent.length + waitsJournalled(dir).length).toBe(1)
+  })
+
+  it('granny_wait says so when the run is cancelled during the wait', async () => {
+    behave({ wait: ['implement-one'] })
+    const f = fakePi()
+    await createGrannyExtension({ killGraceMs: 100 })(f.pi as any)
+    const { id, dir } = await start(f)
+    const reply = wait(f, { runId: id })
+    await waitFor(() => existsSync(join(fake, 'wait-implement-one.pid')))
+    await exec(f.tools.get('granny_cancel'), { runId: id })
+    expect(await reply).toBe(`Run ${id} was cancelled.`)
+    expect(await wait(f, { runId: id })).toBe(`Run ${id} was cancelled.`)
+    expect(waitsJournalled(dir)).toHaveLength(1)
+  })
+
+  it('granny_wait times out with the still-running text, clamping the timeout to at least 1 s, and stops counting as a wait', async () => {
+    behave({ wait: ['implement-one'] })
+    const f = fakePi()
+    await createGrannyExtension({ killGraceMs: 100 })(f.pi as any)
+    const { id, dir } = await start(f)
+    const begun = performance.now()
+    const reply = await wait(f, { runId: id, timeoutSeconds: 0 })
+    expect(performance.now() - begun).toBeGreaterThanOrEqual(990)
+    expect(reply).toBe(`Run ${id} is still running after 1 s. Call granny_wait again to keep waiting, or end your turn - the finish message will start a new one.`)
+    await waitFor(() => existsSync(join(fake, 'wait-implement-one.pid')))
+    await exec(f.tools.get('granny_cancel'), { runId: id })
+    await finished(dir)
+    expect(waitsJournalled(dir)).toEqual([])
+  })
+
+  it('granny_wait stops on abort and leaves the run going', async () => {
+    behave({ wait: ['implement-one'] })
+    const f = fakePi()
+    await createGrannyExtension({ killGraceMs: 100 })(f.pi as any)
+    const { id, dir } = await start(f)
+    const stopped = `Stopped waiting; run ${id} is still running.`
+    const pressed = new AbortController()
+    pressed.abort()
+    expect(await wait(f, { runId: id }, pressed.signal)).toBe(stopped)
+    const esc = new AbortController()
+    const reply = wait(f, { runId: id }, esc.signal)
+    await Bun.sleep(50)
+    esc.abort()
+    expect(await reply).toBe(stopped)
+    expect(JSON.parse(readRun(dir, 'status.json')).status).toBe('running')
+    await waitFor(() => existsSync(join(fake, 'wait-implement-one.pid')))
+    await exec(f.tools.get('granny_cancel'), { runId: id })
+    await finished(dir)
+    expect(waitsJournalled(dir)).toEqual([])
+  })
+
+  it('granny_wait points to granny_status for a run this process does not know', async () => {
+    const f = fakePi()
+    await extension(f.pi as any)
+    const reply = await wait(f, { runId: 'no-such-run' })
+    expect(reply).toContain('No granny run "no-such-run" in this omp process')
+    expect(reply).toContain('granny_status({ repo })')
   })
 
   it('keeps the run alive when posting the completion message throws', async () => {

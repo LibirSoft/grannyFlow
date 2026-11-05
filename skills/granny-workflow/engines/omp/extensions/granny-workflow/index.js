@@ -2581,6 +2581,12 @@ var SHARED = Symbol.for("granny-workflow.omp.state");
 var shared = globalThis[SHARED] ??= { runs: new Map };
 var { runs } = shared;
 var text = (t) => ({ content: [{ type: "text", text: t }] });
+var WAIT_DEFAULT_SECONDS = 1800;
+var WAIT_MAX_SECONDS = 7200;
+function waitSeconds(value) {
+  const n = typeof value === "string" && value.trim() ? Number(value) : value;
+  return typeof n === "number" && Number.isFinite(n) ? Math.min(WAIT_MAX_SECONDS, Math.max(1, Math.round(n))) : WAIT_DEFAULT_SECONDS;
+}
 var READ_ONLY_TOOLS = new Set(["read", "grep", "glob", "find", "ast_grep", "lsp", "bash", "web_search", "todo", "think", "wait", "yield"]);
 var KEYWORDS = new Set(["{", "}", "!", "if", "then", "else", "elif", "do", "while", "until", "nohup"]);
 var PREFIX_OPTIONS_WITH_VALUE = new Map([
@@ -2833,7 +2839,7 @@ var createGrannyExtension = ({ delays = DEFAULT_DELAYS, sleep = pause, killGrace
     const id = runId();
     const dir = join2(input.repo, config.workDir, "runs", id);
     mkdirSync2(dir, { recursive: true });
-    const run = { id, dir, status: "running", cancelled: false, abort: new AbortController, children: new Set, agents: 0 };
+    const run = { id, dir, status: "running", cancelled: false, abort: new AbortController, children: new Set, agents: 0, waiters: new Set };
     runs.set(id, run);
     const journal = (type, data) => appendFileSync2(join2(dir, "journal.jsonl"), JSON.stringify({ t: stamp(), type, ...data }) + `
 `);
@@ -2971,23 +2977,40 @@ When done, call the \`${tool}\` tool exactly once with your result. That call is
       }
     };
     const writeResult = (result) => writeFileSync(join2(dir, "result.json"), JSON.stringify(result, null, 2));
+    const settle = (reply, notice) => {
+      run.reply = reply;
+      const waiting = [...run.waiters];
+      run.waiters.clear();
+      for (const deliver of waiting)
+        deliver(reply);
+      if (waiting.length)
+        journal("notified-via-wait", { waits: waiting.length });
+      else if (notice)
+        notify(notice);
+    };
     runGranny(host, { ...input, config: layers }).then((result) => {
       run.status = "done";
       writeStatus({ finishedAt: stamp() });
       writeResult(result);
-      notify(`[granny] Run ${id} finished.
+      const reply = `[granny] Run ${id} finished.
 ${summarize(result, config.worktree)}
-Call granny_status with runId "${id}" for the full result, verify load-bearing claims yourself, report to the user and wait. Do not push.`);
+Call granny_status with runId "${id}" for the full result, verify load-bearing claims yourself, report to the user and wait. Do not push.`;
+      settle(reply, reply);
     }).catch((error) => {
+      if (run.reply !== undefined)
+        return;
       run.status = run.cancelled ? "cancelled" : "failed";
       const finishedAt = stamp();
       const message = String(error?.message ?? error);
-      writeStatus({ finishedAt, error: String(error?.stack ?? error) });
-      journal("error", { error: message });
-      writeResult({ id, status: run.status, finishedAt, error: message });
-      if (!run.cancelled)
-        notify(`[granny] Run ${id} failed: ${message}
-Call granny_status with runId "${id}" and report to the user.`);
+      const reply = run.cancelled ? `Run ${id} was cancelled.` : `[granny] Run ${id} failed: ${message}
+Call granny_status with runId "${id}" and report to the user.`;
+      try {
+        writeStatus({ finishedAt, error: String(error?.stack ?? error) });
+        journal("error", { error: message });
+        writeResult({ id, status: run.status, finishedAt, error: message });
+      } finally {
+        settle(reply, run.cancelled ? undefined : reply);
+      }
     }).catch(() => {});
     return `granny run ${id} started on ${input.repo} (${input.branch}), ${input.goal !== undefined ? "planning only" : `${input.stages?.length ?? 0} stage(s)${config.parallel ? `, up to ${config.maxParallel} in parallel` : ""}`}, threshold ${config.threshold}, maxRounds ${config.maxRounds}.
 Journal: ${join2(dir, "journal.jsonl")}
@@ -3025,6 +3048,44 @@ You will receive a message when it finishes. Use granny_status { runId: "${id}" 
     }
   });
   pi.registerTool({
+    name: "granny_wait",
+    label: "granny wait",
+    description: `granny-workflow: wait in this turn until a granny run ends and return its result, or return when timeoutSeconds (default ${WAIT_DEFAULT_SECONDS}) pass - use it instead of your own watcher, sleep or poll loop on the run files.`,
+    parameters: {
+      type: "object",
+      properties: {
+        runId: { type: "string" },
+        timeoutSeconds: { type: "number", description: `Seconds to wait while the run is still going, 1 to ${WAIT_MAX_SECONDS}; default ${WAIT_DEFAULT_SECONDS}` }
+      },
+      required: ["runId"]
+    },
+    loadMode: "essential",
+    async execute(_id, params, signal) {
+      const run = runs.get(params.runId);
+      if (!run) {
+        return text(`No granny run "${params.runId}" in this omp process. granny_wait waits only for a run started in this process - the run table is in memory; call granny_status({ repo }) to read a run's files.`);
+      }
+      if (run.reply !== undefined)
+        return text(run.reply);
+      const stopped = `Stopped waiting; run ${run.id} is still running.`;
+      if (signal?.aborted)
+        return text(stopped);
+      const seconds = waitSeconds(params.timeoutSeconds);
+      return new Promise((resolve) => {
+        const done = (reply) => {
+          clearTimeout(timer);
+          signal?.removeEventListener("abort", onAbort);
+          run.waiters.delete(done);
+          resolve(text(reply));
+        };
+        const onAbort = () => done(stopped);
+        const timer = setTimeout(() => done(`Run ${run.id} is still running after ${seconds} s. Call granny_wait again to keep waiting, or end your turn - the finish message will start a new one.`), seconds * 1000);
+        run.waiters.add(done);
+        signal?.addEventListener("abort", onAbort, { once: true });
+      });
+    }
+  });
+  pi.registerTool({
     name: "granny_cancel",
     label: "granny cancel",
     description: "granny-workflow: cancel a running granny run.",
@@ -3049,5 +3110,6 @@ export {
   blockReason,
   createGrannyExtension,
   extension_default as default,
-  isTransient
+  isTransient,
+  waitSeconds
 };

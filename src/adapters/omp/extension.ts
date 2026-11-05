@@ -9,7 +9,7 @@ import type { AgentRequest, Host, ResultKind } from '../../core/types'
 import { DEFAULT_DELAYS, dropPlaceholders, globalConfigPath, type HostOptions, KILL_GRACE_MS, pause, preflight, readJson, RUN_INPUT_SCHEMA, RUN_TOOL_DESCRIPTION, runCommand, runId, runStatus, signalGroup, stageRepos, stamp, SUBMIT, summarize } from '../common'
 
 // The omp (oh-my-pi) host. One file, two modes: in the user's omp session it registers granny_run,
-// granny_status and granny_cancel and runs the loop; every role runs as its own `omp --mode json`
+// granny_status, granny_wait and granny_cancel and runs the loop; every role runs as its own `omp --mode json`
 // process that loads this same file with GRANNY_OMP_CHILD set, where it registers only the role's
 // submit tool and a tool_call guard.
 
@@ -51,6 +51,9 @@ interface RunState {
   abort: AbortController
   children: Set<ChildProcess>
   agents: number
+  reply?: string
+  /** Pending granny_wait calls; set at the moment the run ends, so a run reports either to them or by notice. */
+  waiters: Set<(reply: string) => void>
 }
 
 // omp re-runs the factory for every session in the process; runs started in one must stay visible to all.
@@ -59,6 +62,14 @@ const shared: { runs: Map<string, RunState> } = ((globalThis as any)[SHARED] ??=
 const { runs } = shared
 
 const text = (t: string): ToolResult => ({ content: [{ type: 'text', text: t }] })
+
+const WAIT_DEFAULT_SECONDS = 1800
+const WAIT_MAX_SECONDS = 7200
+
+export function waitSeconds(value: unknown): number {
+  const n = typeof value === 'string' && value.trim() ? Number(value) : value
+  return typeof n === 'number' && Number.isFinite(n) ? Math.min(WAIT_MAX_SECONDS, Math.max(1, Math.round(n))) : WAIT_DEFAULT_SECONDS
+}
 
 const READ_ONLY_TOOLS = new Set(['read', 'grep', 'glob', 'find', 'ast_grep', 'lsp', 'bash', 'web_search', 'todo', 'think', 'wait', 'yield'])
 const KEYWORDS = new Set(['{', '}', '!', 'if', 'then', 'else', 'elif', 'do', 'while', 'until', 'nohup'])
@@ -303,7 +314,7 @@ export const createGrannyExtension =
       const id = runId()
       const dir = join(input.repo, config.workDir, 'runs', id)
       mkdirSync(dir, { recursive: true })
-      const run: RunState = { id, dir, status: 'running', cancelled: false, abort: new AbortController(), children: new Set(), agents: 0 }
+      const run: RunState = { id, dir, status: 'running', cancelled: false, abort: new AbortController(), children: new Set(), agents: 0, waiters: new Set() }
       runs.set(id, run)
       const journal = (type: string, data: Record<string, unknown>) =>
         appendFileSync(join(dir, 'journal.jsonl'), JSON.stringify({ t: stamp(), type, ...data }) + '\n')
@@ -432,21 +443,36 @@ export const createGrannyExtension =
 
       const writeResult = (result: unknown) => writeFileSync(join(dir, 'result.json'), JSON.stringify(result, null, 2))
 
+      const settle = (reply: string, notice: string | undefined) => {
+        run.reply = reply
+        const waiting = [...run.waiters]
+        run.waiters.clear()
+        for (const deliver of waiting) deliver(reply)
+        if (waiting.length) journal('notified-via-wait', { waits: waiting.length })
+        else if (notice) notify(notice)
+      }
+
       void runGranny(host, { ...input, config: layers })
         .then(result => {
           run.status = 'done'
           writeStatus({ finishedAt: stamp() })
           writeResult(result)
-          notify(`[granny] Run ${id} finished.\n${summarize(result, config.worktree)}\nCall granny_status with runId "${id}" for the full result, verify load-bearing claims yourself, report to the user and wait. Do not push.`)
+          const reply = `[granny] Run ${id} finished.\n${summarize(result, config.worktree)}\nCall granny_status with runId "${id}" for the full result, verify load-bearing claims yourself, report to the user and wait. Do not push.`
+          settle(reply, reply)
         })
         .catch(error => {
+          if (run.reply !== undefined) return
           run.status = run.cancelled ? 'cancelled' : 'failed'
           const finishedAt = stamp()
           const message = String(error?.message ?? error)
-          writeStatus({ finishedAt, error: String(error?.stack ?? error) })
-          journal('error', { error: message })
-          writeResult({ id, status: run.status, finishedAt, error: message })
-          if (!run.cancelled) notify(`[granny] Run ${id} failed: ${message}\nCall granny_status with runId "${id}" and report to the user.`)
+          const reply = run.cancelled ? `Run ${id} was cancelled.` : `[granny] Run ${id} failed: ${message}\nCall granny_status with runId "${id}" and report to the user.`
+          try {
+            writeStatus({ finishedAt, error: String(error?.stack ?? error) })
+            journal('error', { error: message })
+            writeResult({ id, status: run.status, finishedAt, error: message })
+          } finally {
+            settle(reply, run.cancelled ? undefined : reply)
+          }
         })
         .catch(() => {})
 
@@ -484,6 +510,45 @@ You will receive a message when it finishes. Use granny_status { runId: "${id}" 
         } catch (e) {
           return text(`granny_status failed: ${(e as Error).message}`)
         }
+      },
+    })
+    pi.registerTool({
+      name: 'granny_wait',
+      label: 'granny wait',
+      description: `granny-workflow: wait in this turn until a granny run ends and return its result, or return when timeoutSeconds (default ${WAIT_DEFAULT_SECONDS}) pass - use it instead of your own watcher, sleep or poll loop on the run files.`,
+      parameters: {
+        type: 'object',
+        properties: {
+          runId: { type: 'string' },
+          timeoutSeconds: { type: 'number', description: `Seconds to wait while the run is still going, 1 to ${WAIT_MAX_SECONDS}; default ${WAIT_DEFAULT_SECONDS}` },
+        },
+        required: ['runId'],
+      },
+      loadMode: 'essential',
+      async execute(_id, params: { runId: string; timeoutSeconds?: number }, signal) {
+        const run = runs.get(params.runId)
+        if (!run) {
+          return text(`No granny run "${params.runId}" in this omp process. granny_wait waits only for a run started in this process - the run table is in memory; call granny_status({ repo }) to read a run's files.`)
+        }
+        if (run.reply !== undefined) return text(run.reply)
+        const stopped = `Stopped waiting; run ${run.id} is still running.`
+        if (signal?.aborted) return text(stopped)
+        const seconds = waitSeconds(params.timeoutSeconds)
+        return new Promise<ToolResult>(resolve => {
+          const done = (reply: string) => {
+            clearTimeout(timer)
+            signal?.removeEventListener('abort', onAbort)
+            run.waiters.delete(done)
+            resolve(text(reply))
+          }
+          const onAbort = () => done(stopped)
+          const timer = setTimeout(
+            () => done(`Run ${run.id} is still running after ${seconds} s. Call granny_wait again to keep waiting, or end your turn - the finish message will start a new one.`),
+            seconds * 1000,
+          )
+          run.waiters.add(done)
+          signal?.addEventListener('abort', onAbort, { once: true })
+        })
       },
     })
     pi.registerTool({
