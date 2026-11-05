@@ -154,8 +154,8 @@ describe('opencode TUI plugin: sidebar, chip and toasts', () => {
     expect(lines.map(l => l.text)).toEqual([
       'granny 523r · running',
       'Plan review · 2m00s',
-      '… review plan review r2… · waiting 1m58s',
-      '● review plan review r2… · running 1m59s',
+      '… review r2 codex · waiting 1m58s',
+      '● review r2 terra · running 1m59s',
     ])
     expect(lines.every(l => l.text.length <= 40)).toBe(true)
     expect(lines[0]!.fg).toBe('c:base')

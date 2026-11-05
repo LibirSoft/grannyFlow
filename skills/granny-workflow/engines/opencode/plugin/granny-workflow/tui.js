@@ -28,6 +28,13 @@ function fit(text, width) {
   return flat.length > width ? `${flat.slice(0, width - 1)}\u2026` : flat;
 }
 var pad = (text, width) => fit(text, width).padEnd(Math.max(0, width));
+function shortModel(model, effort) {
+  if (!model)
+    return effort ? `default model/${effort}` : "default model";
+  const [main = "", variant] = model.split("#");
+  const id = main.slice(main.lastIndexOf("/") + 1);
+  return [id, variant && variant !== "default" ? variant : undefined, effort].filter(Boolean).join("/");
+}
 var dateOf = (value) => new Date(typeof value === "number" || typeof value === "string" ? value : Number.NaN);
 function stamp(value) {
   const d = dateOf(value);
@@ -796,6 +803,32 @@ var STATUS_TONES = { running: "info", done: "success", failed: "error", cancelle
 var AGENT_TONES = { running: "info", waiting: "muted", done: "success", failed: "error", cancelled: "warning" };
 var STAGE_PHASES = new Set(["Implement", "Checks", "Review"]);
 
+// src/adapters/runview/outline.ts
+var isRecord = (v) => !!v && typeof v === "object" && !Array.isArray(v);
+var isCount = (v) => typeof v === "number" && Number.isInteger(v) && v >= 1;
+function readStage(v) {
+  if (!isRecord(v) || !isCount(v.number) || typeof v.name !== "string")
+    return;
+  if (typeof v.implement !== "boolean" || typeof v.review !== "boolean" || typeof v.checks !== "boolean")
+    return;
+  return { number: v.number, name: clean(v.name), implement: v.implement, review: v.review, checks: v.checks };
+}
+function readOutline(value) {
+  if (!isRecord(value))
+    return;
+  const { kind, branch, worktree, planReview, finalReview, reviewers, fromStage, stages } = value;
+  if (kind !== "plan" && kind !== "implement")
+    return;
+  if (typeof branch !== "string" || typeof worktree !== "boolean" || typeof planReview !== "boolean" || typeof finalReview !== "boolean")
+    return;
+  if (!Array.isArray(reviewers) || !reviewers.every((r) => typeof r === "string") || !isCount(fromStage) || !Array.isArray(stages))
+    return;
+  const read = stages.map(readStage);
+  if (read.some((s) => s === undefined))
+    return;
+  return { kind, branch: clean(branch), worktree, planReview, finalReview, reviewers: reviewers.map((r) => clean(r)), fromStage, stages: read };
+}
+
 // src/adapters/runview/tail.ts
 import { closeSync, openSync, readSync, statSync } from "fs";
 var MB = 1024 * 1024;
@@ -912,11 +945,11 @@ var nodeFs = {
   },
   readText: (path) => readFileSync(path, "utf8")
 };
-var isRecord = (value) => !!value && typeof value === "object" && !Array.isArray(value);
+var isRecord2 = (value) => !!value && typeof value === "object" && !Array.isArray(value);
 function roleMeta(info) {
   const metadata = info?.metadata;
-  const m = isRecord(metadata) ? metadata[META_KEY] : undefined;
-  if (!isRecord(m))
+  const m = isRecord2(metadata) ? metadata[META_KEY] : undefined;
+  if (!isRecord2(m))
     return;
   const fields = ["run", "dir", "parent", "label", "role", "phase"];
   if (fields.some((f) => typeof m[f] !== "string"))
@@ -1009,7 +1042,7 @@ class RunWatch {
         continue;
       try {
         const entry = JSON.parse(text);
-        if (isRecord(entry) && typeof entry.type === "string" && entry.type !== "heartbeat")
+        if (isRecord2(entry) && typeof entry.type === "string" && entry.type !== "heartbeat")
           fresh.push(entry);
       } catch {}
     }
@@ -1062,12 +1095,13 @@ class RunWatch {
       return true;
     try {
       const raw = JSON.parse(this.fs.readText(this.statusPath));
-      if (!isRecord(raw))
+      if (!isRecord2(raw))
         return !!this.status;
       const startedAt = timeOf2(raw.startedAt);
       if (startedAt !== undefined)
         this.startedAt = startedAt;
       const finishedAt = timeOf2(raw.finishedAt);
+      const outline = readOutline(raw.outline);
       this.status = {
         ...typeof raw.id === "string" ? { id: raw.id } : {},
         ...typeof raw.status === "string" ? { status: raw.status } : {},
@@ -1076,7 +1110,8 @@ class RunWatch {
         ...finishedAt !== undefined ? { finishedAt } : {},
         ...typeof raw.error === "string" ? { error: clean(raw.error) } : {},
         ...typeof raw.repo === "string" ? { repo: clean(raw.repo) } : {},
-        ...typeof raw.branch === "string" ? { branch: clean(raw.branch) } : {}
+        ...typeof raw.branch === "string" ? { branch: clean(raw.branch) } : {},
+        ...outline ? { outline } : {}
       };
       this.statusStamp = stamp;
       return true;
@@ -1092,10 +1127,12 @@ class RunWatch {
       id,
       status: status?.status ?? "running",
       ...this.startedAt !== undefined ? { startedAt: this.startedAt } : {},
-      ...status?.finishedAt !== undefined ? { endedAt: status.finishedAt } : {}
+      ...status?.finishedAt !== undefined ? { endedAt: status.finishedAt } : {},
+      ...status?.branch !== undefined ? { branch: status.branch } : {}
     };
     const entries = readable ? this.entries : this.roles.map(({ id: session, meta }) => ({ type: "agent", label: meta.label, role: meta.role, session, phase: meta.phase, model: meta.model }));
-    const tree = buildRunTree(info, entries, live, now);
+    const outline = readable ? status?.outline : undefined;
+    const tree = buildRunTree(info, entries, live, now, new Map, outline);
     return {
       id,
       status: tree.status,
@@ -1107,6 +1144,7 @@ class RunWatch {
       ...status?.error !== undefined ? { error: status.error } : {},
       ...status?.repo !== undefined ? { repo: status.repo } : {},
       ...status?.branch !== undefined ? { branch: status.branch } : {},
+      ...outline ? { outline } : {},
       tree,
       readable
     };
@@ -1133,25 +1171,35 @@ class RunWatch {
     const over = TERMINAL.has(s.status);
     const clock = over ? String(s.end !== undefined && now - s.end < FRESH_MS) : String(Math.floor((now - s.start) / 1000));
     const agents = s.tree.agents.map((a) => `${a.session}:${a.state}:${a.activity ?? ""}`).join(",");
-    return [s.status, s.stale ?? "", s.watch, s.readable, s.phase ?? "", this.entries.length, clock, agents].join("|");
+    return [s.status, s.stale ?? "", s.watch, s.readable, s.outline ? "outline" : "", s.phase ?? "", this.entries.length, clock, agents].join("|");
   }
 }
 var shortId = (id) => id.slice(-4);
 var terminal = (s) => TERMINAL.has(s.status);
 var fresh = (s, now) => s.end !== undefined && now - s.end < FRESH_MS;
 var elapsed2 = (s, now) => duration((s.end ?? now) - s.start);
+var STAGE_PHASES2 = new Set(["Implement", "Checks", "Review"]);
+function stageText(tree) {
+  const outline = tree.outline;
+  if (!outline || outline.kind !== "implement" || !outline.stages.length || tree.status !== "running")
+    return;
+  const total = outline.stages.length;
+  if (tree.running.length > 1)
+    return `stages ${tree.running.join("+")}/${total}`;
+  const k = tree.running[0] ?? (STAGE_PHASES2.has(tree.phase ?? "") ? focusStage(tree) : undefined);
+  return k === undefined ? undefined : `stage ${k}/${total}`;
+}
 function agentLine(a, now, width) {
   const marker = `${AGENT_MARKERS[a.state]} `;
   const tail = ` \xB7 ${a.activity ?? `${a.state} ${duration((a.end ?? now) - a.start)}`}`;
-  const model = a.model ? a.model.slice(a.model.lastIndexOf("/") + 1) : "default model";
-  const full = `${marker}${a.label}  ${model}${tail}`;
+  const full = `${marker}${a.action}  ${shortModel(a.model, a.effort)}${tail}`;
   if (full.length <= width)
     return full;
-  const short = `${marker}${a.label}${tail}`;
+  const short = `${marker}${a.action}${tail}`;
   if (short.length <= width)
     return short;
   const room = width - marker.length - tail.length;
-  return room >= 2 ? `${marker}${a.label.slice(0, room - 1)}\u2026${tail}` : fit(short, width);
+  return room >= 2 ? `${marker}${a.action.slice(0, room - 1)}\u2026${tail}` : fit(short, width);
 }
 function sidebarLines(s, now, width) {
   if (s.watch === "off")
@@ -1166,8 +1214,9 @@ function sidebarLines(s, now, width) {
   if (!s.readable)
     lines.push({ text: fit("run files not readable", width), tone: "muted" });
   const phase = s.tree.phases.at(-1);
+  const stage = stageText(s.tree);
   lines.push({
-    text: fit(`${phase?.title ?? "Starting"} \xB7 ${duration(now - (phase?.start ?? s.start))}`, width),
+    text: fit(`${stage ? `${stage} \xB7 ` : ""}${phase?.title ?? "Starting"} \xB7 ${duration(now - (phase?.start ?? s.start))}`, width),
     tone: "muted",
     ...phase ? { key: phaseKey(s.id, phase.index) } : {}
   });
@@ -1186,7 +1235,8 @@ function chipText(s, now) {
   if (s.stale)
     return `granny \xB7 ${s.phase ?? "Starting"} \xB7 stale?`;
   const running = s.tree.agents.filter((a) => a.state === "running").length;
-  return `granny \xB7 ${s.phase ?? "Starting"} \xB7 ${running} running \xB7 ${elapsed2(s, now)}`;
+  const stage = stageText(s.tree);
+  return `granny \xB7 ${stage ? `${stage} \xB7 ` : ""}${s.phase ?? "Starting"} \xB7 ${running} running \xB7 ${elapsed2(s, now)}`;
 }
 function toastFor(e, s) {
   if (s.watch !== "full")
