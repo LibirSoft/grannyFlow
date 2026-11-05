@@ -1,4 +1,5 @@
 export { runGranny, checkInput, type RunInput } from './engine'
+export { GrannyCancelled, isCancelled } from './cancel'
 export { resolveConfig, resolveModel, DEFAULT_CONFIG, type GrannyConfig } from './config'
 export { parseCodexReview, triage, isBlocker } from './review'
 export { SCHEMAS, checkShape } from './schemas'

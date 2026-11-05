@@ -55,6 +55,8 @@ export interface Host {
   readonly name: HostName
   agent(request: AgentRequest): Promise<any | null>
   run?(command: string, cwd: string): Promise<CommandResult>
+  /** True once the run is cancelled; the engine then stops at the next step instead of reading what the step returned. */
+  cancelled?(): boolean
   log(message: string): void
   phase(title: string): void
 }

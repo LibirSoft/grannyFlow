@@ -308,6 +308,15 @@ function resolveModel(spec, host) {
   return spec[host];
 }
 
+// src/core/cancel.ts
+class GrannyCancelled extends Error {
+  constructor() {
+    super("cancelled");
+    this.name = "GrannyCancelled";
+  }
+}
+var isCancelled = (e) => e instanceof GrannyCancelled || typeof e === "object" && e !== null && e.name === "GrannyCancelled";
+
 // src/core/review.ts
 var MARKER = /^\s*[-*]\s*\[(P[0-3]|[A-Za-z]+)\](.*)$/;
 var WORD_SEVERITY = new Map([["critical", "P0"], ["high", "P1"], ["medium", "P2"], ["low", "P3"]]);
@@ -1319,7 +1328,24 @@ async function runGranny(host, input) {
     const theirs = specs.filter((st) => repoOf(st) === repo).map(checksOf);
     return config.checks.filter((c) => theirs.some((list) => list.includes(c)));
   };
-  const call = async (role, kind, label, phase, prompt, access, rc, cwd) => host.agent({
+  const stopIfCancelled = () => {
+    if (host.cancelled?.())
+      throw new GrannyCancelled;
+  };
+  const guarded = async (start) => {
+    stopIfCancelled();
+    let r;
+    try {
+      r = await start();
+    } catch (e) {
+      stopIfCancelled();
+      throw e;
+    }
+    stopIfCancelled();
+    return r;
+  };
+  const run = (script, cwd) => guarded(() => host.run(script, cwd));
+  const call = async (role, kind, label, phase, prompt, access, rc, cwd) => guarded(() => host.agent({
     role,
     kind,
     label,
@@ -1330,7 +1356,7 @@ async function runGranny(host, input) {
     effort: rc.effort,
     access,
     cwd
-  });
+  }));
   const helped = (label, r, missing) => {
     const ran = Boolean(r?.ran);
     const note = typeof r?.note === "string" && r.note.trim() ? r.note : undefined;
@@ -1341,7 +1367,7 @@ ${note}` : ""}` : missing };
   };
   const shell = async (label, phase, script, cwd, ask = gitCommandPrompt) => {
     if (host.run) {
-      const r = await host.run(script, cwd);
+      const r = await run(script, cwd);
       return { ran: r.code === 0, code: r.code, output: r.output };
     }
     const prompt = ask(cwd, label, `cd ${shellQuote(cwd)} && ${script}`);
@@ -1611,7 +1637,7 @@ the last repair's deviations: ${deviations}` : ""}`;
     let output;
     let note;
     if (host.run) {
-      const r = await host.run(plan.script, cwd);
+      const r = await run(plan.script, cwd);
       ran = r.code === 0;
       output = r.output;
       if (!ran)
@@ -1680,6 +1706,8 @@ the last repair's deviations: ${deviations}` : ""}`;
     try {
       return await review(lane, rv, name, subject, round, n);
     } catch (e) {
+      if (isCancelled(e))
+        throw e;
       return { ran: false, findings: [], note: `reviewer call failed: ${String(e?.message ?? e)}` };
     }
   };
@@ -2156,7 +2184,8 @@ ${note}` : note } : result;
   const unfinished = specs.map((_, i) => i).filter((i) => !done.has(i));
   if (failure) {
     const finished = [...done].sort((a, b) => a - b).filter((i) => i >= fromStage - 1);
-    host.log(`a stage failed - waited for the stages already running. Finished: ${finished.map(nameOf).join(", ") || "none"}. Not finished: ${unfinished.map(nameOf).join(", ")}`);
+    if (!isCancelled(failure.error))
+      host.log(`a stage failed - waited for the stages already running. Finished: ${finished.map(nameOf).join(", ") || "none"}. Not finished: ${unfinished.map(nameOf).join(", ")}`);
     throw failure.error;
   }
   if (unfinished.length)

@@ -1,3 +1,4 @@
+import { GrannyCancelled, isCancelled } from './cancel'
 import { resolveConfig, resolveModel, type CheckConfig, type GrannyConfig, type ReviewerConfig, type RoleConfig } from './config'
 import {
   agentPlanReviewPrompt,
@@ -215,19 +216,38 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
     return config.checks.filter(c => theirs.some(list => list.includes(c)))
   }
 
+  const stopIfCancelled = () => {
+    if (host.cancelled?.()) throw new GrannyCancelled()
+  }
+  const guarded = async <T>(start: () => Promise<T>): Promise<T> => {
+    stopIfCancelled()
+    let r: T
+    try {
+      r = await start()
+    } catch (e) {
+      stopIfCancelled()
+      throw e
+    }
+    stopIfCancelled()
+    return r
+  }
+  const run = (script: string, cwd: string) => guarded(() => host.run!(script, cwd))
+
   const call = async (role: Role, kind: ResultKind, label: string, phase: string, prompt: string, access: AgentRequest['access'], rc: RoleConfig, cwd: string) =>
-    host.agent({
-      role,
-      kind,
-      label,
-      phase,
-      prompt,
-      schema: SCHEMAS[kind],
-      model: resolveModel(rc.model, host.name),
-      effort: rc.effort,
-      access,
-      cwd,
-    })
+    guarded(() =>
+      host.agent({
+        role,
+        kind,
+        label,
+        phase,
+        prompt,
+        schema: SCHEMAS[kind],
+        model: resolveModel(rc.model, host.name),
+        effort: rc.effort,
+        access,
+        cwd,
+      }),
+    )
 
   const helped = (label: string, r: any, missing: string): { ran: boolean; code: number | string; output: string } => {
     const ran = Boolean(r?.ran)
@@ -238,7 +258,7 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
 
   const shell = async (label: string, phase: string, script: string, cwd: string, ask = gitCommandPrompt): Promise<{ ran: boolean; code: number | string; output: string }> => {
     if (host.run) {
-      const r = await host.run(script, cwd)
+      const r = await run(script, cwd)
       return { ran: r.code === 0, code: r.code, output: r.output }
     }
     const prompt = ask(cwd, label, `cd ${shellQuote(cwd)} && ${script}`)
@@ -500,7 +520,7 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
     let output: string
     let note: string | undefined
     if (host.run) {
-      const r = await host.run(plan.script, cwd)
+      const r = await run(plan.script, cwd)
       ran = r.code === 0
       output = r.output
       if (!ran) note = `review command exited ${r.code}: ${r.output.slice(-2000)}`
@@ -565,6 +585,7 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
     try {
       return await review(lane, rv, name, subject, round, n)
     } catch (e) {
+      if (isCancelled(e)) throw e
       return { ran: false, findings: [], note: `reviewer call failed: ${String((e as Error)?.message ?? e)}` }
     }
   }
@@ -1050,7 +1071,7 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
   const unfinished = specs.map((_, i) => i).filter(i => !done.has(i))
   if (failure) {
     const finished = [...done].sort((a, b) => a - b).filter(i => i >= fromStage - 1)
-    host.log(`a stage failed - waited for the stages already running. Finished: ${finished.map(nameOf).join(', ') || 'none'}. Not finished: ${unfinished.map(nameOf).join(', ')}`)
+    if (!isCancelled(failure.error)) host.log(`a stage failed - waited for the stages already running. Finished: ${finished.map(nameOf).join(', ') || 'none'}. Not finished: ${unfinished.map(nameOf).join(', ')}`)
     throw failure.error
   }
   if (unfinished.length) throw new Error(`scheduler stopped with stages that never started: ${unfinished.map(nameOf).join(', ')}`)
