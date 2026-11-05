@@ -2619,9 +2619,6 @@ function duration(ms) {
   return `${Math.floor(m / 60)}h${String(m % 60).padStart(2, "0")}m`;
 }
 
-// src/adapters/omp/panel.ts
-var PARSED_EVENTS = new Set(["message_start", "message_end", "tool_execution_start", "tool_execution_end", "turn_start", "turn_end"]);
-
 // src/adapters/opencode/plugin.ts
 var modelText = (model) => model ? `${model.providerID}/${model.id}${model.variant ? `#${model.variant}` : ""}` : null;
 var norm = (dir) => typeof dir === "string" ? dir.replace(/\/+$/, "") : dir;

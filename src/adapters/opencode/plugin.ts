@@ -6,7 +6,7 @@ import { checkInput, runGranny, stageCheckErrors, type RunInput } from '../../co
 import { checkShape, SCHEMAS } from '../../core/schemas'
 import type { AgentRequest, Host, ResultKind } from '../../core/types'
 import { DEFAULT_DELAYS, dropPlaceholders, globalConfigPath, type HostOptions, KILL_GRACE_MS, pause, preflight, readJson, RUN_INPUT_SCHEMA, RUN_TOOL_DESCRIPTION, runCommand, runDir, runId, runStatus, stageRepos, stamp, SUBMIT, summarize } from '../common'
-import { duration } from '../omp/panel'
+import { duration } from '../runview/format'
 
 export { globalConfigPath, pause, preflight, stageRepos, summarize } from '../common'
 export type { RetryPolicy } from '../common'
