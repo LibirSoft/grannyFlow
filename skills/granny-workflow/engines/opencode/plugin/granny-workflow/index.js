@@ -2609,6 +2609,8 @@ ${result.length > 30000 ? result.slice(0, 30000) + `
 }
 
 // src/adapters/opencode/plugin.ts
+var modelText = (model) => model ? `${model.providerID}/${model.id}${model.variant ? `#${model.variant}` : ""}` : null;
+var norm = (dir) => typeof dir === "string" ? dir.replace(/\/+$/, "") : dir;
 var SHARED = Symbol.for("granny-workflow.state");
 var shared = globalThis[SHARED] ??= {
   runs: new Map,
@@ -2686,7 +2688,17 @@ var createGrannyPlugin = ({ delays = DEFAULT_DELAYS, sleep = pause, killGraceMs 
       const id = runId();
       const dir = join2(input.repo, config.workDir, "runs", id);
       mkdirSync2(dir, { recursive: true });
-      const run = { id, repo: input.repo, dir, status: "running", cancelled: false, abort: new AbortController, sessions: new Set };
+      const run = {
+        id,
+        repo: input.repo,
+        dir,
+        status: "running",
+        cancelled: false,
+        abort: new AbortController,
+        sessions: new Set,
+        parent: parentSession,
+        linked: true
+      };
       runs.set(id, run);
       const journal = (type, data) => appendFileSync2(join2(dir, "journal.jsonl"), JSON.stringify({ t: stamp(), type, ...data }) + `
 `);
@@ -2747,6 +2759,60 @@ When done, call the \`${tool}\` tool exactly once with your result. That call is
         journal("agent-failed", { label: req.label, session });
         return null;
       };
+      const createRoleSession = async (req, model) => {
+        const base = {
+          title: `granny \xB7 ${req.label}`,
+          agent: "build",
+          ...model ? { model } : {},
+          permissions: permissions(req.access),
+          metadata: {
+            "granny-workflow": { run: id, dir, parent: parentSession, label: req.label, role: req.role, phase: req.phase, model: modelText(model) }
+          }
+        };
+        const make = async (input) => {
+          const session = await ctx.session.create(input);
+          run.sessions.add(session.id);
+          if (run.cancelled) {
+            run.sessions.delete(session.id);
+            throw new GrannyCancelled;
+          }
+          return session;
+        };
+        if (run.linked) {
+          let sessionID;
+          try {
+            const session = await make({ ...base, parentID: parentSession });
+            sessionID = session.id;
+            if (norm(session.location?.directory) === norm(req.cwd))
+              return { id: session.id, linked: true };
+            await ctx.session.move({ sessionID, directory: req.cwd });
+            await ctx.session.wait({ sessionID });
+            if (run.cancelled)
+              throw new GrannyCancelled;
+            const info = await ctx.session.get({ sessionID });
+            if (norm(info?.location?.directory) !== norm(req.cwd)) {
+              throw new Error(`session ${sessionID} is in ${info?.location?.directory} after the move, not in ${req.cwd}`);
+            }
+            return { id: session.id, linked: true };
+          } catch (e) {
+            if (sessionID !== undefined)
+              run.sessions.delete(sessionID);
+            if (isCancelled(e) || run.cancelled)
+              throw isCancelled(e) ? e : new GrannyCancelled;
+            if (run.linked) {
+              run.linked = false;
+              journal("link-failed", { label: req.label, error: String(e?.message ?? e) });
+            }
+            if (sessionID !== undefined) {
+              try {
+                await ctx.session.remove({ sessionID });
+              } catch {}
+            }
+          }
+        }
+        const session = await make({ ...base, location: { directory: req.cwd } });
+        return { id: session.id, linked: false };
+      };
       const host = {
         name: "opencode",
         async agent(req) {
@@ -2756,15 +2822,8 @@ When done, call the \`${tool}\` tool exactly once with your result. That call is
           if (!tool)
             throw new Error(`no submit tool for result kind "${req.kind}"`);
           const model = modelRef(req.model) ?? parentModel;
-          const session = await ctx.session.create({
-            title: `granny \xB7 ${req.label}`,
-            agent: "build",
-            ...model ? { model } : {},
-            location: { directory: req.cwd },
-            permissions: permissions(req.access)
-          });
-          run.sessions.add(session.id);
-          journal("agent", { label: req.label, role: req.role, session: session.id, model: model ?? null });
+          const session = await createRoleSession(req, model);
+          journal("agent", { label: req.label, role: req.role, session: session.id, model: model ?? null, linked: session.linked });
           try {
             if (run.cancelled)
               throw new GrannyCancelled;
@@ -2872,6 +2931,7 @@ export {
   globalConfigPath,
   isTransient,
   modelRef,
+  modelText,
   pause,
   permissions,
   preflight,

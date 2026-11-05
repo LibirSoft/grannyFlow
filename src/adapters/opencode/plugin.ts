@@ -1,7 +1,7 @@
 import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { resolveConfig } from '../../core/config'
-import { GrannyCancelled } from '../../core/cancel'
+import { GrannyCancelled, isCancelled } from '../../core/cancel'
 import { checkInput, runGranny, stageCheckErrors, type RunInput } from '../../core/engine'
 import { checkShape, SCHEMAS } from '../../core/schemas'
 import type { AgentRequest, Host, ResultKind } from '../../core/types'
@@ -20,9 +20,16 @@ interface RunState {
   cancelled: boolean
   abort: AbortController
   sessions: Set<string>
+  parent: string
+  linked: boolean
 }
 
 type ModelRef = { providerID: string; id: string; variant?: string }
+
+export const modelText = (model: ModelRef | undefined): string | null =>
+  model ? `${model.providerID}/${model.id}${model.variant ? `#${model.variant}` : ''}` : null
+
+const norm = (dir: unknown) => (typeof dir === 'string' ? dir.replace(/\/+$/, '') : dir)
 
 // opencode re-imports the plugin as a new module on reload while earlier runs keep going.
 const SHARED = Symbol.for('granny-workflow.state')
@@ -108,7 +115,17 @@ export const createGrannyPlugin = ({ delays = DEFAULT_DELAYS, sleep = pause, kil
       const id = runId()
       const dir = join(input.repo, config.workDir, 'runs', id)
       mkdirSync(dir, { recursive: true })
-      const run: RunState = { id, repo: input.repo, dir, status: 'running', cancelled: false, abort: new AbortController(), sessions: new Set() }
+      const run: RunState = {
+        id,
+        repo: input.repo,
+        dir,
+        status: 'running',
+        cancelled: false,
+        abort: new AbortController(),
+        sessions: new Set(),
+        parent: parentSession,
+        linked: true,
+      }
       runs.set(id, run)
       const journal = (type: string, data: Record<string, unknown>) =>
         appendFileSync(join(dir, 'journal.jsonl'), JSON.stringify({ t: stamp(), type, ...data }) + '\n')
@@ -169,6 +186,57 @@ export const createGrannyPlugin = ({ delays = DEFAULT_DELAYS, sleep = pause, kil
         return null
       }
 
+      const createRoleSession = async (req: AgentRequest, model: ModelRef | undefined): Promise<{ id: string; linked: boolean }> => {
+        const base = {
+          title: `granny · ${req.label}`,
+          agent: 'build',
+          ...(model ? { model } : {}),
+          permissions: permissions(req.access),
+          metadata: {
+            'granny-workflow': { run: id, dir, parent: parentSession, label: req.label, role: req.role, phase: req.phase, model: modelText(model) },
+          },
+        }
+        const make = async (input: Record<string, unknown>) => {
+          const session = await ctx.session.create(input)
+          run.sessions.add(session.id)
+          if (run.cancelled) {
+            run.sessions.delete(session.id)
+            throw new GrannyCancelled()
+          }
+          return session
+        }
+        if (run.linked) {
+          let sessionID: string | undefined
+          try {
+            const session = await make({ ...base, parentID: parentSession })
+            sessionID = session.id
+            if (norm(session.location?.directory) === norm(req.cwd)) return { id: session.id, linked: true }
+            await ctx.session.move({ sessionID, directory: req.cwd })
+            await ctx.session.wait({ sessionID })
+            if (run.cancelled) throw new GrannyCancelled()
+            const info = await ctx.session.get({ sessionID })
+            if (norm(info?.location?.directory) !== norm(req.cwd)) {
+              throw new Error(`session ${sessionID} is in ${info?.location?.directory} after the move, not in ${req.cwd}`)
+            }
+            return { id: session.id, linked: true }
+          } catch (e) {
+            if (sessionID !== undefined) run.sessions.delete(sessionID)
+            if (isCancelled(e) || run.cancelled) throw isCancelled(e) ? e : new GrannyCancelled()
+            if (run.linked) {
+              run.linked = false
+              journal('link-failed', { label: req.label, error: String((e as Error)?.message ?? e) })
+            }
+            if (sessionID !== undefined) {
+              try {
+                await ctx.session.remove({ sessionID })
+              } catch {}
+            }
+          }
+        }
+        const session = await make({ ...base, location: { directory: req.cwd } })
+        return { id: session.id, linked: false }
+      }
+
       const host: Host = {
         name: 'opencode',
         async agent(req) {
@@ -176,15 +244,8 @@ export const createGrannyPlugin = ({ delays = DEFAULT_DELAYS, sleep = pause, kil
           const tool = SUBMIT[req.kind]
           if (!tool) throw new Error(`no submit tool for result kind "${req.kind}"`)
           const model = modelRef(req.model) ?? parentModel
-          const session = await ctx.session.create({
-            title: `granny · ${req.label}`,
-            agent: 'build',
-            ...(model ? { model } : {}),
-            location: { directory: req.cwd },
-            permissions: permissions(req.access),
-          })
-          run.sessions.add(session.id)
-          journal('agent', { label: req.label, role: req.role, session: session.id, model: model ?? null })
+          const session = await createRoleSession(req, model)
+          journal('agent', { label: req.label, role: req.role, session: session.id, model: model ?? null, linked: session.linked })
           try {
             if (run.cancelled) throw new GrannyCancelled()
             return await converse(req, tool, session.id)
