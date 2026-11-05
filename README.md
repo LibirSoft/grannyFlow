@@ -113,7 +113,7 @@ The full rules: [the decision table](skills/granny-workflow/references/config.md
 | `maxRounds` | `4` | review rounds per stage |
 | `reviewers` | the host model | any mix of host models, Codex and other CLIs |
 | `checks` | none | commands granny runs before every review |
-| `planReview` | `false` | review the plan itself before building it (extra tokens) |
+| `planReview` | `false` | review the plan itself before building it - many more tokens and a much longer run; only when asked |
 | `finalReview` | `true` | review the whole branch after the last stage |
 | `parallel` | `true` | run independent stages at the same time |
 | `roles.<role>.model` | the session model; on Claude Code the judge and helper use Haiku | model per role: `implementer`, `planner`, `judge`, `granny`, `helper` |

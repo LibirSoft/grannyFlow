@@ -116,6 +116,17 @@ describe('skill docs', () => {
     expect(readRoot('README.md')).toMatch(/^\| `planReview` \| `false` \|/m)
   })
 
+  it('says wherever plan review can be turned on that it costs many tokens and time, and to turn it on only when asked', () => {
+    for (const file of ['SKILL.md', 'references/config.md', 'references/claude-code.md', 'references/opencode.md', 'references/omp.md', 'references/cursor.md']) {
+      const text = read(file)
+      expect({ file, extra: text.includes('so it costs extra tokens') }).toEqual({ file, extra: false })
+      expect({ file, tokens: text.includes('many more tokens') }).toEqual({ file, tokens: true })
+      expect({ file, asked: /only when the user asks|unless the user asks for a plan review/.test(text) }).toEqual({ file, asked: true })
+    }
+    expect(read('references/setup.md')).toContain('plan review is off by default because every round is a full review + judge + fix')
+    expect(read('SKILL.md')).toContain('plan review on or off')
+  })
+
   it('documents granny setup with the same threshold presets in the README, setup.md and the config reference', () => {
     expect(read('SKILL.md')).toContain('granny setup')
     expect(read('engines/opencode/agents/granny.md')).toContain('granny setup')
