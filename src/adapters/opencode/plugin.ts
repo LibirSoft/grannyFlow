@@ -5,7 +5,7 @@ import { GrannyCancelled, isCancelled } from '../../core/cancel'
 import { checkInput, runGranny, stageCheckErrors, type RunInput } from '../../core/engine'
 import { checkShape, SCHEMAS } from '../../core/schemas'
 import type { AgentRequest, Host, ResultKind } from '../../core/types'
-import { DEFAULT_DELAYS, dropPlaceholders, globalConfigPath, HEARTBEAT_MS, type HostOptions, KILL_GRACE_MS, pause, planReviewNotice, preflight, readJson, RUN_INPUT_SCHEMA, RUN_TOOL_DESCRIPTION, runCommand, runDir, runId, runStatus, stageRepos, stamp, statusError, SUBMIT, summarize, withHeartbeat } from '../common'
+import { DEFAULT_DELAYS, dropPlaceholders, globalConfigPath, HEARTBEAT_MS, hostModelErrors, type HostOptions, KILL_GRACE_MS, layerSources, pause, planReviewNotice, preflight, readJson, RUN_INPUT_SCHEMA, RUN_TOOL_DESCRIPTION, runCommand, runDir, runId, runStatus, stageRepos, stamp, statusError, SUBMIT, summarize, withHeartbeat } from '../common'
 import { duration } from '../runview/format'
 import { runOutline } from '../runview/outline'
 
@@ -57,6 +57,15 @@ export function modelRef(spec: string | undefined): ModelRef | undefined {
     throw new Error(`opencode models are "provider/model[#variant]", got "${spec}" - set roles.<role>.model.opencode in granny.config.json`)
   }
   return { providerID: main!.slice(0, slash), id: main!.slice(slash + 1), ...(variant ? { variant } : {}) }
+}
+
+const opencodeModelProblem = (model: string): string | undefined => {
+  try {
+    modelRef(model)
+    return undefined
+  } catch {
+    return 'opencode models are "provider/model[#variant]"'
+  }
 }
 
 export function permissions(access: AgentRequest['access']) {
@@ -118,6 +127,8 @@ export const createGrannyPlugin = ({ delays = DEFAULT_DELAYS, sleep = pause, kil
       const config = resolveConfig(layers, 'opencode')
       const unknownChecks = stageCheckErrors(input.stages, config.checks)
       if (unknownChecks.length) return `granny_run refused:\n- ${unknownChecks.join('\n- ')}`
+      const badModels = hostModelErrors(config, layers, 'opencode', opencodeModelProblem, layerSources(input.repo))
+      if (badModels.length) return `granny_run refused:\n- ${badModels.join('\n- ')}`
       const blockers = preflight(input.repo, input.branch, config.workDir, config.worktree)
       for (const repo of stageRepos(input)) blockers.push(...preflight(repo, input.branch, config.workDir, config.worktree).map(b => `${repo}: ${b}`))
       if (blockers.length) return `granny_run refused:\n- ${blockers.join('\n- ')}`

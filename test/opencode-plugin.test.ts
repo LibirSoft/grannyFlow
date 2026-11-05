@@ -467,6 +467,31 @@ describe('opencode plugin', () => {
     expect(f.created).toHaveLength(0)
   })
 
+  it('refuses a model opencode cannot run before any session starts, naming the entry, its config file and the host-keyed fix', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'granny-global-'))
+    const global = join(home, 'config.json')
+    process.env.GRANNY_CONFIG = global
+    writeFileSync(global, JSON.stringify({ reviewers: [{ name: 'sonnet', engine: 'agent', model: 'sonnet' }], roles: { judge: { model: { opencode: 'haiku' } } } }))
+    const f = fakeContext()
+    await plugin.setup(f.ctx)
+    const run = (config?: unknown) => f.tools.get('granny_run').execute({ repo, branch: 'feat/x', stages: [{ task: 't' }], ...(config ? { config } : {}) }, { sessionID: 'parent' })
+    const refused = (await run()).content
+    expect(refused).toStartWith('granny_run refused:\n- ')
+    expect(refused).toContain(`reviewers[0] "sonnet": model "sonnet" (from ${global})`)
+    expect(refused).toContain('opencode models are "provider/model[#variant]"')
+    expect(refused).toContain('{ "claude-code": "sonnet", "opencode": "<provider/model>" }')
+    expect(refused).toContain(`roles.judge.model: "haiku" (from ${global})`)
+    expect(existsSync(join(repo, '.granny/runs'))).toBe(false)
+    expect(f.created).toHaveLength(0)
+
+    const fixed = { reviewers: [{ name: 'sonnet', engine: 'agent', model: { 'claude-code': 'sonnet', opencode: 'anthropic/claude-sonnet' } }], roles: { judge: { model: { opencode: 'opencode/judge' } } } }
+    const started = (await run(fixed)).content
+    expect(started).toContain('granny run ')
+    const id = /granny run (\S+) started/.exec(started)![1]!
+    await finished(join(repo, '.granny/runs', id))
+    rmSync(home, { recursive: true, force: true })
+  })
+
   it('refuses adversarial-review on engine auto, which means the Codex CLI on opencode, without creating sessions', async () => {
     const f = fakeContext()
     await plugin.setup(f.ctx)

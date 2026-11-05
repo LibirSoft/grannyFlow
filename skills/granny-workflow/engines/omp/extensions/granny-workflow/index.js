@@ -2475,6 +2475,30 @@ function planReviewNotice(input, config) {
   return reviewsPlan ? `
 ${planReviewWarning(config.maxRounds)} Tell the user this in your next message.` : "";
 }
+var layerSources = (repo) => [globalConfigPath(), join(repo, "granny.config.json"), "the run's config"];
+var AGENT_ROLES = ["granny", "planner", "implementer", "judge"];
+var isObject2 = (v) => !!v && typeof v === "object" && !Array.isArray(v);
+function hostModelErrors(config, layers, host, problem, sources) {
+  const from = (set) => {
+    for (let i = layers.length - 1;i >= 0; i--) {
+      const layer = layers[i];
+      if (isObject2(layer) && set(layer))
+        return ` (from ${sources[i] ?? `config layer ${i + 1}`})`;
+    }
+    return "";
+  };
+  const check = (what, spec, where) => {
+    const model = resolveModel(spec, host);
+    const wrong = model === undefined ? undefined : problem(model, typeof spec !== "string");
+    if (!wrong)
+      return [];
+    const claude = typeof spec === "string" ? spec : spec?.["claude-code"] ?? model;
+    return [`${what} "${model}"${where} - ${wrong}; give a host-keyed model, e.g. { "claude-code": "${claude}", "${host}": "<provider/model>" }`];
+  };
+  const roles = AGENT_ROLES.flatMap((role) => check(`roles.${role}.model:`, config.roles[role].model, from((l) => isObject2(l.roles) && isObject2(l.roles[role]) && l.roles[role].model !== undefined)));
+  const reviewers = config.reviewers.flatMap((rv, i) => rv.engine === "agent" ? check(`reviewers[${i}] "${rv.name}": model`, rv.model, from((l) => Array.isArray(l.reviewers))) : []);
+  return [...roles, ...reviewers];
+}
 var RUN_TOOL_DESCRIPTION = 'granny-workflow: start the implement \u2192 review \u2192 judge \u2192 fix loop in the background and return a run id. The granny-workflow skill, when installed, describes the inputs and the preflight. Send only the fields you set: leave an optional field out instead of sending "", [], {} or a default - an empty value is not a missing one (stages[].checks [] runs no checks, stages[].after [] starts the stage at once). Set config planReview only when the user asked for a plan review in this request - it costs many tokens and much time.';
 var isEmpty = (v) => v === "" || Array.isArray(v) && !v.length || !!v && typeof v === "object" && !Array.isArray(v) && !Object.keys(v).length;
 function dropPlaceholders(input) {
@@ -4535,6 +4559,8 @@ function blockReason(toolName, input, access, submitTool) {
   const reason = bashBlock(String(input?.command ?? ""), access);
   return reason ? `granny: ${reason}` : undefined;
 }
+var CLAUDE_ALIAS = /^(default|sonnet|opus|haiku|opusplan)(\[1m\])?$/i;
+var ompModelProblem = (model, keyed) => !keyed && CLAUDE_ALIAS.test(model) ? `"${model}" is a Claude Code model alias, not an omp model` : undefined;
 var TRANSIENT = /\b(429|502|503|504|529)\b|rate.?limit|too many requests|overloaded|quota|timed? ?out|timeout|ETIMEDOUT|ECONNRESET|ECONNREFUSED|EPIPE|socket hang up|connection|other side closed|network|fetch failed/i;
 function isTransient(message) {
   return TRANSIENT.test(message);
@@ -4605,6 +4631,11 @@ var createGrannyExtension = ({ delays = DEFAULT_DELAYS, sleep = pause, killGrace
     if (unknownChecks.length)
       return `granny_run refused:
 - ${unknownChecks.join(`
+- `)}`;
+    const badModels = hostModelErrors(config, layers, "omp", ompModelProblem, layerSources(input.repo));
+    if (badModels.length)
+      return `granny_run refused:
+- ${badModels.join(`
 - `)}`;
     const blockers = preflight(input.repo, input.branch, config.workDir, config.worktree);
     for (const repo of stageRepos(input))

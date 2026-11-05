@@ -2473,6 +2473,30 @@ function planReviewNotice(input, config) {
   return reviewsPlan ? `
 ${planReviewWarning(config.maxRounds)} Tell the user this in your next message.` : "";
 }
+var layerSources = (repo) => [globalConfigPath(), join(repo, "granny.config.json"), "the run's config"];
+var AGENT_ROLES = ["granny", "planner", "implementer", "judge"];
+var isObject2 = (v) => !!v && typeof v === "object" && !Array.isArray(v);
+function hostModelErrors(config, layers, host, problem, sources) {
+  const from = (set) => {
+    for (let i = layers.length - 1;i >= 0; i--) {
+      const layer = layers[i];
+      if (isObject2(layer) && set(layer))
+        return ` (from ${sources[i] ?? `config layer ${i + 1}`})`;
+    }
+    return "";
+  };
+  const check = (what, spec, where) => {
+    const model = resolveModel(spec, host);
+    const wrong = model === undefined ? undefined : problem(model, typeof spec !== "string");
+    if (!wrong)
+      return [];
+    const claude = typeof spec === "string" ? spec : spec?.["claude-code"] ?? model;
+    return [`${what} "${model}"${where} - ${wrong}; give a host-keyed model, e.g. { "claude-code": "${claude}", "${host}": "<provider/model>" }`];
+  };
+  const roles = AGENT_ROLES.flatMap((role) => check(`roles.${role}.model:`, config.roles[role].model, from((l) => isObject2(l.roles) && isObject2(l.roles[role]) && l.roles[role].model !== undefined)));
+  const reviewers = config.reviewers.flatMap((rv, i) => rv.engine === "agent" ? check(`reviewers[${i}] "${rv.name}": model`, rv.model, from((l) => Array.isArray(l.reviewers))) : []);
+  return [...roles, ...reviewers];
+}
 var RUN_TOOL_DESCRIPTION = 'granny-workflow: start the implement \u2192 review \u2192 judge \u2192 fix loop in the background and return a run id. The granny-workflow skill, when installed, describes the inputs and the preflight. Send only the fields you set: leave an optional field out instead of sending "", [], {} or a default - an empty value is not a missing one (stages[].checks [] runs no checks, stages[].after [] starts the stage at once). Set config planReview only when the user asked for a plan review in this request - it costs many tokens and much time.';
 var isEmpty = (v) => v === "" || Array.isArray(v) && !v.length || !!v && typeof v === "object" && !Array.isArray(v) && !Object.keys(v).length;
 function dropPlaceholders(input) {
@@ -2711,6 +2735,14 @@ function modelRef(spec) {
   }
   return { providerID: main.slice(0, slash), id: main.slice(slash + 1), ...variant ? { variant } : {} };
 }
+var opencodeModelProblem = (model) => {
+  try {
+    modelRef(model);
+    return;
+  } catch {
+    return 'opencode models are "provider/model[#variant]"';
+  }
+};
 function permissions(access) {
   const rules = [
     { action: "*", resource: "*", effect: "allow" },
@@ -2761,6 +2793,11 @@ var createGrannyPlugin = ({ delays = DEFAULT_DELAYS, sleep = pause, killGraceMs 
       if (unknownChecks.length)
         return `granny_run refused:
 - ${unknownChecks.join(`
+- `)}`;
+      const badModels = hostModelErrors(config, layers, "opencode", opencodeModelProblem, layerSources(input.repo));
+      if (badModels.length)
+        return `granny_run refused:
+- ${badModels.join(`
 - `)}`;
       const blockers = preflight(input.repo, input.branch, config.workDir, config.worktree);
       for (const repo of stageRepos(input))

@@ -3,10 +3,10 @@ import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync } from
 import { homedir } from 'node:os'
 import { isAbsolute, join } from 'node:path'
 import { isCancelled } from '../core/cancel'
-import { planReviewWarning, resolveConfig } from '../core/config'
+import { type ConfigRole, type GrannyConfig, type ModelSpec, planReviewWarning, resolveConfig, resolveModel } from '../core/config'
 export { planReviewWarning } from '../core/config'
 import type { RunInput } from '../core/engine'
-import type { CommandResult, PlanResult, Recheck, ResultKind, RunResult } from '../core/types'
+import type { CommandResult, HostName, PlanResult, Recheck, ResultKind, RunResult } from '../core/types'
 
 // Shared by the in-process host adapters (opencode, omp): config files, preflight, run ids,
 // the completion summary, the granny_run input schema, the retry and cancel defaults and the command runner.
@@ -129,6 +129,44 @@ export function summarize(result: RunResult, worktree: boolean): string {
 export function planReviewNotice(input: RunInput, config: { planReview: boolean; maxRounds: number }): string {
   const reviewsPlan = config.planReview && (input.plan !== undefined || input.goal !== undefined) && !((input.fromStage ?? 1) > 1)
   return reviewsPlan ? `\n${planReviewWarning(config.maxRounds)} Tell the user this in your next message.` : ''
+}
+
+/** The config files a run reads, in layer order, as the start reply and refusals name them. */
+export const layerSources = (repo: string): string[] => [globalConfigPath(), join(repo, 'granny.config.json'), "the run's config"]
+
+const AGENT_ROLES: ConfigRole[] = ['granny', 'planner', 'implementer', 'judge']
+const isObject = (v: unknown): v is Record<string, any> => !!v && typeof v === 'object' && !Array.isArray(v)
+
+/**
+ * The role and agent-reviewer models this host cannot run, one line each, checked at launch instead of at the
+ * role's first call. `problem` says what is wrong with a model, given whether it was keyed to this host.
+ */
+export function hostModelErrors(
+  config: GrannyConfig,
+  layers: unknown[],
+  host: Exclude<HostName, 'claude-code'>,
+  problem: (model: string, keyed: boolean) => string | undefined,
+  sources: string[],
+): string[] {
+  const from = (set: (layer: Record<string, any>) => boolean) => {
+    for (let i = layers.length - 1; i >= 0; i--) {
+      const layer = layers[i]
+      if (isObject(layer) && set(layer)) return ` (from ${sources[i] ?? `config layer ${i + 1}`})`
+    }
+    return ''
+  }
+  const check = (what: string, spec: ModelSpec | undefined, where: string): string[] => {
+    const model = resolveModel(spec, host)
+    const wrong = model === undefined ? undefined : problem(model, typeof spec !== 'string')
+    if (!wrong) return []
+    const claude = typeof spec === 'string' ? spec : (spec?.['claude-code'] ?? model)
+    return [`${what} "${model}"${where} - ${wrong}; give a host-keyed model, e.g. { "claude-code": "${claude}", "${host}": "<provider/model>" }`]
+  }
+  const roles = AGENT_ROLES.flatMap(role =>
+    check(`roles.${role}.model:`, config.roles[role].model, from(l => isObject(l.roles) && isObject(l.roles[role]) && l.roles[role].model !== undefined)),
+  )
+  const reviewers = config.reviewers.flatMap((rv, i) => (rv.engine === 'agent' ? check(`reviewers[${i}] "${rv.name}": model`, rv.model, from(l => Array.isArray(l.reviewers))) : []))
+  return [...roles, ...reviewers]
 }
 
 export const RUN_TOOL_DESCRIPTION =

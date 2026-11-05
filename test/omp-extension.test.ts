@@ -711,6 +711,28 @@ describe('omp extension in the user session (parent mode)', () => {
     expect(journalOf(dir).filter(e => e.type === 'heartbeat')).toHaveLength(beats.length)
   })
 
+  it('refuses a Claude Code model alias given for every host before any role starts, naming the entry, its config file and the host-keyed fix', async () => {
+    behave({})
+    const global = join(fake, 'global-config.json')
+    process.env.GRANNY_CONFIG = global
+    writeFileSync(global, JSON.stringify({ reviewers: [{ name: 'sonnet', engine: 'agent', model: 'sonnet' }] }))
+    const f = fakePi()
+    await extension(f.pi as any)
+    const run = (config?: unknown) => exec(f.tools.get('granny_run'), { repo, branch: 'feat/x', stages: [{ task: 't' }], ...(config ? { config } : {}) })
+    const refused = textOf(await run({ roles: { implementer: { model: 'opus' } } }))
+    expect(refused).toStartWith('granny_run refused:\n- ')
+    expect(refused).toContain(`reviewers[0] "sonnet": model "sonnet" (from ${global})`)
+    expect(refused).toContain('is a Claude Code model alias')
+    expect(refused).toContain('{ "claude-code": "sonnet", "omp": "<provider/model>" }')
+    expect(refused).toContain(`roles.implementer.model: "opus" (from the run's config)`)
+    expect(existsSync(join(repo, '.granny/runs'))).toBe(false)
+    expect(calls()).toEqual([])
+
+    const started = textOf(await run({ reviewers: [{ name: 'sonnet', engine: 'agent', model: { 'claude-code': 'sonnet', omp: 'sonnet' } }], roles: { implementer: { model: 'anthropic/claude-opus' } } }))
+    const id = /granny run (\S+) started/.exec(started)![1]!
+    await finished(join(repo, '.granny/runs', id))
+  })
+
   it('refuses a Codex reviewer, which granny does not run on omp, without starting a run', async () => {
     const f = fakePi()
     await extension(f.pi as any)

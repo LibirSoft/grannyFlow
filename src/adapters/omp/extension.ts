@@ -7,7 +7,7 @@ import { GrannyCancelled, isCancelled } from '../../core/cancel'
 import { checkInput, runGranny, stageCheckErrors, type RunInput } from '../../core/engine'
 import { checkShape, SCHEMAS } from '../../core/schemas'
 import type { AgentRequest, Host, ResultKind } from '../../core/types'
-import { DEFAULT_DELAYS, dropPlaceholders, globalConfigPath, HEARTBEAT_MS, type HostOptions, KILL_GRACE_MS, pause, planReviewNotice, preflight, readJson, RUN_INPUT_SCHEMA, RUN_TOOL_DESCRIPTION, runCommand, runDir, runId, runStatus, signalGroup, stageRepos, stamp, statusError, SUBMIT, summarize, withHeartbeat } from '../common'
+import { DEFAULT_DELAYS, dropPlaceholders, globalConfigPath, HEARTBEAT_MS, hostModelErrors, type HostOptions, KILL_GRACE_MS, layerSources, pause, planReviewNotice, preflight, readJson, RUN_INPUT_SCHEMA, RUN_TOOL_DESCRIPTION, runCommand, runDir, runId, runStatus, signalGroup, stageRepos, stamp, statusError, SUBMIT, summarize, withHeartbeat } from '../common'
 import { lineType, LiveRun, type LiveOptions, PARSED_EVENTS, type RoleActivity, type RoleOutcome } from './panel'
 import { Navigator } from './navigator'
 import { type RunOutline, runOutline } from '../runview/outline'
@@ -263,6 +263,12 @@ export function blockReason(toolName: string, input: any, access: Access, submit
   return reason ? `granny: ${reason}` : undefined
 }
 
+const CLAUDE_ALIAS = /^(default|sonnet|opus|haiku|opusplan)(\[1m\])?$/i
+
+/** omp takes fuzzy model ids, so only a Claude Code alias meant for every host is refused; one keyed to omp is the user's choice. */
+const ompModelProblem = (model: string, keyed: boolean): string | undefined =>
+  !keyed && CLAUDE_ALIAS.test(model) ? `"${model}" is a Claude Code model alias, not an omp model` : undefined
+
 const TRANSIENT = /\b(429|502|503|504|529)\b|rate.?limit|too many requests|overloaded|quota|timed? ?out|timeout|ETIMEDOUT|ECONNRESET|ECONNREFUSED|EPIPE|socket hang up|connection|other side closed|network|fetch failed/i
 
 export function isTransient(message: string): boolean {
@@ -348,6 +354,8 @@ export const createGrannyExtension =
       const config = resolveConfig(layers, 'omp')
       const unknownChecks = stageCheckErrors(input.stages, config.checks)
       if (unknownChecks.length) return `granny_run refused:\n- ${unknownChecks.join('\n- ')}`
+      const badModels = hostModelErrors(config, layers, 'omp', ompModelProblem, layerSources(input.repo))
+      if (badModels.length) return `granny_run refused:\n- ${badModels.join('\n- ')}`
       const blockers = preflight(input.repo, input.branch, config.workDir, config.worktree)
       for (const repo of stageRepos(input)) blockers.push(...preflight(repo, input.branch, config.workDir, config.worktree).map(b => `${repo}: ${b}`))
       if (blockers.length) return `granny_run refused:\n- ${blockers.join('\n- ')}`
