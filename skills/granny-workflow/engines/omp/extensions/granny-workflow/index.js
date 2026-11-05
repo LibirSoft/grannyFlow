@@ -2,8 +2,8 @@
 // @bun
 // src/adapters/omp/extension.ts
 import { spawn as spawn2 } from "child_process";
-import { appendFileSync as appendFileSync3, existsSync as existsSync3, mkdirSync as mkdirSync2, readFileSync as readFileSync2, rmSync, writeFileSync } from "fs";
-import { basename, dirname, join as join2 } from "path";
+import { appendFileSync as appendFileSync3, existsSync as existsSync2, mkdirSync as mkdirSync2, readFileSync as readFileSync3, rmSync, writeFileSync } from "fs";
+import { basename, dirname, join as join4 } from "path";
 import { fileURLToPath } from "url";
 
 // src/core/types.ts
@@ -2967,19 +2967,555 @@ class LiveRun {
   }
 }
 
-// src/adapters/omp/watch.ts
-import { appendFileSync as appendFileSync2, closeSync, existsSync as existsSync2, openSync, readSync, statSync } from "fs";
+// src/adapters/omp/navigator.ts
+import { readdirSync as readdirSync3, readFileSync as readFileSync2 } from "fs";
+import { join as join3 } from "path";
 
 // src/adapters/omp/format.ts
+var ANSI = /\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[@-Z\\-_])/g;
+var CONTROL = /[\x00-\x08\x0b-\x1f\x7f]/g;
+var clean = (text) => text.replace(/\t/g, "  ").replace(ANSI, "").replace(CONTROL, "");
 var dateOf = (value) => new Date(typeof value === "number" || typeof value === "string" ? value : Number.NaN);
 function clock(value) {
   const d = dateOf(value);
   return Number.isNaN(d.getTime()) ? "--:--:--" : d.toTimeString().slice(0, 8);
 }
+function stamp2(value) {
+  const d = dateOf(value);
+  return Number.isNaN(d.getTime()) ? undefined : `${d.toISOString().slice(0, 10)} ${d.toTimeString().slice(0, 8)}`;
+}
+
+// src/adapters/omp/tail.ts
+import { closeSync, openSync, readSync, statSync } from "fs";
+var MB = 1024 * 1024;
+var NEWLINE = 10;
+
+class TailReader {
+  path;
+  position = 0;
+  read = 0;
+  started = false;
+  dropping = false;
+  inode;
+  pending = Buffer.alloc(0);
+  firstWindowBytes;
+  maxReadBytes;
+  constructor(path, { firstWindowBytes = 8 * MB, maxReadBytes = 4 * MB } = {}) {
+    this.path = path;
+    this.firstWindowBytes = firstWindowBytes;
+    this.maxReadBytes = Math.max(1, maxReadBytes);
+  }
+  get offset() {
+    return this.position;
+  }
+  get bytesRead() {
+    return this.read;
+  }
+  poll() {
+    const out = { lines: [], reset: false, skippedBytes: 0 };
+    let size;
+    let inode;
+    try {
+      const st = statSync(this.path);
+      if (!st.isFile())
+        return out;
+      size = st.size;
+      inode = st.ino;
+    } catch {
+      return out;
+    }
+    if (this.started && (size < this.position || this.inode !== undefined && inode !== this.inode)) {
+      this.position = 0;
+      this.pending = Buffer.alloc(0);
+      this.started = false;
+      this.dropping = false;
+      out.reset = true;
+    }
+    this.inode = inode;
+    if (!this.started) {
+      this.started = true;
+      if (size > this.firstWindowBytes) {
+        this.position = size - this.firstWindowBytes;
+        this.dropping = true;
+        out.skippedBytes = this.position;
+      }
+    }
+    if (size === this.position)
+      return out;
+    const length = Math.min(size - this.position, this.maxReadBytes);
+    const chunk = Buffer.alloc(length);
+    let got = 0;
+    let fd;
+    try {
+      fd = openSync(this.path, "r");
+      got = readSync(fd, chunk, 0, length, this.position);
+    } catch {
+      return out;
+    } finally {
+      if (fd !== undefined) {
+        try {
+          closeSync(fd);
+        } catch {}
+      }
+    }
+    if (got <= 0)
+      return out;
+    this.position += got;
+    this.read += got;
+    let data = chunk.subarray(0, got);
+    if (this.dropping) {
+      const nl = data.indexOf(NEWLINE);
+      if (nl < 0) {
+        out.skippedBytes += got;
+        return out;
+      }
+      out.skippedBytes += nl + 1;
+      data = data.subarray(nl + 1);
+      this.dropping = false;
+    }
+    const all = this.pending.length ? Buffer.concat([this.pending, data]) : data;
+    const last = all.lastIndexOf(NEWLINE);
+    if (last < 0) {
+      this.pending = Buffer.from(all);
+      return out;
+    }
+    this.pending = Buffer.from(all.subarray(last + 1));
+    out.lines = all.subarray(0, last).toString("utf8").split(`
+`);
+    return out;
+  }
+}
+
+// src/adapters/omp/transcript.ts
+var MAX_ENTRY_CHARS = 2 * 1024 * 1024;
+var PROMPT_LINES = 12;
+var THINKING_LINES = 3;
+var RESULT_LINES = 8;
+var ARGS_CHARS = 300;
+var PAD = " ".repeat(10);
+var split2 = (text) => clean(text).split(`
+`);
+var cut = (text, max) => text.length > max ? `${text.slice(0, max - 1)}\u2026` : text;
+function head(lines, max, indent, tail = "") {
+  const out = lines.slice(0, max).map((l) => `${indent}${l}`);
+  if (lines.length > max)
+    out.push(`${indent}\u2026 ${lines.length - max} more lines${tail}`);
+  return out;
+}
+function textOf(content) {
+  if (typeof content === "string")
+    return content;
+  if (!Array.isArray(content))
+    return "";
+  return content.filter((p) => p?.type === "text" && typeof p.text === "string").map((p) => p.text).join(`
+`);
+}
+function toolCall(part) {
+  const args = part?.arguments && typeof part.arguments === "object" ? { ...part.arguments } : {};
+  const intent = typeof part?.intent === "string" && part.intent.trim() ? part.intent : typeof args.i === "string" && args.i.trim() ? args.i : undefined;
+  delete args.i;
+  delete args.intent;
+  let json;
+  try {
+    json = JSON.stringify(args) ?? "";
+  } catch {
+    json = "";
+  }
+  const name = clean(String(part?.name ?? "tool"));
+  return [`\u25B8 ${name}${intent ? `: ${clean(intent).replace(/\s+/g, " ").trim()}` : ""}`, `  ${cut(clean(json), ARGS_CHARS)}`];
+}
+function assistant(message) {
+  const out = [];
+  const parts = Array.isArray(message?.content) ? message.content : [];
+  for (const part of parts) {
+    if (part?.type === "thinking" && typeof part.thinking === "string" && part.thinking.trim()) {
+      const lines = split2(part.thinking.trim());
+      if (part.summary === true) {
+        const [first, ...rest] = lines.map((l) => l.replace(/\*\*/g, ""));
+        out.push(`\xBB ${first}`, ...rest.map((l) => `  ${l}`));
+      } else
+        out.push("\u2234 thinking", ...head(lines, THINKING_LINES, "  "));
+    } else if (part?.type === "text" && typeof part.text === "string" && part.text.trim()) {
+      const [first, ...rest] = split2(part.text.trim());
+      out.push(`\u270E ${first}`, ...rest.map((l) => `  ${l}`));
+    } else if (part?.type === "toolCall")
+      out.push(...toolCall(part));
+  }
+  if (message?.stopReason === "error")
+    out.push(`\u2717 error: ${clean(String(message.errorMessage ?? "unknown error"))}`);
+  return out;
+}
+function toolResult(message) {
+  const out = [`  \u2190 ${clean(String(message?.toolName ?? "tool"))} ${message?.isError === true ? "\u2717" : "\u2713"}`];
+  const parts = Array.isArray(message?.content) ? message.content : [];
+  const text = textOf(parts);
+  if (text)
+    out.push(...head(split2(text), RESULT_LINES, "    ", ` (${text.length} chars)`));
+  for (const part of parts)
+    if (part?.type === "image")
+      out.push("    [image]");
+  return out;
+}
+function messageLines(message) {
+  switch (message?.role) {
+    case "user":
+      return ["\u25B6 prompt", ...head(split2(textOf(message.content).trim()), PROMPT_LINES, "  ")];
+    case "assistant":
+      return assistant(message);
+    case "toolResult":
+      return toolResult(message);
+  }
+  return [];
+}
+function sessionEntryLines(line) {
+  if (line.length > MAX_ENTRY_CHARS)
+    return [`(entry of ${Math.round(line.length / 1024)} KB not shown)`];
+  if (!line.trim())
+    return [];
+  let entry;
+  try {
+    entry = JSON.parse(line);
+  } catch {
+    return [];
+  }
+  switch (entry?.type) {
+    case "session":
+      return [`\u2500\u2500 session ${clean(String(entry.id ?? "?"))} \xB7 ${clean(String(entry.cwd ?? ""))}`];
+    case "model_change":
+      return [`\xB7 model ${clean(String(entry.model ?? "?"))}`];
+    case "thinking_level_change":
+      return [`\xB7 thinking ${clean(String(entry.thinkingLevel ?? "?"))}`];
+    case "message": {
+      const lines = messageLines(entry.message);
+      return lines.map((l, i) => i === 0 ? `${clock(entry.timestamp)}  ${l}` : `${PAD}${l}`);
+    }
+  }
+  return [];
+}
+
+class LineBuffer {
+  max;
+  dropped = 0;
+  version = 0;
+  kept = [];
+  view;
+  constructor(max = 5000) {
+    this.max = max;
+  }
+  push(lines) {
+    if (!lines.length)
+      return;
+    for (const line of lines)
+      this.kept.push(line);
+    if (this.kept.length > this.max) {
+      const over = this.kept.length - this.max;
+      this.kept.splice(0, over);
+      this.dropped += over;
+    }
+    this.view = undefined;
+    this.version++;
+  }
+  lines() {
+    this.view ??= this.dropped ? [`\u2026 ${this.dropped} earlier lines not kept`, ...this.kept] : this.kept.slice();
+    return this.view;
+  }
+}
+
+// src/adapters/omp/tree.ts
+import { readdirSync as readdirSync2 } from "fs";
+import { join as join2 } from "path";
+var MAX_PHASE_ENTRIES = 200;
+var COMMAND_CHARS = 160;
+var PAD2 = " ".repeat(10);
+var AGENT_MARKERS = { running: "\u25CF", waiting: "\u2026", done: "\u2713", failed: "\u2717", cancelled: "\u2298" };
+var GROUP = /^(?:review|judge|fix|extract)\s+(.+?)\s+r(\d+)\b/;
+var STAGE = /^implement (.+)$/;
+function groupOf(label) {
+  const round = GROUP.exec(label);
+  if (round)
+    return `${round[1]} \xB7 round ${round[2]}`;
+  return STAGE.exec(label)?.[1];
+}
+var timeOf = (entry) => {
+  const t = entry.t ? Date.parse(entry.t) : Number.NaN;
+  return Number.isNaN(t) ? undefined : t;
+};
+var at = (t, text) => {
+  const [first, ...rest] = text.replace(/\t/g, "  ").split(`
+`);
+  return [`${clock(t)}  ${first}`, ...rest.map((l) => `${PAD2}${l}`)];
+};
+function lastOf(items, match) {
+  for (let i = items.length - 1;i >= 0; i--)
+    if (match(items[i]))
+      return items[i];
+  return;
+}
+var modelText = (model, effort) => `${model ?? "default model"}${effort ? `/${effort}` : ""}`;
+function buildRunTree(run, entries, live, now, files = new Map) {
+  const running = run.status === "running";
+  const phases = [];
+  const agents = [];
+  const bySession = new Map;
+  const subagentNames = new Map;
+  const outcomes = new Map;
+  const failed = new Map;
+  const firstTime = entries.map(timeOf).find((t) => t !== undefined);
+  const start = run.startedAt ?? firstTime ?? now;
+  let lastTime = start;
+  const newPhase = (title, t) => {
+    const node = { index: phases.length, title, start: t, marker: "\u2713", groups: [], lines: [], entries: [], byGroup: new Map, agentNodes: [] };
+    phases.push(node);
+    return node;
+  };
+  const current = (t) => phases.at(-1) ?? newPhase("Starting", t);
+  const note = (phase, lines) => {
+    phase.entries.push(lines);
+    if (phase.entries.length > MAX_PHASE_ENTRIES)
+      phase.entries.shift();
+  };
+  const phaseOf = new Map;
+  const noted = new Set;
+  const ended = (session, state, t) => {
+    const agent = bySession.get(session);
+    const phase = agent && phaseOf.get(agent);
+    if (!agent || !phase || noted.has(agent))
+      return;
+    noted.add(agent);
+    note(phase, at(t, `\u25A0 ${agent.label} ${state}${t === undefined ? "" : ` ${duration(t - agent.start)}`}`));
+  };
+  for (const entry of entries) {
+    const t = timeOf(entry) ?? lastTime;
+    lastTime = Math.max(lastTime, t);
+    switch (entry.type) {
+      case "phase": {
+        const title = String(entry.title ?? "");
+        if (phases.at(-1)?.title !== title)
+          newPhase(title, t);
+        break;
+      }
+      case "agent": {
+        const title = typeof entry.phase === "string" && entry.phase ? entry.phase : undefined;
+        const phase = title ? lastOf(phases, (p) => p.title === title) ?? newPhase(title, t) : current(t);
+        const agent = {
+          label: String(entry.label ?? "?"),
+          role: String(entry.role ?? "?"),
+          ...typeof entry.model === "string" ? { model: entry.model } : {},
+          ...typeof entry.effort === "string" ? { effort: entry.effort } : {},
+          session: String(entry.session ?? ""),
+          phase: phase.title,
+          start: t,
+          state: "waiting",
+          subagents: []
+        };
+        agents.push(agent);
+        bySession.set(agent.session, agent);
+        phase.agentNodes.push(agent);
+        phaseOf.set(agent, phase);
+        const name = groupOf(agent.label);
+        const key = name ?? "";
+        let group = phase.byGroup.get(key);
+        if (!group) {
+          group = { ...name ? { title: name } : {}, agents: [] };
+          phase.byGroup.set(key, group);
+          phase.groups.push(group);
+        }
+        group.agents.push(agent);
+        note(phase, at(t, `\u25B8 ${agent.label} started (${agent.role} \xB7 ${modelText(agent.model, agent.effort)})`));
+        break;
+      }
+      case "agent-end": {
+        const outcome = entry.outcome === "done" || entry.outcome === "failed" || entry.outcome === "cancelled" ? entry.outcome : "failed";
+        outcomes.set(String(entry.session), { outcome, end: t, ...typeof entry.error === "string" ? { error: entry.error } : {} });
+        ended(String(entry.session), outcome, t);
+        break;
+      }
+      case "agent-failed":
+        failed.set(String(entry.session), { end: t, ...typeof entry.error === "string" ? { error: entry.error } : {} });
+        ended(String(entry.session), "failed", t);
+        break;
+      case "subagent": {
+        const agent = lastOf(agents, (a) => a.label === entry.label);
+        if (!agent)
+          break;
+        const names = subagentNames.get(agent) ?? [];
+        for (const name of Array.isArray(entry.agents) ? entry.agents : [])
+          if (!names.includes(String(name)))
+            names.push(String(name));
+        subagentNames.set(agent, names);
+        break;
+      }
+      case "log":
+        note(current(t), at(t, String(entry.message ?? "")));
+        break;
+      case "command":
+        note(current(t), at(t, `$ ${String(entry.command ?? "").split(`
+`)[0].slice(0, COMMAND_CHARS)}`));
+        break;
+      case "retry":
+        note(current(t), at(t, `\u21BB ${entry.label} retry ${entry.attempt}: ${String(entry.reason ?? "").split(`
+`)[0]}`));
+        break;
+      case "provider-error":
+        note(current(t), at(t, `! ${entry.label} provider error${entry.backoffMs !== undefined ? ` (retry in ${duration(Number(entry.backoffMs))})` : ""}: ${String(entry.error ?? "").split(`
+`)[0]}`));
+        break;
+      case "error":
+        note(current(t), at(t, `\u2717 run failed: ${String(entry.error ?? "")}`));
+        break;
+    }
+  }
+  const end = running ? undefined : run.endedAt ?? lastTime;
+  for (const agent of agents) {
+    const view = live.get(agent.session);
+    const recorded = outcomes.get(agent.session);
+    const failure = failed.get(agent.session);
+    if (recorded) {
+      agent.state = recorded.outcome;
+      agent.end = recorded.end;
+      if (recorded.error)
+        agent.error = recorded.error;
+    } else if (failure) {
+      agent.state = "failed";
+      agent.end = failure.end;
+      if (failure.error)
+        agent.error = failure.error;
+    } else if (view?.outcome) {
+      agent.state = view.outcome;
+      if (view.endedAt !== undefined)
+        agent.end = view.endedAt;
+      if (view.error)
+        agent.error = view.error;
+    } else if (running)
+      agent.state = view?.active ? "running" : "waiting";
+    else {
+      agent.state = run.status === "cancelled" ? "cancelled" : run.status === "failed" ? "failed" : "done";
+      agent.end = view?.endedAt ?? end;
+    }
+    if (agent.state === "running" && view)
+      agent.activity = `${view.state} ${duration(now - view.since)}`;
+    if (agent.state !== "running" && agent.state !== "waiting")
+      ended(agent.session, agent.state, agent.end);
+    const names = subagentNames.get(agent);
+    if (names) {
+      const found = files.get(agent.session);
+      agent.subagents = found?.size ? [...found].map(([name, path]) => ({ name, path })) : names.map((name) => ({ name }));
+    }
+  }
+  phases.forEach((phase, i) => {
+    const next = phases[i + 1];
+    phase.end = next ? next.start : end;
+    const last = i === phases.length - 1;
+    const states = phase.agentNodes.map((a) => a.state);
+    if (states.includes("running") || running && last)
+      phase.marker = "\u25CF";
+    else if (last && run.status === "cancelled" || states.includes("cancelled"))
+      phase.marker = "\u2298";
+    else if (states.includes("failed") || last && run.status === "failed")
+      phase.marker = "\u2717";
+    else
+      phase.marker = "\u2713";
+    phase.lines = phase.entries.flat();
+  });
+  return {
+    id: run.id,
+    status: run.status,
+    start,
+    ...end !== undefined ? { end } : {},
+    ...phases.length ? { phase: phases.at(-1).title } : {},
+    phases: phases.map(({ entries: _e, byGroup: _g, agentNodes: _a, ...phase }) => phase),
+    agents
+  };
+}
+var runKey = (id) => `run:${id}`;
+var phaseKey = (id, index) => `phase:${id}:${index}`;
+var agentKey = (session) => `agent:${session}`;
+var subKey = (session, name) => `sub:${session}:${name}`;
+function visibleRows(runs, folded, expandedRun) {
+  const rows = [];
+  for (const run of runs) {
+    const rk = runKey(run.id);
+    const open = run.id === expandedRun && !folded.has(rk);
+    rows.push({ key: rk, kind: "run", depth: 0, selectable: true, run, folded: !open });
+    if (!open)
+      continue;
+    for (const phase of run.phases) {
+      const pk = phaseKey(run.id, phase.index);
+      const shut = folded.has(pk);
+      rows.push({ key: pk, kind: "phase", depth: 1, selectable: true, run, phase, folded: shut, parent: rk });
+      if (shut)
+        continue;
+      for (const [g, group] of phase.groups.entries()) {
+        const depth = group.title ? 3 : 2;
+        if (group.title)
+          rows.push({ key: `group:${run.id}:${phase.index}:${g}`, kind: "group", depth: 2, selectable: false, run, phase, title: group.title, parent: pk });
+        for (const agent of group.agents) {
+          const ak = agentKey(agent.session);
+          rows.push({ key: ak, kind: "agent", depth, selectable: true, run, phase, agent, parent: pk });
+          for (const sub of agent.subagents)
+            rows.push({ key: subKey(agent.session, sub.name), kind: "sub", depth: depth + 1, selectable: true, run, phase, agent, sub, parent: ak });
+        }
+      }
+    }
+  }
+  return rows;
+}
+function nextAgent(rows, key, dir) {
+  const from = rows.findIndex((r) => r.key === key);
+  let i = from < 0 ? dir > 0 ? -1 : rows.length : from;
+  for (i += dir;i >= 0 && i < rows.length; i += dir)
+    if (rows[i].kind === "agent")
+      return rows[i].key;
+  return;
+}
+var elapsed = (start, end, now) => duration((end ?? now) - start);
+function rowText(row, now, width = Number.POSITIVE_INFINITY) {
+  const indent = "  ".repeat(row.depth);
+  switch (row.kind) {
+    case "run": {
+      const { run } = row;
+      return `${row.folded ? "\u25B8" : "\u25BE"} run ${run.id} \xB7 ${run.status} \xB7 ${elapsed(run.start, run.end, now)}`;
+    }
+    case "phase": {
+      const phase = row.phase;
+      const count = phase.groups.reduce((n, g) => n + g.agents.length, 0);
+      return `${indent}${phase.marker} ${phase.title} \xB7 ${elapsed(phase.start, phase.end, now)}${row.folded && count ? ` \xB7 ${count} agent${count === 1 ? "" : "s"} folded` : ""}`;
+    }
+    case "group":
+      return `${indent}${row.title}`;
+    case "agent": {
+      const a = row.agent;
+      const tail = ` \xB7 ${elapsed(a.start, a.end, now)}${a.activity ? ` \xB7 ${a.activity}` : ""}`;
+      const head = `${indent}${AGENT_MARKERS[a.state]} ${a.label}`;
+      const full = `${head}  ${a.role} \xB7 ${modelText(a.model, a.effort)}${tail}`;
+      if (full.length <= width)
+        return full;
+      const short = a.model?.includes("/") ? `${head}  ${a.role} \xB7 ${modelText(a.model.slice(a.model.lastIndexOf("/") + 1), a.effort)}${tail}` : full;
+      return short.length <= width ? short : `${head}${tail}`;
+    }
+    case "sub":
+      return `${indent}\u2514 ${row.sub.name}${row.sub.path ? "" : " (no transcript yet)"}`;
+  }
+}
+function subagentFiles(session) {
+  const out = new Map;
+  try {
+    for (const dir of readdirSync2(session, { withFileTypes: true })) {
+      if (!dir.isDirectory())
+        continue;
+      try {
+        for (const file of readdirSync2(join2(session, dir.name), { withFileTypes: true })) {
+          if (file.isFile() && file.name.endsWith(".jsonl"))
+            out.set(file.name.slice(0, -".jsonl".length), join2(session, dir.name, file.name));
+        }
+      } catch {}
+    }
+  } catch {}
+  return new Map([...out].sort(([a], [b]) => a.localeCompare(b)));
+}
 
 // src/adapters/omp/watch.ts
-var VIEW_LINES = 40;
-var TAIL_BYTES = 256 * 1024;
+import { appendFileSync as appendFileSync2 } from "fs";
 var TEXT_LINES = 12;
 
 class EventLog {
@@ -3005,32 +3541,6 @@ class EventLog {
       } catch {}
     }
   }
-}
-function readTail(path, maxBytes = TAIL_BYTES) {
-  if (!existsSync2(path))
-    return [];
-  const size = statSync(path).size;
-  const from = Math.max(0, size - maxBytes);
-  const buffer = Buffer.alloc(size - from);
-  const fd = openSync(path, "r");
-  try {
-    readSync(fd, buffer, 0, buffer.length, from);
-  } finally {
-    closeSync(fd);
-  }
-  const lines = buffer.toString("utf8").split(`
-`);
-  if (from > 0)
-    lines.shift();
-  const out = [];
-  for (const line of lines) {
-    if (!line.trim())
-      continue;
-    try {
-      out.push(JSON.parse(line));
-    } catch {}
-  }
-  return out;
 }
 function entryLines(e) {
   const at = clock(e.t);
@@ -3060,9 +3570,6 @@ function entryLines(e) {
   }
   return [];
 }
-function formatEntries(entries, max = VIEW_LINES) {
-  return entries.flatMap(entryLines).slice(-max);
-}
 function fit(line, width) {
   const flat = line.replace(/\t/g, "  ");
   if (width <= 0)
@@ -3070,63 +3577,675 @@ function fit(line, width) {
   return flat.length > width ? `${flat.slice(0, Math.max(0, width - 1))}\u2026` : flat;
 }
 
-class LogView {
-  path;
-  title;
-  tui;
-  keys;
-  done;
-  size = -1;
-  body = [];
-  timer;
+// src/adapters/omp/navigator.ts
+var NAMED = [
+  ["tui.select.up", "up"],
+  ["tui.select.down", "down"],
+  ["tui.select.pageUp", "pageUp"],
+  ["tui.select.pageDown", "pageDown"],
+  ["tui.editor.cursorLineStart", "home"],
+  ["tui.editor.cursorLineEnd", "end"],
+  ["tui.select.confirm", "enter"],
+  ["tui.select.cancel", "escape"],
+  ["tui.editor.cursorLeft", "left"],
+  ["tui.editor.cursorRight", "right"],
+  ["tui.input.tab", "tab"]
+];
+var RAW = {
+  "\x1B[A": "up",
+  "\x1BOA": "up",
+  k: "up",
+  "\x1B[B": "down",
+  "\x1BOB": "down",
+  j: "down",
+  "\x1B[C": "right",
+  "\x1BOC": "right",
+  "\x1B[D": "left",
+  "\x1BOD": "left",
+  "\x1B[5~": "pageUp",
+  "\x1B[6~": "pageDown",
+  "\x1B[H": "home",
+  "\x1BOH": "home",
+  "\x1B[1~": "home",
+  "\x1B[7~": "home",
+  "\x1B[F": "end",
+  "\x1BOF": "end",
+  "\x1B[4~": "end",
+  "\x1B[8~": "end",
+  "\r": "enter",
+  "\n": "enter",
+  "\x1B": "escape",
+  "\t": "tab",
+  "\x1B[Z": "backtab",
+  " ": "space",
+  "]": "next",
+  "[": "prev",
+  f: "follow",
+  t: "toggle",
+  q: "quit"
+};
+var TREE_HELP = "\u2191\u2193 move \xB7 Enter/\u2192 open \xB7 Space fold \xB7 Tab/] next agent \xB7 [ prev \xB7 Esc close";
+var SOURCES = 8;
+var MB2 = 1024 * 1024;
+var SEPARATOR = " \u2502 ";
+var clamp = (n, lo, hi) => Math.max(lo, Math.min(hi, n));
+function wrap(lines, width) {
+  const out = [];
+  const w = Math.max(1, width);
+  for (const raw of lines) {
+    const line = raw.replace(/\t/g, "  ");
+    if (line.length <= w)
+      out.push(line);
+    else
+      for (let i = 0;i < line.length; i += w)
+        out.push(line.slice(i, i + w));
+  }
+  return out;
+}
+
+class Navigator {
+  deps;
+  focus = "tree";
+  expanded;
+  folded = new Set;
+  selected = "";
+  trees = [];
+  rows = [];
+  parents = new Map;
+  caches = new Map;
+  sources = new Map;
+  overrides = new Map;
+  source;
+  version = 0;
+  memo;
+  wrapped;
+  bodyHeight = 10;
+  treeTop = 0;
   closed = false;
-  constructor(path, title, tui, keys, done, refreshMs = 500) {
-    this.path = path;
-    this.title = title;
-    this.tui = tui;
-    this.keys = keys;
-    this.done = done;
-    this.timer = setInterval(() => {
-      if (this.read())
-        this.tui.requestRender();
-    }, refreshMs);
+  finished = false;
+  timer;
+  soon;
+  constructor(deps) {
+    this.deps = deps;
+    this.expanded = deps.runId;
+    try {
+      this.refresh();
+      const tree = this.trees.find((t) => t.id === this.expanded);
+      const agent = tree && ([...tree.agents].reverse().find((a) => a.state === "running") ?? tree.agents.at(-1));
+      this.selected = agent ? `agent:${agent.session}` : runKey(this.expanded);
+      this.relayout();
+      this.pollSource();
+    } catch {}
+    this.timer = setInterval(() => this.tick(), Math.max(10, deps.tickMs));
     this.timer.unref?.();
   }
-  read() {
-    let size = 0;
-    try {
-      size = existsSync2(this.path) ? statSync(this.path).size : 0;
-    } catch {}
-    if (size === this.size)
-      return false;
-    this.size = size;
-    try {
-      this.body = formatEntries(readTail(this.path));
-    } catch {
-      this.body = [];
-    }
-    return true;
+  get disposed() {
+    return this.closed;
   }
-  render(width) {
-    this.read();
-    const body = this.body.length ? this.body : ["(no events yet)"];
-    return [this.title(), "", ...body, "", "Esc closes"].map((l) => fit(l, width));
+  get bytesRead() {
+    return this.source?.read ?? 0;
   }
-  invalidate() {}
-  handleInput(data) {
-    if (data === "\x1B" || data === "q" || this.keys?.matches?.(data, "tui.select.cancel"))
-      this.close();
-  }
-  close() {
+  tick() {
     if (this.closed)
       return;
-    this.dispose();
-    this.done();
+    try {
+      this.refresh();
+      this.pollSource();
+    } catch {}
+    this.version++;
+    this.redraw();
   }
   dispose() {
     this.closed = true;
     clearInterval(this.timer);
+    if (this.soon)
+      clearTimeout(this.soon);
   }
+  invalidate() {
+    this.memo = undefined;
+    this.wrapped = undefined;
+  }
+  capturesInput(data) {
+    try {
+      return this.keyOf(data) !== undefined;
+    } catch {
+      return false;
+    }
+  }
+  handleInput(data) {
+    if (this.closed)
+      return;
+    try {
+      const key = this.keyOf(data);
+      if (!key)
+        return;
+      if (this.focus === "tree")
+        this.treeKey(key);
+      else
+        this.detailKey(key);
+    } catch {}
+    if (this.closed)
+      return;
+    this.version++;
+    this.redraw();
+  }
+  render(width) {
+    const height = this.height();
+    const key = `${width}:${height}:${this.version}`;
+    if (this.memo?.key === key)
+      return this.memo.lines;
+    let lines;
+    try {
+      lines = this.draw(width, height);
+    } catch {
+      lines = [fit("granny: the navigator could not draw this view", width)];
+    }
+    this.memo = { key, lines };
+    return lines;
+  }
+  close() {
+    if (this.finished)
+      return;
+    this.finished = true;
+    this.dispose();
+    try {
+      this.deps.done();
+    } catch {}
+  }
+  redraw() {
+    try {
+      this.deps.tui.requestRender();
+    } catch {
+      this.close();
+    }
+  }
+  keyOf(data) {
+    const matches = this.deps.keys?.matches;
+    if (typeof matches === "function") {
+      for (const [name, key] of NAMED) {
+        try {
+          if (matches.call(this.deps.keys, data, name))
+            return key;
+        } catch {}
+      }
+    }
+    return Object.hasOwn(RAW, data) ? RAW[data] : undefined;
+  }
+  height() {
+    try {
+      const rows = this.deps.tui.terminal?.rows ?? process.stdout.rows ?? 30;
+      return Math.max(5, Number.isFinite(rows) ? rows : 30);
+    } catch {
+      return 30;
+    }
+  }
+  cacheOf(run) {
+    let cache = this.caches.get(run.id);
+    if (!cache) {
+      cache = { reader: new TailReader(join3(run.dir, "journal.jsonl")), entries: [], files: new Map, read: false };
+      this.caches.set(run.id, cache);
+    }
+    return cache;
+  }
+  pollJournal(cache) {
+    const { lines, reset } = cache.reader.poll();
+    if (reset)
+      cache.entries = [];
+    for (const line of lines) {
+      if (!line.trim())
+        continue;
+      try {
+        cache.entries.push(JSON.parse(line));
+      } catch {}
+    }
+    cache.read = true;
+  }
+  runList() {
+    try {
+      return this.deps.runs();
+    } catch {
+      return [];
+    }
+  }
+  refresh() {
+    const now = this.deps.now();
+    const runs = this.runList();
+    this.trees = runs.map((run) => {
+      const cache = this.cacheOf(run);
+      const open = run.id === this.expanded;
+      if (open || !cache.read && run.status !== "running")
+        this.pollJournal(cache);
+      const live = new Map;
+      for (const role of run.live.roles)
+        live.set(role.info.session, role);
+      const info = { id: run.id, status: run.status, startedAt: run.live.startedAt, ...run.reply !== undefined ? { reply: run.reply } : {} };
+      const tree = buildRunTree(info, cache.entries, live, now, cache.files);
+      if (!open)
+        return tree;
+      if (this.selected === runKey(run.id) && cache.status?.for !== run.status) {
+        try {
+          cache.status = { for: run.status, data: JSON.parse(readFileSync2(join3(run.dir, "status.json"), "utf8")) };
+        } catch {}
+      }
+      let found = false;
+      for (const agent of tree.agents) {
+        if (!agent.subagents.length)
+          continue;
+        const files = subagentFiles(agent.session);
+        if ([...files.values()].join(`
+`) !== [...cache.files.get(agent.session)?.values() ?? []].join(`
+`))
+          found = true;
+        cache.files.set(agent.session, files);
+      }
+      return found ? buildRunTree(info, cache.entries, live, now, cache.files) : tree;
+    });
+    this.relayout();
+  }
+  relayout() {
+    this.rows = visibleRows(this.trees, this.folded, this.expanded);
+    for (const row of this.rows)
+      if (row.parent)
+        this.parents.set(row.key, row.parent);
+    let key = this.selected;
+    while (key && !this.rows.some((r) => r.key === key && r.selectable))
+      key = this.parents.get(key);
+    this.selected = key ?? this.rows.find((r) => r.selectable)?.key ?? "";
+    this.choose();
+  }
+  selectedRow() {
+    return this.rows.find((r) => r.key === this.selected);
+  }
+  choose() {
+    const row = this.selectedRow();
+    if (!row)
+      return void (this.source = undefined);
+    let kind;
+    let spec = {};
+    if (row.kind === "agent") {
+      const agent = row.agent;
+      const live = agent.state === "running" || agent.state === "waiting";
+      kind = this.overrides.get(row.key) ?? (live ? "events" : "transcript");
+      spec = kind === "events" ? { file: join3(agent.session, "events.jsonl"), relist: false } : { dir: agent.session, relist: live };
+      spec.follow = live;
+    } else if (row.kind === "sub") {
+      kind = "transcript";
+      spec = { ...row.sub.path ? { file: row.sub.path } : {}, relist: false, follow: false };
+    } else
+      kind = row.kind === "run" ? "run" : "phase";
+    const key = `${row.key}|${kind}|${spec.file ?? spec.dir ?? ""}`;
+    let source = this.sources.get(key);
+    if (!source) {
+      source = { key, kind, relist: false, readers: new Map, buffer: new LineBuffer, linesVersion: 0, follow: false, read: 0, polled: false, ...spec };
+      this.sources.set(key, source);
+      if (this.sources.size > SOURCES)
+        this.sources.delete(this.sources.keys().next().value);
+      if (source.file || source.dir)
+        this.later();
+    } else if (source.dir)
+      source.relist = spec.relist ?? false;
+    this.source = source;
+    if (kind === "phase" || kind === "run")
+      this.staticBody(source, row);
+  }
+  later() {
+    if (this.soon || this.closed)
+      return;
+    this.soon = setTimeout(() => {
+      this.soon = undefined;
+      this.tick();
+    }, 0);
+    this.soon.unref?.();
+  }
+  staticBody(source, row) {
+    const lines = row.kind === "run" ? this.runBody(row.run) : row.phase.lines;
+    if (source.lines && source.lines.length === lines.length && source.lines.every((l, i) => l === lines[i]))
+      return;
+    source.lines = lines;
+    source.linesVersion++;
+  }
+  runBody(tree) {
+    const run = this.runList().find((r) => r.id === tree.id);
+    const status = this.caches.get(tree.id)?.status?.data ?? {};
+    const out = [`status   ${tree.status}`];
+    if (typeof status.repo === "string")
+      out.push(`repo     ${status.repo}`);
+    if (typeof status.branch === "string")
+      out.push(`branch   ${status.branch}`);
+    out.push(`started  ${stamp2(status.startedAt) ?? stamp2(tree.start) ?? "?"}`);
+    if (tree.status !== "running")
+      out.push(`ended    ${stamp2(status.finishedAt) ?? stamp2(tree.end) ?? "?"}`);
+    else
+      out.push(`phase    ${tree.phase ?? "?"}`);
+    if (run)
+      out.push(`result   ${join3(run.dir, "result.json")}`);
+    if (run?.reply !== undefined)
+      out.push("", ...run.reply.split(`
+`));
+    return out;
+  }
+  pollSource() {
+    const source = this.source;
+    if (!source || !source.file && !source.dir)
+      return;
+    if (source.dir && (source.relist || !source.readers.size)) {
+      let names = [];
+      try {
+        names = readdirSync3(source.dir).filter((n) => n.endsWith(".jsonl") && n !== "events.jsonl").sort();
+      } catch {}
+      for (const name of names) {
+        const path = join3(source.dir, name);
+        if (!source.readers.has(path))
+          source.readers.set(path, new TailReader(path));
+      }
+    } else if (source.file && !source.readers.size)
+      source.readers.set(source.file, new TailReader(source.file));
+    const render = source.kind === "events" ? eventLines : sessionEntryLines;
+    source.polled = true;
+    for (const reader of source.readers.values()) {
+      const before = reader.bytesRead;
+      const { lines, reset, skippedBytes } = reader.poll();
+      source.read += reader.bytesRead - before;
+      if (reset) {
+        source.readers.clear();
+        source.buffer = new LineBuffer;
+        source.top = undefined;
+        return this.pollSource();
+      }
+      if (skippedBytes)
+        source.buffer.push([`\u2026 first ${Math.max(1, Math.round(skippedBytes / MB2))} MB skipped`]);
+      if (lines.length)
+        source.buffer.push(lines.flatMap(render));
+    }
+  }
+  select(key) {
+    if (!key || key === this.selected)
+      return;
+    this.selected = key;
+    this.choose();
+  }
+  selectable() {
+    return this.rows.filter((r) => r.selectable);
+  }
+  moveBy(delta) {
+    const rows = this.selectable();
+    const at = rows.findIndex((r) => r.key === this.selected);
+    this.select(rows[clamp(at + delta, 0, rows.length - 1)]?.key);
+  }
+  agentStep(dir) {
+    this.select(nextAgent(this.rows, this.selected, dir));
+  }
+  treeKey(key) {
+    const page = Math.max(1, this.height() - 3);
+    switch (key) {
+      case "up":
+        return this.moveBy(-1);
+      case "down":
+        return this.moveBy(1);
+      case "pageUp":
+        return this.moveBy(-page);
+      case "pageDown":
+        return this.moveBy(page);
+      case "home":
+        return this.select(this.selectable()[0]?.key);
+      case "end":
+        return this.select(this.selectable().at(-1)?.key);
+      case "enter":
+      case "right": {
+        const row = this.selectedRow();
+        if (row?.kind === "run" && row.folded && key === "enter")
+          return this.fold();
+        this.focus = "detail";
+        return;
+      }
+      case "space":
+        return this.fold();
+      case "tab":
+      case "next":
+        return this.agentStep(1);
+      case "backtab":
+      case "prev":
+        return this.agentStep(-1);
+      case "left":
+        return this.select(this.selectedRow()?.parent);
+      case "escape":
+      case "quit":
+        return this.close();
+    }
+  }
+  fold() {
+    const row = this.selectedRow();
+    if (!row)
+      return;
+    if (row.kind === "run") {
+      if (row.run.id !== this.expanded) {
+        this.expanded = row.run.id;
+        this.folded.delete(row.key);
+        this.later();
+      } else if (this.folded.has(row.key))
+        this.folded.delete(row.key);
+      else
+        this.folded.add(row.key);
+    } else if (row.kind === "phase") {
+      if (this.folded.has(row.key))
+        this.folded.delete(row.key);
+      else
+        this.folded.add(row.key);
+    } else
+      return;
+    this.relayout();
+  }
+  detailKey(key) {
+    const source = this.source;
+    switch (key) {
+      case "up":
+        return this.scroll(-1);
+      case "down":
+        return this.scroll(1);
+      case "pageUp":
+        return this.scroll(-Math.max(1, this.bodyHeight - 1));
+      case "pageDown":
+        return this.scroll(Math.max(1, this.bodyHeight - 1));
+      case "home":
+        if (source) {
+          source.follow = false;
+          source.top = 0;
+        }
+        return;
+      case "end":
+        if (source) {
+          source.follow = true;
+          source.top = undefined;
+        }
+        return;
+      case "follow":
+        if (source) {
+          source.follow = !source.follow;
+          if (source.follow)
+            source.top = undefined;
+          else
+            this.scroll(0);
+        }
+        return;
+      case "toggle": {
+        const row = this.selectedRow();
+        if (row?.kind !== "agent" || !source)
+          return;
+        this.overrides.set(row.key, source.kind === "events" ? "transcript" : "events");
+        return this.choose();
+      }
+      case "tab":
+      case "next":
+        return this.agentStep(1);
+      case "backtab":
+      case "prev":
+        return this.agentStep(-1);
+      case "left":
+      case "escape":
+        this.focus = "tree";
+        return;
+      case "quit":
+        return this.close();
+    }
+  }
+  scroll(delta) {
+    const source = this.source;
+    if (!source)
+      return;
+    const length = this.wrapped?.lines.length ?? 0;
+    const max = Math.max(0, length - this.bodyHeight);
+    const current = source.follow || source.top === undefined ? max : source.top;
+    source.top = clamp(current + delta, 0, max);
+    if (delta < 0)
+      source.follow = false;
+  }
+  paint(style, text) {
+    const theme = this.deps.theme;
+    if (typeof theme?.fg !== "function")
+      return text;
+    try {
+      const out = theme.fg(style, text);
+      return typeof out === "string" ? out : text;
+    } catch {
+      return text;
+    }
+  }
+  highlight(text) {
+    const theme = this.deps.theme;
+    try {
+      if (typeof theme?.bg === "function") {
+        const out = theme.bg("selectedBg", text);
+        if (typeof out === "string")
+          return out;
+      }
+    } catch {}
+    try {
+      if (typeof theme?.inverse === "function") {
+        const out = theme.inverse(text);
+        if (typeof out === "string")
+          return out;
+      }
+    } catch {}
+    return text;
+  }
+  draw(width, height) {
+    const tree = this.trees.find((t) => t.id === this.expanded) ?? this.trees[0];
+    const now = this.deps.now();
+    const tag = this.focus === "tree" ? "[tree]" : "[detail]";
+    const title = tree ? `granny ${tree.id} \xB7 ${tree.phase ?? "Starting"} \xB7 ${tree.status} \xB7 ${duration((tree.end ?? now) - tree.start)}` : "granny \xB7 no run";
+    const room = width - tag.length - 1;
+    const header = room >= 10 ? `${fit(title, room).padEnd(room)} ${tag}` : fit(title, width);
+    const body = Math.max(1, height - 2);
+    let panes;
+    if (width >= 100) {
+      const treeWidth = clamp(Math.round(width * 0.38), 36, 60);
+      const left = this.treePane(treeWidth, body, now);
+      const right = this.detailPane(width - treeWidth - SEPARATOR.length, body, now);
+      panes = left.map((l, i) => `${l}${this.paint("dim", SEPARATOR)}${right[i] ?? ""}`);
+    } else
+      panes = this.focus === "tree" ? this.treePane(width, body, now) : this.detailPane(width, body, now);
+    return [this.paint("accent", header), ...panes, this.paint("dim", fit(this.help(), width))];
+  }
+  help() {
+    if (this.focus === "tree")
+      return TREE_HELP;
+    const source = this.source;
+    const toggle = this.selectedRow()?.kind === "agent" ? ` \xB7 t ${source?.kind === "events" ? "transcript" : "events"}` : "";
+    return `\u2191\u2193 PgUp/PgDn Home/End scroll \xB7 f follow (${source?.follow ? "on" : "off"})${toggle} \xB7 Tab/] [ agent \xB7 \u2190/Esc back \xB7 q close`;
+  }
+  treePane(width, height, now) {
+    const at = this.rows.findIndex((r) => r.key === this.selected);
+    if (at >= 0) {
+      if (at < this.treeTop)
+        this.treeTop = at;
+      if (at >= this.treeTop + height)
+        this.treeTop = at - height + 1;
+    }
+    this.treeTop = clamp(this.treeTop, 0, Math.max(0, this.rows.length - height));
+    const out = [];
+    for (const row of this.rows.slice(this.treeTop, this.treeTop + height)) {
+      const chosen = row.key === this.selected;
+      const plain = fit(`${chosen ? "\u203A" : " "} ${rowText(row, now, width - 2)}`, width).padEnd(width);
+      out.push(chosen ? this.highlight(plain) : this.paint(styleOf(row), plain));
+    }
+    while (out.length < height)
+      out.push(" ".repeat(width));
+    return out;
+  }
+  detailHeader(now) {
+    const row = this.selectedRow();
+    const source = this.source;
+    if (!row)
+      return "nothing selected";
+    const follow = `follow ${source?.follow ? "on" : "off"}`;
+    switch (row.kind) {
+      case "agent": {
+        const a = row.agent;
+        const view = this.runList().find((r) => r.id === row.run.id)?.live.roles.find((r) => r.info.session === a.session);
+        const state = a.state === "running" && view ? `${view.state} ${duration(now - view.since)}${view.state === "thinking" && view.heading ? ` \xB7 "${view.heading}"` : ""}` : `${a.state} ${duration((a.end ?? now) - a.start)}`;
+        return `${a.label} (${a.role}) \xB7 ${a.model ?? "default model"}${a.effort ? `/${a.effort}` : ""} \xB7 ${state} \xB7 ${source?.kind ?? "events"} \xB7 ${follow}`;
+      }
+      case "sub":
+        return `${row.sub.name} \xB7 subagent of ${row.agent.label} \xB7 transcript \xB7 ${follow}`;
+      case "phase": {
+        const p = row.phase;
+        return `${p.marker} ${p.title} \xB7 ${duration((p.end ?? now) - p.start)} \xB7 journal`;
+      }
+      default:
+        return `run ${row.run.id} \xB7 ${row.run.status}`;
+    }
+  }
+  detailPane(width, height, now) {
+    const header = wrap([this.detailHeader(now)], width).slice(0, Math.max(1, height - 1));
+    const source = this.source;
+    const bodyHeight = Math.max(1, height - header.length);
+    this.bodyHeight = bodyHeight;
+    const raw = source?.lines ?? source?.buffer.lines() ?? [];
+    const version = source?.lines ? source.linesVersion : source?.buffer.version ?? 0;
+    const key = `${source?.key}:${width}:${version}`;
+    if (this.wrapped?.key !== key)
+      this.wrapped = { key, lines: wrap(raw.length ? raw : [emptyText(source)], width) };
+    const lines = this.wrapped.lines;
+    const max = Math.max(0, lines.length - bodyHeight);
+    const top = source?.follow ? max : clamp(source?.top ?? max, 0, max);
+    const out = [...header.map((h) => this.paint("accent", h)), ...lines.slice(top, top + bodyHeight)];
+    while (out.length < height)
+      out.push("");
+    return out;
+  }
+}
+function eventLines(line) {
+  if (!line.trim())
+    return [];
+  try {
+    return entryLines(JSON.parse(line));
+  } catch {
+    return [];
+  }
+}
+function emptyText(source) {
+  if (!source)
+    return "";
+  if ((source.file || source.dir) && !source.polled)
+    return "(reading \u2026)";
+  if (source.kind === "events")
+    return "(no events yet)";
+  if (source.kind === "transcript")
+    return source.file || source.dir ? "(no transcript yet)" : "(no transcript yet - the subagent has not written one)";
+  return "(nothing yet)";
+}
+function styleOf(row) {
+  if (row.kind === "group")
+    return "dim";
+  const state = row.kind === "agent" ? row.agent.state : undefined;
+  const marker = row.kind === "phase" ? row.phase.marker : state ? AGENT_MARKERS[state] : undefined;
+  if (marker === "\u25CF")
+    return "accent";
+  if (marker === "\u2717")
+    return "error";
+  if (marker === "\u2298" || marker === "\u2026")
+    return "muted";
+  return "text";
 }
 
 // src/adapters/omp/extension.ts
@@ -3331,7 +4450,8 @@ function isTransient(message) {
   return TRANSIENT.test(message);
 }
 var STATUS_KEEP_MS = 60000;
-var WATCH_HELP = "granny-workflow: watch a granny run - /granny picks a role and shows its event log live; /granny <runId> picks that run; /granny off|on hides or shows the run panel in this session";
+var WATCH_HELP = "granny-workflow: watch granny runs - /granny (or alt+w) opens the run navigator: this process's runs, their phases and agents, and the selected one's live events or transcript; /granny <runId> opens it on that run; /granny off|on hides or shows the run panel in this session";
+var OVERLAY = { width: "100%", maxHeight: "100%", margin: 0, fullscreen: true, mouseTracking: false };
 function turnError(turn) {
   if (turn.assistant?.stopReason === "error")
     return turn.assistant.errorMessage || "unknown provider error";
@@ -3340,10 +4460,10 @@ function turnError(turn) {
   return;
 }
 function readSubmission(path) {
-  if (!existsSync3(path))
+  if (!existsSync2(path))
     return;
   try {
-    return JSON.parse(readFileSync2(path, "utf8"));
+    return JSON.parse(readFileSync3(path, "utf8"));
   } catch {
     return;
   }
@@ -3389,7 +4509,7 @@ var createGrannyExtension = ({ delays = DEFAULT_DELAYS, sleep = pause, killGrace
       return `granny_run refused:
 - ${problems.join(`
 - `)}`;
-    const layers = [readJson(globalConfigPath()), readJson(join2(input.repo, "granny.config.json")), input.config];
+    const layers = [readJson(globalConfigPath()), readJson(join4(input.repo, "granny.config.json")), input.config];
     const config = resolveConfig(layers, "omp");
     const unknownChecks = stageCheckErrors(input.stages, config.checks);
     if (unknownChecks.length)
@@ -3404,7 +4524,7 @@ var createGrannyExtension = ({ delays = DEFAULT_DELAYS, sleep = pause, killGrace
 - ${blockers.join(`
 - `)}`;
     const id = runId();
-    const dir = join2(input.repo, config.workDir, "runs", id);
+    const dir = join4(input.repo, config.workDir, "runs", id);
     mkdirSync2(dir, { recursive: true });
     shared.clearStatus?.();
     shared.clearStatus = undefined;
@@ -3412,10 +4532,10 @@ var createGrannyExtension = ({ delays = DEFAULT_DELAYS, sleep = pause, killGrace
     const live = new LiveRun(id, watch !== "off" && ctx?.hasUI === true ? ctx.ui : undefined, { now, renderEveryMs }, !shared.hidden);
     const run = { id, dir, status: "running", cancelled: false, abort: new AbortController, children: new Set, agents: 0, waiters: new Set, live, watch };
     runs.set(id, run);
-    const journal = (type, data) => appendFileSync3(join2(dir, "journal.jsonl"), JSON.stringify({ t: stamp(), type, ...data }) + `
+    const journal = (type, data) => appendFileSync3(join4(dir, "journal.jsonl"), JSON.stringify({ t: stamp(), type, ...data }) + `
 `);
-    const writeStatus = (extra = {}) => writeFileSync(join2(dir, "status.json"), JSON.stringify({ id, status: run.status, repo: input.repo, branch: input.branch, ...extra }, null, 2));
-    writeFileSync(join2(dir, "input.json"), JSON.stringify({ ...input, config: layers }, null, 2));
+    const writeStatus = (extra = {}) => writeFileSync(join4(dir, "status.json"), JSON.stringify({ id, status: run.status, repo: input.repo, branch: input.branch, ...extra }, null, 2));
+    writeFileSync(join4(dir, "input.json"), JSON.stringify({ ...input, config: layers }, null, 2));
     writeStatus({ startedAt: stamp() });
     const parentModel = ctx?.model?.provider && ctx?.model?.id ? `${ctx.model.provider}/${ctx.model.id}` : undefined;
     const bin = process.env.GRANNY_OMP_BIN ?? "omp";
@@ -3524,9 +4644,9 @@ When done, call the \`${tool}\` tool exactly once with your result. That call is
         if (!tool)
           throw new Error(`no submit tool for result kind "${req.kind}"`);
         const model = req.model ?? parentModel;
-        const session = join2(dir, "sessions", `${++run.agents}-${slug2(req.label)}`);
+        const session = join4(dir, "sessions", `${++run.agents}-${slug2(req.label)}`);
         mkdirSync2(session, { recursive: true });
-        const spec = { tool, kind: req.kind, out: join2(session, "submission.json"), access: req.access };
+        const spec = { tool, kind: req.kind, out: join4(session, "submission.json"), access: req.access };
         const args = [
           "--mode",
           "json",
@@ -3542,7 +4662,7 @@ When done, call the \`${tool}\` tool exactly once with your result. That call is
           ...req.effort ? ["--thinking", req.effort] : []
         ];
         journal("agent", { label: req.label, role: req.role, phase: req.phase, session, model: model ?? null, ...req.effort ? { effort: req.effort } : {} });
-        const path = join2(session, "events.jsonl");
+        const path = join4(session, "events.jsonl");
         const log = watch === "full" ? new EventLog(path, now, (e) => journal("event-log-failed", { label: req.label, path, error: String(e?.message ?? e) })) : undefined;
         const view = live.role({ label: req.label, role: req.role, model, effort: req.effort, session, phase: req.phase, ...log ? { log: path } : {} }, log && ((entry) => log.write(entry)));
         const end = (outcome, error) => {
@@ -3585,7 +4705,7 @@ When done, call the \`${tool}\` tool exactly once with your result. That call is
         journal("notify-failed", { error: String(e?.message ?? e) });
       }
     };
-    const writeResult = (result) => writeFileSync(join2(dir, "result.json"), JSON.stringify(result, null, 2));
+    const writeResult = (result) => writeFileSync(join4(dir, "result.json"), JSON.stringify(result, null, 2));
     const settle = (reply, notice) => {
       run.reply = reply;
       const clear = live.close(run.status);
@@ -3625,7 +4745,7 @@ Call granny_status with runId "${id}" and report to the user.`;
       }
     }).catch(() => {});
     return `granny run ${id} started on ${input.repo} (${input.branch}), ${input.goal !== undefined ? "planning only" : `${input.stages?.length ?? 0} stage(s)${config.parallel ? `, up to ${config.maxParallel} in parallel` : ""}`}, threshold ${config.threshold}, maxRounds ${config.maxRounds}.
-Journal: ${join2(dir, "journal.jsonl")}
+Journal: ${join4(dir, "journal.jsonl")}
 To wait in this turn, call granny_wait { runId: "${id}" }; otherwise end your turn - the finish message starts a new one. Never write your own watcher, sleep or poll loop on the run files. Use granny_status { runId: "${id}" } for progress and granny_cancel to stop it.`;
   };
   pi.registerTool({
@@ -3729,22 +4849,33 @@ ${run.live.lines(Number.POSITIVE_INFINITY).join(`
     if (run.watch !== "full") {
       return say(ctx, `granny: watching is off for run ${run.id} (watch: "${run.watch}") - set "watch": "full" in granny.config.json or the run's config to log each role and watch it with /granny.`);
     }
-    const roles = run.live.roles;
-    if (!roles.length)
-      return say(ctx, `granny: run ${run.id} has started no role yet.`);
-    const tui = ctx?.hasUI === true && typeof ctx.ui?.select === "function" && typeof ctx.ui?.custom === "function" && (ctx.mode === undefined || ctx.mode === "tui");
-    if (!tui)
+    const tui = ctx?.hasUI === true && typeof ctx.ui?.custom === "function" && (ctx.mode === undefined || ctx.mode === "tui");
+    if (!tui) {
+      const roles = run.live.roles;
+      if (!roles.length)
+        return say(ctx, `granny: run ${run.id} has started no role yet.`);
       return say(ctx, [`granny run ${run.id} - event log per role:`, ...roles.map((r) => `  ${r.info.label} (${r.info.role}): ${r.info.log}`)].join(`
 `));
-    const t = now();
-    const options = roles.map((r, i) => ({ label: `${i + 1}. ${r.info.label} (${r.info.role})`, description: r.summary(t) }));
-    const picked = await ctx.ui.select(`granny ${run.id} \xB7 ${run.live.phase} - pick a role to watch`, options);
-    const role = roles[options.findIndex((o) => o.label === picked)];
-    if (!role?.info.log)
+    }
+    if (shared.navigating)
       return;
-    const path = role.info.log;
-    const title = () => `granny ${run.id} \xB7 ${role.info.label} (${role.info.role}) \xB7 ${role.active ? role.state : "done"}`;
-    await ctx.ui.custom((tuiHost, _theme, keys, done) => new LogView(path, title, tuiHost, keys, () => done(undefined)), { overlay: true });
+    shared.navigating = true;
+    let navigator;
+    try {
+      await ctx.ui.custom((tuiHost, theme, keys, done) => navigator = new Navigator({
+        runs: () => [...runs.values()].filter((r) => r.watch === "full"),
+        runId: run.id,
+        tui: tuiHost,
+        theme,
+        keys,
+        done: () => done(undefined),
+        now,
+        tickMs: renderEveryMs
+      }), { overlay: true, overlayOptions: OVERLAY });
+    } finally {
+      navigator?.dispose();
+      shared.navigating = false;
+    }
   };
   pi.registerCommand?.("granny", {
     description: WATCH_HELP,
@@ -3760,6 +4891,14 @@ ${run.live.lines(Number.POSITIVE_INFINITY).join(`
       }
     }
   });
+  try {
+    pi.registerShortcut?.("alt+w", {
+      description: "granny-workflow: open the run navigator",
+      handler: (ctx) => {
+        watchRun("", ctx).catch(() => {});
+      }
+    });
+  } catch {}
   pi.registerTool({
     name: "granny_cancel",
     label: "granny cancel",

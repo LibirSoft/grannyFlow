@@ -33,15 +33,20 @@ function makeRepo(): string {
 function fakePi() {
   const tools = new Map<string, any>()
   const commands = new Map<string, any>()
+  const shortcuts = new Map<string, any>()
   const handlers: Array<[string, any]> = []
   const sent: Array<{ message: any; options: any }> = []
   const pi = {
     registerTool: (t: any) => tools.set(t.name, t),
     registerCommand: (name: string, options: any) => commands.set(name, options),
+    registerShortcut: (shortcut: string, options: any) => {
+      if (shortcuts.has(shortcut)) throw new Error(`${shortcut} registered twice`)
+      shortcuts.set(shortcut, options)
+    },
     on: (event: string, handler: any) => handlers.push([event, handler]),
     sendMessage: (message: any, options: any) => sent.push({ message, options }),
   }
-  return { pi, tools, commands, handlers, sent }
+  return { pi, tools, commands, shortcuts, handlers, sent }
 }
 
 const CTX = { cwd: '/', model: { provider: 'omp-test', id: 'parent-model' } }
@@ -73,7 +78,8 @@ function feed(role: RoleActivity, line: string, now: number) {
   else role.event(JSON.parse(line), now)
 }
 
-const liveRoles = (id: string): RoleActivity[] => (globalThis as any)[Symbol.for('granny-workflow.omp.state')].runs.get(id).live.roles
+const ompState = () => (globalThis as any)[Symbol.for('granny-workflow.omp.state')] as { runs: Map<string, any>; navigating?: boolean }
+const liveRoles = (id: string): RoleActivity[] => ompState().runs.get(id).live.roles
 
 const readRun = (dir: string, file: string) => (existsSync(join(dir, file)) ? readFileSync(join(dir, file), 'utf8') : '')
 const journalOf = (dir: string) => readRun(dir, 'journal.jsonl').trim().split('\n').filter(Boolean).map(l => JSON.parse(l))
@@ -520,6 +526,7 @@ describe('omp extension in a role process (child mode)', () => {
     await extension(f.pi as any)
     expect([...f.tools.keys()]).toEqual(['granny_submit_judgement'])
     expect([...f.commands.keys()]).toEqual([])
+    expect([...f.shortcuts.keys()]).toEqual([])
     const submit = f.tools.get('granny_submit_judgement')
     expect(submit.loadMode).toBe('essential')
     expect(submit.parameters).toBe(SCHEMAS.judge)
@@ -596,6 +603,8 @@ describe('omp extension in the user session (parent mode)', () => {
     process.env.GRANNY_OMP_BIN = bin
     process.env.FAKE_OMP_DIR = fake
     process.env.GRANNY_CONFIG = join(repo, 'no-global-config.json')
+    ompState().runs.clear()
+    ompState().navigating = false
   })
   afterEach(() => {
     for (const file of ['hang-implement-one.pid', 'wait-implement-one.pid', 'wait-review-one-r1-reviewer.pid']) {
@@ -644,7 +653,8 @@ describe('omp extension in the user session (parent mode)', () => {
     expect(f.tools.get('granny_run').parameters.required).toEqual(['repo', 'branch'])
     expect(f.handlers).toEqual([])
     expect([...f.commands.keys()]).toEqual(['granny'])
-    expect(f.commands.get('granny').description).toContain('watch')
+    expect([...f.shortcuts.keys()]).toEqual(['alt+w'])
+    expect(f.commands.get('granny').description).toContain('alt+w')
     expect(f.commands.get('granny').getArgumentCompletions('o').map((i: any) => i.value)).toEqual(['off', 'on'])
   })
 
@@ -1318,72 +1328,153 @@ describe('omp extension in the user session (parent mode)', () => {
     }
   })
 
-  const commandUi = () => {
+  const OVERLAY = { overlay: true, overlayOptions: { width: '100%', maxHeight: '100%', margin: 0, fullscreen: true, mouseTracking: false } }
+  const at = (s: number) => new Date(Date.UTC(2026, 0, 1, 0, 0, s)).toISOString()
+  const SESSION = [
+    { type: 'title', v: 1, title: 'implement one', updatedAt: at(0), pad: '' },
+    { type: 'session', version: 3, id: 'fake-session', timestamp: at(0), cwd: '/work' },
+    { type: 'message', timestamp: at(1), message: { role: 'user', content: [{ type: 'text', text: 'Implement stage one.' }] } },
+    { type: 'message', timestamp: at(2), message: { role: 'assistant', content: [{ type: 'toolCall', id: 'c1', name: 'read', arguments: { path: 'plan.md' }, intent: 'Reading the plan' }], stopReason: 'toolUse' } },
+    { type: 'message', timestamp: at(3), message: { role: 'toolResult', toolCallId: 'c1', toolName: 'read', content: [{ type: 'text', text: '# Plan' }], isError: false } },
+    { type: 'message', timestamp: at(4), message: { role: 'assistant', content: [{ type: 'text', text: 'Stage one is implemented.' }], stopReason: 'stop' } },
+  ]
+  const SUB_SESSION = [
+    { type: 'session', version: 3, id: 'sub-session', timestamp: at(5), cwd: '/work' },
+    { type: 'message', timestamp: at(6), message: { role: 'assistant', content: [{ type: 'text', text: 'Baseline gates are green.' }], stopReason: 'stop' } },
+  ]
+
+  const commandUi = (custom?: (factory: any, options: any) => unknown) => {
     const u = fakeUi()
     const notes: string[] = []
-    const selects: Array<{ title: string; options: Array<{ label: string; description?: string }> }> = []
-    const views: Array<{ view: any; options: any; renders: number[] }> = []
+    const selects: unknown[] = []
+    const views: Array<{ view: any; options: any; renders: number[]; closed: number }> = []
     const ui = {
       ...u.ui,
       notify: (message: string) => void notes.push(message),
-      select: async (title: string, options: any[]) => {
-        selects.push({ title, options })
-        return options.find(o => o.label.includes('implement one'))?.label
-      },
-      custom: (factory: any, options: any) =>
-        new Promise(resolve => {
-          const renders: number[] = []
-          const view = factory({ requestRender: () => renders.push(1) }, {}, { matches: () => false }, resolve)
-          views.push({ view, options, renders })
-        }),
+      select: async (...args: unknown[]) => void selects.push(args),
+      custom:
+        custom ??
+        ((factory: any, options: any) =>
+          new Promise(resolve => {
+            const entry = { view: undefined as any, options, renders: [] as number[], closed: 0 }
+            views.push(entry)
+            entry.view = factory({ requestRender: () => entry.renders.push(1), terminal: { rows: 40 } }, {}, { matches: () => false }, (value: unknown) => {
+              entry.closed++
+              resolve(value)
+            })
+          })),
     }
     return { ...u, ui, notes, selects, views, ctx: { ...CTX, hasUI: true, mode: 'tui', ui } }
   }
+  const screen = (view: any, width = 160) => (view.render(width) as string[]).join('\n')
+  const press = (view: any, ...keys: string[]) => {
+    for (const key of keys) view.handleInput(key)
+  }
 
-  it('/granny lists the roles of the latest run and opens a role\'s event log live in an overlay until Esc', async () => {
-    behave({ events: { 'implement-one': STREAM }, hold: ['implement-one'] })
+  it('/granny opens the run navigator full-screen: the run\'s phases and agents, a running agent\'s live events, then transcripts once it ended, until Esc', async () => {
+    behave({
+      events: { 'implement-one': STREAM },
+      hold: ['implement-one'],
+      session: { 'implement-one': SESSION },
+      subagentSessions: { 'implement-one': { BaselineGates: SUB_SESSION } },
+    })
     const c = commandUi()
     const f = fakePi()
     await createGrannyExtension({ renderEveryMs: 10 })(f.pi as any)
     const { id, dir } = await start(f, {}, c.ctx)
     await waitFor(() => sessionFiles(dir, 'events.jsonl').some(p => readFileSync(p, 'utf8').includes('"subagents"')))
-    const granny = f.commands.get('granny')
 
-    const opened = granny.handler('', c.ctx)
+    const opened = f.commands.get('granny').handler('', c.ctx)
     await waitFor(() => c.views.length === 1)
-    expect(c.selects[0]!.title).toContain(`granny ${id}`)
-    expect(c.selects[0]!.options).toEqual([{ label: '1. implement one (implementer)', description: expect.stringMatching(/^omp-test\/parent-model · waiting for model \d+s · \d+s$/) }])
-    expect(c.views[0]!.options).toEqual({ overlay: true })
+    expect(c.views[0]!.options).toEqual(OVERLAY)
+    expect(c.selects).toEqual([])
     const view = c.views[0]!.view
-    const lines: string[] = view.render(100)
-    expect(lines[0]).toMatch(new RegExp(`^granny ${id} · implement one \\(implementer\\) · waiting for model$`))
-    const body = lines.join('\n')
-    expect(body).toMatch(/\d\d:\d\d:\d\d  · thinking/)
-    expect(body).toContain('  » Reading the plan')
-    expect(body).toContain('  ▸ read: Reading the plan (plan.md)')
-    expect(body).toContain('  ✎ answer:\n')
-    expect(body).toContain('          Spawning helpers.')
-    expect(body).toContain('  └ task: BaselineGates')
-    expect(body).not.toContain('running read')
-    expect(body).not.toContain('process exited')
-    expect(lines.at(-1)).toBe('Esc closes')
-    expect(view.render(20).every((l: string) => l.length <= 20)).toBe(true)
+    await waitFor(() => screen(view).includes('└ task: BaselineGates'), 3000)
+    const live = screen(view).split('\n')
+    expect(live[0]).toMatch(new RegExp(`^granny ${id} · Implement · running · \\d+s +\\[tree\\]$`))
+    expect(live.some(l => l.startsWith(`  ▾ run ${id} · running · `))).toBe(true)
+    expect(live.some(l => /^ {4}● Implement · \d+s/.test(l))).toBe(true)
+    expect(live.some(l => /^› {7}● implement one · \d+s · waiting for model \d+s +│/.test(l))).toBe(true)
+    expect(live.some(l => l.startsWith('          └ BaselineGates '))).toBe(true)
+    expect(live.some(l => l.includes('│ implement one (implementer) · omp-test/parent-model · waiting for model ') && l.includes(' · events · follow on'))).toBe(true)
+    for (const text of ['  » Reading the plan', '  ▸ read: Reading the plan (plan.md)', '  ✎ answer:', '  └ task: BaselineGates']) {
+      expect(live.some(l => l.includes(`│ `) && l.includes(text))).toBe(true)
+    }
+    expect(live.at(-1)).toBe('↑↓ move · Enter/→ open · Space fold · Tab/] next agent · [ prev · Esc close')
+    expect(live).toHaveLength(40)
 
     writeFileSync(join(fake, 'release-implement-one'), '')
-    await finished(dir)
-    await waitFor(() => c.views[0]!.renders.length > 0, 3000)
-    expect(view.render(100).join('\n')).toMatch(/■ process exited 0/)
-    view.handleInput('x')
-    view.handleInput('\x1b')
-    expect(await opened).toBeUndefined()
+    expect((await finished(dir)).stages[0].outcome).toBe('clean')
+    await waitFor(() => screen(view).includes(`▾ run ${id} · done · `), 3000)
+    const ended = screen(view).split('\n')
+    const tree = ended.map(l => l.split(' │ ')[0]!.trimEnd())
+    expect(tree.some(l => /^ {4}✓ Review · \d+s$/.test(l))).toBe(true)
+    expect(tree.filter(l => l === '      one · round 1')).toHaveLength(2)
+    expect(tree).toContain('      one · round 2')
+    for (const label of ['review one r1 reviewer', 'judge one r1', 'fix one r1', 'review one r2 reviewer']) {
+      expect(tree.some(l => new RegExp(`^ {8}✓ ${label}( · | {2})`).test(l))).toBe(true)
+    }
+    expect(tree.some(l => /^ {4}✓ PR ready · \d+s$/.test(l))).toBe(true)
+    expect(tree.some(l => /^› {7}✓ implement one( · | {2})/.test(l))).toBe(true)
+    expect(tree).toContain('          └ BaselineGates')
 
-    const again = granny.handler(id, c.ctx)
+    press(view, '\r')
+    await waitFor(() => screen(view).includes('✎ Stage one is implemented.'), 3000)
+    const transcript = screen(view)
+    expect(transcript.split('\n')[0]).toEndWith('[detail]')
+    expect(transcript).toContain('│ implement one (implementer) · omp-test/parent-model · done ')
+    expect(transcript).toContain('── session fake-session · /work')
+    expect(transcript).toMatch(/\d\d:\d\d:\d\d {2}▸ read: Reading the plan/)
+    expect(transcript.split('\n').at(-1)).toStartWith('↑↓ PgUp/PgDn Home/End scroll · f follow (off) · t events')
+
+    press(view, '\x1b', '\x1b[B')
+    await waitFor(() => screen(view).includes('✎ Baseline gates are green.'), 3000)
+    expect(screen(view)).toContain('│ BaselineGates · subagent of implement one · transcript')
+    expect(screen(view)).not.toContain('Stage one is implemented.')
+
+    press(view, '\r', '\x1b', '\x1b')
+    expect(await opened).toBeUndefined()
+    expect(c.views[0]!.closed).toBe(1)
+    expect(view.disposed).toBe(true)
+  })
+
+  it('/granny <runId> opens the navigator on that run, lists only the runs with watch "full", and a second open while one is open does nothing', async () => {
+    behave({ hold: ['implement-one'] })
+    const c = commandUi()
+    const f = fakePi()
+    await createGrannyExtension({ renderEveryMs: 10 })(f.pi as any)
+    writeFileSync(join(fake, 'release-implement-one'), '')
+    const first = await start(f, {}, c.ctx)
+    await finished(first.dir)
+    const second = await start(f, { watch: 'panel', maxRounds: 2 }, c.ctx)
+    await finished(second.dir)
+    rmSync(join(fake, 'release-implement-one'))
+    const third = await start(f, { maxRounds: 3 }, c.ctx)
+    await waitFor(() => existsSync(join(third.dir, 'sessions')))
+    const granny = f.commands.get('granny')
+
+    const opened = granny.handler(first.id, c.ctx)
+    await waitFor(() => c.views.length === 1)
+    const shown = screen(c.views[0]!.view)
+    expect(shown.split('\n')[0]).toStartWith(`granny ${first.id} · `)
+    expect(shown).toContain(`▾ run ${first.id} · done`)
+    expect(shown).toContain(`▸ run ${third.id} · running`)
+    expect(shown).not.toContain(second.id)
+
+    await granny.handler('', c.ctx)
+    await granny.handler(third.id, c.ctx)
+    expect(c.views).toHaveLength(1)
+    expect(c.notes).toEqual([])
+
+    press(c.views[0]!.view, 'q')
+    await opened
+    const reopened = granny.handler('', c.ctx)
     await waitFor(() => c.views.length === 2)
-    const roles = c.selects[1]!.options
-    expect(roles.length).toBe(fs.readdirSync(join(dir, 'sessions')).length)
-    expect(roles.every(o => / · done · \d+s$/.test(o.description!))).toBe(true)
-    c.views[1]!.view.handleInput('q')
-    await again
+    expect(screen(c.views[1]!.view).split('\n')[0]).toStartWith(`granny ${third.id} · `)
+    press(c.views[1]!.view, 'q')
+    await reopened
+    writeFileSync(join(fake, 'release-implement-one'), '')
+    await finished(third.dir)
   })
 
   it('/granny off hides the panel for this session and /granny on shows it again', async () => {
@@ -1408,23 +1499,32 @@ describe('omp extension in the user session (parent mode)', () => {
     }
     await waitFor(() => (c.widget(key) ?? []).some(l => l.includes('implement one')))
     expect(c.status(key)).toStartWith(`granny ${id} · `)
+    expect(c.views).toEqual([])
     writeFileSync(join(fake, 'release-implement-one'), '')
     await finished(dir)
     expect(c.status(key)).toBe(`granny ${id}: done`)
   })
 
-  it('/granny says watching is off for a run with watch "panel", and how to turn it on', async () => {
+  it('/granny and alt+w say watching is off for a run with watch "panel", and how to turn it on; /granny names an unknown run and the lack of any run', async () => {
     behave({ hold: ['implement-one'] })
     const c = commandUi()
     const f = fakePi()
     await createGrannyExtension({ renderEveryMs: 10 })(f.pi as any)
+    await f.commands.get('granny').handler('', c.ctx)
+    expect(c.notes.at(-1)).toBe('granny: no granny run in this omp process yet.')
     const { id, dir } = await start(f, { watch: 'panel' }, c.ctx)
     await waitFor(() => existsSync(join(dir, 'sessions')))
+    const off = `granny: watching is off for run ${id} (watch: "panel") - set "watch": "full" in granny.config.json or the run's config to log each role and watch it with /granny.`
     await f.commands.get('granny').handler('', c.ctx)
-    expect(c.notes.at(-1)).toBe(`granny: watching is off for run ${id} (watch: "panel") - set "watch": "full" in granny.config.json or the run's config to log each role and watch it with /granny.`)
-    expect(c.selects).toEqual([])
+    expect(c.notes.at(-1)).toBe(off)
+    c.notes.length = 0
+    expect(f.shortcuts.get('alt+w').handler(c.ctx)).toBeUndefined()
+    await waitFor(() => c.notes.length > 0)
+    expect(c.notes).toEqual([off])
     await f.commands.get('granny').handler('no-such-run', c.ctx)
     expect(c.notes.at(-1)).toBe('granny: no run "no-such-run" in this omp process - /granny watches the runs started here.')
+    expect(c.views).toEqual([])
+    expect(c.selects).toEqual([])
     writeFileSync(join(fake, 'release-implement-one'), '')
     await finished(dir)
   })
@@ -1444,6 +1544,62 @@ describe('omp extension in the user session (parent mode)', () => {
     await finished(dir)
   })
 
+  it('registers alt+w in parent mode, which opens the navigator in the TUI, once at a time', async () => {
+    behave({ hold: ['implement-one'] })
+    const c = commandUi()
+    const f = fakePi()
+    await createGrannyExtension({ renderEveryMs: 10 })(f.pi as any)
+    expect([...f.shortcuts.keys()]).toEqual(['alt+w'])
+    expect(f.shortcuts.get('alt+w').description).toBe('granny-workflow: open the run navigator')
+    const { id, dir } = await start(f, {}, c.ctx)
+    await waitFor(() => existsSync(join(dir, 'sessions')))
+    const handler = f.shortcuts.get('alt+w').handler
+    expect(handler(c.ctx)).toBeUndefined()
+    await waitFor(() => c.views.length === 1)
+    expect(c.views[0]!.options).toEqual(OVERLAY)
+    expect(screen(c.views[0]!.view).split('\n')[0]).toStartWith(`granny ${id} · `)
+    handler(c.ctx)
+    await Bun.sleep(50)
+    expect(c.views).toHaveLength(1)
+    press(c.views[0]!.view, 'q')
+    await waitFor(() => c.views[0]!.closed === 1)
+    handler(c.ctx)
+    await waitFor(() => c.views.length === 2)
+    press(c.views[1]!.view, 'q')
+    writeFileSync(join(fake, 'release-implement-one'), '')
+    await finished(dir)
+  })
+
+  it('swallows a ui.custom that throws or rejects when alt+w opens the navigator, disposes a navigator it built, and the run finishes', async () => {
+    behave({ hold: ['implement-one'] })
+    const f = fakePi()
+    await createGrannyExtension({ renderEveryMs: 10 })(f.pi as any)
+    let calls = 0
+    const throwing = commandUi(() => {
+      calls++
+      throw new Error('stale tui')
+    })
+    const built: any[] = []
+    const rejecting = commandUi(async (factory: any) => {
+      calls++
+      built.push(factory({ requestRender: () => {}, terminal: { rows: 40 } }, {}, { matches: () => false }, () => {}))
+      throw new Error('overlay refused')
+    })
+    const { id, dir } = await start(f, {}, throwing.ctx)
+    await waitFor(() => existsSync(join(dir, 'sessions')))
+    const handler = f.shortcuts.get('alt+w').handler
+    expect(handler(throwing.ctx)).toBeUndefined()
+    expect(handler(rejecting.ctx)).toBeUndefined()
+    await waitFor(() => calls === 2)
+    await Bun.sleep(20)
+    expect(handler(rejecting.ctx)).toBeUndefined()
+    await waitFor(() => calls === 3)
+    await waitFor(() => built.length === 2 && built.every(v => v.disposed))
+    writeFileSync(join(fake, 'release-implement-one'), '')
+    expect((await finished(dir)).stages[0].outcome).toBe('clean')
+    await waitFor(() => f.sent.length > 0)
+    expect(f.sent[0]!.message.content).toContain(`[granny] Run ${id} finished.`)
+  })
   it('keeps the run going when the UI throws', async () => {
     behave({})
     const f = fakePi()
