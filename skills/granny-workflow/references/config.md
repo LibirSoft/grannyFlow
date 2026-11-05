@@ -200,20 +200,32 @@ The fix step is the implementer with write access (label `fix plan review r<n>`)
 
 | `engine` | runs |
 |---|---|
-| `auto` (default) | on Claude Code: the Codex plugin when its companion script is installed and `node` is on `PATH`, otherwise the Codex CLI. On opencode and omp: always the Codex CLI |
-| `codex-plugin` | OpenAI's Codex plugin for Claude Code, on every host. When the companion script is missing, or `node` is not on `PATH`, the reviewer fails with a note saying so - it never falls back to the CLI |
-| `codex` | the Codex CLI: `codex exec review` |
+| `auto` (default) | on Claude Code: the Codex plugin when its companion script is installed and `node` is on `PATH`, otherwise the Codex CLI. On opencode: always the Codex CLI. Not on omp |
+| `codex-plugin` | OpenAI's Codex plugin for Claude Code, on Claude Code and opencode. When the companion script is missing, or `node` is not on `PATH`, the reviewer fails with a note saying so - it never falls back to the CLI |
+| `codex` | the Codex CLI: `codex exec review`; not on omp |
 | `agent` | a host subagent told to stay read-only ([Read-only roles](#read-only-roles)) reviews the diff with the "Reviewer - agent engine" prompt, on this entry's `model` and `effort`. On Claude Code that means Claude models only (`opus`, `sonnet`, `haiku`, a Claude model ID); to have GLM or another provider review there, use engine `command` with a CLI that reaches it, such as `opencode run`. On opencode, any `provider/model` the server has; on omp, any model omp has |
 | `command` | your command, any CLI - see [Command reviewers](#command-reviewers) |
 
-Codex, Opus and GLM reviewing every stage. On opencode and omp the GLM reviewer is an agent on a provider model:
+**omp runs no Codex reviewer.** The Codex engines - `auto`, `codex` and `codex-plugin`, so also an entry that names no `engine` - are refused before an omp run starts. omp reaches Codex models itself: for a Codex review there, use an `agent` reviewer on one of them (`omp models` lists the `openai-codex/...` ids):
+
+```json
+{
+  "reviewers": [
+    { "name": "codex", "engine": "agent", "model": { "omp": "openai-codex/gpt-6.1-sol" } },
+    { "name": "opus", "engine": "agent", "model": { "omp": "anthropic/claude-opus-5-5" } },
+    { "name": "glm", "engine": "agent", "model": { "omp": "zai/glm-5.3" } }
+  ]
+}
+```
+
+Codex, Opus and GLM reviewing every stage. On opencode the GLM reviewer is an agent on a provider model:
 
 ```json
 {
   "reviewers": [
     { "name": "codex", "engine": "auto" },
-    { "name": "opus", "engine": "agent", "model": { "opencode": "anthropic/claude-opus-5-5", "omp": "anthropic/claude-opus-5-5" } },
-    { "name": "glm", "engine": "agent", "model": { "opencode": "opencode/glm-5.3-flash-free", "omp": "zai/glm-5.3" } }
+    { "name": "opus", "engine": "agent", "model": { "opencode": "anthropic/claude-opus-5-5" } },
+    { "name": "glm", "engine": "agent", "model": { "opencode": "opencode/glm-5.3-flash-free" } }
   ]
 }
 ```
@@ -385,9 +397,9 @@ The companion talks to Codex through an app-server broker it starts in the backg
 | `mode` | `review` (default), `adversarial-review` | `review` is Codex's built-in reviewer; `adversarial-review` is the plugin's skeptical, ship/no-ship review with `critical`/`high`/`medium`/`low` findings. It needs the plugin: engine `codex-plugin`, or `auto` on Claude Code, where a missing companion or a missing `node` fails the reviewer instead of running a plain CLI review |
 | `focus` | non-empty string | extra instructions for `adversarial-review` only (the plain review takes no focus text), passed shell-quoted after `--` |
 
-Rejected before any agent starts: `mode` on engines `codex`, `agent` and `command`; `adversarial-review` with `auto` on opencode or omp (where `auto` means the CLI); `focus` without `adversarial-review`.
+Rejected before any agent starts: `mode` on engines `codex`, `agent` and `command`; `adversarial-review` with `auto` on opencode (where `auto` means the CLI); every Codex engine on omp; `focus` without `adversarial-review`.
 
-An adversarial review on every host:
+An adversarial review on Claude Code and opencode (omp runs no Codex reviewer):
 
 ```json
 { "reviewers": [{ "name": "codex", "engine": "codex-plugin", "mode": "adversarial-review", "focus": "data loss, retries and auth" }] }

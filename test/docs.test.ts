@@ -18,20 +18,25 @@ describe('skill docs', () => {
     expect(read('references/prompts.md')).toBe(renderPrompts())
   })
 
-  it('has only JSON examples that resolveConfig accepts on every host', () => {
+  it('has only JSON examples that resolveConfig accepts on every host - omp refusing only the Codex reviewers, with its own message', () => {
     const docs: Record<string, string> = { 'README.md': readRoot('README.md'), 'SKILL.md': read('SKILL.md') }
     for (const f of readdirSync(join(skill, 'references'))) docs[`references/${f}`] = read(`references/${f}`)
     const examples = Object.entries(docs).flatMap(([file, md]) => jsonBlocks(md).map(block => ({ file, block })))
     expect(examples.length).toBeGreaterThanOrEqual(10)
     for (const { file, block } of examples) {
+      const config = JSON.parse(block)
+      const codex = (config.reviewers ?? []).some((r: any) => ['auto', 'codex', 'codex-plugin', undefined].includes(r?.engine))
       for (const host of HOSTS) {
         let problem: string | undefined
         try {
-          resolveConfig([JSON.parse(block)], host)
+          resolveConfig([config], host)
         } catch (e) {
           problem = String(e)
         }
-        expect({ file, host, block, problem }).toEqual({ file, host, block, problem: undefined })
+        if (host === 'omp' && codex) {
+          expect(problem).toContain('runs Codex, which granny does not run on omp')
+          expect(problem!.split('\n- ').slice(1).every(line => line.includes('which granny does not run on omp'))).toBe(true)
+        } else expect({ file, host, block, problem }).toEqual({ file, host, block, problem: undefined })
       }
     }
   })

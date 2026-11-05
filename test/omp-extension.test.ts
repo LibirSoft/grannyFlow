@@ -331,11 +331,13 @@ describe('omp extension in the user session (parent mode)', () => {
     expect(f.handlers).toEqual([])
   })
 
-  it('refuses adversarial-review on engine auto, which means the Codex CLI on omp, without starting a run', async () => {
+  it('refuses a Codex reviewer, which granny does not run on omp, without starting a run', async () => {
     const f = fakePi()
     await extension(f.pi as any)
-    const refused = textOf(await exec(f.tools.get('granny_run'), { repo, branch: 'feat/x', stages: [{ task: 't' }], config: { reviewers: [{ mode: 'adversarial-review' }] } }))
-    expect(refused).toContain('on omp engine "auto" means the Codex CLI')
+    for (const reviewer of [{ name: 'c' }, { engine: 'codex' }, { engine: 'codex-plugin', mode: 'adversarial-review' }]) {
+      const refused = textOf(await exec(f.tools.get('granny_run'), { repo, branch: 'feat/x', stages: [{ task: 't' }], config: { reviewers: [reviewer] } }))
+      expect(refused).toContain('runs Codex, which granny does not run on omp - use "engine": "agent" with an omp model')
+    }
     expect(existsSync(join(repo, '.granny/runs'))).toBe(false)
   })
 

@@ -59,6 +59,7 @@ var METRIC_KEYS = new Set(["pattern", "min", "max"]);
 var EFFORTS = new Set(["low", "medium", "high", "xhigh", "max"]);
 var ENGINES = ["auto", "codex", "codex-plugin", "agent", "command"];
 var PLUGIN_ENGINES = ["auto", "codex-plugin"];
+var CODEX_ENGINES = ["auto", "codex", "codex-plugin"];
 var MODES = ["review", "adversarial-review"];
 var NAME = /^[a-z0-9-]+$/;
 var isObject = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
@@ -186,8 +187,10 @@ function reviewers(list, errors, host) {
     } else if (entry.command !== undefined) {
       errors.push(`${at}.command needs "engine": "command"; engine "${engine}" runs its own reviewer`);
     }
-    if (host && host !== "claude-code" && adversarial && engine === "auto") {
-      errors.push(`${at}.mode "adversarial-review" needs the Codex plugin, and on ${host} engine "auto" means the Codex CLI - set ${at}.engine to "codex-plugin"`);
+    if (host === "omp" && CODEX_ENGINES.includes(engine)) {
+      errors.push(`${at}.engine "${engine}"${entry.engine === undefined ? " (the engine of an entry that names none)" : ""} runs Codex, which granny does not run on omp - use "engine": "agent" with an omp model, e.g. "model": { "omp": "openai-codex/gpt-6.1-sol" }, or "engine": "command"`);
+    } else if (host === "opencode" && adversarial && engine === "auto") {
+      errors.push(`${at}.mode "adversarial-review" needs the Codex plugin, and on opencode engine "auto" means the Codex CLI - set ${at}.engine to "codex-plugin"`);
     }
     return { ...entry, name, engine };
   });

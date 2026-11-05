@@ -67,7 +67,7 @@ Role processes run with `--approval-mode yolo`: they never wait for an approval,
 
 Read-only roles (the judge, `agent` reviewers, the extraction agent) may call only `read`, `grep`, `glob`, `find`, `ast_grep`, `lsp`, `bash`, `web_search`, `todo`, `think`, `wait`, `yield` and their submit tool. Their `bash` commands additionally cannot `git add` or `git commit`. The guard reads only the `bash` tool's command line: it does not see code a writing role runs through `eval`, and a read-only role's `bash` can still write files. That matches opencode, whose rules cover the same commands.
 
-Review commands and checks run in your omp process's environment: `codex`, and the CLI of every `command` reviewer, must be on that `PATH` and logged in.
+Review commands and checks run in your omp process's environment: the CLI of every `command` reviewer must be on that `PATH` and logged in.
 
 ## When the omp session exits mid-run
 
@@ -82,7 +82,7 @@ A new session inside the same omp process still sees the run: `granny_status` an
 Every entry of `reviewers` reviews every round, all at the same time: agent reviewers as concurrent role processes (each session dir is named after its label, `review <stage> r<n> <name>`), the other engines as concurrent review commands in your omp process.
 
 - `agent` reviews in a read-only role process on the entry's `model` and `effort` - any model omp has, GLM included (`zai/glm-5.3`).
-- `auto` (an entry's engine when it names none; the default reviewer list is one `agent` entry instead) always means the Codex CLI (`codex exec review`) here, as on opencode. To use OpenAI's Codex plugin, set the entry's `engine` to `codex-plugin`: the review script then runs the newest `${CLAUDE_CONFIG_DIR:-$HOME/.claude}/plugins/cache/openai-codex/codex/<version>/scripts/codex-companion.mjs` with `node`, read from your omp process's environment. When the companion or `node` is missing, the reviewer fails with a note. `mode: "adversarial-review"` needs `codex-plugin`; with `auto`, `granny_run` refuses to start.
+- No Codex engine: `auto`, `codex` and `codex-plugin` - and so an entry without `engine` - are refused before the run starts, with a message naming the entry. omp reaches Codex models itself, so a Codex review here is an `agent` reviewer on one of them, e.g. `{ "name": "codex", "engine": "agent", "model": { "omp": "openai-codex/gpt-6.1-sol" } }` (`omp models` lists the ids).
 - `command` runs the template in your omp process's shell; `{prompt}` arrives as one shell-quoted line.
 
 The journal logs each reviewer's backend every round (`<stage> r<n> <name>: reviewer: ...`). Details: [config.md](config.md#reviewers).

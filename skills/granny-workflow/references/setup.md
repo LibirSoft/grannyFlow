@@ -32,7 +32,7 @@ Ask these four, each with the current value (or the default) marked:
    - the host model and Codex: `[{ "name": "reviewer", "engine": "agent" }, { "name": "codex", "engine": "auto" }]`
    - Codex only: `[{ "name": "codex", "engine": "auto" }]`
 
-   Codex not found: say how to get it (install the Codex CLI and `codex login`) and offer only the host model. Other reviewers (a pinned model, any CLI) are in [config.md](config.md#reviewers); add them when the user asks.
+   Codex not found: say how to get it (install the Codex CLI and `codex login`) and offer only the host model. On omp granny runs no Codex reviewer: offer the host model only, or the host model and an `agent` reviewer on a Codex model, `{ "name": "codex", "engine": "agent", "model": { "omp": "openai-codex/<model>" } }` with `<model>` from `omp models`. Other reviewers (a pinned model, any CLI) are in [config.md](config.md#reviewers); add them when the user asks.
 
 3. **Checks** (multi-select) - the commands from step 1.4 that granny should run itself after every implementation and fix, before any review; a red one goes back to the implementer. None (default) leaves it to the agents to run the gates.
 

@@ -111,6 +111,8 @@ Three layers, later wins: `~/.config/granny/config.json` (user), `<repo>/granny.
 }
 ```
 
+On omp drop the `codex` entry: granny runs no Codex reviewer there; an `agent` reviewer on an `openai-codex/...` model does that job.
+
 Checks are off by default. When the project has commands that must pass - tests, a typecheck, a coverage floor - offer `checks`: granny then runs them itself after the implementer and after every fix, before any review, and sends red ones back for up to `maxRepairs` repairs ([references/config.md](references/config.md#checks)):
 
 ```json
@@ -131,8 +133,9 @@ Checks are off by default. When the project has commands that must pass - tests,
    - `worktree: false`: `git -C <repo> status --short` is clean; create and check out `branch`.
 3. The work dir (default `.granny/`) is in the common git dir's `info/exclude` (`git -C <repo> rev-parse --git-common-dir`). With the worktree on, the setup step adds it; with it off, add it yourself. It holds the PR body and review outputs (in the worktree), run journals, and the plan a planning run writes by default (`plans/`, in the main checkout) - so it must be excluded before the planner writes.
 4. Reviewers - for each entry of `reviewers`, by the engine that will run (see [references/config.md](references/config.md#reviewers)):
-   - Codex CLI (engine `codex`, or `auto` on opencode or omp, or `auto` on Claude Code without the plugin or without `node`): `codex --version` works and Codex is logged in (`codex login status`).
-   - Codex plugin (engine `codex-plugin`, or `auto` on Claude Code when it is installed and `command -v node` finds `node`): `node --version` works; `ls "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/cache/openai-codex/codex/*/scripts/codex-companion.mjs` finds the companion (for `codex-plugin` on opencode: with the opencode server's `HOME` and `CLAUDE_CONFIG_DIR`; on omp: with those of the shell omp runs in); `codex --version` works and Codex is logged in - the companion drives the CLI.
+   - On omp: no Codex engine - `auto`, `codex`, `codex-plugin` and an entry without `engine` are refused; offer an `agent` reviewer on an `openai-codex/...` model instead.
+   - Codex CLI (engine `codex`, or `auto` on opencode, or `auto` on Claude Code without the plugin or without `node`): `codex --version` works and Codex is logged in (`codex login status`).
+   - Codex plugin (engine `codex-plugin`, or `auto` on Claude Code when it is installed and `command -v node` finds `node`): `node --version` works; `ls "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/cache/openai-codex/codex/*/scripts/codex-companion.mjs` finds the companion (for `codex-plugin` on opencode: with the opencode server's `HOME` and `CLAUDE_CONFIG_DIR`); `codex --version` works and Codex is logged in - the companion drives the CLI.
    - Engine `agent`: the model exists on this host - on Claude Code only Claude models; for any other provider there, the reviewer needs engine `command`. `opencode models` and `omp models` list theirs.
    - Engine `command`: the CLI in the template is on `PATH` where the review runs (on opencode: the server's; on omp: the omp session's) and logged in to its provider.
    Tell the user which reviewers will run and what `auto` will pick. A reviewer that fails twice in a round ends the stage `review-failed`. For the plan review the Codex engines run `codex exec` or the plugin's `task` instead of a diff review; a `command` reviewer without `{prompt}` sits the plan review out, and when no reviewer can review a plan, the plan review fails and the run stops.

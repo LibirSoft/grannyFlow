@@ -176,7 +176,10 @@ describe('reviewers', () => {
     ['a command on the Codex plugin', [{ engine: 'codex-plugin', command: 'r {base}' }], 'reviewers[0].command needs "engine": "command"'],
     ['a command on an agent reviewer', [{ engine: 'agent', command: 'r {prompt}' }], 'reviewers[0].command needs "engine": "command"'],
     ['adversarial-review on auto on opencode', [{ name: 'c' }, { mode: 'adversarial-review' }], 'reviewers[1].mode "adversarial-review" needs the Codex plugin, and on opencode engine "auto" means the Codex CLI - set reviewers[1].engine to "codex-plugin"', 'opencode'],
-    ['adversarial-review on auto on omp', [{ mode: 'adversarial-review' }], 'reviewers[0].mode "adversarial-review" needs the Codex plugin, and on omp engine "auto" means the Codex CLI - set reviewers[0].engine to "codex-plugin"', 'omp'],
+    ['an entry without engine on omp', [{ engine: 'agent' }, { name: 'c' }], 'reviewers[1].engine "auto" (the engine of an entry that names none) runs Codex, which granny does not run on omp - use "engine": "agent"', 'omp'],
+    ['engine auto on omp', [{ engine: 'auto', mode: 'adversarial-review' }], 'reviewers[0].engine "auto" runs Codex, which granny does not run on omp', 'omp'],
+    ['the Codex CLI on omp', [{ engine: 'codex' }], 'reviewers[0].engine "codex" runs Codex, which granny does not run on omp', 'omp'],
+    ['the Codex plugin on omp', [{ engine: 'codex-plugin' }], 'reviewers[0].engine "codex-plugin" runs Codex, which granny does not run on omp', 'omp'],
   ]
   for (const [label, list, message, host] of rejects) {
     it(`rejects ${label}`, () => {
@@ -257,6 +260,15 @@ describe('resolveModel', () => {
     expect(resolveModel(c.reviewers[0]!.model, 'omp')).toBe('zai/glm-5.3')
     expect(resolveModel(resolveConfig([], 'omp').roles.helper.model, 'omp')).toBeUndefined()
     expect(() => resolveConfig([{ roles: { judge: { model: { pi: 'x' } } } }], 'omp')).toThrow('roles.judge.model: unknown host "pi"')
+  })
+
+  it('runs agent and command reviewers on omp, and the Codex engines on the other hosts only', () => {
+    expect(resolveConfig([], 'omp').reviewers).toEqual([{ name: 'reviewer', engine: 'agent' }])
+    const omp = [{ reviewers: [{ name: 'gpt', engine: 'agent', model: { omp: 'openai-codex/gpt-6.1-sol' } }, { name: 'glm', engine: 'command', command: 'opencode run {prompt}' }] }]
+    expect(resolveConfig(omp, 'omp').reviewers.map(r => r.engine)).toEqual(['agent', 'command'])
+    for (const host of ['claude-code', 'opencode'] as const) {
+      expect(resolveConfig([{ reviewers: [{ engine: 'codex' }, { engine: 'codex-plugin' }, {}] }], host).reviewers.map(r => r.engine)).toEqual(['codex', 'codex-plugin', 'auto'])
+    }
   })
 })
 

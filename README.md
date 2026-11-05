@@ -34,7 +34,7 @@ It works on Claude Code, opencode and omp (oh-my-pi), where the loop runs as cod
      cp <skill-dir>/engines/cursor/agents/*.md ~/.cursor/agents/
      ```
 
-3. Optional: Codex as a second reviewer. Install the [Codex CLI](https://github.com/openai/codex) and run `codex login`. On Claude Code, OpenAI's [Codex plugin](https://github.com/openai/codex-plugin-cc) is used instead when it is installed.
+3. Optional: Codex as a second reviewer. Install the [Codex CLI](https://github.com/openai/codex) and run `codex login`. On Claude Code, OpenAI's [Codex plugin](https://github.com/openai/codex-plugin-cc) is used instead when it is installed. omp runs no Codex reviewer: use an `agent` reviewer on one of omp's `openai-codex/...` models.
 
 4. In your project, ask your agent:
 
