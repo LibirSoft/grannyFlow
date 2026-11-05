@@ -16,7 +16,7 @@ The engine is an omp (oh-my-pi) extension (`engines/omp/extensions/granny-workfl
 
 3. Quit omp and start it again. `granny_run`, `granny_status` and `granny_cancel` should be listed among the tools of the new session.
 
-There is no `granny` agent definition for omp: omp's agent files define task subagents, not the agent of your session. To run granny on a particular model, start the session on that model or set `roles.granny.model` ([config.md](config.md#models-per-host)).
+There is no `granny` agent definition for omp: omp's agent files define task subagents, not the agent of your session. To run granny's roles on a particular model, start the session on that model - a role without its own model uses the model of the session that called `granny_run` - or set `model` on each role ([config.md](config.md#models-per-host)). `roles.granny` is only the model of the extraction fallback and the final PR-ready check; it does not change your session's model.
 
 ## Launch
 
