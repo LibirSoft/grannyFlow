@@ -935,7 +935,7 @@ describe('omp extension in the user session (parent mode)', () => {
     const result = await finished(dir)
     expect(result).toEqual({ id, status: 'failed', finishedAt: expect.any(String), error: expect.stringContaining('GRANNY_OMP_BIN') })
     expect(result.error).not.toContain('\n    at ')
-    expect(JSON.parse(readRun(dir, 'status.json'))).toMatchObject({ status: 'failed', finishedAt: result.finishedAt })
+    expect(JSON.parse(readRun(dir, 'status.json'))).toMatchObject({ status: 'failed', finishedAt: result.finishedAt, error: expect.stringContaining('\n    at ') })
   })
 
   it('writes result.json when a run is cancelled, and sends no message', async () => {
@@ -947,7 +947,7 @@ describe('omp extension in the user session (parent mode)', () => {
     await exec(f.tools.get('granny_cancel'), { runId: id })
     const result = await finished(dir)
     expect(result).toEqual({ id, status: 'cancelled', finishedAt: expect.any(String), error: 'cancelled' })
-    expect(JSON.parse(readRun(dir, 'status.json')).status).toBe('cancelled')
+    expect(JSON.parse(readRun(dir, 'status.json'))).toMatchObject({ status: 'cancelled', error: 'cancelled' })
     expect(f.sent).toEqual([])
   })
 

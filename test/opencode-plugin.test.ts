@@ -674,6 +674,7 @@ describe('opencode plugin', () => {
     await waitFor(() => sleeping)
     await f.tools.get('granny_cancel').execute({ runId: id })
     await waitFor(() => readRun(dir, 'status.json').includes('"status": "cancelled"'))
+    expect(JSON.parse(readRun(dir, 'status.json')).error).toBe('cancelled')
     expect(promptsTo(f, 'granny · implement one')).toHaveLength(1)
     expect(f.created).toHaveLength(1)
   })

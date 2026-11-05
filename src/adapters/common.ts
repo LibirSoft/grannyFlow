@@ -2,6 +2,7 @@ import { spawn, spawnSync, type ChildProcess } from 'node:child_process'
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { isAbsolute, join } from 'node:path'
+import { isCancelled } from '../core/cancel'
 import { planReviewWarning, resolveConfig } from '../core/config'
 export { planReviewWarning } from '../core/config'
 import type { RunInput } from '../core/engine'
@@ -71,6 +72,11 @@ export function stageRepos(input: RunInput): string[] {
   const top = (p: string) => p.replace(/\/+$/, '') || '/'
   const primary = top(input.repo)
   return [...new Set((input.stages ?? []).flatMap(st => (typeof st.repo === 'string' && top(st.repo) !== primary ? [top(st.repo)] : [])))]
+}
+
+/** status.json's error: the stack of a failure, only "cancelled" for a cancel. */
+export function statusError(error: unknown, cancelled: boolean): string {
+  return cancelled || isCancelled(error) ? 'cancelled' : String((error as Error)?.stack ?? error)
 }
 
 export function stamp(): string {

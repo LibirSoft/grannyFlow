@@ -2397,6 +2397,9 @@ function stageRepos(input) {
   const primary = top(input.repo);
   return [...new Set((input.stages ?? []).flatMap((st) => typeof st.repo === "string" && top(st.repo) !== primary ? [top(st.repo)] : []))];
 }
+function statusError(error, cancelled) {
+  return cancelled || isCancelled(error) ? "cancelled" : String(error?.stack ?? error);
+}
 function stamp() {
   return new Date().toISOString();
 }
@@ -2894,7 +2897,7 @@ ${summarize(result, config.worktree)}
 Call granny_status with runId "${id}" for the full result, verify load-bearing claims yourself, report to the user and wait. Do not push.`);
       }).catch(async (error) => {
         run.status = run.cancelled ? "cancelled" : "failed";
-        writeStatus({ finishedAt: stamp(), error: String(error?.stack ?? error) });
+        writeStatus({ finishedAt: stamp(), error: statusError(error, run.cancelled) });
         journal("error", { error: String(error?.message ?? error) });
         if (!run.cancelled)
           await notify(`[granny] Run ${id} failed: ${String(error?.message ?? error)}
