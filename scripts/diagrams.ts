@@ -166,19 +166,21 @@ function loop(theme: Theme): string {
 }
 
 function hosts(theme: Theme): string {
-  const c = canvas(theme, 1000, 470, 'granny-workflow: one core engine, generated for Claude Code and opencode; Cursor follows it by hand')
+  const c = canvas(theme, 1250, 470, 'granny-workflow: one core engine, generated for Claude Code, opencode and omp; Cursor follows it by hand')
 
-  c.box(300, 24, 400, 92, 'neutral', 'src/core: one engine', ['loop · routing · judge · config · review parsing', 'written once in TypeScript'])
+  c.box(425, 24, 400, 92, 'neutral', 'src/core: one engine', ['loop · routing · judge · config · review parsing', 'written once in TypeScript'])
 
-  c.path('M420,116 L420,150 L160,150 L160,188', 'blue')
-  c.path('M580,116 L580,150 L500,150 L500,188', 'purple')
-  c.label(500, 140, 'scripts/build.ts', 'neutral')
-  c.path('M700,70 L840,70 L840,188', 'muted', { dashed: true })
-  c.label(770, 62, 'same rules, by hand', 'muted')
+  c.path('M465,116 L465,150 L169,150 L169,188', 'blue')
+  c.path('M545,116 L545,150 L471,150 L471,188', 'purple')
+  c.path('M705,116 L705,150 L773,150 L773,188', 'green')
+  c.label(625, 140, 'scripts/build.ts', 'neutral')
+  c.path('M825,70 L1075,70 L1075,188', 'muted', { dashed: true })
+  c.label(950, 62, 'same rules, by hand', 'muted')
 
   c.box(24, 190, 290, 150, 'blue', 'Claude Code', ['Workflow script', 'every role is an agent() call', 'with its own model, effort, schema', 'reviewers run as concurrent calls'])
-  c.box(355, 190, 290, 150, 'purple', 'opencode 2.x', ['server plugin', 'granny_run · granny_status · granny_cancel', 'every role is a child session', 'review CLIs run directly'])
-  c.box(686, 190, 290, 150, 'muted', 'Cursor and others', ['manual protocol in the skill', 'four subagents', 'same loop, not deterministic'], { dashed: true })
+  c.box(326, 190, 290, 150, 'purple', 'opencode 2.x', ['server plugin', 'granny_run · granny_status · granny_cancel', 'every role is a child session', 'review CLIs run directly'])
+  c.box(628, 190, 290, 150, 'green', 'omp (oh-my-pi)', ['extension in your session', 'granny_run · granny_status · granny_cancel', 'every role is an omp process', 'review CLIs run directly'])
+  c.box(930, 190, 290, 150, 'muted', 'Cursor and others', ['manual protocol in the skill', 'four subagents', 'same loop, not deterministic'], { dashed: true })
 
   const roles: Array<[string, string, Tone]> = [
     ['granny', 'launches and reports', 'neutral'],
@@ -188,7 +190,7 @@ function hosts(theme: Theme): string {
     ['judge', 'classifies and dedupes', 'amber'],
   ]
   c.text(24, 384, 'ROLES · EACH WITH ITS OWN MODEL AND EFFORT', { size: 11.5, weight: 700, fill: c.p.muted, spacing: 1.2 })
-  roles.forEach(([name, what, tone], i) => c.box(24 + i * 193, 398, 180, 58, tone, name, [what]))
+  roles.forEach(([name, what, tone], i) => c.box(24 + i * 243, 398, 230, 58, tone, name, [what]))
   return c.done()
 }
 

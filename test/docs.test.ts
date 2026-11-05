@@ -142,6 +142,13 @@ describe('skill docs', () => {
     expect(() => read('engines/omp/extensions/granny-workflow/index.js')).not.toThrow()
   })
 
+  it('names omp in the README, the package description and the hosts diagram', () => {
+    expect(readRoot('README.md')).toContain(OMP_INSTALL)
+    expect(readRoot('README.md')).toMatch(/^\| omp \|/m)
+    expect(JSON.parse(readRoot('package.json')).description).toContain('omp')
+    for (const theme of ['light', 'dark']) expect(readRoot(`docs/images/hosts-${theme}.svg`)).toContain('omp')
+  })
+
   it('lists in omp.md exactly the built-in omp tools a read-only role may call', () => {
     const omp = read('references/omp.md')
     const start = omp.indexOf('may call only')
