@@ -55,6 +55,8 @@ import type {
   Role,
   RoundRecord,
   RunResult,
+  StageEvent,
+  StageOutcome,
   StageResult,
   StageSpec,
 } from './types'
@@ -1042,6 +1044,11 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
   const undelivered = new Set<number>()
   let failure: { error: unknown } | undefined
   const nameOf = (i: number) => `${i + 1} (${specs[i]!.name || `stage ${i + 1}`})`
+  const stageEvent = (i: number, event: StageEvent['event'], outcome?: StageOutcome) => {
+    try {
+      host.stage?.({ number: i + 1, name: specs[i]!.name || `stage ${i + 1}`, event, ...(outcome ? { outcome } : {}) })
+    } catch {}
+  }
   for (let i = 0; i < fromStage - 1; i++) {
     results[i] = { stage: specs[i]!.name || `stage ${i + 1}`, outcome: 'skipped', rounds: 0, residual: [], unresolved: [], history: [] }
     done.add(i)
@@ -1064,9 +1071,11 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
           results[i] = { stage: specs[i]!.name || `stage ${i + 1}`, outcome: 'skipped', rounds: 0, residual: [], unresolved: [], history: [], note }
           done.add(i)
           undelivered.add(i)
+          stageEvent(i, 'end', 'skipped')
           continue
         }
         if (running.size) host.log(`${specs[i]!.name || `stage ${i + 1}`}: starting in parallel with ${[...running.keys()].map(j => specs[j]!.name || `stage ${j + 1}`).join(', ')}`)
+        stageEvent(i, 'start')
         running.set(
           i,
           startStage(i).then(
@@ -1075,6 +1084,7 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
               if (r.outcome === 'no-changes' || r.outcome === 'checks-failed') undelivered.add(i)
               done.add(i)
               running.delete(i)
+              stageEvent(i, 'end', r.outcome)
             },
             error => {
               failure ??= { error }

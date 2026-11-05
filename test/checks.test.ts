@@ -108,6 +108,11 @@ describe('checks', () => {
     expect(r.stages[1]).toMatchObject({ stage: 'more', outcome: 'skipped' })
     expect(r.stages[1]!.note).toContain('ended checks-failed')
     expect(f.calls.some(c => c.label === 'implement more')).toBe(false)
+    expect(f.stages).toEqual([
+      { number: 1, name: 'core', event: 'start' },
+      { number: 1, name: 'core', event: 'end', outcome: 'checks-failed' },
+      { number: 2, name: 'more', event: 'end', outcome: 'skipped' },
+    ])
   })
 
   describe('metric', () => {

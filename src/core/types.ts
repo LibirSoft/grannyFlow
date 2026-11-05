@@ -51,6 +51,13 @@ export interface CommandResult {
   output: string
 }
 
+export interface StageEvent {
+  number: number
+  name: string
+  event: 'start' | 'end'
+  outcome?: StageOutcome
+}
+
 export interface Host {
   readonly name: HostName
   agent(request: AgentRequest): Promise<any | null>
@@ -59,6 +66,8 @@ export interface Host {
   cancelled?(): boolean
   log(message: string): void
   phase(title: string): void
+  /** A stage started or ended; a stage that never starts gets one `end` with outcome `skipped`. */
+  stage?(event: StageEvent): void
 }
 
 export interface Finding {

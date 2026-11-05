@@ -7,6 +7,7 @@ import { checkShape, SCHEMAS } from '../../core/schemas'
 import type { AgentRequest, Host, ResultKind } from '../../core/types'
 import { DEFAULT_DELAYS, dropPlaceholders, globalConfigPath, type HostOptions, KILL_GRACE_MS, pause, planReviewNotice, preflight, readJson, RUN_INPUT_SCHEMA, RUN_TOOL_DESCRIPTION, runCommand, runDir, runId, runStatus, stageRepos, stamp, statusError, SUBMIT, summarize } from '../common'
 import { duration } from '../runview/format'
+import { runOutline } from '../runview/outline'
 
 export { globalConfigPath, pause, preflight, stageRepos, summarize } from '../common'
 export type { RetryPolicy } from '../common'
@@ -139,8 +140,9 @@ export const createGrannyPlugin = ({ delays = DEFAULT_DELAYS, sleep = pause, kil
       runs.set(id, run)
       const journal = (type: string, data: Record<string, unknown>) =>
         appendFileSync(join(dir, 'journal.jsonl'), JSON.stringify({ t: stamp(), type, ...data }) + '\n')
+      const outline = runOutline(input, config)
       const writeStatus = (extra: Record<string, unknown> = {}) =>
-        writeFileSync(join(dir, 'status.json'), JSON.stringify({ id, status: run.status, repo: input.repo, branch: input.branch, parent: parentSession, watch: config.watch, ...extra }, null, 2))
+        writeFileSync(join(dir, 'status.json'), JSON.stringify({ id, status: run.status, repo: input.repo, branch: input.branch, parent: parentSession, watch: config.watch, outline, ...extra }, null, 2))
       writeFileSync(join(dir, 'input.json'), JSON.stringify({ ...input, config: layers }, null, 2))
       writeStatus({ startedAt: stamp() })
 
@@ -255,7 +257,7 @@ export const createGrannyPlugin = ({ delays = DEFAULT_DELAYS, sleep = pause, kil
           if (!tool) throw new Error(`no submit tool for result kind "${req.kind}"`)
           const model = modelRef(req.model) ?? parentModel
           const session = await createRoleSession(req, model)
-          journal('agent', { label: req.label, role: req.role, phase: req.phase, session: session.id, model: model ?? null, linked: session.linked })
+          journal('agent', { label: req.label, role: req.role, phase: req.phase, session: session.id, model: model ?? null, linked: session.linked, cwd: req.cwd })
           run.active.set(session.id, { label: req.label, role: req.role, model: modelText(model), since: Date.now() })
           const end = (outcome: 'done' | 'failed' | 'cancelled', error?: string) => {
             run.active.delete(session.id)
@@ -284,6 +286,7 @@ export const createGrannyPlugin = ({ delays = DEFAULT_DELAYS, sleep = pause, kil
         },
         log: message => journal('log', { message }),
         phase: title => journal('phase', { title }),
+        stage: ({ number, name, event, outcome }) => journal('stage', { number, name, event, ...(outcome ? { outcome } : {}) }),
       }
 
       const notify = async (text: string) => {

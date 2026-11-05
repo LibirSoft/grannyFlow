@@ -58,6 +58,8 @@ describe('parallel stages', () => {
       ['logo c', C, 'clean'],
     ])
     expect(f.setups.map(s => s.cwd)).toEqual([A, B, C])
+    expect(f.stages.map(e => `${e.event} ${e.number}`).slice(0, 3)).toEqual(['start 1', 'start 2', 'start 3'])
+    expect(f.stages.filter(e => e.event === 'end').map(e => e.outcome)).toEqual(['clean', 'clean', 'clean'])
     expect(f.setups[2]!.command).toContain('"$wt" master')
     expect(r.repos?.map(x => [x.repo, x.worktree, x.final?.gatesGreen])).toEqual([
       [A, '/work/a-worktrees/feat-x', true],

@@ -10,6 +10,7 @@ import type { AgentRequest, Host, ResultKind } from '../../core/types'
 import { DEFAULT_DELAYS, dropPlaceholders, globalConfigPath, type HostOptions, KILL_GRACE_MS, pause, planReviewNotice, preflight, readJson, RUN_INPUT_SCHEMA, RUN_TOOL_DESCRIPTION, runCommand, runDir, runId, runStatus, signalGroup, stageRepos, stamp, statusError, SUBMIT, summarize } from '../common'
 import { lineType, LiveRun, type LiveOptions, PARSED_EVENTS, type RoleActivity, type RoleOutcome } from './panel'
 import { Navigator } from './navigator'
+import { type RunOutline, runOutline } from '../runview/outline'
 import { EventLog } from './watch'
 
 // The omp (oh-my-pi) host. One file, two modes: in the user's omp session it registers granny_run,
@@ -73,6 +74,8 @@ interface RunState {
   waiters: Set<(reply: string) => void>
   live: LiveRun
   watch: WatchMode
+  branch: string
+  outline: RunOutline
 }
 
 // omp re-runs the factory for every session in the process; runs started in one must stay visible to all.
@@ -356,12 +359,13 @@ export const createGrannyExtension =
       shared.clearStatus = undefined
       const { watch } = config
       const live = new LiveRun(id, watch !== 'off' && ctx?.hasUI === true ? ctx.ui : undefined, { now, renderEveryMs }, !shared.hidden)
-      const run: RunState = { id, dir, status: 'running', cancelled: false, abort: new AbortController(), children: new Set(), agents: 0, waiters: new Set(), live, watch }
+      const outline = runOutline(input, config)
+      const run: RunState = { id, dir, status: 'running', cancelled: false, abort: new AbortController(), children: new Set(), agents: 0, waiters: new Set(), live, watch, branch: input.branch, outline }
       runs.set(id, run)
       const journal = (type: string, data: Record<string, unknown>) =>
         appendFileSync(join(dir, 'journal.jsonl'), JSON.stringify({ t: stamp(), type, ...data }) + '\n')
       const writeStatus = (extra: Record<string, unknown> = {}) =>
-        writeFileSync(join(dir, 'status.json'), JSON.stringify({ id, status: run.status, repo: input.repo, branch: input.branch, ...extra }, null, 2))
+        writeFileSync(join(dir, 'status.json'), JSON.stringify({ id, status: run.status, repo: input.repo, branch: input.branch, outline, ...extra }, null, 2))
       writeFileSync(join(dir, 'input.json'), JSON.stringify({ ...input, config: layers }, null, 2))
       writeStatus({ startedAt: stamp() })
 
@@ -475,7 +479,7 @@ export const createGrannyExtension =
             ...(model ? ['--model', model] : []),
             ...(req.effort ? ['--thinking', req.effort] : []),
           ]
-          journal('agent', { label: req.label, role: req.role, phase: req.phase, session, model: model ?? null, ...(req.effort ? { effort: req.effort } : {}) })
+          journal('agent', { label: req.label, role: req.role, phase: req.phase, session, model: model ?? null, ...(req.effort ? { effort: req.effort } : {}), cwd: req.cwd })
           const path = join(session, 'events.jsonl')
           const log =
             watch === 'full'
@@ -510,6 +514,7 @@ export const createGrannyExtension =
           journal('phase', { title })
           live.setPhase(title)
         },
+        stage: ({ number, name, event, outcome }) => journal('stage', { number, name, event, ...(outcome ? { outcome } : {}) }),
       }
 
       const notify = (content: string) => {

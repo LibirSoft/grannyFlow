@@ -193,10 +193,41 @@ describe('runGranny', () => {
     expect(f.commands).toHaveLength(0)
   })
 
+  it('tells the host when each stage starts and ends, in order', async () => {
+    const f = fakeHost()
+    await runGranny(f.host, input({ stages: [{ name: 'one', task: 'A' }, { task: 'B' }], config: { parallel: false } }))
+    expect(f.stages).toEqual([
+      { number: 1, name: 'one', event: 'start' },
+      { number: 1, name: 'one', event: 'end', outcome: 'clean' },
+      { number: 2, name: 'stage 2', event: 'start' },
+      { number: 2, name: 'stage 2', event: 'end', outcome: 'clean' },
+    ])
+  })
+
+  it('runs unchanged on a host without the stage hook', async () => {
+    const f = fakeHost()
+    delete (f.host as { stage?: unknown }).stage
+    const r = await runGranny(f.host, input({ stages: [{ name: 'one', task: 'A' }, { name: 'two', task: 'B' }] }))
+    expect(r.stages.map(s => [s.stage, s.outcome])).toEqual([['one', 'clean'], ['two', 'clean']])
+  })
+
+  it('keeps going when the stage hook throws', async () => {
+    const f = fakeHost()
+    f.host.stage = () => {
+      throw new Error('journal full')
+    }
+    const r = await runGranny(f.host, input({ stages: [{ name: 'one', task: 'A' }, { name: 'two', task: 'B' }] }))
+    expect(r.stages.map(s => [s.stage, s.outcome])).toEqual([['one', 'clean'], ['two', 'clean']])
+  })
+
   it('resumes from a later stage', async () => {
     const f = fakeHost()
     const r = await runGranny(f.host, input({ stages: [{ name: 'a', task: 'A' }, { name: 'b', task: 'B' }], fromStage: 2 }))
     expect(r.stages.map(s => [s.stage, s.outcome])).toEqual([['a', 'skipped'], ['b', 'clean']])
+    expect(f.stages).toEqual([
+      { number: 2, name: 'b', event: 'start' },
+      { number: 2, name: 'b', event: 'end', outcome: 'clean' },
+    ])
     const impl = f.calls.find(c => c.kind === 'implementation')!
     expect(impl.prompt).toContain('Stage 2/2: "b"')
     expect(impl.prompt).toContain('Earlier stages are done')
@@ -674,6 +705,10 @@ describe('the base a stage review diffs against', () => {
     expect(r.stages[1]!.note).toBe('not started: it builds on 1 (a), which ended no-changes')
     expect(r.stages[3]!.note).toBe('not started: it builds on 2 (b), which was not started')
     expect(f.calls.filter(c => c.kind === 'implementation').map(c => c.label)).toEqual(['implement a', 'implement c'])
+    expect(f.stages.filter(e => e.number === 2 || e.number === 4)).toEqual([
+      { number: 2, name: 'b', event: 'end', outcome: 'skipped' },
+      { number: 4, name: 'd', event: 'end', outcome: 'skipped' },
+    ])
   })
 
   it('keeps running the later stages of a sequential run that do not build on the no-changes stage', async () => {

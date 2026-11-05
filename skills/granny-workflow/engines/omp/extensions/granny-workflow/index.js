@@ -2156,6 +2156,11 @@ ${note}` : note } : result;
   const undelivered = new Set;
   let failure;
   const nameOf = (i) => `${i + 1} (${specs[i].name || `stage ${i + 1}`})`;
+  const stageEvent = (i, event, outcome) => {
+    try {
+      host.stage?.({ number: i + 1, name: specs[i].name || `stage ${i + 1}`, event, ...outcome ? { outcome } : {} });
+    } catch {}
+  };
   for (let i = 0;i < fromStage - 1; i++) {
     results[i] = { stage: specs[i].name || `stage ${i + 1}`, outcome: "skipped", rounds: 0, residual: [], unresolved: [], history: [] };
     done.add(i);
@@ -2174,16 +2179,19 @@ ${note}` : note } : result;
           results[i] = { stage: specs[i].name || `stage ${i + 1}`, outcome: "skipped", rounds: 0, residual: [], unresolved: [], history: [], note };
           done.add(i);
           undelivered.add(i);
+          stageEvent(i, "end", "skipped");
           continue;
         }
         if (running.size)
           host.log(`${specs[i].name || `stage ${i + 1}`}: starting in parallel with ${[...running.keys()].map((j) => specs[j].name || `stage ${j + 1}`).join(", ")}`);
+        stageEvent(i, "start");
         running.set(i, startStage(i).then((r) => {
           results[i] = r;
           if (r.outcome === "no-changes" || r.outcome === "checks-failed")
             undelivered.add(i);
           done.add(i);
           running.delete(i);
+          stageEvent(i, "end", r.outcome);
         }, (error) => {
           failure ??= { error };
           running.delete(i);
@@ -4289,6 +4297,29 @@ function styleOf(row) {
   return "text";
 }
 
+// src/adapters/runview/outline.ts
+function runOutline(input, config) {
+  const kind = input.goal !== undefined ? "plan" : "implement";
+  const fromStage = input.fromStage ?? 1;
+  const stages = (input.stages ?? []).map((st, i) => ({
+    number: i + 1,
+    name: clean(st.name || `stage ${i + 1}`),
+    implement: st.implement !== false,
+    review: st.review !== false,
+    checks: (st.checks === undefined ? config.checks.length : st.checks.length) > 0
+  }));
+  return {
+    kind,
+    branch: clean(input.branch),
+    worktree: config.worktree,
+    planReview: config.planReview && (kind === "plan" || input.plan !== undefined && fromStage === 1),
+    finalReview: config.finalReview && stages.length > 1,
+    reviewers: config.reviewers.map((r) => clean(r.name)),
+    fromStage,
+    stages
+  };
+}
+
 // src/adapters/omp/extension.ts
 var SHARED = Symbol.for("granny-workflow.omp.state");
 var shared = globalThis[SHARED] ??= { runs: new Map };
@@ -4571,11 +4602,12 @@ var createGrannyExtension = ({ delays = DEFAULT_DELAYS, sleep = pause, killGrace
     shared.clearStatus = undefined;
     const { watch } = config;
     const live = new LiveRun(id, watch !== "off" && ctx?.hasUI === true ? ctx.ui : undefined, { now, renderEveryMs }, !shared.hidden);
-    const run = { id, dir, status: "running", cancelled: false, abort: new AbortController, children: new Set, agents: 0, waiters: new Set, live, watch };
+    const outline = runOutline(input, config);
+    const run = { id, dir, status: "running", cancelled: false, abort: new AbortController, children: new Set, agents: 0, waiters: new Set, live, watch, branch: input.branch, outline };
     runs.set(id, run);
     const journal = (type, data) => appendFileSync3(join4(dir, "journal.jsonl"), JSON.stringify({ t: stamp(), type, ...data }) + `
 `);
-    const writeStatus = (extra = {}) => writeFileSync(join4(dir, "status.json"), JSON.stringify({ id, status: run.status, repo: input.repo, branch: input.branch, ...extra }, null, 2));
+    const writeStatus = (extra = {}) => writeFileSync(join4(dir, "status.json"), JSON.stringify({ id, status: run.status, repo: input.repo, branch: input.branch, outline, ...extra }, null, 2));
     writeFileSync(join4(dir, "input.json"), JSON.stringify({ ...input, config: layers }, null, 2));
     writeStatus({ startedAt: stamp() });
     const parentModel = ctx?.model?.provider && ctx?.model?.id ? `${ctx.model.provider}/${ctx.model.id}` : undefined;
@@ -4702,7 +4734,7 @@ When done, call the \`${tool}\` tool exactly once with your result. That call is
           ...model ? ["--model", model] : [],
           ...req.effort ? ["--thinking", req.effort] : []
         ];
-        journal("agent", { label: req.label, role: req.role, phase: req.phase, session, model: model ?? null, ...req.effort ? { effort: req.effort } : {} });
+        journal("agent", { label: req.label, role: req.role, phase: req.phase, session, model: model ?? null, ...req.effort ? { effort: req.effort } : {}, cwd: req.cwd });
         const path = join4(session, "events.jsonl");
         const log = watch === "full" ? new EventLog(path, now, (e) => journal("event-log-failed", { label: req.label, path, error: String(e?.message ?? e) })) : undefined;
         const view = live.role({ label: req.label, role: req.role, model, effort: req.effort, session, phase: req.phase, ...log ? { log: path } : {} }, log && ((entry) => log.write(entry)));
@@ -4737,7 +4769,8 @@ When done, call the \`${tool}\` tool exactly once with your result. That call is
       phase: (title) => {
         journal("phase", { title });
         live.setPhase(title);
-      }
+      },
+      stage: ({ number, name, event, outcome }) => journal("stage", { number, name, event, ...outcome ? { outcome } : {} })
     };
     const notify = (content) => {
       try {

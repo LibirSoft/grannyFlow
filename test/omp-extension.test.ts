@@ -677,6 +677,27 @@ describe('omp extension in the user session (parent mode)', () => {
     await finished(off.dir)
   })
 
+  it('writes the run outline to status.json from the start, and a planning run as kind plan', async () => {
+    behave({ wait: ['implement-one', 'plan'] })
+    const f = fakePi()
+    await createGrannyExtension({ killGraceMs: 100 })(f.pi as any)
+    const run = await start(f)
+    expect(JSON.parse(readRun(run.dir, 'status.json'))).toMatchObject({ status: 'running', outline: { kind: 'implement', branch: 'feat/x', stages: [{ number: 1, name: 'one' }] } })
+    await waitFor(() => callsTo('implement-one').length > 0)
+    await exec(f.tools.get('granny_cancel'), { runId: run.id })
+    await finished(run.dir)
+    expect(JSON.parse(readRun(run.dir, 'status.json'))).toMatchObject({ status: 'cancelled', outline: { kind: 'implement' } })
+
+    const started = textOf(await exec(f.tools.get('granny_run'), { repo, branch: 'feat/x', goal: 'Build it.' }))
+    const id = /granny run (\S+) started/.exec(started)![1]!
+    const dir = join(repo, '.granny/runs', id)
+    expect(JSON.parse(readRun(dir, 'status.json')).outline).toMatchObject({ kind: 'plan', stages: [], finalReview: false })
+    await waitFor(() => callsTo('plan').length > 0)
+    expect(journalOf(dir).find(e => e.type === 'agent')).toMatchObject({ label: 'plan', cwd: repo })
+    await exec(f.tools.get('granny_cancel'), { runId: id })
+    await finished(dir)
+  })
+
   it('refuses a Codex reviewer, which granny does not run on omp, without starting a run', async () => {
     const f = fakePi()
     await extension(f.pi as any)
@@ -733,6 +754,21 @@ describe('omp extension in the user session (parent mode)', () => {
     expect(agents[0]).toMatchObject({ role: 'implementer', model: 'omp-test/parent-model' })
     expect(agents[2]).toMatchObject({ role: 'judge', model: 'anthropic/judge-model', effort: 'high' })
     expect(agents.map(e => e.phase)).toEqual(['Implement', 'Review', 'Review', 'Implement', 'Review', 'PR ready'])
+    expect(agents.map(e => e.cwd)).toEqual(agents.map(() => repo))
+    expect(journalOf(dir).filter(e => e.type === 'stage').map(({ t: _t, type: _type, ...e }) => e)).toEqual([
+      { number: 1, name: 'one', event: 'start' },
+      { number: 1, name: 'one', event: 'end', outcome: 'clean' },
+    ])
+    expect(JSON.parse(readRun(dir, 'status.json')).outline).toEqual({
+      kind: 'implement',
+      branch: 'feat/x',
+      worktree: true,
+      planReview: false,
+      finalReview: false,
+      reviewers: ['reviewer'],
+      fromStage: 1,
+      stages: [{ number: 1, name: 'one', implement: true, review: true, checks: false }],
+    })
     const ends = journalOf(dir).filter(e => e.type === 'agent-end')
     for (const agent of agents) {
       expect(ends.filter(e => e.session === agent.session)).toEqual([{ t: expect.any(String), type: 'agent-end', label: agent.label, session: agent.session, outcome: 'done' }])

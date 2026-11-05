@@ -2154,6 +2154,11 @@ ${note}` : note } : result;
   const undelivered = new Set;
   let failure;
   const nameOf = (i) => `${i + 1} (${specs[i].name || `stage ${i + 1}`})`;
+  const stageEvent = (i, event, outcome) => {
+    try {
+      host.stage?.({ number: i + 1, name: specs[i].name || `stage ${i + 1}`, event, ...outcome ? { outcome } : {} });
+    } catch {}
+  };
   for (let i = 0;i < fromStage - 1; i++) {
     results[i] = { stage: specs[i].name || `stage ${i + 1}`, outcome: "skipped", rounds: 0, residual: [], unresolved: [], history: [] };
     done.add(i);
@@ -2172,16 +2177,19 @@ ${note}` : note } : result;
           results[i] = { stage: specs[i].name || `stage ${i + 1}`, outcome: "skipped", rounds: 0, residual: [], unresolved: [], history: [], note };
           done.add(i);
           undelivered.add(i);
+          stageEvent(i, "end", "skipped");
           continue;
         }
         if (running.size)
           host.log(`${specs[i].name || `stage ${i + 1}`}: starting in parallel with ${[...running.keys()].map((j) => specs[j].name || `stage ${j + 1}`).join(", ")}`);
+        stageEvent(i, "start");
         running.set(i, startStage(i).then((r) => {
           results[i] = r;
           if (r.outcome === "no-changes" || r.outcome === "checks-failed")
             undelivered.add(i);
           done.add(i);
           running.delete(i);
+          stageEvent(i, "end", r.outcome);
         }, (error) => {
           failure ??= { error };
           running.delete(i);
@@ -2639,6 +2647,32 @@ function duration(ms) {
     return `${m}m${String(s % 60).padStart(2, "0")}s`;
   return `${Math.floor(m / 60)}h${String(m % 60).padStart(2, "0")}m`;
 }
+var ANSI = /\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[@-Z\\-_])/g;
+var CONTROL = /[\x00-\x08\x0b-\x1f\x7f]/g;
+var clean = (text) => text.replace(/\t/g, "  ").replace(ANSI, "").replace(CONTROL, "");
+
+// src/adapters/runview/outline.ts
+function runOutline(input, config) {
+  const kind = input.goal !== undefined ? "plan" : "implement";
+  const fromStage = input.fromStage ?? 1;
+  const stages = (input.stages ?? []).map((st, i) => ({
+    number: i + 1,
+    name: clean(st.name || `stage ${i + 1}`),
+    implement: st.implement !== false,
+    review: st.review !== false,
+    checks: (st.checks === undefined ? config.checks.length : st.checks.length) > 0
+  }));
+  return {
+    kind,
+    branch: clean(input.branch),
+    worktree: config.worktree,
+    planReview: config.planReview && (kind === "plan" || input.plan !== undefined && fromStage === 1),
+    finalReview: config.finalReview && stages.length > 1,
+    reviewers: config.reviewers.map((r) => clean(r.name)),
+    fromStage,
+    stages
+  };
+}
 
 // src/adapters/opencode/plugin.ts
 var modelText = (model) => model ? `${model.providerID}/${model.id}${model.variant ? `#${model.variant}` : ""}` : null;
@@ -2735,7 +2769,8 @@ var createGrannyPlugin = ({ delays = DEFAULT_DELAYS, sleep = pause, killGraceMs 
       runs.set(id, run);
       const journal = (type, data) => appendFileSync2(join2(dir, "journal.jsonl"), JSON.stringify({ t: stamp(), type, ...data }) + `
 `);
-      const writeStatus = (extra = {}) => writeFileSync(join2(dir, "status.json"), JSON.stringify({ id, status: run.status, repo: input.repo, branch: input.branch, parent: parentSession, watch: config.watch, ...extra }, null, 2));
+      const outline = runOutline(input, config);
+      const writeStatus = (extra = {}) => writeFileSync(join2(dir, "status.json"), JSON.stringify({ id, status: run.status, repo: input.repo, branch: input.branch, parent: parentSession, watch: config.watch, outline, ...extra }, null, 2));
       writeFileSync(join2(dir, "input.json"), JSON.stringify({ ...input, config: layers }, null, 2));
       writeStatus({ startedAt: stamp() });
       let parentModel;
@@ -2856,7 +2891,7 @@ When done, call the \`${tool}\` tool exactly once with your result. That call is
             throw new Error(`no submit tool for result kind "${req.kind}"`);
           const model = modelRef(req.model) ?? parentModel;
           const session = await createRoleSession(req, model);
-          journal("agent", { label: req.label, role: req.role, phase: req.phase, session: session.id, model: model ?? null, linked: session.linked });
+          journal("agent", { label: req.label, role: req.role, phase: req.phase, session: session.id, model: model ?? null, linked: session.linked, cwd: req.cwd });
           run.active.set(session.id, { label: req.label, role: req.role, model: modelText(model), since: Date.now() });
           const end = (outcome, error) => {
             run.active.delete(session.id);
@@ -2888,7 +2923,8 @@ When done, call the \`${tool}\` tool exactly once with your result. That call is
           return runCommand(command, cwd, run.abort.signal, killGraceMs);
         },
         log: (message) => journal("log", { message }),
-        phase: (title) => journal("phase", { title })
+        phase: (title) => journal("phase", { title }),
+        stage: ({ number, name, event, outcome }) => journal("stage", { number, name, event, ...outcome ? { outcome } : {} })
       };
       const notify = async (text) => {
         try {

@@ -528,6 +528,21 @@ describe('opencode plugin', () => {
     expect(agents.map(e => [e.label, e.phase, e.session, e.linked])).toEqual(f.created.map(s => [s.metadata['granny-workflow'].label, s.metadata['granny-workflow'].phase, s.id, true]))
     expect(journal.filter(e => e.type === 'agent-end')).toEqual(agents.map(e => ({ t: expect.any(String), type: 'agent-end', label: e.label, session: e.session, outcome: 'done' })))
     expect(JSON.parse(readRun(dir, 'status.json'))).toMatchObject({ id, status: 'done', parent: 'parent', watch: 'full' })
+    expect(JSON.parse(readRun(dir, 'status.json')).outline).toEqual({
+      kind: 'implement',
+      branch: 'feat/x',
+      worktree: true,
+      planReview: false,
+      finalReview: false,
+      reviewers: ['codex'],
+      fromStage: 1,
+      stages: [{ number: 1, name: 'one', implement: true, review: true, checks: false }],
+    })
+    expect(agents.map(e => e.cwd)).toEqual(agents.map(() => repo))
+    expect(journal.filter(e => e.type === 'stage').map(({ t: _t, type: _type, ...e }) => e)).toEqual([
+      { number: 1, name: 'one', event: 'start' },
+      { number: 1, name: 'one', event: 'end', outcome: 'clean' },
+    ])
     expect(f.created[1].model).toEqual({ providerID: 'opencode', id: 'judge-model' })
     expect(f.created[1].permissions).toContainEqual({ action: 'edit', resource: '*', effect: 'deny' })
     expect(f.prompts.some(p => p.text.startsWith('You stopped without calling granny_submit_implementation'))).toBe(true)
@@ -541,6 +556,26 @@ describe('opencode plugin', () => {
     expect(status.content).toContain('"status": "done"')
     expect(status.content).toContain('"outcome": "clean"')
     expect(git(repo, 'status', '--porcelain')).toBe('')
+  })
+
+  it('writes the run outline to status.json from the start, and a planning run as kind plan', async () => {
+    const f = fakeContext({ hangUntilInterrupted: title => title === 'granny · implement one' || title === 'granny · plan' })
+    await plugin.setup(f.ctx)
+    const run = await startRun(repo, f)
+    expect(JSON.parse(readRun(run.dir, 'status.json'))).toMatchObject({ status: 'running', outline: { kind: 'implement', branch: 'feat/x', stages: [{ number: 1, name: 'one' }] } })
+    await waitFor(() => f.prompts.length > 0)
+    await f.tools.get('granny_cancel').execute({ runId: run.id })
+    await waitFor(() => readRun(run.dir, 'status.json').includes('"status": "cancelled"'))
+    expect(JSON.parse(readRun(run.dir, 'status.json')).outline).toMatchObject({ kind: 'implement' })
+
+    const started = await f.tools.get('granny_run').execute({ repo, branch: 'feat/x', goal: 'Build it.' }, { sessionID: 'parent' })
+    const id = /granny run (\S+) started/.exec(started.content)![1]!
+    const dir = join(repo, '.granny/runs', id)
+    expect(JSON.parse(readRun(dir, 'status.json')).outline).toMatchObject({ kind: 'plan', stages: [], finalReview: false })
+    await waitFor(() => journalOf(dir).some(e => e.type === 'agent'))
+    expect(journalOf(dir).find(e => e.type === 'agent')).toMatchObject({ label: 'plan', cwd: repo })
+    await f.tools.get('granny_cancel').execute({ runId: id })
+    await waitFor(() => readRun(dir, 'status.json').includes('"status": "cancelled"'))
   })
 
   it('works in a worktree of its own when repo is on another branch, and keeps the run files in repo', async () => {
@@ -558,6 +593,7 @@ describe('opencode plugin', () => {
     expect(result).toMatchObject({ repo, worktree: wt })
     expect(result.stages[0]).toMatchObject({ outcome: 'clean', rounds: 2 })
     expect(f.created.map(s => s.location.directory)).toEqual(f.created.map(() => wt))
+    expect(journalOf(dir).filter(e => e.type === 'agent').map(e => e.cwd)).toEqual(f.created.map(() => wt))
     expect(f.created.map(s => s.parentID)).toEqual(f.created.map(() => 'parent'))
     expect(f.moves).toEqual(f.created.map(s => ({ sessionID: s.id, directory: wt })))
     expect(existsSync(join(wt, '.granny/reviewed'))).toBe(true)

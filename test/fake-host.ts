@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process'
 import { existsSync, statSync } from 'node:fs'
 import { isAbsolute, join } from 'node:path'
 import { priorityOf } from '../src/core/review'
-import type { AgentRequest, CommandResult, Host, HostName } from '../src/core/types'
+import type { AgentRequest, CommandResult, Host, HostName, StageEvent } from '../src/core/types'
 
 export type Review = CommandResult | string
 export type Reviews = Review[] | Record<string, Review[]> | ((command: string) => Review | Promise<Review>)
@@ -114,6 +114,7 @@ export function fakeHost(opts: FakeOptions = {}) {
   const setups: Setup[] = []
   const logs: string[] = []
   const phases: string[] = []
+  const stages: StageEvent[] = []
   const probes: string[] = []
   let impl = 0
   const jobs = new Map<string, { script: string; result?: CommandResult; waits: number; exit?: string }>()
@@ -244,6 +245,7 @@ export function fakeHost(opts: FakeOptions = {}) {
     },
     log: m => logs.push(m),
     phase: t => phases.push(t),
+    stage: e => stages.push(e),
   }
   if (opts.direct !== false) {
     host.run = async (command: string, cwd: string) => {
@@ -257,7 +259,7 @@ export function fakeHost(opts: FakeOptions = {}) {
       return nextReview(command, cwd)
     }
   }
-  return { host, calls, requests, commands, cwds, setups, logs, phases, probes, stops }
+  return { host, calls, requests, commands, cwds, setups, logs, phases, stages, probes, stops }
 }
 
 export const finding = (severity: string, title: string, file = 'src/a.ts', line = 3) =>

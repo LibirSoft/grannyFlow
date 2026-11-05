@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'bun:test'
 import { clock } from '../src/adapters/runview/format'
+import { readOutline, runOutline } from '../src/adapters/runview/outline'
+import { resolveConfig } from '../src/core/config'
+import type { RunInput } from '../src/core/engine'
 import { buildRunTree, type JournalEntry, type LiveView, rowText, visibleRows } from '../src/adapters/runview/tree'
 
 const BASE = Date.parse('2026-11-05T18:23:28.000Z')
@@ -89,5 +92,62 @@ describe('buildRunTree with control characters in the journal', () => {
     expect(lines).toContain(`${clock(BASE + 5 * S)}  ✗ run failed: broke`)
     for (const l of lines) expect(l).not.toMatch(DIRTY)
     expect(tree.agents[0]).toMatchObject({ label: 'plan', role: 'planner', error: 'boom' })
+  })
+})
+
+describe('runOutline', () => {
+  const run = (input: Partial<RunInput>, config: unknown = {}) =>
+    runOutline({ repo: '/r', branch: 'feat/x', stages: [{ name: 'one', task: 't' }], ...input }, resolveConfig([config]))
+
+  it('names the stages as the engine does and says which steps the run has', () => {
+    expect(run({ stages: [{ name: 'one', task: 't' }, { task: 'u', checks: [] }, { name: 'r', review: false, implement: false }] }, { checks: [{ name: 'test', run: 'bun test' }] })).toEqual({
+      kind: 'implement',
+      branch: 'feat/x',
+      worktree: true,
+      planReview: false,
+      finalReview: true,
+      reviewers: ['reviewer'],
+      fromStage: 1,
+      stages: [
+        { number: 1, name: 'one', implement: true, review: true, checks: true },
+        { number: 2, name: 'stage 2', implement: true, review: true, checks: false },
+        { number: 3, name: 'r', implement: false, review: false, checks: true },
+      ],
+    })
+  })
+
+  it('has no checks without configured checks, and no final review for one stage', () => {
+    expect(run({}, { worktree: false })).toMatchObject({ worktree: false, finalReview: false, stages: [{ number: 1, name: 'one', implement: true, review: true, checks: false }] })
+  })
+
+  it('reviews the plan only in a planning run or with a plan and no later fromStage', () => {
+    expect(run({}, { planReview: true }).planReview).toBe(false)
+    expect(run({ plan: ['/p.md'] }, { planReview: true }).planReview).toBe(true)
+    expect(run({ plan: ['/p.md'], stages: [{ task: 'a' }, { task: 'b' }], fromStage: 2 }, { planReview: true })).toMatchObject({ planReview: false, fromStage: 2 })
+    expect(run({ plan: ['/p.md'] }).planReview).toBe(false)
+    const plan = runOutline({ repo: '/r', branch: 'feat/x', goal: 'build it' }, resolveConfig([{ planReview: true, reviewers: [{ name: 'a', engine: 'agent' }, { name: 'b', engine: 'agent' }] }]))
+    expect(plan).toMatchObject({ kind: 'plan', planReview: true, finalReview: false, stages: [], reviewers: ['a', 'b'] })
+  })
+
+  it('drops control characters from the names', () => {
+    expect(run({ branch: 'feat/\x1b[1mx', stages: [{ name: 'o\rne', task: 't' }] }).stages[0]!.name).toBe('one')
+  })
+})
+
+describe('readOutline', () => {
+  const good = runOutline({ repo: '/r', branch: 'feat/x', stages: [{ name: 'one', task: 't' }] }, resolveConfig([]))
+
+  it('reads back what runOutline wrote', () => {
+    expect(readOutline(JSON.parse(JSON.stringify(good)))).toEqual(good)
+  })
+
+  it('rejects anything malformed', () => {
+    for (const bad of [undefined, null, 'x', [], { ...good, stages: 'one' }, { ...good, stages: [{ ...good.stages[0], name: 3 }] }, { ...good, kind: 'other' }, { ...good, reviewers: [1] }, { ...good, fromStage: '1' }, { ...good, planReview: 'yes' }]) {
+      expect(readOutline(bad)).toBeUndefined()
+    }
+  })
+
+  it('cleans the text it reads', () => {
+    expect(readOutline({ ...good, branch: 'a\x07b', stages: [{ ...good.stages[0], name: 'o\x1b[0mne' }] })).toMatchObject({ branch: 'ab', stages: [{ name: 'one' }] })
   })
 })
