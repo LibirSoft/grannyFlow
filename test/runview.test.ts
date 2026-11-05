@@ -65,3 +65,29 @@ describe('buildRunTree with an opencode journal', () => {
     expect(odd.agents[0]!.model).toBeUndefined()
   })
 })
+
+describe('buildRunTree with control characters in the journal', () => {
+  const DIRTY = /[\x00-\x08\x0b-\x1f\x7f]/
+  it('drops ANSI codes, carriage returns and bells from log, command, error and agent text', () => {
+    const tree = buildRunTree(
+      { id: 'R', status: 'failed', startedAt: BASE },
+      [
+        j(0, 'phase', { title: 'Plan' }),
+        j(1 * S, 'agent', { label: 'plan\x1b[1m', role: 'planner\x07', session: 'ses_plan', model: null, phase: 'Plan' }),
+        j(2 * S, 'log', { message: '\x1b[31mred\x1b[0m line\r\nnext\x07' }),
+        j(3 * S, 'command', { command: 'echo \x1b[31mhi\r' }),
+        j(4 * S, 'agent-end', { label: 'plan', session: 'ses_plan', outcome: 'failed', error: 'boom\x1b[0m\r' }),
+        j(5 * S, 'error', { error: 'broke\x07\r' }),
+      ],
+      new Map(),
+      BASE + M,
+    )
+    const lines = tree.phases[0]!.lines
+    expect(lines).toContain(`${clock(BASE + 2 * S)}  red line`)
+    expect(lines).toContain('          next')
+    expect(lines).toContain(`${clock(BASE + 3 * S)}  $ echo hi`)
+    expect(lines).toContain(`${clock(BASE + 5 * S)}  ✗ run failed: broke`)
+    for (const l of lines) expect(l).not.toMatch(DIRTY)
+    expect(tree.agents[0]).toMatchObject({ label: 'plan', role: 'planner', error: 'boom' })
+  })
+})

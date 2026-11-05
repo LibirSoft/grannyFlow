@@ -1,6 +1,6 @@
 // A granny run as a tree: phases, round/stage groups, agents and their task subagents, built from the
 // run's journal entries with what the host knows live about each role laid over them.
-import { clock, duration } from './format'
+import { clean, clock, duration } from './format'
 
 export interface JournalEntry {
   t?: string
@@ -114,7 +114,7 @@ const timeOf = (entry: JournalEntry): number | undefined => {
 }
 
 const at = (t: number | undefined, text: string): string[] => {
-  const [first, ...rest] = text.replace(/\t/g, '  ').split('\n')
+  const [first, ...rest] = clean(text).split('\n')
   return [`${clock(t)}  ${first}`, ...rest.map(l => `${PAD}${l}`)]
 }
 
@@ -194,12 +194,13 @@ export function buildRunTree(
       }
       case 'agent': {
         const phase = phaseFor(entry, t)
-        const model = modelOf(entry.model)
+        const raw = modelOf(entry.model)
+        const model = raw === undefined ? undefined : clean(raw)
         const agent: AgentNode = {
-          label: String(entry.label ?? '?'),
-          role: String(entry.role ?? '?'),
+          label: clean(String(entry.label ?? '?')),
+          role: clean(String(entry.role ?? '?')),
           ...(model ? { model } : {}),
-          ...(typeof entry.effort === 'string' ? { effort: entry.effort } : {}),
+          ...(typeof entry.effort === 'string' ? { effort: clean(entry.effort) } : {}),
           session: String(entry.session ?? ''),
           phase: phase.title,
           start: t,
@@ -224,19 +225,19 @@ export function buildRunTree(
       }
       case 'agent-end': {
         const outcome = entry.outcome === 'done' || entry.outcome === 'failed' || entry.outcome === 'cancelled' ? entry.outcome : 'failed'
-        outcomes.set(String(entry.session), { outcome, end: t, ...(typeof entry.error === 'string' ? { error: entry.error } : {}) })
+        outcomes.set(String(entry.session), { outcome, end: t, ...(typeof entry.error === 'string' ? { error: clean(entry.error) } : {}) })
         ended(String(entry.session), outcome, t)
         break
       }
       case 'agent-failed':
-        failed.set(String(entry.session), { end: t, ...(typeof entry.error === 'string' ? { error: entry.error } : {}) })
+        failed.set(String(entry.session), { end: t, ...(typeof entry.error === 'string' ? { error: clean(entry.error) } : {}) })
         ended(String(entry.session), 'failed', t)
         break
       case 'subagent': {
-        const agent = lastOf(agents, a => a.label === entry.label)
+        const agent = lastOf(agents, a => a.label === clean(String(entry.label ?? '?')))
         if (!agent) break
         const names = subagentNames.get(agent) ?? []
-        for (const name of Array.isArray(entry.agents) ? entry.agents : []) if (!names.includes(String(name))) names.push(String(name))
+        for (const name of Array.isArray(entry.agents) ? entry.agents : []) if (!names.includes(clean(String(name)))) names.push(clean(String(name)))
         subagentNames.set(agent, names)
         break
       }
@@ -277,7 +278,7 @@ export function buildRunTree(
     } else if (view?.outcome) {
       agent.state = view.outcome
       if (view.endedAt !== undefined) agent.end = view.endedAt
-      if (view.error) agent.error = view.error
+      if (view.error) agent.error = clean(view.error)
     } else if (running) agent.state = view?.active ? 'running' : 'waiting'
     else {
       agent.state = run.status === 'cancelled' ? 'cancelled' : run.status === 'failed' ? 'failed' : 'done'

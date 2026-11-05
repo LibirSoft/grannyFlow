@@ -4,7 +4,7 @@
 import { readFileSync, statSync } from 'node:fs'
 import { basename, join } from 'node:path'
 import type { WatchMode } from '../../core/config'
-import { duration } from '../runview/format'
+import { clean, duration } from '../runview/format'
 import { TailReader, type TailOptions } from '../runview/tail'
 import { AGENT_MARKERS, type AgentNode, agentKey, type AgentState, buildRunTree, type JournalEntry, type LiveView, phaseKey, runKey, type RunTree } from '../runview/tree'
 
@@ -231,9 +231,9 @@ export class RunWatch {
         ...(typeof raw.parent === 'string' ? { parent: raw.parent } : {}),
         ...(MODES.includes(raw.watch as WatchMode) ? { watch: raw.watch as WatchMode } : {}),
         ...(finishedAt !== undefined ? { finishedAt } : {}),
-        ...(typeof raw.error === 'string' ? { error: raw.error } : {}),
-        ...(typeof raw.repo === 'string' ? { repo: raw.repo } : {}),
-        ...(typeof raw.branch === 'string' ? { branch: raw.branch } : {}),
+        ...(typeof raw.error === 'string' ? { error: clean(raw.error) } : {}),
+        ...(typeof raw.repo === 'string' ? { repo: clean(raw.repo) } : {}),
+        ...(typeof raw.branch === 'string' ? { branch: clean(raw.branch) } : {}),
       }
       this.statusStamp = stamp
       return true

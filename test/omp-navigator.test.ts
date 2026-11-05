@@ -858,6 +858,27 @@ describe('Navigator', () => {
     expect(s.text()).toContain('- one: clean')
   })
 
+  it('draws event text, journal lines and the run reply without control characters', () => {
+    const s = open()
+    appendFileSync(join(s.impl, 'events.jsonl'), line({ t: iso(70), type: 'text', text: '\x1b[31mred answer\x1b[0m\r\nbell\x07 line' }))
+    appendFileSync(join(s.dir, 'journal.jsonl'), line({ t: iso(71), type: 'log', message: 'log \x1b[32mgreen\x1b[0m\r\x07' }))
+    s.nav.tick()
+    expect(s.text()).toContain('red answer')
+    expect(s.text()).toContain('bell line')
+    s.nav.handleInput('\x1b[A')
+    s.nav.tick()
+    expect(s.text()).toContain('log green')
+    s.run.status = 'done'
+    s.run.reply = '[granny] Run R1 \x1b[1mfinished\x1b[0m.\r\n- one: clean\x07'
+    s.live.stop(s.implRole)
+    s.implRole.outcome = 'done'
+    s.nav.handleInput('\x1b[H')
+    s.nav.tick()
+    expect(s.text()).toContain('[granny] Run R1 finished.')
+    expect(s.text()).toContain('- one: clean')
+    for (const l of s.nav.render(160)) expect(l).not.toMatch(/[\x00-\x08\x0b-\x1f\x7f]/)
+  })
+
   it('redraws once per tick however much was written, at once on a key, and never reads files in render', () => {
     const s = open()
     const events = join(s.impl, 'events.jsonl')

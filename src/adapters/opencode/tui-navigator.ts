@@ -2,8 +2,7 @@
 // subagent sessions, a selection, and the detail of the selected node, laid out as rows of cells.
 // It reads only the hub's cached snapshots and opencode's in-memory session store.
 import { join } from 'node:path'
-import { clean, stamp } from '../omp/format'
-import { duration } from '../runview/format'
+import { clean, duration, stamp } from '../runview/format'
 import { type AgentNode, AGENT_MARKERS, agentKey, nextAgent, type PhaseNode, type Row, rowText, runKey, type RunTree, visibleRows } from '../runview/tree'
 import { AGENT_TONES, type RunSnapshot, STATUS_TONES, type Tone } from './runwatch'
 import { attempt, type Cell } from './tui-view'

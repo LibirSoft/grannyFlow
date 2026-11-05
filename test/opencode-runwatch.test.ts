@@ -107,6 +107,14 @@ describe('RunWatch', () => {
     expect(watch.snapshot.tree.phases.at(-1)!.lines.at(-1)).toContain('x'.repeat(1 + pad))
   })
 
+  it('drops control characters from the status error, repo and branch', () => {
+    planRun()
+    status({ status: 'failed', error: 'Error: \x1b[31mboom\x1b[0m\r\n    at x\x07', repo: '/re\x07po', branch: 'feat/\x1b[1mx' })
+    const watch = new RunWatch(dir, { now: () => BASE + 33 * M })
+    watch.poll(running())
+    expect(watch.snapshot).toMatchObject({ error: 'Error: boom\n    at x', repo: '/repo', branch: 'feat/x' })
+  })
+
   it('does not re-read an unchanged status.json and reports no change', () => {
     planRun()
     const { fs, counts } = countingFs()

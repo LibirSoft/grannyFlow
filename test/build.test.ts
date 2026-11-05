@@ -146,9 +146,11 @@ describe('opencode plugin bundle', () => {
     expect(readFileSync(join(root, 'skills/granny-workflow/engines/opencode/plugin/granny-workflow/index.js'), 'utf8')).toBe(built)
   })
 
-  it('bundles no module of the omp adapter', () => {
-    const text = readFileSync(join(root, 'skills/granny-workflow/engines/opencode/plugin/granny-workflow/index.js'), 'utf8')
-    expect(text.match(/^\/\/ src\/adapters\/omp\/.*$/gm) ?? []).toEqual([])
+  it('bundles no module of the omp adapter, in the server plugin or the TUI plugin', () => {
+    for (const file of ['index.js', 'tui.js']) {
+      const text = readFileSync(join(root, 'skills/granny-workflow/engines/opencode/plugin/granny-workflow', file), 'utf8')
+      expect(text.match(/^\/\/ src\/adapters\/omp\/.*$/gm) ?? []).toEqual([])
+    }
   })
 
   it('default-exports a v2 plugin definition', async () => {

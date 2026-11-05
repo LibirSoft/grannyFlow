@@ -3,7 +3,7 @@
 // only in the tick; render() lays out cached lines.
 import { readdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { stamp } from './format'
+import { clean, stamp } from './format'
 import { duration, type LiveRun, type RoleActivity } from './panel'
 import { TailReader } from '../runview/tail'
 import { subagentFiles } from './subagents'
@@ -368,13 +368,13 @@ export class Navigator {
     const run = this.runList().find(r => r.id === tree.id)
     const status = this.caches.get(tree.id)?.status?.data ?? {}
     const out = [`status   ${tree.status}`]
-    if (typeof status.repo === 'string') out.push(`repo     ${status.repo}`)
-    if (typeof status.branch === 'string') out.push(`branch   ${status.branch}`)
+    if (typeof status.repo === 'string') out.push(`repo     ${clean(status.repo)}`)
+    if (typeof status.branch === 'string') out.push(`branch   ${clean(status.branch)}`)
     out.push(`started  ${stamp(status.startedAt) ?? stamp(tree.start) ?? '?'}`)
     if (tree.status !== 'running') out.push(`ended    ${stamp(status.finishedAt) ?? stamp(tree.end) ?? '?'}`)
     else out.push(`phase    ${tree.phase ?? '?'}`)
     if (run) out.push(`result   ${join(run.dir, 'result.json')}`)
-    if (run?.reply !== undefined) out.push('', ...run.reply.split('\n'))
+    if (run?.reply !== undefined) out.push('', ...clean(run.reply).split('\n'))
     return out
   }
 
@@ -665,7 +665,7 @@ export class Navigator {
 function eventLines(line: string): string[] {
   if (!line.trim()) return []
   try {
-    return entryLines(JSON.parse(line) as Logged)
+    return entryLines(JSON.parse(line) as Logged).map(clean)
   } catch {
     return []
   }

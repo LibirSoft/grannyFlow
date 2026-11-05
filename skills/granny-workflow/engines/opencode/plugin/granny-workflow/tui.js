@@ -18,6 +18,14 @@ function duration(ms) {
     return `${m}m${String(s % 60).padStart(2, "0")}s`;
   return `${Math.floor(m / 60)}h${String(m % 60).padStart(2, "0")}m`;
 }
+var ANSI = /\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[@-Z\\-_])/g;
+var CONTROL = /[\x00-\x08\x0b-\x1f\x7f]/g;
+var clean = (text) => text.replace(/\t/g, "  ").replace(ANSI, "").replace(CONTROL, "");
+var dateOf = (value) => new Date(typeof value === "number" || typeof value === "string" ? value : Number.NaN);
+function stamp(value) {
+  const d = dateOf(value);
+  return Number.isNaN(d.getTime()) ? undefined : `${d.toISOString().slice(0, 10)} ${d.toTimeString().slice(0, 8)}`;
+}
 
 // src/adapters/runview/tree.ts
 var MAX_PHASE_ENTRIES = 200;
@@ -37,7 +45,7 @@ var timeOf = (entry) => {
   return Number.isNaN(t) ? undefined : t;
 };
 var at = (t, text) => {
-  const [first, ...rest] = text.replace(/\t/g, "  ").split(`
+  const [first, ...rest] = clean(text).split(`
 `);
   return [`${clock(t)}  ${first}`, ...rest.map((l) => `${PAD}${l}`)];
 };
@@ -106,12 +114,13 @@ function buildRunTree(run, entries, live, now, files = new Map) {
       }
       case "agent": {
         const phase = phaseFor(entry, t);
-        const model = modelOf(entry.model);
+        const raw = modelOf(entry.model);
+        const model = raw === undefined ? undefined : clean(raw);
         const agent = {
-          label: String(entry.label ?? "?"),
-          role: String(entry.role ?? "?"),
+          label: clean(String(entry.label ?? "?")),
+          role: clean(String(entry.role ?? "?")),
           ...model ? { model } : {},
-          ...typeof entry.effort === "string" ? { effort: entry.effort } : {},
+          ...typeof entry.effort === "string" ? { effort: clean(entry.effort) } : {},
           session: String(entry.session ?? ""),
           phase: phase.title,
           start: t,
@@ -136,22 +145,22 @@ function buildRunTree(run, entries, live, now, files = new Map) {
       }
       case "agent-end": {
         const outcome = entry.outcome === "done" || entry.outcome === "failed" || entry.outcome === "cancelled" ? entry.outcome : "failed";
-        outcomes.set(String(entry.session), { outcome, end: t, ...typeof entry.error === "string" ? { error: entry.error } : {} });
+        outcomes.set(String(entry.session), { outcome, end: t, ...typeof entry.error === "string" ? { error: clean(entry.error) } : {} });
         ended(String(entry.session), outcome, t);
         break;
       }
       case "agent-failed":
-        failed.set(String(entry.session), { end: t, ...typeof entry.error === "string" ? { error: entry.error } : {} });
+        failed.set(String(entry.session), { end: t, ...typeof entry.error === "string" ? { error: clean(entry.error) } : {} });
         ended(String(entry.session), "failed", t);
         break;
       case "subagent": {
-        const agent = lastOf(agents, (a) => a.label === entry.label);
+        const agent = lastOf(agents, (a) => a.label === clean(String(entry.label ?? "?")));
         if (!agent)
           break;
         const names = subagentNames.get(agent) ?? [];
         for (const name of Array.isArray(entry.agents) ? entry.agents : [])
-          if (!names.includes(String(name)))
-            names.push(String(name));
+          if (!names.includes(clean(String(name))))
+            names.push(clean(String(name)));
         subagentNames.set(agent, names);
         break;
       }
@@ -199,7 +208,7 @@ function buildRunTree(run, entries, live, now, files = new Map) {
       if (view.endedAt !== undefined)
         agent.end = view.endedAt;
       if (view.error)
-        agent.error = view.error;
+        agent.error = clean(view.error);
     } else if (running)
       agent.state = view?.active ? "running" : "waiting";
     else {
@@ -558,9 +567,9 @@ class RunWatch {
         ...typeof raw.parent === "string" ? { parent: raw.parent } : {},
         ...MODES.includes(raw.watch) ? { watch: raw.watch } : {},
         ...finishedAt !== undefined ? { finishedAt } : {},
-        ...typeof raw.error === "string" ? { error: raw.error } : {},
-        ...typeof raw.repo === "string" ? { repo: raw.repo } : {},
-        ...typeof raw.branch === "string" ? { branch: raw.branch } : {}
+        ...typeof raw.error === "string" ? { error: clean(raw.error) } : {},
+        ...typeof raw.repo === "string" ? { repo: clean(raw.repo) } : {},
+        ...typeof raw.branch === "string" ? { branch: clean(raw.branch) } : {}
       };
       this.statusStamp = stamp;
       return true;
@@ -696,16 +705,6 @@ function toastFor(e, s) {
 
 // src/adapters/opencode/tui-navigator.ts
 import { join as join2 } from "path";
-
-// src/adapters/omp/format.ts
-var ANSI = /\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[@-Z\\-_])/g;
-var CONTROL = /[\x00-\x08\x0b-\x1f\x7f]/g;
-var clean = (text) => text.replace(/\t/g, "  ").replace(ANSI, "").replace(CONTROL, "");
-var dateOf = (value) => new Date(typeof value === "number" || typeof value === "string" ? value : Number.NaN);
-function stamp(value) {
-  const d = dateOf(value);
-  return Number.isNaN(d.getTime()) ? undefined : `${d.toISOString().slice(0, 10)} ${d.toTimeString().slice(0, 8)}`;
-}
 
 // src/adapters/opencode/tui-view.ts
 var attempt = (fn) => {
