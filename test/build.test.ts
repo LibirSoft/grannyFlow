@@ -76,7 +76,7 @@ describe('claude-code workflow.js', () => {
     expect(impl.opts).toMatchObject({ label: 'implement one', phase: 'Implement', model: 'opus', effort: 'high' })
     expect(impl.prompt).toContain('Working repo: /r-worktrees/feat-x, branch `feat/x`')
     const runner = calls.find(c => c.opts.label === 'review one r1 codex')!
-    expect(runner.prompt).toContain('\ncd /r-worktrees/feat-x && if [ -s .granny/review-one-r1-codex.pid ]')
+    expect(runner.prompt).toContain('\n( cd /r-worktrees/feat-x && if [ -s .granny/review-one-r1-codex.pid ]')
     expect(calls.filter(c => c.opts.label.startsWith('review one r1 codex')).map(c => c.opts.label)).toEqual(['review one r1 codex', 'review one r1 codex wait 1', 'review one r1 codex read'])
     expect(runner.prompt.startsWith('READ-ONLY ROLE')).toBe(true)
     expect(runner.opts).toMatchObject({ model: 'haiku', effort: 'low' })

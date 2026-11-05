@@ -1366,14 +1366,17 @@ async function runGranny(host, input) {
     access,
     cwd
   }));
-  const helped = (label, r, missing) => {
+  const reported = (r) => {
     const said = exitMarked(String(r?.output ?? ""));
     const ran = said ? said.code === 0 : Boolean(r?.ran);
     const note = typeof r?.note === "string" && r.note.trim() ? r.note : undefined;
+    return { ran, code: said ? said.code : r?.exitCode ?? (ran ? 0 : "?"), output: said ? said.output : String(r?.output ?? ""), ...note ? { note } : {} };
+  };
+  const helped = (label, r, missing) => {
+    const { ran, code, output, note } = reported(r);
     if (ran && note)
       host.log(`${label}: the helper's note, kept out of the command's output: ${note}`);
-    const code = said ? said.code : r?.exitCode ?? (ran ? 0 : "?");
-    return { ran, code, output: r ? `${said ? said.output : String(r.output ?? "")}${!ran && note ? `
+    return { ran, code, output: r ? `${output}${!ran && note ? `
 ${note}` : ""}` : missing };
   };
   const shell = async (label, phase, script, cwd, ask = gitCommandPrompt) => {
@@ -1649,27 +1652,29 @@ the last repair's deviations: ${deviations}` : ""}`;
         note = `review command exited ${r.code}: ${r.output.slice(-2000)}`;
     } else {
       const job = detachedReview(plan, config, stem, cwd);
-      const step = (label, prompt) => call("helper", "command", label, phase, prompt, "read-only", config.roles.helper, cwd);
-      const started = await step(`review ${tag}`, reviewStartPrompt(p, name, rv.name, job.start));
+      const step = async (label, prompt) => {
+        const r = await call("helper", "command", label, phase, prompt, "read-only", config.roles.helper, cwd);
+        return r ? reported(r) : undefined;
+      };
+      const started = await step(`review ${tag}`, reviewStartPrompt(p, name, rv.name, markExit(job.start)));
       if (!started?.ran) {
-        const said = String(started?.output ?? "");
-        return { ran: false, findings: [], note: started ? `review command did not start (exit ${started.exitCode ?? "?"})${started.note ? ` (${started.note})` : ""}: ${said.slice(-2000)}` : "review runner returned nothing" };
+        return { ran: false, findings: [], note: started ? `review command did not start (exit ${started.code})${started.note ? ` (${started.note})` : ""}: ${started.output.slice(-2000)}` : "review runner returned nothing" };
       }
       let done = false;
       for (let n = 1;n <= MAX_WAITS && !done; n++) {
-        const w = await step(`review ${tag} wait ${n}`, reviewWaitPrompt(p, name, rv.name, n, MAX_WAITS, WAIT_SECONDS / 60, job.wait));
-        done = lineShaped(String(w?.output ?? ""), /^done$/) !== undefined;
+        const w = await step(`review ${tag} wait ${n}`, reviewWaitPrompt(p, name, rv.name, n, MAX_WAITS, WAIT_SECONDS / 60, markExit(job.wait)));
+        done = lineShaped(w?.output ?? "", /^done$/) !== undefined;
       }
       if (!done) {
-        await step(`review ${tag} stop`, reviewStopPrompt(p, name, rv.name, job.stop));
+        await step(`review ${tag} stop`, reviewStopPrompt(p, name, rv.name, markExit(job.stop)));
         const limit = `${MAX_WAITS} waits of up to ${WAIT_SECONDS / 60} minutes (${MAX_WAITS * WAIT_SECONDS / 60} minutes)`;
         return { ran: false, findings: [], note: `review command still running after ${limit} - stopped it` };
       }
-      const r = await step(`review ${tag} read`, reviewReadPrompt(p, name, rv.name, job.read));
+      const r = await step(`review ${tag} read`, reviewReadPrompt(p, name, rv.name, markExit(job.read)));
       ran = Boolean(r?.ran);
-      output = String(r?.output ?? "");
+      output = r?.output ?? "";
       if (!ran)
-        note = r ? `review command exited ${r.exitCode ?? "?"}${r.note ? ` (${r.note})` : ""}: ${output.slice(-2000)}` : "review runner returned nothing";
+        note = r ? `review command exited ${r.code}${r.note ? ` (${r.note})` : ""}: ${output.slice(-2000)}` : "review runner returned nothing";
     }
     host.log(`${tag}: reviewer: ${plan.backend ?? reportedBackend(output) ?? "not reported"}`);
     if (!ran)

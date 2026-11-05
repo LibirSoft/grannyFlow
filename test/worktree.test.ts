@@ -76,7 +76,7 @@ describe('the worktree setup in a real git repo', () => {
     expect(impl.prompt).toContain(`Working repo: ${wt}, branch \`feat/x\``)
     expect(impl.cwd).toBe(wt)
     if (f.cwds.length) expect(f.cwds).toEqual([wt])
-    else expect(f.calls.find(c => c.label === 'review core r1 codex')!.prompt).toContain(`\ncd '${wt.replaceAll("'", `'\\''`)}' && if [ -s .granny/review-core-r1-codex.pid ]`)
+    else expect(f.calls.find(c => c.label === 'review core r1 codex')!.prompt).toContain(`\n( cd '${wt.replaceAll("'", `'\\''`)}' && if [ -s .granny/review-core-r1-codex.pid ]`)
   }
 
   for (const host of ['opencode', 'claude-code'] as const) {

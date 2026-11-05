@@ -149,7 +149,12 @@ export function fakeHost(opts: FakeOptions = {}) {
     return next === undefined ? CLEAN : asResult(next)
   }
 
-  const detached = async (command: string): Promise<unknown> => {
+  /** `command` is the step without the exit-code wrapper; `line` is what the helper was asked to run. */
+  const detached = async (command: string, line: string, marked: boolean): Promise<unknown> => {
+    const r = await detachedStep(command, line)
+    return withMark(r, marked && !opts.shell)
+  }
+  const detachedStep = async (command: string, line: string): Promise<unknown> => {
     const cwd = cdTarget(command)
     const key = `${cwd}\0${jobOf(command)}`
     if (START.test(command)) {
@@ -159,7 +164,7 @@ export function fakeHost(opts: FakeOptions = {}) {
       const file = unquote(exit!)
       const job: { script: string; result?: CommandResult; waits: number; exit?: string } = { script, waits: 0, exit: isAbsolute(file) ? file : join(cwd, file) }
       jobs.set(key, job)
-      if (opts.shell) return noted(command, await bash(command, '/', opts.shell.env))
+      if (opts.shell) return noted(command, await bash(line, '/', opts.shell.env))
       job.result = await nextReview(script, '/')
       return { ran: true, exitCode: 0, output: 'started\n' }
     }
@@ -175,14 +180,14 @@ export function fakeHost(opts: FakeOptions = {}) {
         const r = opts.wait(command, job.waits)
         return r === null ? null : noted(command, asResult(r))
       }
-      if (opts.shell) return noted(command, await bash(command, '/', opts.shell.env))
+      if (opts.shell) return noted(command, await bash(line, '/', opts.shell.env))
       return noted(command, { code: 0, output: 'done\n' })
     }
     if (isStop(command)) {
       stops.push(command)
-      return opts.shell ? noted(command, await bash(command, '/', opts.shell.env)) : { ran: true, exitCode: 0, output: 'stopped\n' }
+      return opts.shell ? noted(command, await bash(line, '/', opts.shell.env)) : { ran: true, exitCode: 0, output: 'stopped\n' }
     }
-    if (opts.shell) return noted(job.script, await bash(command, '/', opts.shell.env))
+    if (opts.shell) return noted(job.script, await bash(line, '/', opts.shell.env))
     return noted(job.script, job.result ?? CLEAN)
   }
   const isDetached = (command: string) => START.test(command) || isWait(command) || isRead(command) || isStop(command)
@@ -224,8 +229,9 @@ export function fakeHost(opts: FakeOptions = {}) {
           return { perFinding, rationale: 'r' }
         }
         case 'command': {
-          const step = /Run exactly this[^\n]*:\n(.+)\n/.exec(req.prompt)?.[1] ?? ''
-          if (isDetached(step)) return detached(step)
+          const line = /Run exactly this[^\n]*:\n(.+)\n/.exec(req.prompt)?.[1] ?? ''
+          const step = unmarked(line)
+          if (isDetached(step)) return detached(step, line, marked)
           const script = /never cut it short\):\n(.+)\n/.exec(plain)?.[1] ?? /Run exactly this:\n(.+)\n/.exec(plain)?.[1] ?? ''
           commands.push(script)
           return withMark(noted(script, await nextReview(script, '/')), marked)

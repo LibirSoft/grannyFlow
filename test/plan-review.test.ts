@@ -285,7 +285,7 @@ describe('the plan review', () => {
       ['review plan review r1 codex wait 1', 'Plan review'],
       ['review plan review r1 codex read', 'Plan review'],
     ])
-    expect(f.calls.find(c => c.label === 'review plan review r1 codex wait 1')!.prompt).toContain(`\ncd ${WT} && bash -c 'until [ -s .granny/review-plan-review-r1-codex.exit ]`)
+    expect(f.calls.find(c => c.label === 'review plan review r1 codex wait 1')!.prompt).toContain(`\n( cd ${WT} && bash -c 'until [ -s .granny/review-plan-review-r1-codex.exit ]`)
   })
 
   it('waits for a slow plan-review command on Claude Code until it is done, then reads its findings', async () => {
