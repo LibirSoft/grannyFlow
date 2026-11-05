@@ -336,12 +336,26 @@ describe('live panel', () => {
       expect(role.state).toBe('preparing a tool call')
       role.stream('message_update', update('thinking_start'), 0)
       role.stream('message_update', thinking, 0)
-      expect(parse).not.toHaveBeenCalled()
+      expect(parse).toHaveBeenCalledTimes(1)
       expect(live.lines()[1]).toEndWith(' · thinking 0s · "Big \\ \"quoted\" heading"')
       expect(parse.mock.calls.every(([arg]) => String(arg).length < 100)).toBe(true)
     } finally {
       parse.mockRestore()
     }
+  })
+
+  it('keeps a bounded tail of the thinking text, not the raw lines, between draws, and still finds the heading', () => {
+    const live = new LiveRun('r1', undefined, { now: () => 0, renderEveryMs: 1000 })
+    const role = live.role({ label: 'plan', role: 'planner' })
+    live.start(role)
+    role.stream('message_update', update('thinking_start'), 0)
+    const partial = `,"partial":{"content":[{"type":"thinking","thinking":"${'y'.repeat(100_000)}"}]}`
+    role.stream('message_update', `{"type":"message_update","assistantMessageEvent":{"type":"thinking_delta","contentIndex":0,"delta":"**Early heading**\\n"}${partial}}`, 0)
+    for (let i = 0; i < 300; i++) {
+      role.stream('message_update', `{"type":"message_update","assistantMessageEvent":{"type":"thinking_delta","contentIndex":0,"delta":"step ${i} "}${partial}}`, 0)
+    }
+    expect(role.retainedChars).toBeLessThanOrEqual(8000)
+    expect(live.lines()[1]).toEndWith(' · thinking 0s · "Early heading"')
   })
 
   it('draws at most once per renderEveryMs, refreshes on its own from the first draw, and stops when closed', async () => {

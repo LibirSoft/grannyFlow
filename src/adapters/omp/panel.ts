@@ -25,7 +25,6 @@ export const PARSED_EVENTS = new Set(['message_start', 'message_end', 'tool_exec
 const HEAD = 200
 const MAX_LINES = 8
 const THINKING_TAIL = 4000
-const PENDING_FLUSH = 256
 
 function stringAfter(text: string, marker: string): string | undefined {
   const i = text.indexOf(marker)
@@ -106,7 +105,7 @@ export class RoleActivity {
   lastTool?: { text: string; at: number; error: boolean }
   task?: { id: string; agents: string[]; mark?: string }
   private thinking = ''
-  private pending: string[] = []
+  private unscanned = false
   private running = new Map<string, ToolCall>()
 
   constructor(readonly info: RoleInfo, now: number) {
@@ -121,7 +120,6 @@ export class RoleActivity {
 
   begin(now: number) {
     this.running.clear()
-    this.pending = []
     this.set('starting', now)
   }
 
@@ -131,15 +129,18 @@ export class RoleActivity {
     switch (streamType(line)) {
       case 'thinking_start':
         this.thinking = ''
-        this.pending = []
+        this.unscanned = false
         this.heading = undefined
         this.set('thinking', now)
         break
-      case 'thinking_delta':
-        this.pending.push(line)
-        if (this.pending.length >= PENDING_FLUSH) this.flush()
+      case 'thinking_delta': {
+        const delta = deltaOf(line)
+        this.thinking += delta
+        if (delta.includes('*')) this.unscanned = true
+        if (this.thinking.length > 2 * THINKING_TAIL) this.flush()
         this.set('thinking', now)
         break
+      }
       case 'text_start':
       case 'text_delta':
         this.set('writing', now)
@@ -184,14 +185,19 @@ export class RoleActivity {
     return undefined
   }
 
-  /** Reads the thinking text queued since the last call and keeps its latest `**heading**`. */
+  /** Characters of thinking text held for the heading search. */
+  get retainedChars(): number {
+    return this.thinking.length
+  }
+
+  /** Keeps the latest `**heading**` of the thinking text and trims the text to its tail. */
   flush() {
-    if (!this.pending.length) return
-    for (const line of this.pending) this.thinking += deltaOf(line)
-    this.pending = []
-    let heading: string | undefined
-    for (const m of this.thinking.matchAll(HEADING)) heading = m[1]
-    if (heading?.trim()) this.heading = oneLine(heading)
+    if (this.unscanned) {
+      this.unscanned = false
+      let heading: string | undefined
+      for (const m of this.thinking.matchAll(HEADING)) heading = m[1]
+      if (heading?.trim()) this.heading = oneLine(heading)
+    }
     if (this.thinking.length > THINKING_TAIL) this.thinking = this.thinking.slice(-THINKING_TAIL)
   }
 

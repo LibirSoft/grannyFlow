@@ -2582,7 +2582,6 @@ var PARSED_EVENTS = new Set(["message_start", "message_end", "tool_execution_sta
 var HEAD = 200;
 var MAX_LINES = 8;
 var THINKING_TAIL = 4000;
-var PENDING_FLUSH = 256;
 function stringAfter(text, marker) {
   const i = text.indexOf(marker);
   if (i < 0)
@@ -2653,7 +2652,7 @@ class RoleActivity {
   lastTool;
   task;
   thinking = "";
-  pending = [];
+  unscanned = false;
   running = new Map;
   constructor(info, now) {
     this.info = info;
@@ -2667,7 +2666,6 @@ class RoleActivity {
   }
   begin(now) {
     this.running.clear();
-    this.pending = [];
     this.set("starting", now);
   }
   stream(type, line, now) {
@@ -2676,16 +2674,20 @@ class RoleActivity {
     switch (streamType(line)) {
       case "thinking_start":
         this.thinking = "";
-        this.pending = [];
+        this.unscanned = false;
         this.heading = undefined;
         this.set("thinking", now);
         break;
-      case "thinking_delta":
-        this.pending.push(line);
-        if (this.pending.length >= PENDING_FLUSH)
+      case "thinking_delta": {
+        const delta = deltaOf(line);
+        this.thinking += delta;
+        if (delta.includes("*"))
+          this.unscanned = true;
+        if (this.thinking.length > 2 * THINKING_TAIL)
           this.flush();
         this.set("thinking", now);
         break;
+      }
       case "text_start":
       case "text_delta":
         this.set("writing", now);
@@ -2730,17 +2732,18 @@ class RoleActivity {
     }
     return;
   }
+  get retainedChars() {
+    return this.thinking.length;
+  }
   flush() {
-    if (!this.pending.length)
-      return;
-    for (const line of this.pending)
-      this.thinking += deltaOf(line);
-    this.pending = [];
-    let heading;
-    for (const m of this.thinking.matchAll(HEADING))
-      heading = m[1];
-    if (heading?.trim())
-      this.heading = oneLine(heading);
+    if (this.unscanned) {
+      this.unscanned = false;
+      let heading;
+      for (const m of this.thinking.matchAll(HEADING))
+        heading = m[1];
+      if (heading?.trim())
+        this.heading = oneLine(heading);
+    }
     if (this.thinking.length > THINKING_TAIL)
       this.thinking = this.thinking.slice(-THINKING_TAIL);
   }
