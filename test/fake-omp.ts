@@ -23,6 +23,10 @@ export interface FakeOmpBehaviour {
   events?: Record<string, unknown[]>
   /** Slugs whose first run, after its events, waits until `release-<slug>` exists in FAKE_OMP_DIR. */
   hold?: string[]
+  /** Session entries the first run of a slug writes to `<session dir>/2026-01-01T00-00-00-000Z_fake-<pid>.jsonl`, one JSON per line. */
+  session?: Record<string, unknown[]>
+  /** Subagent sessions (name -> entries) the first run of a slug writes to `<session dir>/2026-01-01T00-00-00-000Z_fake-<pid>/<Name>.jsonl`. */
+  subagentSessions?: Record<string, Record<string, unknown[]>>
 }
 
 export const CANNED: Record<string, unknown> = {
@@ -68,6 +72,13 @@ if (import.meta.main) {
     say({ type: 'message_end', message: { role: 'assistant', content: [], stopReason, ...(errorMessage ? { errorMessage } : {}) } })
 
   if (attempt === 1) {
+    const stem = join(sessionDir, `2026-01-01T00-00-00-000Z_fake-${process.pid}`)
+    const jsonl = (entries: unknown[]) => entries.map(e => JSON.stringify(e) + '\n').join('')
+    if (behaviour.session?.[slug]) writeFileSync(`${stem}.jsonl`, jsonl(behaviour.session[slug]))
+    for (const [name, entries] of Object.entries(behaviour.subagentSessions?.[slug] ?? {})) {
+      mkdirSync(stem, { recursive: true })
+      writeFileSync(join(stem, `${name}.jsonl`), jsonl(entries))
+    }
     for (const line of behaviour.events?.[slug] ?? []) process.stdout.write(`${typeof line === 'string' ? line : JSON.stringify(line)}\n`)
     if (behaviour.hold?.includes(slug)) {
       while (!existsSync(join(dir, `release-${slug}`))) await Bun.sleep(10)
