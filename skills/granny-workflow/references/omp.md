@@ -1,6 +1,6 @@
 # granny on omp
 
-The engine is an omp (oh-my-pi) extension (`engines/omp/extensions/granny-workflow/`). In your omp session it adds `granny_run`, `granny_status`, `granny_wait` and `granny_cancel`. The loop is code inside the extension, which runs in your omp process. Every role runs as its own `omp` process on its own model and answers through a `granny_submit_*` tool. The review commands and the checks run directly in your omp process.
+The engine is an omp (oh-my-pi) extension (`engines/omp/extensions/granny-workflow/`). In your omp session it adds `granny_run`, `granny_status`, `granny_wait` and `granny_cancel`, and the `/granny` command. The loop is code inside the extension, which runs in your omp process. Every role runs as its own `omp` process on its own model and answers through a `granny_submit_*` tool. The review commands and the checks run directly in your omp process.
 
 ## Install
 
@@ -14,7 +14,7 @@ The engine is an omp (oh-my-pi) extension (`engines/omp/extensions/granny-workfl
 
    Install it globally. omp loads project extensions only from `<cwd>/.omp/extensions/`, and with `worktree` on (the default) the run works in the branch's worktree. The role processes do not need the install: they load the extension file by its absolute path. `granny_run` itself must be in your session, though, and a per-project copy is missing in every other directory you start omp in.
 
-3. Quit omp and start it again. `granny_run`, `granny_status`, `granny_wait` and `granny_cancel` should be listed among the tools of the new session.
+3. Quit omp and start it again. `granny_run`, `granny_status`, `granny_wait` and `granny_cancel` should be listed among the tools of the new session, and `/granny` among its commands.
 
 There is no `granny` agent definition for omp: omp's agent files define task subagents, not the agent of your session. To run granny's roles on a particular model, start the session on that model - a role without its own model uses the model of the session that called `granny_run` - or set `model` on each role ([config.md](config.md#models-per-host)). `roles.granny` is only the model of the extraction fallback and the final PR-ready check; it does not change your session's model.
 
@@ -41,7 +41,7 @@ Independent stages run at the same time, up to `maxParallel` ([config.md](config
 - `granny_wait({ runId, timeoutSeconds? })` - blocks the turn until the run ends and returns what the message would carry: the finish summary, the failure, or `Run <id> was cancelled.` A run that has already ended returns at once. After `timeoutSeconds` (default 1800, clamped to 1-7200) it returns `Run <id> is still running after <n> s. ...`; Esc returns `Stopped waiting; run <id> is still running.` It is interruptible: a message you type, or any other aside, ends it with that same text. A run that ends while a `granny_wait` for it is pending reports only through those waits: no message is posted, and the journal has `notified-via-wait`. It waits only for a run of this omp process (the run table is in memory); for any other run it points to `granny_status({ repo })`.
 - `granny_cancel({ runId })` - interrupts every running step; nothing further starts. Every role process and every review command runs in its own process group. Each group gets SIGTERM, then SIGKILL 5 s later when it is still running.
 
-Run files: `<repo>/.granny/runs/<id>/` - `input.json`, `status.json`, `journal.jsonl`, `result.json` - in the main checkout you passed as `repo`, also when the run works in another worktree. Every terminal state writes `result.json`, after `status.json`, so a `result.json` means the run has ended and `status.json` already says how: `done` writes the run's result, `failed` and `cancelled` write `{ id, status, finishedAt, error }` with the error message (the stack is in `status.json`). Each role process has its own directory there, `sessions/<n>-<label>/`, which holds its omp session and `submission.json`, the arguments of its submit call. The PR body and the review outputs are in the worktree's `.granny/`.
+Run files: `<repo>/.granny/runs/<id>/` - `input.json`, `status.json`, `journal.jsonl`, `result.json` - in the main checkout you passed as `repo`, also when the run works in another worktree. Every terminal state writes `result.json`, after `status.json`, so a `result.json` means the run has ended and `status.json` already says how: `done` writes the run's result, `failed` and `cancelled` write `{ id, status, finishedAt, error }` with the error message (the stack is in `status.json`). Each role process has its own directory there, `sessions/<n>-<label>/`, which holds its omp session, `submission.json`, the arguments of its submit call, and with `watch` `"full"` its [event log](#watching-a-role) `events.jsonl`. The PR body and the review outputs are in the worktree's `.granny/`.
 
 ## Live panel
 
@@ -54,7 +54,23 @@ granny 20261105-165811-dww8 · Plan · 11m02s
     └ task: BaselineGates ✓, PublishedContracts ✓
 ```
 
-Per running role process: label, role, model/effort (`default model` when omp picks it), and what it does now and for how long - `starting`, `waiting for model`, `thinking` (with the latest `**heading**` of the reasoning, as GPT models stream them), `writing`, `preparing a tool call`, `running <tool>: <intent>` (the tool's intent, else a short argument: path, command, pattern); then `last tool:` (✗ when it failed) and `└ task:` with the subagents of its latest `task` call (`…` while it runs, ✓ or ✗ when it ended). It reads the role processes' JSON events, so it moves while a long answer streams, before anything reaches the session files. At most 8 lines, the rest of the roles as `+N more`; redrawn at most once a second. When the run ends the widget goes, and the status line says `granny <id>: done`, `failed` or `cancelled` for a minute or until the next run starts. Without a UI (print, json, rpc mode) there is no panel; `granny_status` shows the same view. The journal gets a `subagent` entry `{ label, agents }` for every `task` call of a role, nothing per other tool call.
+Per running role process: label, role, model/effort (`default model` when omp picks it), and what it does now and for how long - `starting`, `waiting for model`, `thinking` (with the latest `**heading**` of the reasoning, as GPT models stream them), `writing`, `preparing a tool call`, `running <tool>: <intent>` (the tool's intent, else a short argument: path, command, pattern); then `last tool:` (✗ when it failed) and `└ task:` with the subagents of its latest `task` call (`…` while it runs, ✓ or ✗ when it ended). It reads the role processes' JSON events, so it moves while a long answer streams, before anything reaches the session files. At most 8 lines, the rest of the roles as `+N more`; redrawn at most once a second. When the run ends the widget goes, and the status line says `granny <id>: done`, `failed` or `cancelled` for a minute or until the next run starts. Without a UI (print, json, rpc mode) there is no panel; `granny_status` shows the same view. The journal gets a `subagent` entry `{ label, agents }` for every `task` call of a role, nothing per other tool call. With `"watch": "off"` ([config.md](config.md#watching-a-run)) there is no panel and no status line either; `/granny off` hides them for the rest of the omp session (running runs too) and `/granny on` brings them back, without writing any config. `granny_status`'s live view and the `subagent` entries stay in every mode.
+
+## Watching a role
+
+`watch` in the config ([config.md](config.md#watching-a-run)) sets how much of a run the session shows: `"full"` (default) the panel, an event log per role and `/granny`; `"panel"` the panel only; `"off"` nothing. The run itself is the same in every mode.
+
+**Event log.** With `"full"`, each role process appends to `sessions/<n>-<label>/events.jsonl` while it streams (the file appears with its first entry). One JSON object per line, each with `t` (ISO time), condensed from the process's JSON events - never the raw stream, whose `message_update` lines carry the whole partial message each time:
+
+- `{ type: "state", state }` - each change: `waiting for model`, `thinking`, `writing`, `preparing a tool call`, `running <tool>: <intent>`;
+- `{ type: "heading", text }` - each new `**heading**` of the reasoning;
+- `{ type: "tool", name, intent?, arg? }` when a tool starts (`arg`: path, pattern or the first 200 characters of a command), `{ type: "tool-end", name, error? }` when it ends;
+- `{ type: "text", text }` - the final text of each answer, cut to 4000 characters;
+- `{ type: "subagents", agents }` for a `task` call, `{ type: "exit", code }` when the process closes (each `--continue` follow-up adds its own entries to the same file).
+
+A failed append is journalled once per role (`event-log-failed` with the path and error) and that role's log stops there; the run goes on.
+
+**`/granny`.** In the TUI, `/granny` lists the roles of the latest running run of this omp process (else its latest run) - number, label, role, model, what it does now and for how long, `done` once its process ended, and its run time. Pick one and its event log opens in an overlay: the last 40 lines (time, states, `»` headings, `▸` tool calls with intent and argument, `✗` failed tools, `└ task:` subagents, `✎` answers up to 12 lines each, `■` exit), re-read every half second while the file grows. Esc (or `q`) closes it. `/granny <runId>` picks that run (only runs started in this omp process). `/granny off` / `/granny on` hide or show the panel (above). For a run with `"panel"` or `"off"` it says `watching is off for run <id> (watch: "<mode>")` and how to turn it on. Outside the TUI (print, json, rpc mode) it prints each role's `events.jsonl` path instead, as a message that starts no turn. The view is an omp overlay; it does not open a terminal pane (omp's `openTerminal` needs a multiplexer), so to follow a log outside omp, `tail -f` its path.
 
 ## Role processes
 
