@@ -2608,8 +2608,7 @@ ${result.length > 30000 ? result.slice(0, 30000) + `
 `);
 }
 
-// src/adapters/omp/panel.ts
-var PARSED_EVENTS = new Set(["message_start", "message_end", "tool_execution_start", "tool_execution_end", "turn_start", "turn_end"]);
+// src/adapters/runview/format.ts
 function duration(ms) {
   const s = Math.max(0, Math.floor(ms / 1000));
   if (s < 60)
@@ -2619,6 +2618,9 @@ function duration(ms) {
     return `${m}m${String(s % 60).padStart(2, "0")}s`;
   return `${Math.floor(m / 60)}h${String(m % 60).padStart(2, "0")}m`;
 }
+
+// src/adapters/omp/panel.ts
+var PARSED_EVENTS = new Set(["message_start", "message_end", "tool_execution_start", "tool_execution_end", "turn_start", "turn_end"]);
 
 // src/adapters/opencode/plugin.ts
 var modelText = (model) => model ? `${model.providerID}/${model.id}${model.variant ? `#${model.variant}` : ""}` : null;
