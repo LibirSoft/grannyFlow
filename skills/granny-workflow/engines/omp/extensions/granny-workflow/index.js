@@ -2794,6 +2794,7 @@ function readSubmission(path) {
   }
 }
 var slug2 = (label) => label.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 60) || "agent";
+var SUBAGENT_SUBMIT = "granny: only the role's top-level agent submits the result - return your findings to the agent that spawned you.";
 function registerChild(pi, spec) {
   pi.registerTool({
     name: spec.tool,
@@ -2801,7 +2802,9 @@ function registerChild(pi, spec) {
     description: `granny-workflow: submit your final ${spec.kind} result. Call it exactly once, when your task is done.`,
     parameters: SCHEMAS[spec.kind],
     loadMode: "essential",
-    async execute(_id, params) {
+    async execute(_id, params, _signal, _onUpdate, ctx) {
+      if (ctx?.agent?.kind === "sub")
+        return text(SUBAGENT_SUBMIT);
       mkdirSync2(dirname(spec.out), { recursive: true });
       writeFileSync(spec.out, JSON.stringify(params));
       return text("Recorded. You are done - stop now.");
@@ -2810,6 +2813,15 @@ function registerChild(pi, spec) {
   pi.on("tool_call", async (event) => {
     const reason = blockReason(event.toolName, event.input, spec.access, spec.tool);
     return reason ? { block: true, reason } : undefined;
+  });
+  pi.on("session_start", async (_event, ctx) => {
+    if (ctx?.agent?.kind !== "sub")
+      return;
+    try {
+      const active = pi.getActiveTools?.();
+      if (active?.includes(spec.tool))
+        await pi.setActiveTools?.(active.filter((name) => name !== spec.tool));
+    } catch {}
   });
 }
 var createGrannyExtension = ({ delays = DEFAULT_DELAYS, sleep = pause, killGraceMs = KILL_GRACE_MS } = {}) => (pi) => {

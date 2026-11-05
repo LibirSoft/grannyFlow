@@ -38,6 +38,9 @@ interface OmpTool {
 export interface OmpApi {
   registerTool(tool: OmpTool): void
   on(event: 'tool_call', handler: (event: { toolName: string; input: any }) => Promise<{ block: true; reason: string } | undefined>): void
+  on(event: 'session_start', handler: (event: unknown, ctx: any) => Promise<void>): void
+  getActiveTools?(): string[]
+  setActiveTools?(toolNames: string[]): Promise<void>
   sendMessage(message: { customType: string; content: string; display: boolean }, options: { triggerTurn: boolean; deliverAs: 'followUp' }): void
 }
 
@@ -274,6 +277,10 @@ function readSubmission(path: string): unknown {
 
 const slug = (label: string) => label.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 60) || 'agent'
 
+const SUBAGENT_SUBMIT = "granny: only the role's top-level agent submits the result - return your findings to the agent that spawned you."
+
+// omp runs this factory again for every task subagent of a role, in the same process, so the role's
+// submit tool and guard reach the subagents too.
 function registerChild(pi: OmpApi, spec: ChildSpec) {
   pi.registerTool({
     name: spec.tool,
@@ -281,7 +288,8 @@ function registerChild(pi: OmpApi, spec: ChildSpec) {
     description: `granny-workflow: submit your final ${spec.kind} result. Call it exactly once, when your task is done.`,
     parameters: SCHEMAS[spec.kind],
     loadMode: 'essential',
-    async execute(_id, params) {
+    async execute(_id, params, _signal, _onUpdate, ctx) {
+      if (ctx?.agent?.kind === 'sub') return text(SUBAGENT_SUBMIT)
       mkdirSync(dirname(spec.out), { recursive: true })
       writeFileSync(spec.out, JSON.stringify(params))
       return text('Recorded. You are done - stop now.')
@@ -290,6 +298,13 @@ function registerChild(pi: OmpApi, spec: ChildSpec) {
   pi.on('tool_call', async event => {
     const reason = blockReason(event.toolName, event.input, spec.access, spec.tool)
     return reason ? { block: true, reason } : undefined
+  })
+  pi.on('session_start', async (_event, ctx) => {
+    if (ctx?.agent?.kind !== 'sub') return
+    try {
+      const active = pi.getActiveTools?.()
+      if (active?.includes(spec.tool)) await pi.setActiveTools?.(active.filter(name => name !== spec.tool))
+    } catch {}
   })
 }
 

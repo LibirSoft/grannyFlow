@@ -255,7 +255,7 @@ describe('omp extension in a role process (child mode)', () => {
     const submit = f.tools.get('granny_submit_judgement')
     expect(submit.loadMode).toBe('essential')
     expect(submit.parameters).toBe(SCHEMAS.judge)
-    expect(f.handlers.map(([event]) => event)).toEqual(['tool_call'])
+    expect(f.handlers.map(([event]) => event).sort()).toEqual(['session_start', 'tool_call'])
 
     const value = { perFinding: [], rationale: 'nothing to judge' }
     expect(textOf(await exec(submit, value))).toBe('Recorded. You are done - stop now.')
@@ -277,6 +277,41 @@ describe('omp extension in a role process (child mode)', () => {
     expect(await guard({ type: 'tool_call', toolCallId: 'c', toolName: 'edit', input: {} })).toBeUndefined()
     expect(await guard({ type: 'tool_call', toolCallId: 'c', toolName: 'bash', input: { command: 'git commit -qm x' } })).toBeUndefined()
     expect(await guard({ type: 'tool_call', toolCallId: 'c', toolName: 'ask', input: {} })).toMatchObject({ block: true })
+  })
+
+  it('lets only the role\'s top-level agent submit: a subagent\'s call writes nothing and is told to report to its parent', async () => {
+    const out = join(dir, 'sessions/1-plan/submission.json')
+    process.env.GRANNY_OMP_CHILD = JSON.stringify({ tool: 'granny_submit_plan', kind: 'plan', out, access: 'write' })
+    const f = fakePi()
+    await extension(f.pi as any)
+    const submit = f.tools.get('granny_submit_plan')
+    const sub = { cwd: dir, agent: { kind: 'sub', id: '0-BaselineGates', name: 'task', depth: 1, parentId: 'Main' } }
+    const refused = textOf(await exec(submit, { notes: 'research notes' }, sub))
+    expect(refused).toBe("granny: only the role's top-level agent submits the result - return your findings to the agent that spawned you.")
+    expect(existsSync(out)).toBe(false)
+
+    const value = { plan: 'the plan' }
+    expect(textOf(await exec(submit, value, { cwd: dir, agent: { kind: 'main', id: 'Main', name: 'main', depth: 0 } }))).toBe('Recorded. You are done - stop now.')
+    expect(JSON.parse(readFileSync(out, 'utf8'))).toEqual(value)
+  })
+
+  it('hides the submit tool from a subagent session and leaves the top-level role session alone', async () => {
+    process.env.GRANNY_OMP_CHILD = JSON.stringify({ tool: 'granny_submit_findings', kind: 'findings', out: join(dir, 'out.json'), access: 'read-only' })
+    const f = fakePi()
+    const set: string[][] = []
+    const api = { ...f.pi, getActiveTools: () => ['read', 'granny_submit_findings', 'bash'], setActiveTools: async (names: string[]) => void set.push(names) }
+    await extension(api as any)
+    const sessionStart = f.handlers.find(([event]) => event === 'session_start')![1]
+    await sessionStart({ type: 'session_start' }, { agent: { kind: 'main', id: 'Main', name: 'main', depth: 0 } })
+    await sessionStart({ type: 'session_start' }, {})
+    expect(set).toEqual([])
+    await sessionStart({ type: 'session_start' }, { agent: { kind: 'sub', id: '0-Explore', name: 'explore', depth: 1 } })
+    expect(set).toEqual([['read', 'bash']])
+
+    const broken = fakePi()
+    await extension({ ...broken.pi, getActiveTools: () => { throw new Error('runtime not initialized') } } as any)
+    const brokenStart = broken.handlers.find(([event]) => event === 'session_start')![1]
+    await brokenStart({ type: 'session_start' }, { agent: { kind: 'sub', id: '0-Explore', name: 'explore', depth: 1 } })
   })
 })
 

@@ -176,6 +176,6 @@ describe('omp extension bundle', () => {
       delete process.env.GRANNY_OMP_CHILD
     }
     expect(tools).toEqual(['granny_submit_findings'])
-    expect(events).toEqual(['tool_call'])
+    expect(events).toEqual(['tool_call', 'session_start'])
   })
 })
