@@ -761,6 +761,49 @@ describe('Navigator', () => {
     expect(s.text()).toContain('✎ Gates are green.')
   })
 
+  it('opens a finished agent\'s transcript at its end when it is drawn before its first read', () => {
+    const s = open()
+    const session = join(s.plan, '2026-11-05T17-00-01-000Z_u.jsonl')
+    appendFileSync(session, Array.from({ length: 100 }, (_, i) => line({ type: 'message', timestamp: iso(60), message: { role: 'assistant', content: [{ type: 'text', text: `line ${i}` }] } })).join(''))
+    s.nav.handleInput('[')
+    expect(s.text()).toContain('(reading …)')
+    s.nav.handleInput('\x1b[C')
+    s.nav.render(160)
+    s.nav.tick()
+    const lines = s.nav.render(160)
+    expect(lines.at(-2)).toEndWith('✎ line 99')
+    expect(lines.join('\n')).not.toContain('▶ prompt')
+  })
+
+  it('keeps a phase\'s journal lines at their end as they arrive until the view is scrolled', () => {
+    const s = open({ rows: 12 })
+    s.nav.handleInput('\x1b[A')
+    s.nav.render(160)
+    s.nav.tick()
+    s.nav.render(160)
+    appendFileSync(join(s.dir, 'journal.jsonl'), Array.from({ length: 20 }, (_, i) => line({ t: iso(70 + i), type: 'log', message: `note ${i}` })).join(''))
+    s.nav.tick()
+    expect(s.nav.render(160).at(-2)).toEndWith('note 19')
+  })
+
+  it('holds the view where it is when follow is turned off with f', () => {
+    const s = open({ rows: 12 })
+    const events = join(s.impl, 'events.jsonl')
+    const steps = (from: number) => Array.from({ length: 20 }, (_, i) => line({ t: iso(70 + from + i), type: 'heading', text: `step ${from + i}` })).join('')
+    s.nav.handleInput('\r')
+    appendFileSync(events, steps(0))
+    s.nav.tick()
+    s.nav.render(160)
+    s.nav.handleInput('f')
+    const before = s.nav.render(160)
+    expect(before.at(-1)).toContain('f follow (off)')
+    expect(before.at(-2)).toEndWith('» step 19')
+    appendFileSync(events, steps(20))
+    s.nav.tick()
+    const after = s.nav.render(160)
+    expect(after.slice(2, -1).map(l => l.slice(l.indexOf(' │ ') + 3))).toEqual(before.slice(2, -1).map(l => l.slice(l.indexOf(' │ ') + 3)))
+  })
+
   it('reads a newly selected source right after the key, outside the key handler', async () => {
     const s = open()
     s.nav.handleInput('[')
@@ -853,16 +896,25 @@ describe('Navigator', () => {
     expect(s.text()).toContain('● implement one')
   })
 
-  it('survives a throwing requestRender by disposing itself, and a throwing theme by drawing plain text', () => {
+  it('survives a throwing requestRender by closing itself once, and a throwing theme by drawing plain text', () => {
     const s = open()
     s.renders.fail = true
     expect(() => s.nav.tick()).not.toThrow()
     expect(s.nav.disposed).toBe(true)
+    expect(s.closed()).toBe(1)
     expect(() => s.nav.handleInput('\x1b[A')).not.toThrow()
     const count = s.renders.count
     s.nav.tick()
     expect(s.renders.count).toBe(count)
-    expect(s.closed()).toBe(0)
+    expect(s.closed()).toBe(1)
+
+    const k = open()
+    k.renders.fail = true
+    expect(() => k.nav.handleInput('\x1b[A')).not.toThrow()
+    expect(k.nav.disposed).toBe(true)
+    expect(k.closed()).toBe(1)
+    k.nav.handleInput('q')
+    expect(k.closed()).toBe(1)
 
     const t = open({
       theme: {

@@ -225,7 +225,7 @@ export class Navigator {
     try {
       this.deps.tui.requestRender()
     } catch {
-      this.dispose()
+      this.close()
     }
   }
 
@@ -515,6 +515,7 @@ export class Navigator {
         if (source) {
           source.follow = !source.follow
           if (source.follow) source.top = undefined
+          else this.scroll(0)
         }
         return
       case 'toggle': {
@@ -657,7 +658,6 @@ export class Navigator {
     if (this.wrapped?.key !== key) this.wrapped = { key, lines: wrap(raw.length ? raw : [emptyText(source)], width) }
     const lines = this.wrapped.lines
     const max = Math.max(0, lines.length - bodyHeight)
-    if (source && !source.follow && source.top === undefined) source.top = max
     const top = source?.follow ? max : clamp(source?.top ?? max, 0, max)
     const out = [...header.map(h => this.paint('accent', h)), ...lines.slice(top, top + bodyHeight)]
     while (out.length < height) out.push('')
