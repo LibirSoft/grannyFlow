@@ -536,6 +536,62 @@ describe('checks', () => {
     expect(f.calls.filter(c => c.label === 'check final review tests')).toHaveLength(1)
   })
 
+  describe('on Claude Code, when the helper reports ran false without an exit code (the Bash tool shows none on success)', () => {
+    const silent = (output: string) => (req: AgentRequest) => (req.label === 'check core tests' ? { ran: false, output } : undefined)
+
+    it('wraps the check so it prints its own exit code last', async () => {
+      const f = scripted({ 'run-tests': [green()] }, { name: 'claude-code', direct: false })
+      await runGranny(f.host, run({ checks: [TESTS] }))
+      expect(f.calls.find(c => c.label === 'check core tests')!.prompt).toContain(`\n( cd ${REPO} && run-tests ) 2>&1; echo "[granny] exit=$?"\n`)
+    })
+
+    it('passes the check on a last line [granny] exit=0', async () => {
+      const f = scripted({}, { name: 'claude-code', direct: false, override: silent('838 pass\n0 fail\n[granny] exit=0\n') })
+      const r = await runGranny(f.host, run({ checks: [TESTS] }))
+      expect(r.stages[0]!.outcome).toBe('clean')
+      expect(r.stages[0]!.checks?.[0]!.results[0]).toEqual({ name: 'tests', passed: true, code: 0 })
+      expect(f.calls.filter(c => c.label === 'check core tests')).toHaveLength(1)
+    })
+
+    it('fails the check on [granny] exit=1 and spends a repair on it, with the marker line kept out of the output', async () => {
+      let n = 0
+      const f = scripted(
+        {},
+        { name: 'claude-code', direct: false, override: req => (req.label === 'check core tests' ? { ran: false, output: n++ === 0 ? 'FAIL\n[granny] exit=1\n' : 'ok\n[granny] exit=0\n' } : undefined) },
+      )
+      const r = await runGranny(f.host, run({ maxRepairs: 1, checks: [TESTS] }))
+      expect(r.stages[0]!.checks?.[0]!.results[0]).toEqual({ name: 'tests', passed: false, code: 1 })
+      const repair = f.calls.find(c => c.label === 'repair core implement #1')!
+      expect(repair.prompt).toContain('Exit code: 1\nOutput (tail):\n```\nFAIL\n\n```')
+      expect(r.stages[0]!.outcome).toBe('clean')
+    })
+
+    it('without the marker, still ends the gate "check runner failed"', async () => {
+      const f = scripted({}, { name: 'claude-code', direct: false, override: silent('838 pass\n0 fail\n') })
+      const r = await runGranny(f.host, run({ checks: [TESTS] }))
+      expect(r.stages[0]!.outcome).toBe('checks-failed')
+      expect(r.stages[0]!.checks?.[0]!.results[0]).toMatchObject({ name: 'tests', passed: false, code: '?', note: 'check runner failed' })
+      expect(f.calls.some(c => c.label.startsWith('repair'))).toBe(false)
+    })
+
+    it('reads HEAD, the commit count and the status from the marker too', async () => {
+      const f = scripted({ 'run-tests': [green()] }, { name: 'claude-code', direct: false })
+      const agent = f.host.agent.bind(f.host)
+      const silentProbes: string[] = []
+      f.host.agent = async req => {
+        const said = req.label.startsWith('head ') ? 'abcdef1234567\n' : req.label.startsWith('commits ') ? '2\n' : req.label.startsWith('status ') ? '' : undefined
+        if (said === undefined) return agent(req)
+        silentProbes.push(req.label)
+        return { ran: false, output: `${said}[granny] exit=0\n` }
+      }
+      const r = await runGranny(f.host, run({ checks: [TESTS] }))
+      expect(r.stages[0]!.outcome).toBe('clean')
+      expect(silentProbes).toEqual(expect.arrayContaining(['head core', 'commits core', 'status core implement']))
+      expect(f.logs.some(l => l.includes('could not read'))).toBe(false)
+      expect(f.calls.find(c => c.label === 'review core r1 reviewer')!.prompt).toContain('git diff abcdef1234567...HEAD')
+    })
+  })
+
   it('on Claude Code, ask the helper to keep every line the metric matches when it shortens a long output', async () => {
     const pattern = 'All files\\s*\\|\\s*([0-9.]+)'
     const f = scripted({ 'run-cov': [green('All files | 91.2\n')], 'run-tests': [green()] }, { name: 'claude-code', direct: false })

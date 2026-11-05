@@ -74,6 +74,17 @@ const isRead = (command: string) => command.includes('exit "${code:-1}"')
 const isStop = (command: string) => command.includes('echo stopped')
 const jobOf = (command: string) => /review-[^\s']*?-r\d+-[a-z0-9-]+(?=\.(?:exit|out|pid))/.exec(command)?.[0] ?? ''
 
+const MARK_HEAD = /^\( (?=cd )/
+const MARK_TAIL = ' ) 2>&1; echo "[granny] exit=$?"'
+/** The command inside the exit-code wrapper the engine puts around a helper's shell step. */
+const unmarked = (line: string) => (MARK_HEAD.test(line) && line.endsWith(MARK_TAIL) ? line.slice(2, -MARK_TAIL.length) : line)
+/** What the real wrapper adds: the exit code as a last line, right after the command's own output. */
+const withMark = (r: unknown, on: boolean) => {
+  if (!on || !r || typeof r !== 'object') return r
+  const out = r as { output?: unknown; exitCode?: unknown }
+  return typeof out.exitCode === 'number' ? { ...out, output: `${String(out.output ?? '')}[granny] exit=${out.exitCode}\n` } : r
+}
+
 const cdTarget = (line: string) => {
   const quoted = /^cd ((?:'[^']*'(?:\\''[^']*')*)|\S+) && /.exec(line)?.[1] ?? ''
   return quoted.startsWith("'") ? quoted.slice(1, -1).replaceAll(`'\\''`, "'") : quoted
@@ -180,14 +191,16 @@ export function fakeHost(opts: FakeOptions = {}) {
     name: opts.name ?? 'opencode',
     async agent(req) {
       requests.push(req)
+      const marked = req.kind === 'command' && req.prompt.includes(MARK_TAIL)
+      const plain = marked ? req.prompt.split('\n').map(unmarked).join('\n') : req.prompt
       if (req.label === 'worktree' || (req.kind === 'command' && req.label.startsWith('worktree '))) {
-        const line = /Run exactly this:\n(.+)\n/.exec(req.prompt)?.[1] ?? ''
+        const line = /Run exactly this:\n(.+)\n/.exec(plain)?.[1] ?? ''
         setups.push({ command: line, cwd: '/', request: req })
-        return noted(line, await setUp(line, '/', cdTarget(line)))
+        return withMark(noted(line, await setUp(line, '/', cdTarget(line))), marked)
       }
-      if (req.kind === 'command' && isProbe(req.prompt)) {
-        const line = /Run exactly this:\n(.+)\n/.exec(req.prompt)?.[1] ?? ''
-        return noted(line, await probe(line, req.cwd))
+      if (req.kind === 'command' && isProbe(plain)) {
+        const line = /Run exactly this:\n(.+)\n/.exec(plain)?.[1] ?? ''
+        return withMark(noted(line, await probe(line, req.cwd)), marked)
       }
       calls.push(req)
       const custom = await opts.override?.(req)
@@ -213,9 +226,9 @@ export function fakeHost(opts: FakeOptions = {}) {
         case 'command': {
           const step = /Run exactly this[^\n]*:\n(.+)\n/.exec(req.prompt)?.[1] ?? ''
           if (isDetached(step)) return detached(step)
-          const script = /never cut it short\):\n(.+)\n/.exec(req.prompt)?.[1] ?? /Run exactly this:\n(.+)\n/.exec(req.prompt)?.[1] ?? ''
+          const script = /never cut it short\):\n(.+)\n/.exec(plain)?.[1] ?? /Run exactly this:\n(.+)\n/.exec(plain)?.[1] ?? ''
           commands.push(script)
-          return noted(script, await nextReview(script, '/'))
+          return withMark(noted(script, await nextReview(script, '/')), marked)
         }
         case 'findings':
           return { findings: [] }

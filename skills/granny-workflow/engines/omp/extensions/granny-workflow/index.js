@@ -1220,6 +1220,14 @@ var FINAL_REVIEW_PHASE = "Final review";
 var CHECKS_PHASE = "Checks";
 var TIMEOUT_PROBE = "if command -v timeout >/dev/null; then echo timeout; elif command -v gtimeout >/dev/null; then echo gtimeout; else exit 1; fi";
 var TIMEOUT_MISSING = /(^|[\s:])g?timeout: (command )?not found|command not found: g?timeout$/m;
+var EXIT_MARK = /\[granny\] exit=(\d+)[ \t]*(?:\r?\n|$)/g;
+var markExit = (command) => `( ${command} ) 2>&1; echo "[granny] exit=$?"`;
+function exitMarked(output) {
+  const last = [...output.matchAll(EXIT_MARK)].at(-1);
+  if (!last)
+    return;
+  return { code: Number(last[1]), output: output.slice(0, last.index) + output.slice(last.index + last[0].length) };
+}
 var saidSomething = (d) => typeof d === "string" && d.trim() && !/^\s*(none|n\/a|-|no deviations)?\.?\s*$/i.test(d) ? d : undefined;
 var slug = (s) => s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "stage";
 var trimPath = (s) => s.replace(/\/+$/, "") || "/";
@@ -1361,11 +1369,13 @@ async function runGranny(host, input) {
     cwd
   }));
   const helped = (label, r, missing) => {
-    const ran = Boolean(r?.ran);
+    const said = exitMarked(String(r?.output ?? ""));
+    const ran = said ? said.code === 0 : Boolean(r?.ran);
     const note = typeof r?.note === "string" && r.note.trim() ? r.note : undefined;
     if (ran && note)
       host.log(`${label}: the helper's note, kept out of the command's output: ${note}`);
-    return { ran, code: r?.exitCode ?? (ran ? 0 : "?"), output: r ? `${String(r.output ?? "")}${!ran && note ? `
+    const code = said ? said.code : r?.exitCode ?? (ran ? 0 : "?");
+    return { ran, code, output: r ? `${said ? said.output : String(r.output ?? "")}${!ran && note ? `
 ${note}` : ""}` : missing };
   };
   const shell = async (label, phase, script, cwd, ask = gitCommandPrompt) => {
@@ -1373,7 +1383,7 @@ ${note}` : ""}` : missing };
       const r = await run(script, cwd);
       return { ran: r.code === 0, code: r.code, output: r.output };
     }
-    const prompt = ask(cwd, label, `cd ${shellQuote(cwd)} && ${script}`);
+    const prompt = ask(cwd, label, markExit(`cd ${shellQuote(cwd)} && ${script}`));
     return helped(label, await call("helper", "command", label, phase, prompt, "write", config.roles.helper, cwd), `the ${label} runner returned nothing`);
   };
   const readHead = async (label, phase, cwd) => {
@@ -1400,13 +1410,7 @@ ${note}` : ""}` : missing };
   };
   const setUpWorktree = async (repo, branch, from, label, shared) => {
     const script = worktreeScript(config, branch, from, worktreePath(repo, branch, config.worktreeDir, shared));
-    let r;
-    if (host.run)
-      r = await shell(label, "Worktree", script, repo);
-    else {
-      const prompt = worktreeCommandPrompt(repo, branch, `cd ${shellQuote(repo)} && ${script}`);
-      r = helped(label, await call("helper", "command", label, "Worktree", prompt, "write", config.roles.helper, repo), "the worktree runner returned nothing");
-    }
+    const r = await shell(label, "Worktree", script, repo, (_cwd, _step, command) => worktreeCommandPrompt(repo, branch, command));
     const path = r.ran ? reportedWorktree(r.output) : undefined;
     if (!path)
       throw new Error(`worktree setup failed${repo === primary && branch === input.branch ? "" : ` for ${repo} ${branch}`} (exit ${r.code}): ${r.output.slice(-2000)}`);

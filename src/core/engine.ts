@@ -68,6 +68,21 @@ const CHECKS_PHASE = 'Checks'
 const TIMEOUT_PROBE = 'if command -v timeout >/dev/null; then echo timeout; elif command -v gtimeout >/dev/null; then echo gtimeout; else exit 1; fi'
 const TIMEOUT_MISSING = /(^|[\s:])g?timeout: (command )?not found|command not found: g?timeout$/m
 
+const EXIT_MARK = /\[granny\] exit=(\d+)[ \t]*(?:\r?\n|$)/g
+
+/**
+ * Claude Code's Bash tool shows no exit code when a command succeeds, so the helper cannot always report one:
+ * the command prints its own as a last line. A subshell, not a brace group, so a script's own `exit` still reaches it.
+ */
+export const markExit = (command: string) => `( ${command} ) 2>&1; echo "[granny] exit=$?"`
+
+/** The exit code from the last marker line, and the output without that line. */
+export function exitMarked(output: string): { code: number; output: string } | undefined {
+  const last = [...output.matchAll(EXIT_MARK)].at(-1)
+  if (!last) return undefined
+  return { code: Number(last[1]), output: output.slice(0, last.index) + output.slice(last.index! + last[0].length) }
+}
+
 export type RepoInput = string | { repo: string; base?: string }
 
 export interface RunInput {
@@ -250,10 +265,12 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
     )
 
   const helped = (label: string, r: any, missing: string): { ran: boolean; code: number | string; output: string } => {
-    const ran = Boolean(r?.ran)
+    const said = exitMarked(String(r?.output ?? ''))
+    const ran = said ? said.code === 0 : Boolean(r?.ran)
     const note = typeof r?.note === 'string' && r.note.trim() ? r.note : undefined
     if (ran && note) host.log(`${label}: the helper's note, kept out of the command's output: ${note}`)
-    return { ran, code: r?.exitCode ?? (ran ? 0 : '?'), output: r ? `${String(r.output ?? '')}${!ran && note ? `\n${note}` : ''}` : missing }
+    const code = said ? said.code : (r?.exitCode ?? (ran ? 0 : '?'))
+    return { ran, code, output: r ? `${said ? said.output : String(r.output ?? '')}${!ran && note ? `\n${note}` : ''}` : missing }
   }
 
   const shell = async (label: string, phase: string, script: string, cwd: string, ask = gitCommandPrompt): Promise<{ ran: boolean; code: number | string; output: string }> => {
@@ -261,7 +278,7 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
       const r = await run(script, cwd)
       return { ran: r.code === 0, code: r.code, output: r.output }
     }
-    const prompt = ask(cwd, label, `cd ${shellQuote(cwd)} && ${script}`)
+    const prompt = ask(cwd, label, markExit(`cd ${shellQuote(cwd)} && ${script}`))
     return helped(label, await call('helper', 'command', label, phase, prompt, 'write', config.roles.helper, cwd), `the ${label} runner returned nothing`)
   }
 
@@ -291,12 +308,7 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
 
   const setUpWorktree = async (repo: string, branch: string, from: string, label: string, shared: boolean): Promise<string> => {
     const script = worktreeScript(config, branch, from, worktreePath(repo, branch, config.worktreeDir, shared))
-    let r: { ran: boolean; code: number | string; output: string }
-    if (host.run) r = await shell(label, 'Worktree', script, repo)
-    else {
-      const prompt = worktreeCommandPrompt(repo, branch, `cd ${shellQuote(repo)} && ${script}`)
-      r = helped(label, await call('helper', 'command', label, 'Worktree', prompt, 'write', config.roles.helper, repo), 'the worktree runner returned nothing')
-    }
+    const r = await shell(label, 'Worktree', script, repo, (_cwd, _step, command) => worktreeCommandPrompt(repo, branch, command))
     const path = r.ran ? reportedWorktree(r.output) : undefined
     if (!path) throw new Error(`worktree setup failed${repo === primary && branch === input.branch ? '' : ` for ${repo} ${branch}`} (exit ${r.code}): ${r.output.slice(-2000)}`)
     host.log(`worktree${repo === primary && branch === input.branch ? '' : ` ${baseName(repo)} ${branch}`}: ${path}`)

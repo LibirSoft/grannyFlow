@@ -67,10 +67,11 @@ describe('claude-code workflow.js', () => {
     const setup = calls[0]!
     expect(setup.opts).toMatchObject({ label: 'worktree', phase: 'Worktree', model: 'haiku', effort: 'low' })
     expect(setup.prompt.startsWith('READ-ONLY ROLE')).toBe(false)
-    expect(setup.prompt).toContain('\ncd /r && ex="$(git rev-parse --git-common-dir)/info/exclude"')
+    expect(setup.prompt).toContain('\n( cd /r && ex="$(git rev-parse --git-common-dir)/info/exclude"')
+    expect(setup.prompt).toContain(' ) 2>&1; echo "[granny] exit=$?"\n')
     expect(setup.prompt).toContain('wt=/r-worktrees/feat-x;')
     expect(calls[1]!.opts).toMatchObject({ label: 'head one', phase: 'Implement', model: 'haiku', effort: 'low' })
-    expect(calls[1]!.prompt).toContain('\ncd /r-worktrees/feat-x && git rev-parse --verify HEAD\n')
+    expect(calls[1]!.prompt).toContain('\n( cd /r-worktrees/feat-x && git rev-parse --verify HEAD ) 2>&1; echo "[granny] exit=$?"\n')
     const impl = calls[2]!
     expect(impl.opts).toMatchObject({ label: 'implement one', phase: 'Implement', model: 'opus', effort: 'high' })
     expect(impl.prompt).toContain('Working repo: /r-worktrees/feat-x, branch `feat/x`')
