@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'bun:test'
 import { DEFAULT_CONFIG, resolveConfig, resolveModel } from '../src/core/config'
+import type { HostName } from '../src/core/types'
 import { cliCommand } from '../src/core/reviewer'
 
 describe('resolveConfig', () => {
@@ -74,8 +75,8 @@ describe('resolveConfig', () => {
 })
 
 describe('reviewers', () => {
-  const reviewers = (list: unknown, host?: 'claude-code' | 'opencode') => () => resolveConfig([{ reviewers: list }], host)
-  const one = (r: Record<string, unknown>, host?: 'claude-code' | 'opencode') => reviewers([r], host)
+  const reviewers = (list: unknown, host?: HostName) => () => resolveConfig([{ reviewers: list }], host)
+  const one = (r: Record<string, unknown>, host?: HostName) => reviewers([r], host)
 
   it('defaults to one agent reviewer on the host model, not Codex', () => {
     expect(DEFAULT_CONFIG.reviewers).toEqual([{ name: 'reviewer', engine: 'agent' }])
@@ -146,7 +147,7 @@ describe('reviewers', () => {
     expect(() => resolveConfig([{}, { roles: { reviewer: null } }])).toThrow('config layer 2: roles.reviewer was replaced by "reviewers"')
   })
 
-  const rejects: Array<[string, unknown, string, ('claude-code' | 'opencode')?]> = [
+  const rejects: Array<[string, unknown, string, HostName?]> = [
     ['a list that is not an array', { name: 'codex' }, 'reviewers must be a non-empty array of reviewer objects'],
     ['an empty list', [], 'reviewers must be a non-empty array of reviewer objects'],
     ['an entry that is not an object', ['codex'], 'reviewers[0] must be an object'],
@@ -175,6 +176,7 @@ describe('reviewers', () => {
     ['a command on the Codex plugin', [{ engine: 'codex-plugin', command: 'r {base}' }], 'reviewers[0].command needs "engine": "command"'],
     ['a command on an agent reviewer', [{ engine: 'agent', command: 'r {prompt}' }], 'reviewers[0].command needs "engine": "command"'],
     ['adversarial-review on auto on opencode', [{ name: 'c' }, { mode: 'adversarial-review' }], 'reviewers[1].mode "adversarial-review" needs the Codex plugin, and on opencode engine "auto" means the Codex CLI - set reviewers[1].engine to "codex-plugin"', 'opencode'],
+    ['adversarial-review on auto on omp', [{ mode: 'adversarial-review' }], 'reviewers[0].mode "adversarial-review" needs the Codex plugin, and on omp engine "auto" means the Codex CLI - set reviewers[0].engine to "codex-plugin"', 'omp'],
   ]
   for (const [label, list, message, host] of rejects) {
     it(`rejects ${label}`, () => {
@@ -242,6 +244,19 @@ describe('resolveModel', () => {
     expect(resolveModel(spec, 'opencode')).toBe('anthropic/claude-opus-5-5')
     expect(resolveModel({ 'claude-code': 'opus' }, 'opencode')).toBeUndefined()
     expect(resolveModel(undefined, 'opencode')).toBeUndefined()
+  })
+
+  it('takes an omp key in role and reviewer models and resolves it on omp only, while an unknown host key still fails', () => {
+    const c = resolveConfig(
+      [{ roles: { judge: { model: { omp: 'anthropic/claude-sonnet-5-5' } } }, reviewers: [{ engine: 'agent', model: { opencode: 'zai/glm-5', omp: 'zai/glm-5.3' } }] }],
+      'omp',
+    )
+    expect(resolveModel(c.roles.judge.model, 'omp')).toBe('anthropic/claude-sonnet-5-5')
+    expect(resolveModel(c.roles.judge.model, 'opencode')).toBeUndefined()
+    expect(resolveModel(c.roles.judge.model, 'claude-code')).toBeUndefined()
+    expect(resolveModel(c.reviewers[0]!.model, 'omp')).toBe('zai/glm-5.3')
+    expect(resolveModel(resolveConfig([], 'omp').roles.helper.model, 'omp')).toBeUndefined()
+    expect(() => resolveConfig([{ roles: { judge: { model: { pi: 'x' } } } }], 'omp')).toThrow('roles.judge.model: unknown host "pi"')
   })
 })
 
