@@ -367,6 +367,8 @@ describe('omp extension in the user session (parent mode)', () => {
     await extension(f.pi as any)
     expect([...f.tools.keys()].sort()).toEqual(['granny_cancel', 'granny_run', 'granny_status', 'granny_wait'])
     expect(f.tools.get('granny_wait').parameters.required).toEqual(['runId'])
+    expect(f.tools.get('granny_wait').interruptible).toBe(true)
+    for (const name of ['granny_run', 'granny_status', 'granny_cancel']) expect(f.tools.get(name).interruptible).toBeUndefined()
     for (const tool of f.tools.values()) {
       expect(tool.loadMode).toBe('essential')
       expect(tool.label).toBeString()
@@ -434,7 +436,7 @@ describe('omp extension in the user session (parent mode)', () => {
     await waitFor(() => f.sent.length > 0)
     expect(f.sent).toHaveLength(1)
     const [{ message, options }] = f.sent
-    expect(options).toEqual({ triggerTurn: true, deliverAs: 'followUp' })
+    expect(options).toEqual({ deliverAs: 'aside' })
     expect(message).toMatchObject({ customType: 'granny-workflow', display: true })
     expect(message.content).toContain(`[granny] Run ${id} finished.`)
     expect(message.content).toContain('- one: clean, 2 review round(s)')
@@ -591,7 +593,7 @@ describe('omp extension in the user session (parent mode)', () => {
     expect(readRun(dir, 'status.json')).toContain('"status": "failed"')
     expect(f.sent[0]!.message.content).toContain(`[granny] Run ${id} failed: `)
     expect(f.sent[0]!.message.content).toContain('GRANNY_OMP_BIN')
-    expect(f.sent[0]!.options).toEqual({ triggerTurn: true, deliverAs: 'followUp' })
+    expect(f.sent[0]!.options).toEqual({ deliverAs: 'aside' })
   })
 
   it('writes result.json last on success, when status.json is already terminal', async () => {

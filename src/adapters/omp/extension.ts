@@ -32,6 +32,7 @@ interface OmpTool {
   description: string
   parameters: unknown
   loadMode?: 'essential' | 'discoverable'
+  interruptible?: boolean
   execute(toolCallId: string, params: any, signal: AbortSignal | undefined, onUpdate: unknown, ctx: any): Promise<ToolResult>
 }
 
@@ -41,7 +42,7 @@ export interface OmpApi {
   on(event: 'session_start', handler: (event: unknown, ctx: any) => Promise<void>): void
   getActiveTools?(): string[]
   setActiveTools?(toolNames: string[]): Promise<void>
-  sendMessage(message: { customType: string; content: string; display: boolean }, options: { triggerTurn: boolean; deliverAs: 'followUp' }): void
+  sendMessage(message: { customType: string; content: string; display: boolean }, options: { deliverAs: 'aside' }): void
 }
 
 type Status = 'running' | 'done' | 'failed' | 'cancelled'
@@ -450,7 +451,7 @@ export const createGrannyExtension =
 
       const notify = (content: string) => {
         try {
-          pi.sendMessage({ customType: 'granny-workflow', content, display: true }, { triggerTurn: true, deliverAs: 'followUp' })
+          pi.sendMessage({ customType: 'granny-workflow', content, display: true }, { deliverAs: 'aside' })
         } catch (e) {
           journal('notify-failed', { error: String((e as Error)?.message ?? e) })
         }
@@ -540,6 +541,7 @@ To wait in this turn, call granny_wait { runId: "${id}" }; otherwise end your tu
         required: ['runId'],
       },
       loadMode: 'essential',
+      interruptible: true,
       async execute(_id, params: { runId: string; timeoutSeconds?: number }, signal) {
         const run = runs.get(params.runId)
         if (!run) {

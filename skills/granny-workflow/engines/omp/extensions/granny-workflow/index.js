@@ -2983,7 +2983,7 @@ When done, call the \`${tool}\` tool exactly once with your result. That call is
     };
     const notify = (content) => {
       try {
-        pi.sendMessage({ customType: "granny-workflow", content, display: true }, { triggerTurn: true, deliverAs: "followUp" });
+        pi.sendMessage({ customType: "granny-workflow", content, display: true }, { deliverAs: "aside" });
       } catch (e) {
         journal("notify-failed", { error: String(e?.message ?? e) });
       }
@@ -3072,6 +3072,7 @@ To wait in this turn, call granny_wait { runId: "${id}" }; otherwise end your tu
       required: ["runId"]
     },
     loadMode: "essential",
+    interruptible: true,
     async execute(_id, params, signal) {
       const run = runs.get(params.runId);
       if (!run) {
