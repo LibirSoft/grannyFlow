@@ -505,8 +505,8 @@ The word severities map to `critical` → P0, `high` → P1, `medium` → P2, `l
 
 `watch` (omp only) decides what the omp session that started a run shows of it. The run, its journal, `granny_status` and its live view are the same in every mode.
 
-- `"full"` (default): the live panel and status line, plus a condensed event log per role process (`sessions/<n>-<label>/events.jsonl`: state changes, reasoning headings, tool calls, the final text of each answer) and the `/granny` command that opens a role's log live in an overlay.
-- `"panel"`: the live panel and status line only; no event log, and `/granny` says watching is off for that run.
+- `"full"` (default): the live panel and status line, plus a condensed event log per role process (`sessions/<n>-<label>/events.jsonl`: state changes, reasoning headings, tool calls, the final text of each answer) and the run navigator (`/granny`, `alt+w`): the run's phases and agents, each agent's live log or transcript.
+- `"panel"`: the live panel and status line only; no event log, and `/granny` and `alt+w` say watching is off for that run.
 - `"off"`: no panel, no status line, no event log.
 
 ```json
