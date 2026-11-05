@@ -1,8 +1,9 @@
-import { afterEach, beforeEach, describe, expect, it } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, it, spyOn } from 'bun:test'
 import { appendFileSync, mkdirSync, mkdtempSync, renameSync, rmSync, truncateSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { TailReader } from '../src/adapters/omp/tail'
+import { LineBuffer, sessionEntryLines } from '../src/adapters/omp/transcript'
 
 let tmp: string
 beforeEach(() => {
@@ -110,5 +111,135 @@ describe('TailReader', () => {
     const r = new TailReader(path)
     expect(() => r.poll()).not.toThrow()
     expect(r.poll().lines).toEqual([])
+  })
+})
+
+const T = '2026-11-05T17:37:50.000Z'
+const AT = new Date(T).toTimeString().slice(0, 8)
+const PAD = ' '.repeat(10)
+const entry = (value: unknown) => JSON.stringify(value)
+const message = (msg: Record<string, unknown>) => entry({ type: 'message', id: 'm1', timestamp: T, message: msg })
+const numbered = (n: number, word = 'line') => Array.from({ length: n }, (_, i) => `${word} ${i + 1}`).join('\n')
+
+describe('sessionEntryLines', () => {
+  it('renders the session header, model and thinking level changes', () => {
+    expect(sessionEntryLines(entry({ type: 'session', version: 3, id: 'abc', timestamp: T, cwd: '/repo' }))).toEqual(['── session abc · /repo'])
+    expect(sessionEntryLines(entry({ type: 'model_change', model: 'openai-codex/gpt-6.1-sol' }))).toEqual(['· model openai-codex/gpt-6.1-sol'])
+    expect(sessionEntryLines(entry({ type: 'thinking_level_change', thinkingLevel: 'xhigh' }))).toEqual(['· thinking xhigh'])
+  })
+
+  it('shows nothing for the title line, custom entries, credential pins, unknown types and broken lines', () => {
+    expect(sessionEntryLines(entry({ type: 'title', v: 1, title: 'Plan', updatedAt: T, pad: '    ' }))).toEqual([])
+    expect(sessionEntryLines(entry({ type: 'custom', customType: 'tool_execution_start', data: {} }))).toEqual([])
+    expect(sessionEntryLines(entry({ type: 'credential_pin', provider: 'x' }))).toEqual([])
+    expect(sessionEntryLines(entry({ type: 'something_new', x: 1 }))).toEqual([])
+    expect(sessionEntryLines('{"type":"message","timestamp":')).toEqual([])
+    expect(sessionEntryLines('')).toEqual([])
+  })
+
+  it('shows the first 12 lines of a prompt and how many more there are', () => {
+    const lines = sessionEntryLines(message({ role: 'user', content: [{ type: 'text', text: numbered(30) }] }))
+    expect(lines[0]).toBe(`${AT}  ▶ prompt`)
+    expect(lines.slice(1, 13)).toEqual(Array.from({ length: 12 }, (_, i) => `${PAD}  line ${i + 1}`))
+    expect(lines[13]).toBe(`${PAD}  … 18 more lines`)
+    expect(lines).toHaveLength(14)
+    expect(sessionEntryLines(message({ role: 'user', content: 'short\tprompt' }))).toEqual([`${AT}  ▶ prompt`, `${PAD}  short  prompt`])
+  })
+
+  it('renders an assistant message part by part: summaries, thinking, text, tool calls, and its error', () => {
+    const lines = sessionEntryLines(
+      message({
+        role: 'assistant',
+        content: [
+          { type: 'thinking', thinking: '**Checking the stage order**\nfirst the plan', summary: true },
+          { type: 'thinking', thinking: numbered(5, 'thought') },
+          { type: 'text', text: 'I will read the plan.\nThen act.' },
+          { type: 'toolCall', id: 'c1', name: 'read', arguments: { path: 'plan.md', i: 'Reading the plan' } },
+          { type: 'toolCall', id: 'c2', name: 'bash', arguments: { command: 'x'.repeat(400) }, intent: 'Running the gates' },
+          { type: 'toolCall', id: 'c3', name: 'todo', arguments: {} },
+        ],
+        model: 'gpt',
+        stopReason: 'error',
+        errorMessage: '429 rate limit',
+      }),
+    )
+    expect(lines).toEqual([
+      `${AT}  » Checking the stage order`,
+      `${PAD}  first the plan`,
+      `${PAD}∴ thinking`,
+      `${PAD}  thought 1`,
+      `${PAD}  thought 2`,
+      `${PAD}  thought 3`,
+      `${PAD}  … 2 more lines`,
+      `${PAD}✎ I will read the plan.`,
+      `${PAD}  Then act.`,
+      `${PAD}▸ read: Reading the plan`,
+      `${PAD}  {"path":"plan.md"}`,
+      `${PAD}▸ bash: Running the gates`,
+      `${PAD}  ${`{"command":"${'x'.repeat(400)}"}`.slice(0, 299)}…`,
+      `${PAD}▸ todo`,
+      `${PAD}  {}`,
+      `${PAD}✗ error: 429 rate limit`,
+    ])
+  })
+
+  it('shows the first 8 lines of a tool result, how much more there is, and images as a marker', () => {
+    const text = numbered(40)
+    const lines = sessionEntryLines(message({ role: 'toolResult', toolCallId: 'c1', toolName: 'read', content: [{ type: 'text', text }], isError: false, details: {} }))
+    expect(lines[0]).toBe(`${AT}    ← read ✓`)
+    expect(lines.slice(1, 9)).toEqual(Array.from({ length: 8 }, (_, i) => `${PAD}    line ${i + 1}`))
+    expect(lines[9]).toBe(`${PAD}    … 32 more lines (${text.length} chars)`)
+    expect(lines).toHaveLength(10)
+    const failed = sessionEntryLines(
+      message({ role: 'toolResult', toolCallId: 'c2', toolName: 'bash', content: [{ type: 'text', text: '\x1b[31mboom\x1b[0m' }, { type: 'image', data: 'xx' }], isError: true }),
+    )
+    expect(failed).toEqual([`${AT}    ← bash ✗`, `${PAD}    boom`, `${PAD}    [image]`])
+  })
+
+  it('does not parse an entry over 2 MB', () => {
+    const big = `{"type":"message","message":{"role":"toolResult","content":[{"type":"text","text":"${'a'.repeat(3 * 1024 * 1024)}"}]}}`
+    const parse = spyOn(JSON, 'parse')
+    try {
+      expect(sessionEntryLines(big)).toEqual([`(entry of ${Math.round(big.length / 1024)} KB not shown)`])
+      expect(parse).not.toHaveBeenCalled()
+    } finally {
+      parse.mockRestore()
+    }
+  })
+
+  it('renders the line after a broken one', () => {
+    const lines = ['{"type":"message",', entry({ type: 'model_change', model: 'm2' })].flatMap(sessionEntryLines)
+    expect(lines).toEqual(['· model m2'])
+  })
+
+  it('produces no ANSI codes or tabs', () => {
+    const lines = sessionEntryLines(message({ role: 'assistant', content: [{ type: 'text', text: '\x1b[1mbold\x1b[22m\tand \x1b]8;;http://x\x07link' }] }))
+    expect(lines).toEqual([`${AT}  ✎ bold  and link`])
+  })
+})
+
+describe('LineBuffer', () => {
+  it('keeps the last max lines and says how many it dropped', () => {
+    const buffer = new LineBuffer(5000)
+    const v0 = buffer.version
+    buffer.push(Array.from({ length: 4000 }, (_, i) => `l${i}`))
+    buffer.push(Array.from({ length: 2000 }, (_, i) => `l${4000 + i}`))
+    expect(buffer.version).toBeGreaterThan(v0)
+    expect(buffer.dropped).toBe(1000)
+    const lines = buffer.lines()
+    expect(lines).toHaveLength(5001)
+    expect(lines[0]).toBe('… 1000 earlier lines not kept')
+    expect(lines[1]).toBe('l1000')
+    expect(lines.at(-1)).toBe('l5999')
+    expect(buffer.lines()).toBe(lines)
+  })
+
+  it('has no dropped line while it holds everything', () => {
+    const buffer = new LineBuffer(3)
+    buffer.push(['a', 'b'])
+    expect(buffer.lines()).toEqual(['a', 'b'])
+    const version = buffer.version
+    buffer.push([])
+    expect(buffer.version).toBe(version)
   })
 })
