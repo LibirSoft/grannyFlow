@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, it, spyOn } from 'bun:test'
 import { spawnSync } from 'node:child_process'
 import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -287,7 +287,7 @@ describe('omp extension in the user session (parent mode)', () => {
     process.env.GRANNY_CONFIG = join(repo, 'no-global-config.json')
   })
   afterEach(() => {
-    for (const file of ['hang-implement-one.pid']) {
+    for (const file of ['hang-implement-one.pid', 'wait-implement-one.pid']) {
       if (existsSync(join(fake, file))) {
         try {
           process.kill(Number(readFileSync(join(fake, file), 'utf8')), 'SIGKILL')
@@ -510,6 +510,30 @@ describe('omp extension in the user session (parent mode)', () => {
     expect(callsTo('implement-one')).toHaveLength(1)
     expect(f.sent).toEqual([])
     expect(textOf(await exec(f.tools.get('granny_cancel'), { runId: id }))).toContain(`No running granny run "${id}"`)
+  })
+
+  it('sends no SIGKILL after cancel once the role process has exited on SIGTERM', async () => {
+    behave({ wait: ['implement-one'] })
+    const f = fakePi()
+    await createGrannyExtension({ killGraceMs: 300 })(f.pi as any)
+    const { id, dir } = await start(f)
+    const pidFile = join(fake, 'wait-implement-one.pid')
+    await waitFor(() => existsSync(pidFile) && readFileSync(pidFile, 'utf8') !== '')
+    const pid = Number(readFileSync(pidFile, 'utf8'))
+    const signals: Array<[number, unknown]> = []
+    const realKill = process.kill.bind(process)
+    const spy = spyOn(process, 'kill').mockImplementation(((target: number, signal?: string | number) => {
+      if (target === -pid) signals.push([target, signal])
+      return realKill(target, signal)
+    }) as typeof process.kill)
+    try {
+      expect(textOf(await exec(f.tools.get('granny_cancel'), { runId: id }))).toContain(`Cancelling ${id}`)
+      await waitFor(() => readRun(dir, 'status.json').includes('"status": "cancelled"'), 3000)
+      await Bun.sleep(600)
+    } finally {
+      spy.mockRestore()
+    }
+    expect(signals).toEqual([[-pid, 'SIGTERM']])
   })
 
   it('fails the run with a message naming GRANNY_OMP_BIN when omp cannot be started', async () => {

@@ -507,7 +507,7 @@ You will receive a message when it finishes. Use granny_status { runId: "${id}" 
         run.abort.abort()
         for (const proc of run.children) {
           signalGroup(proc, 'SIGTERM')
-          setTimeout(() => signalGroup(proc, 'SIGKILL'), killGraceMs).unref()
+          setTimeout(() => run.children.has(proc) && signalGroup(proc, 'SIGKILL'), killGraceMs).unref()
         }
         return text(`Cancelling ${params.runId}; every running step is interrupted and nothing further starts.`)
       },

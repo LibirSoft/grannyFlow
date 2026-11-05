@@ -17,6 +17,8 @@ export interface FakeOmpBehaviour {
   errors?: Array<{ slug: string; message: string; times: number }>
   /** Slugs whose run ignores SIGTERM and hangs until killed. */
   hang?: string[]
+  /** Slugs whose run hangs until SIGTERM, which ends it. */
+  wait?: string[]
 }
 
 export const CANNED: Record<string, unknown> = {
@@ -64,6 +66,10 @@ if (import.meta.main) {
   if (behaviour.hang?.includes(slug)) {
     process.on('SIGTERM', () => {})
     writeFileSync(join(dir, `hang-${slug}.pid`), String(process.pid))
+    await new Promise(() => setInterval(() => {}, 1000))
+  }
+  if (behaviour.wait?.includes(slug)) {
+    writeFileSync(join(dir, `wait-${slug}.pid`), String(process.pid))
     await new Promise(() => setInterval(() => {}, 1000))
   }
   const error = behaviour.errors?.find(e => e.slug === slug && attempt <= e.times)
