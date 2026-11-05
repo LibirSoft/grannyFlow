@@ -1,7 +1,8 @@
 // The live view of a granny run in the omp session that started it: what each role process is
 // doing right now, read from its `omp --mode json` stdout. Shown as a TUI widget and status line,
 // and appended to granny_status.
-import { duration } from '../runview/format'
+import { argOf, type NowKind, type NowState, type TodoItem } from '../runview/activity'
+import { duration, shortArg } from '../runview/format'
 
 export { duration }
 
@@ -13,6 +14,8 @@ export interface PanelUi {
 export interface LiveOptions {
   now: () => number
   renderEveryMs: number
+  /** Appended to the widget's first line: where to look at the agents. */
+  hint?: string
 }
 
 export interface RoleInfo {
@@ -26,6 +29,8 @@ export interface RoleInfo {
   phase: string
   /** The role's events.jsonl, when the run keeps one. */
   log?: string
+  /** The directory the role works in. */
+  cwd?: string
 }
 
 export type RoleOutcome = 'done' | 'failed' | 'cancelled'
@@ -34,8 +39,9 @@ export type RoleOutcome = 'done' | 'failed' | 'cancelled'
 export type LogEntry =
   | { type: 'state'; state: string }
   | { type: 'heading'; text: string }
-  | { type: 'tool'; name: string; intent?: string; arg?: string }
-  | { type: 'tool-end'; name: string; error?: true }
+  | { type: 'tool'; id?: string; name: string; intent?: string; arg?: string }
+  | { type: 'tool-end'; id?: string; name: string; error?: true }
+  | { type: 'todo'; todos: TodoItem[] }
   | { type: 'text'; text: string }
   | { type: 'subagents'; agents: string[] }
   | { type: 'exit'; code: number }
@@ -93,8 +99,6 @@ export function oneLine(value: string, max = 60): string {
 }
 
 
-const ARG_KEYS = ['path', 'file_path', 'file', 'pattern', 'command', 'query', 'url', 'op']
-
 function subagents(args: any): string[] {
   const items: any[] = Array.isArray(args?.tasks) ? args.tasks : [args]
   return items.map(t => oneLine(String(t?.name || t?.agent || 'task'), 40))
@@ -106,15 +110,29 @@ interface ToolCall {
   intent?: boolean
 }
 
-function argOf(args: any, max: number): string | undefined {
-  const key = ARG_KEYS.find(k => typeof args?.[k] === 'string' && args[k].trim())
-  return key ? oneLine(args[key], max) : undefined
-}
+const callId = (event: any) => (event?.toolCallId === undefined ? {} : { id: String(event.toolCallId) })
 
 function toolEntry(event: any): LogEntry {
   const intent = typeof event?.intent === 'string' && event.intent.trim() ? oneLine(event.intent, LOG_ARG) : undefined
-  const arg = argOf(event?.args, LOG_ARG)
-  return { type: 'tool', name: String(event?.toolName ?? 'tool'), ...(intent ? { intent } : {}), ...(arg ? { arg } : {}) }
+  const raw = argOf(event?.args)
+  const arg = raw ? oneLine(raw, LOG_ARG) : undefined
+  return { type: 'tool', ...callId(event), name: String(event?.toolName ?? 'tool'), ...(intent ? { intent } : {}), ...(arg ? { arg } : {}) }
+}
+
+const TODO_STATES: Record<string, TodoItem['state']> = { completed: 'done', in_progress: 'active', pending: 'pending', blocked: 'pending' }
+
+/** The todo list a todo call's result holds (omp's `details.phases`), flattened. */
+function todosOf(result: any): TodoItem[] | undefined {
+  const phases = result?.details?.phases
+  if (!Array.isArray(phases)) return undefined
+  const out: TodoItem[] = []
+  for (const phase of phases) {
+    for (const task of Array.isArray(phase?.tasks) ? phase.tasks : []) {
+      const state = TODO_STATES[task?.status]
+      if (state && typeof task.content === 'string' && task.content.trim()) out.push({ text: oneLine(task.content, LOG_ARG), state })
+    }
+  }
+  return out.length ? out : undefined
 }
 
 function finalText(message: any): string {
@@ -127,12 +145,15 @@ function finalText(message: any): string {
     .slice(0, LOG_TEXT)
 }
 
-function describe(event: any): ToolCall {
+function describe(event: any, cwd: string | undefined): ToolCall {
   const name = String(event?.toolName ?? 'tool')
   if (typeof event?.intent === 'string' && event.intent.trim()) return { name, detail: oneLine(event.intent), intent: true }
   if (name === 'task') return { name, detail: oneLine(subagents(event?.args).join(', ')) }
-  return { name, detail: argOf(event?.args, 60) }
+  const arg = argOf(event?.args)
+  return { name, detail: arg ? oneLine(shortArg(arg, cwd), 60) : undefined }
 }
+
+const NOW_KINDS: Record<string, NowKind> = { starting: 'starting', 'waiting for model': 'waiting', thinking: 'thinking', writing: 'writing', 'preparing a tool call': 'preparing' }
 
 const HEADING = /(?:^|\n)[ \t]*\*\*([^*\n]+)\*\*/g
 
@@ -226,7 +247,7 @@ export class RoleActivity {
         return undefined
       }
       case 'tool_execution_start': {
-        const call = describe(event)
+        const call = describe(event, this.info.cwd)
         this.running.set(String(event.toolCallId), call)
         this.set(running(call), now)
         this.log?.(toolEntry(event))
@@ -238,18 +259,33 @@ export class RoleActivity {
       }
       case 'tool_execution_end': {
         const id = String(event.toolCallId)
-        const call = this.running.get(id) ?? describe(event)
+        const call = this.running.get(id) ?? describe(event, this.info.cwd)
         this.running.delete(id)
         const error = event.isError === true
         this.lastTool = { text: call.intent || !call.detail ? (call.detail ?? call.name) : `${call.name}: ${call.detail}`, at: now, error }
         if (this.task?.id === id) this.task.mark = error ? '✗' : '✓'
-        this.log?.({ type: 'tool-end', name: call.name, ...(error ? { error: true as const } : {}) })
+        const todos = error || !this.log ? undefined : todosOf(event.result)
+        if (todos) this.log?.({ type: 'todo', todos })
+        this.log?.({ type: 'tool-end', ...callId(event), name: call.name, ...(error ? { error: true as const } : {}) })
         const other = [...this.running.values()].at(-1)
         this.set(other ? running(other) : 'waiting for model', now)
         return undefined
       }
     }
     return undefined
+  }
+
+  /** What the role does now, for the navigator; undefined once its process has ended. */
+  now(): NowState | undefined {
+    if (!this.active) return undefined
+    const heading = this.heading ? { heading: this.heading } : {}
+    const call = [...this.running.values()].at(-1)
+    if (call && this.state.startsWith('running ')) {
+      const what = call.detail ? (call.intent ? { intent: call.detail } : { arg: call.detail }) : {}
+      return { state: 'running', tool: call.name, ...what, since: this.since, ...heading }
+    }
+    const state = NOW_KINDS[this.state]
+    return state ? { state, since: this.since, ...heading } : undefined
   }
 
   /** Characters of thinking text held for the heading search. */
@@ -397,6 +433,7 @@ export class LiveRun {
     if (now - this.lastDraw < this.options.renderEveryMs) return
     this.lastDraw = now
     const lines = this.lines()
+    if (this.options.hint) lines[0] = `${lines[0]} · ${this.options.hint}`
     const status = this.status()
     this.call(ui => ui.setWidget(this.key, lines, { placement: 'aboveEditor' }))
     this.call(ui => ui.setStatus(this.key, status))

@@ -440,6 +440,61 @@ describe('live panel', () => {
     expect(live.lines()).toEqual(['granny r4 · Review · 0s', '  no role process running'])
     live.close('done')()
   })
+
+  it('names a running command without its cd to the worktree, and a path relative to the role\'s cwd', () => {
+    const live = new LiveRun('r5', undefined, { now: () => 0, renderEveryMs: 1000 })
+    const role = live.role({ label: 'implement one', role: 'implementer', session: 's', phase: 'p', cwd: '/home/u/wt' })
+    live.start(role)
+    role.event({ type: 'tool_execution_start', toolCallId: 'b', toolName: 'bash', args: { command: "cd '/home/u/wt' && bun test test/GameService.test.ts" } }, 0)
+    expect(live.lines()[1]).toBe('  implement one (implementer) · default model · running bash: bun test test/GameService.test.ts 0s')
+    role.event({ type: 'tool_execution_end', toolCallId: 'b', toolName: 'bash', result: {} }, 0)
+    role.event({ type: 'tool_execution_start', toolCallId: 'r', toolName: 'read', args: { path: '/home/u/wt/src/services/GameService.ts' } }, 0)
+    expect(live.lines()[1]).toBe('  implement one (implementer) · default model · running read: src/services/GameService.ts 0s')
+    expect(live.lines()[2]).toBe('    last tool: bash: bun test test/GameService.test.ts (0s ago)')
+  })
+
+  it('tells where the agents are on the widget\'s first line only when given a hint, never in granny_status\'s copy', () => {
+    const u = fakeUi()
+    const live = new LiveRun('r6', u.ui, { now: () => 0, renderEveryMs: 1000, hint: '/granny or alt+w: agents' })
+    live.touch()
+    expect(u.widget('granny-r6')![0]).toBe('granny r6 · Starting · 0s · /granny or alt+w: agents')
+    expect(live.lines()[0]).toBe('granny r6 · Starting · 0s')
+    live.close('done')
+    const plain = fakeUi()
+    const other = new LiveRun('r7', plain.ui, { now: () => 0, renderEveryMs: 1000 })
+    other.touch()
+    expect(plain.widget('granny-r7')![0]).toBe('granny r7 · Starting · 0s')
+    other.close('done')
+  })
+
+  it('gives what a role does now as a state the navigator can draw', () => {
+    let t = 0
+    const live = new LiveRun('r8', undefined, { now: () => t, renderEveryMs: 1000 })
+    const role = live.role({ label: 'implement one', role: 'implementer', session: 's', phase: 'p', cwd: '/wt' })
+    expect(role.now()).toBeUndefined()
+    live.start(role)
+    expect(role.now()).toEqual({ state: 'starting', since: 0 })
+    t = 2000
+    role.stream('message_update', update('thinking_start'), t)
+    role.stream('message_update', update('thinking_delta', { delta: '**Weighing the options**\n' }), t)
+    role.flush()
+    expect(role.now()).toEqual({ state: 'thinking', since: 2000, heading: 'Weighing the options' })
+    t = 5000
+    role.event({ type: 'tool_execution_start', toolCallId: 'b', toolName: 'bash', args: { command: 'cd /wt && bun test' } }, t)
+    expect(role.now()).toEqual({ state: 'running', tool: 'bash', arg: 'bun test', since: 5000, heading: 'Weighing the options' })
+    role.event({ type: 'tool_execution_start', toolCallId: 'r', toolName: 'read', args: { path: 'a.ts' }, intent: 'Reading a' }, t)
+    expect(role.now()).toMatchObject({ state: 'running', tool: 'read', intent: 'Reading a' })
+    role.event({ type: 'tool_execution_end', toolCallId: 'r', toolName: 'read', result: {} }, t)
+    expect(role.now()).toMatchObject({ state: 'running', tool: 'bash', arg: 'bun test' })
+    role.event({ type: 'tool_execution_end', toolCallId: 'b', toolName: 'bash', result: {} }, t)
+    expect(role.now()).toMatchObject({ state: 'waiting' })
+    role.stream('message_update', update('toolcall_start'), t)
+    expect(role.now()?.state).toBe('preparing')
+    role.stream('message_update', update('text_delta', { delta: 'x' }), t)
+    expect(role.now()?.state).toBe('writing')
+    live.stop(role)
+    expect(role.now()).toBeUndefined()
+  })
 })
 
 describe('role event log', () => {
@@ -470,18 +525,46 @@ describe('role event log', () => {
       { type: 'state', state: 'thinking' },
       { type: 'heading', text: 'Comparing options' },
       { type: 'state', state: 'running read: Reading the plan' },
-      { type: 'tool', name: 'read', intent: 'Reading the plan', arg: 'plan.md' },
-      { type: 'tool-end', name: 'read' },
+      { type: 'tool', id: 't1', name: 'read', intent: 'Reading the plan', arg: 'plan.md' },
+      { type: 'tool-end', id: 't1', name: 'read' },
       { type: 'state', state: 'waiting for model' },
     ])
-    expect(entries[8]).toEqual({ type: 'tool', name: 'bash', arg: `echo ${'a'.repeat(194)}…` })
-    expect(entries[9]).toEqual({ type: 'tool-end', name: 'bash', error: true })
+    expect(entries[8]).toEqual({ type: 'tool', id: 't2', name: 'bash', arg: `echo ${'a'.repeat(194)}…` })
+    expect(entries[9]).toEqual({ type: 'tool-end', id: 't2', name: 'bash', error: true })
     const text = entries.find(e => e.type === 'text') as { text: string }
     expect(text.text).toStartWith('Done. www')
     expect(text.text).toHaveLength(4000)
     expect(entries.at(-2)).toEqual({ type: 'subagents', agents: ['BaselineGates', 'explore'] })
     expect(entries.at(-1)).toEqual({ type: 'exit', code: 0 })
     expect(JSON.stringify(entries)).not.toContain('HUGE')
+  })
+
+  it('logs the todo list a todo call left, with done, active and pending items, and nothing for a failed one', () => {
+    const entries: LogEntry[] = []
+    const live = new LiveRun('r1', undefined, { now: () => 0, renderEveryMs: 1000 })
+    const role = live.role({ label: 'implement one', role: 'implementer', session: 's', phase: 'p' }, entry => void entries.push(entry))
+    live.start(role)
+    const phases = [
+      { name: 'Auth', tasks: [{ content: 'Tracking complete auth recovery stage', status: 'completed' }, { content: 'Advancing to durable session completion', status: 'in_progress' }] },
+      { name: 'Wrap up', tasks: [{ content: 'Final checks', status: 'pending' }, { content: 'Old idea', status: 'abandoned' }, { content: 'Needs input', status: 'blocked' }] },
+    ]
+    role.event({ type: 'tool_execution_start', toolCallId: 'td', toolName: 'todo', args: { op: 'start', task: 'Advancing to durable session completion' } }, 0)
+    role.event({ type: 'tool_execution_end', toolCallId: 'td', toolName: 'todo', result: { content: [{ type: 'text', text: 'ok' }], details: { op: 'start', phases } } }, 0)
+    role.event({ type: 'tool_execution_start', toolCallId: 'bad', toolName: 'todo', args: { op: 'done' } }, 0)
+    role.event({ type: 'tool_execution_end', toolCallId: 'bad', toolName: 'todo', result: { details: { phases: [] } }, isError: true }, 0)
+    role.event({ type: 'tool_execution_end', toolCallId: 'x', toolName: 'read', result: { details: { phases: 'not a list' } } }, 0)
+    expect(entries.filter(e => e.type === 'todo')).toEqual([
+      {
+        type: 'todo',
+        todos: [
+          { text: 'Tracking complete auth recovery stage', state: 'done' },
+          { text: 'Advancing to durable session completion', state: 'active' },
+          { text: 'Final checks', state: 'pending' },
+          { text: 'Needs input', state: 'pending' },
+        ],
+      },
+    ])
+    expect(entries.map(e => e.type)).toEqual(['state', 'tool', 'todo', 'tool-end', 'state', 'state', 'tool', 'tool-end', 'state', 'tool-end'])
   })
 
   it('stops writing after the first failed append, reports it once, and never throws - not even when reporting fails', () => {
@@ -1089,6 +1172,29 @@ describe('omp extension in the user session (parent mode)', () => {
     expect(started).toContain('granny_cancel')
     expect(f.tools.get('granny_wait').description).toContain('instead of your own watcher, sleep or poll loop')
     await finished(join(repo, '.granny/runs', id))
+  })
+
+  it('tells the agent to point the user at the navigator, and the panel names it, only with watch "full"', async () => {
+    behave({ hold: ['implement-one'] })
+    const u = tui()
+    const f = fakePi()
+    await createGrannyExtension({ renderEveryMs: 10 })(f.pi as any)
+    const full = await start(f, {}, u.ctx)
+    const sentence = 'Tell the user: /granny or alt+w opens the run navigator (stages, agents, live activity).'
+    expect(full.started).toContain(`\n${sentence}`)
+    await waitFor(() => (u.widget(`granny-${full.id}`) ?? []).some(l => l.startsWith('  implement one')))
+    expect(u.widget(`granny-${full.id}`)![0]).toMatch(new RegExp(`^granny ${full.id} · \\S.* · \\d+s · /granny or alt\\+w: agents$`))
+    writeFileSync(join(fake, 'release-implement-one'), '')
+    await finished(full.dir)
+    rmSync(join(fake, 'release-implement-one'))
+    const panel = await start(f, { watch: 'panel', maxRounds: 2 }, u.ctx)
+    expect(panel.started).not.toContain(sentence)
+    await waitFor(() => (u.widget(`granny-${panel.id}`) ?? []).some(l => l.startsWith('  implement one')))
+    expect(u.widget(`granny-${panel.id}`)![0]).not.toContain('/granny')
+    writeFileSync(join(fake, 'release-implement-one'), '')
+    await finished(panel.dir)
+    expect(f.commands.get('granny').description).toContain('stepper')
+    expect(f.commands.get('granny').description).toContain('stage groups')
   })
 
   const wait = (f: ReturnType<typeof fakePi>, params: Record<string, unknown>, signal?: AbortSignal) =>

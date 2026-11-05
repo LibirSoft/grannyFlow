@@ -282,7 +282,10 @@ export type ExtensionOptions = HostOptions & LiveOptions
 const STATUS_KEEP_MS = 60_000
 
 const WATCH_HELP =
-  "granny-workflow: watch granny runs - /granny (or alt+w) opens the run navigator: this process's runs, their phases and agents, and the selected one's live events or transcript; /granny <runId> opens it on that run; /granny off|on hides or shows the run panel in this session"
+  "granny-workflow: watch granny runs - /granny (or alt+w) opens the run navigator: a stepper of the run's steps, its stage groups with their agents, and what the selected agent is doing now (or its transcript); /granny <runId> opens it on that run; /granny off|on hides or shows the run panel in this session"
+
+const NAVIGATOR_HINT = '/granny or alt+w: agents'
+const NAVIGATOR_SENTENCE = '\nTell the user: /granny or alt+w opens the run navigator (stages, agents, live activity).'
 
 const OVERLAY = { width: '100%', maxHeight: '100%', margin: 0, fullscreen: true, mouseTracking: false }
 
@@ -366,7 +369,7 @@ export const createGrannyExtension =
       shared.clearStatus?.()
       shared.clearStatus = undefined
       const { watch } = config
-      const live = new LiveRun(id, watch !== 'off' && ctx?.hasUI === true ? ctx.ui : undefined, { now, renderEveryMs }, !shared.hidden)
+      const live = new LiveRun(id, watch !== 'off' && ctx?.hasUI === true ? ctx.ui : undefined, { now, renderEveryMs, ...(watch === 'full' ? { hint: NAVIGATOR_HINT } : {}) }, !shared.hidden)
       const outline = runOutline(input, config)
       const run: RunState = { id, dir, status: 'running', cancelled: false, abort: new AbortController(), children: new Set(), agents: 0, waiters: new Set(), live, watch, branch: input.branch, outline }
       runs.set(id, run)
@@ -493,7 +496,7 @@ export const createGrannyExtension =
             watch === 'full'
               ? new EventLog(path, now, e => journal('event-log-failed', { label: req.label, path, error: String((e as Error)?.message ?? e) }))
               : undefined
-          const view = live.role({ label: req.label, role: req.role, model, effort: req.effort, session, phase: req.phase, ...(log ? { log: path } : {}) }, log && (entry => log.write(entry)))
+          const view = live.role({ label: req.label, role: req.role, model, effort: req.effort, session, phase: req.phase, cwd: req.cwd, ...(log ? { log: path } : {}) }, log && (entry => log.write(entry)))
           const end = (outcome: RoleOutcome, error?: string) => {
             view.outcome = outcome
             if (error !== undefined) view.error = error
@@ -573,7 +576,7 @@ export const createGrannyExtension =
 
       return `granny run ${id} started on ${input.repo} (${input.branch}), ${input.goal !== undefined ? 'planning only' : `${input.stages?.length ?? 0} stage(s)${config.parallel ? `, up to ${config.maxParallel} in parallel` : ''}`}, threshold ${config.threshold}, maxRounds ${config.maxRounds}.
 Journal: ${join(dir, 'journal.jsonl')}
-To wait in this turn, call granny_wait { runId: "${id}" }; otherwise end your turn - the finish message starts a new one. Never write your own watcher, sleep or poll loop on the run files. Use granny_status { runId: "${id}" } for progress and granny_cancel to stop it.${planReviewNotice(input, config)}${overridesNotice(layers, 'omp')}`
+To wait in this turn, call granny_wait { runId: "${id}" }; otherwise end your turn - the finish message starts a new one. Never write your own watcher, sleep or poll loop on the run files. Use granny_status { runId: "${id}" } for progress and granny_cancel to stop it.${planReviewNotice(input, config)}${watch === 'full' ? NAVIGATOR_SENTENCE : ''}${overridesNotice(layers, 'omp')}`
     }
 
     pi.registerTool({

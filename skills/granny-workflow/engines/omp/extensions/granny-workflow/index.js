@@ -2749,10 +2749,37 @@ function fit(text, width) {
     return "";
   return flat.length > width ? `${flat.slice(0, width - 1)}\u2026` : flat;
 }
+var CD = /^cd\s+('(?:[^']|'\\'')*'|"[^"]*"|\S+)\s*&&\s*/;
+var escape = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+var BOUNDARY = `(^|[\\s'"=(:])`;
+function shortArg(text, cwd, home) {
+  let out = clean(text).trim().replace(CD, "");
+  const dir = cwd?.replace(/\/+$/, "");
+  if (dir) {
+    out = out.replace(new RegExp(`${BOUNDARY}${escape(dir)}/`, "g"), "$1").replace(new RegExp(`${BOUNDARY}${escape(dir)}(?=$|[\\s'"])`, "g"), "$1.");
+  }
+  const root = home?.replace(/\/+$/, "");
+  if (root)
+    out = out.replace(new RegExp(`${BOUNDARY}${escape(root)}/`, "g"), "$1~/");
+  return out.replace(/\s+/g, " ").trim();
+}
 var dateOf = (value) => new Date(typeof value === "number" || typeof value === "string" ? value : Number.NaN);
 function stamp2(value) {
   const d = dateOf(value);
   return Number.isNaN(d.getTime()) ? undefined : `${d.toISOString().slice(0, 10)} ${d.toTimeString().slice(0, 8)}`;
+}
+
+// src/adapters/runview/activity.ts
+var ARG_KEYS = ["path", "file_path", "file", "pattern", "command", "query", "url", "description", "op"];
+var ARG_CHARS = 400;
+var SHELLS = new Set(["bash", "shell", "sh"]);
+var oneLine = (text) => clean(text).replace(/\s+/g, " ").trim();
+function argOf(input) {
+  if (!input || typeof input !== "object")
+    return;
+  const args = input;
+  const key = ARG_KEYS.find((k) => typeof args[k] === "string" && args[k].trim());
+  return key ? oneLine(args[key]).slice(0, ARG_CHARS) : undefined;
 }
 
 // src/adapters/omp/panel.ts
@@ -2795,37 +2822,51 @@ function deltaOf(line) {
   }
   return "";
 }
-function oneLine(value, max = 60) {
+function oneLine2(value, max = 60) {
   const flat = value.replace(/\s+/g, " ").trim();
   return flat.length > max ? `${flat.slice(0, max - 1)}\u2026` : flat;
 }
-var ARG_KEYS = ["path", "file_path", "file", "pattern", "command", "query", "url", "op"];
 function subagents(args) {
   const items = Array.isArray(args?.tasks) ? args.tasks : [args];
-  return items.map((t) => oneLine(String(t?.name || t?.agent || "task"), 40));
+  return items.map((t) => oneLine2(String(t?.name || t?.agent || "task"), 40));
 }
-function argOf(args, max) {
-  const key = ARG_KEYS.find((k) => typeof args?.[k] === "string" && args[k].trim());
-  return key ? oneLine(args[key], max) : undefined;
-}
+var callId = (event) => event?.toolCallId === undefined ? {} : { id: String(event.toolCallId) };
 function toolEntry(event) {
-  const intent = typeof event?.intent === "string" && event.intent.trim() ? oneLine(event.intent, LOG_ARG) : undefined;
-  const arg = argOf(event?.args, LOG_ARG);
-  return { type: "tool", name: String(event?.toolName ?? "tool"), ...intent ? { intent } : {}, ...arg ? { arg } : {} };
+  const intent = typeof event?.intent === "string" && event.intent.trim() ? oneLine2(event.intent, LOG_ARG) : undefined;
+  const raw = argOf(event?.args);
+  const arg = raw ? oneLine2(raw, LOG_ARG) : undefined;
+  return { type: "tool", ...callId(event), name: String(event?.toolName ?? "tool"), ...intent ? { intent } : {}, ...arg ? { arg } : {} };
+}
+var TODO_STATES = { completed: "done", in_progress: "active", pending: "pending", blocked: "pending" };
+function todosOf(result) {
+  const phases = result?.details?.phases;
+  if (!Array.isArray(phases))
+    return;
+  const out = [];
+  for (const phase of phases) {
+    for (const task of Array.isArray(phase?.tasks) ? phase.tasks : []) {
+      const state = TODO_STATES[task?.status];
+      if (state && typeof task.content === "string" && task.content.trim())
+        out.push({ text: oneLine2(task.content, LOG_ARG), state });
+    }
+  }
+  return out.length ? out : undefined;
 }
 function finalText(message) {
   const parts = Array.isArray(message?.content) ? message.content : [];
   return parts.filter((p) => p?.type === "text" && typeof p.text === "string").map((p) => p.text).join(`
 `).trim().slice(0, LOG_TEXT);
 }
-function describe(event) {
+function describe(event, cwd) {
   const name = String(event?.toolName ?? "tool");
   if (typeof event?.intent === "string" && event.intent.trim())
-    return { name, detail: oneLine(event.intent), intent: true };
+    return { name, detail: oneLine2(event.intent), intent: true };
   if (name === "task")
-    return { name, detail: oneLine(subagents(event?.args).join(", ")) };
-  return { name, detail: argOf(event?.args, 60) };
+    return { name, detail: oneLine2(subagents(event?.args).join(", ")) };
+  const arg = argOf(event?.args);
+  return { name, detail: arg ? oneLine2(shortArg(arg, cwd), 60) : undefined };
 }
+var NOW_KINDS = { starting: "starting", "waiting for model": "waiting", thinking: "thinking", writing: "writing", "preparing a tool call": "preparing" };
 var HEADING = /(?:^|\n)[ \t]*\*\*([^*\n]+)\*\*/g;
 
 class RoleActivity {
@@ -2919,7 +2960,7 @@ class RoleActivity {
         return;
       }
       case "tool_execution_start": {
-        const call = describe(event);
+        const call = describe(event, this.info.cwd);
         this.running.set(String(event.toolCallId), call);
         this.set(running(call), now);
         this.log?.(toolEntry(event));
@@ -2932,19 +2973,34 @@ class RoleActivity {
       }
       case "tool_execution_end": {
         const id = String(event.toolCallId);
-        const call = this.running.get(id) ?? describe(event);
+        const call = this.running.get(id) ?? describe(event, this.info.cwd);
         this.running.delete(id);
         const error = event.isError === true;
         this.lastTool = { text: call.intent || !call.detail ? call.detail ?? call.name : `${call.name}: ${call.detail}`, at: now, error };
         if (this.task?.id === id)
           this.task.mark = error ? "\u2717" : "\u2713";
-        this.log?.({ type: "tool-end", name: call.name, ...error ? { error: true } : {} });
+        const todos = error || !this.log ? undefined : todosOf(event.result);
+        if (todos)
+          this.log?.({ type: "todo", todos });
+        this.log?.({ type: "tool-end", ...callId(event), name: call.name, ...error ? { error: true } : {} });
         const other = [...this.running.values()].at(-1);
         this.set(other ? running(other) : "waiting for model", now);
         return;
       }
     }
     return;
+  }
+  now() {
+    if (!this.active)
+      return;
+    const heading = this.heading ? { heading: this.heading } : {};
+    const call = [...this.running.values()].at(-1);
+    if (call && this.state.startsWith("running ")) {
+      const what = call.detail ? call.intent ? { intent: call.detail } : { arg: call.detail } : {};
+      return { state: "running", tool: call.name, ...what, since: this.since, ...heading };
+    }
+    const state = NOW_KINDS[this.state];
+    return state ? { state, since: this.since, ...heading } : undefined;
   }
   get retainedChars() {
     return this.thinking.length;
@@ -2955,7 +3011,7 @@ class RoleActivity {
       let heading;
       for (const m of this.thinking.matchAll(HEADING))
         heading = m[1];
-      const text = heading?.trim() ? oneLine(heading) : undefined;
+      const text = heading?.trim() ? oneLine2(heading) : undefined;
       if (text && text !== this.heading) {
         this.heading = text;
         this.log?.({ type: "heading", text });
@@ -3080,6 +3136,8 @@ class LiveRun {
       return;
     this.lastDraw = now;
     const lines = this.lines();
+    if (this.options.hint)
+      lines[0] = `${lines[0]} \xB7 ${this.options.hint}`;
     const status = this.status();
     this.call((ui) => ui.setWidget(this.key, lines, { placement: "aboveEditor" }));
     this.call((ui) => ui.setStatus(this.key, status));
@@ -4886,7 +4944,7 @@ var PREFIX_OPTIONS_WITH_VALUE = new Map([
   ["xargs", new Set(["-I", "-L", "-n", "-P", "-s", "-d", "-E", "-a"])],
   ["timeout", new Set(["-s", "-k", "--signal", "--kill-after"])]
 ]);
-var SHELLS = new Set(["bash", "sh", "zsh", "dash", "ksh"]);
+var SHELLS2 = new Set(["bash", "sh", "zsh", "dash", "ksh"]);
 var SHELL_OPTIONS_WITH_VALUE = new Set(["-o", "+o", "-O", "+O", "--rcfile", "--init-file"]);
 var GITHUB_DENIED_OPS = new Set(["pr_create", "pr_push", "pr_checkout"]);
 var GIT_OPTIONS_WITH_VALUE = new Set(["-C", "-c", "--git-dir", "--work-tree", "--namespace", "--config-env"]);
@@ -5013,7 +5071,7 @@ function commandBlock(words, access) {
   }
   const program = basename(words[i] ?? "");
   const rest = words.slice(i + 1);
-  const shellCommand = SHELLS.has(program) ? shellCommandString(rest) : undefined;
+  const shellCommand = SHELLS2.has(program) ? shellCommandString(rest) : undefined;
   if (shellCommand !== undefined)
     return bashBlock(shellCommand, access);
   if (program === "eval")
@@ -5067,7 +5125,10 @@ function isTransient(message) {
   return TRANSIENT.test(message);
 }
 var STATUS_KEEP_MS = 60000;
-var WATCH_HELP = "granny-workflow: watch granny runs - /granny (or alt+w) opens the run navigator: this process's runs, their phases and agents, and the selected one's live events or transcript; /granny <runId> opens it on that run; /granny off|on hides or shows the run panel in this session";
+var WATCH_HELP = "granny-workflow: watch granny runs - /granny (or alt+w) opens the run navigator: a stepper of the run's steps, its stage groups with their agents, and what the selected agent is doing now (or its transcript); /granny <runId> opens it on that run; /granny off|on hides or shows the run panel in this session";
+var NAVIGATOR_HINT = "/granny or alt+w: agents";
+var NAVIGATOR_SENTENCE = `
+Tell the user: /granny or alt+w opens the run navigator (stages, agents, live activity).`;
 var OVERLAY = { width: "100%", maxHeight: "100%", margin: 0, fullscreen: true, mouseTracking: false };
 function turnError(turn) {
   if (turn.assistant?.stopReason === "error")
@@ -5151,7 +5212,7 @@ var createGrannyExtension = ({ delays = DEFAULT_DELAYS, sleep = pause, killGrace
     shared.clearStatus?.();
     shared.clearStatus = undefined;
     const { watch } = config;
-    const live = new LiveRun(id, watch !== "off" && ctx?.hasUI === true ? ctx.ui : undefined, { now, renderEveryMs }, !shared.hidden);
+    const live = new LiveRun(id, watch !== "off" && ctx?.hasUI === true ? ctx.ui : undefined, { now, renderEveryMs, ...watch === "full" ? { hint: NAVIGATOR_HINT } : {} }, !shared.hidden);
     const outline = runOutline(input, config);
     const run = { id, dir, status: "running", cancelled: false, abort: new AbortController, children: new Set, agents: 0, waiters: new Set, live, watch, branch: input.branch, outline };
     runs.set(id, run);
@@ -5287,7 +5348,7 @@ When done, call the \`${tool}\` tool exactly once with your result. That call is
         journal("agent", { label: req.label, role: req.role, phase: req.phase, session, model: model ?? null, ...req.effort ? { effort: req.effort } : {}, cwd: req.cwd });
         const path = join4(session, "events.jsonl");
         const log = watch === "full" ? new EventLog(path, now, (e) => journal("event-log-failed", { label: req.label, path, error: String(e?.message ?? e) })) : undefined;
-        const view = live.role({ label: req.label, role: req.role, model, effort: req.effort, session, phase: req.phase, ...log ? { log: path } : {} }, log && ((entry) => log.write(entry)));
+        const view = live.role({ label: req.label, role: req.role, model, effort: req.effort, session, phase: req.phase, cwd: req.cwd, ...log ? { log: path } : {} }, log && ((entry) => log.write(entry)));
         const end = (outcome, error) => {
           view.outcome = outcome;
           if (error !== undefined)
@@ -5370,7 +5431,7 @@ Call granny_status with runId "${id}" and report to the user.`;
     }).catch(() => {});
     return `granny run ${id} started on ${input.repo} (${input.branch}), ${input.goal !== undefined ? "planning only" : `${input.stages?.length ?? 0} stage(s)${config.parallel ? `, up to ${config.maxParallel} in parallel` : ""}`}, threshold ${config.threshold}, maxRounds ${config.maxRounds}.
 Journal: ${join4(dir, "journal.jsonl")}
-To wait in this turn, call granny_wait { runId: "${id}" }; otherwise end your turn - the finish message starts a new one. Never write your own watcher, sleep or poll loop on the run files. Use granny_status { runId: "${id}" } for progress and granny_cancel to stop it.${planReviewNotice(input, config)}${overridesNotice(layers, "omp")}`;
+To wait in this turn, call granny_wait { runId: "${id}" }; otherwise end your turn - the finish message starts a new one. Never write your own watcher, sleep or poll loop on the run files. Use granny_status { runId: "${id}" } for progress and granny_cancel to stop it.${planReviewNotice(input, config)}${watch === "full" ? NAVIGATOR_SENTENCE : ""}${overridesNotice(layers, "omp")}`;
   };
   pi.registerTool({
     name: "granny_run",
