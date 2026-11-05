@@ -4,10 +4,11 @@
 import { readFileSync, statSync } from 'node:fs'
 import { basename, join } from 'node:path'
 import type { WatchMode } from '../../core/config'
-import { clean, duration, fit } from '../runview/format'
+import { clean, duration, fit, shortModel } from '../runview/format'
 import { AGENT_TONES, STATUS_TONES, type Tone } from '../runview/layout'
+import { readOutline, type RunOutline } from '../runview/outline'
 import { TailReader, type TailOptions } from '../runview/tail'
-import { AGENT_MARKERS, type AgentNode, agentKey, buildRunTree, type JournalEntry, type LiveView, phaseKey, runKey, type RunTree } from '../runview/tree'
+import { AGENT_MARKERS, type AgentNode, agentKey, buildRunTree, focusStage, type JournalEntry, type LiveView, phaseKey, runKey, type RunTree } from '../runview/tree'
 
 export interface RoleMeta {
   run: string
@@ -54,6 +55,7 @@ export interface RunSnapshot {
   error?: string
   repo?: string
   branch?: string
+  outline?: RunOutline
   tree: RunTree
   readable: boolean
   /** Running, but its files have not changed for a while and none of its role sessions runs. */
@@ -138,6 +140,7 @@ interface StatusFile {
   error?: string
   repo?: string
   branch?: string
+  outline?: RunOutline
 }
 
 export interface RunWatchOptions {
@@ -265,6 +268,7 @@ export class RunWatch {
       const startedAt = timeOf(raw.startedAt)
       if (startedAt !== undefined) this.startedAt = startedAt
       const finishedAt = timeOf(raw.finishedAt)
+      const outline = readOutline(raw.outline)
       this.status = {
         ...(typeof raw.id === 'string' ? { id: raw.id } : {}),
         ...(typeof raw.status === 'string' ? { status: raw.status } : {}),
@@ -274,6 +278,7 @@ export class RunWatch {
         ...(typeof raw.error === 'string' ? { error: clean(raw.error) } : {}),
         ...(typeof raw.repo === 'string' ? { repo: clean(raw.repo) } : {}),
         ...(typeof raw.branch === 'string' ? { branch: clean(raw.branch) } : {}),
+        ...(outline ? { outline } : {}),
       }
       this.statusStamp = stamp
       return true
@@ -291,11 +296,13 @@ export class RunWatch {
       status: status?.status ?? 'running',
       ...(this.startedAt !== undefined ? { startedAt: this.startedAt } : {}),
       ...(status?.finishedAt !== undefined ? { endedAt: status.finishedAt } : {}),
+      ...(status?.branch !== undefined ? { branch: status.branch } : {}),
     }
     const entries: JournalEntry[] = readable
       ? this.entries
       : this.roles.map(({ id: session, meta }) => ({ type: 'agent', label: meta.label, role: meta.role, session, phase: meta.phase, model: meta.model }))
-    const tree = buildRunTree(info, entries, live, now)
+    const outline = readable ? status?.outline : undefined
+    const tree = buildRunTree(info, entries, live, now, new Map(), outline)
     return {
       id,
       status: tree.status,
@@ -307,6 +314,7 @@ export class RunWatch {
       ...(status?.error !== undefined ? { error: status.error } : {}),
       ...(status?.repo !== undefined ? { repo: status.repo } : {}),
       ...(status?.branch !== undefined ? { branch: status.branch } : {}),
+      ...(outline ? { outline } : {}),
       tree,
       readable,
     }
@@ -331,7 +339,7 @@ export class RunWatch {
     const over = TERMINAL.has(s.status)
     const clock = over ? String(s.end !== undefined && now - s.end < FRESH_MS) : String(Math.floor((now - s.start) / 1000))
     const agents = s.tree.agents.map(a => `${a.session}:${a.state}:${a.activity ?? ''}`).join(',')
-    return [s.status, s.stale ?? '', s.watch, s.readable, s.phase ?? '', this.entries.length, clock, agents].join('|')
+    return [s.status, s.stale ?? '', s.watch, s.readable, s.outline ? 'outline' : '', s.phase ?? '', this.entries.length, clock, agents].join('|')
   }
 }
 
@@ -342,16 +350,27 @@ const elapsed = (s: RunSnapshot, now: number) => duration((s.end ?? now) - s.sta
 
 export { AGENT_TONES, STATUS_TONES } from '../runview/layout'
 
+const STAGE_PHASES = new Set(['Implement', 'Checks', 'Review'])
+
+/** `stage 1/2`, or `stages 1+2/3` while several run; undefined for a run without an outline or outside its stages. */
+export function stageText(tree: RunTree): string | undefined {
+  const outline = tree.outline
+  if (!outline || outline.kind !== 'implement' || !outline.stages.length || tree.status !== 'running') return undefined
+  const total = outline.stages.length
+  if (tree.running.length > 1) return `stages ${tree.running.join('+')}/${total}`
+  const k = tree.running[0] ?? (STAGE_PHASES.has(tree.phase ?? '') ? focusStage(tree) : undefined)
+  return k === undefined ? undefined : `stage ${k}/${total}`
+}
+
 function agentLine(a: AgentNode, now: number, width: number): string {
   const marker = `${AGENT_MARKERS[a.state]} `
   const tail = ` · ${a.activity ?? `${a.state} ${duration((a.end ?? now) - a.start)}`}`
-  const model = a.model ? a.model.slice(a.model.lastIndexOf('/') + 1) : 'default model'
-  const full = `${marker}${a.label}  ${model}${tail}`
+  const full = `${marker}${a.action}  ${shortModel(a.model, a.effort)}${tail}`
   if (full.length <= width) return full
-  const short = `${marker}${a.label}${tail}`
+  const short = `${marker}${a.action}${tail}`
   if (short.length <= width) return short
   const room = width - marker.length - tail.length
-  return room >= 2 ? `${marker}${a.label.slice(0, room - 1)}…${tail}` : fit(short, width)
+  return room >= 2 ? `${marker}${a.action.slice(0, room - 1)}…${tail}` : fit(short, width)
 }
 
 /** The run's sidebar section: header, phase and the agents that matter now; empty when watching is off or the run is long over. */
@@ -365,8 +384,9 @@ export function sidebarLines(s: RunSnapshot, now: number, width: number): Line[]
   const lines: Line[] = [{ text: fit(`granny ${short} · ${s.stale ? 'stale?' : s.status}`, width), tone: s.stale ? 'warning' : 'base', key: runKey(s.id) }]
   if (!s.readable) lines.push({ text: fit('run files not readable', width), tone: 'muted' })
   const phase = s.tree.phases.at(-1)
+  const stage = stageText(s.tree)
   lines.push({
-    text: fit(`${phase?.title ?? 'Starting'} · ${duration(now - (phase?.start ?? s.start))}`, width),
+    text: fit(`${stage ? `${stage} · ` : ''}${phase?.title ?? 'Starting'} · ${duration(now - (phase?.start ?? s.start))}`, width),
     tone: 'muted',
     ...(phase ? { key: phaseKey(s.id, phase.index) } : {}),
   })
@@ -382,7 +402,8 @@ export function chipText(s: RunSnapshot, now: number): string {
   if (terminal(s)) return fresh(s, now) ? `granny · ${s.status}` : ''
   if (s.stale) return `granny · ${s.phase ?? 'Starting'} · stale?`
   const running = s.tree.agents.filter(a => a.state === 'running').length
-  return `granny · ${s.phase ?? 'Starting'} · ${running} running · ${elapsed(s, now)}`
+  const stage = stageText(s.tree)
+  return `granny · ${stage ? `${stage} · ` : ''}${s.phase ?? 'Starting'} · ${running} running · ${elapsed(s, now)}`
 }
 
 /** The toast for an event, sent to the run's parent session; only when watching is full. */

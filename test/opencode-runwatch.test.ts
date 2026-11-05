@@ -316,6 +316,86 @@ describe('RunWatch', () => {
   })
 })
 
+const KIMI = { providerID: 'kimi-code-plan-global', id: 'k3.1-pro', variant: 'default' }
+const stageOf = (number: number, name: string) => ({ number, name, implement: true, review: true, checks: false })
+const OUTLINE = { kind: 'implement', branch: 'feat/x', worktree: true, planReview: false, finalReview: true, reviewers: ['a'], fromStage: 1, stages: [stageOf(1, 'one'), stageOf(2, 'two')] }
+
+function stagedRun(outline: unknown = OUTLINE) {
+  status({ outline })
+  journal(
+    line(0, 'phase', { title: 'Worktree' }),
+    line(1 * S, 'stage', { number: 1, name: 'one', event: 'start' }),
+    line(2 * S, 'phase', { title: 'Implement' }),
+    line(2 * S, 'agent', { label: 'implement one', role: 'implementer', session: 'ses_i', model: KIMI, phase: 'Implement', cwd: '/w/feat-x', linked: true }),
+  )
+  const watch = new RunWatch(dir, { now: () => BASE + 100 * S })
+  watch.poll(running('ses_i'))
+  return watch.snapshot
+}
+
+describe('the run outline', () => {
+  it('reads the outline from status.json into the snapshot and the tree', () => {
+    const s = stagedRun()
+    expect(s.outline).toEqual(OUTLINE as any)
+    expect(s.tree.outline).toEqual(OUTLINE as any)
+    expect(s.tree.branch).toBe('feat/x')
+    expect(s.tree.groups.map(g => [g.key, g.state])).toEqual([
+      ['stage:1', 'running'],
+      ['stage:2', 'upcoming'],
+      ['final-review', 'upcoming'],
+      ['pr-ready', 'upcoming'],
+    ])
+    expect(s.tree.agents[0]).toMatchObject({ action: 'implement', group: 'stage:1', cwd: '/w/feat-x' })
+  })
+
+  it('leaves a malformed outline out and still builds the view', () => {
+    const s = stagedRun({ ...OUTLINE, stages: 'one' })
+    expect(s.outline).toBeUndefined()
+    expect(s.tree.outline).toBeUndefined()
+    expect(s.tree.agents.map(a => a.action)).toEqual(['implement'])
+    expect(sidebarLines(s, BASE + 100 * S, 42).map(l => l.text)).toEqual(['granny 523r · running', 'Implement · 1m38s', '● implement  k3.1-pro · running 1m38s'])
+  })
+
+  it('names the stage of how many in the sidebar and the chip, with the short model and the action', () => {
+    const s = stagedRun()
+    const now = BASE + 100 * S
+    expect(sidebarLines(s, now, 42).map(l => [l.text, l.tone])).toEqual([
+      ['granny 523r · running', 'base'],
+      ['stage 1/2 · Implement · 1m38s', 'muted'],
+      ['● implement  k3.1-pro · running 1m38s', 'info'],
+    ])
+    expect(sidebarLines(s, now, 30).map(l => l.text)).toEqual(['granny 523r · running', 'stage 1/2 · Implement · 1m38s', '● implement · running 1m38s'])
+    for (const l of sidebarLines(s, now, 30)) expect(l.text.length).toBeLessThanOrEqual(30)
+    expect(chipText(s, now)).toBe('granny · stage 1/2 · Implement · 1 running · 1m40s')
+    const text = JSON.stringify(sidebarLines(s, now, 60))
+    expect(text).not.toContain('kimi-code-plan-global')
+    expect(text).not.toContain('#default')
+  })
+
+  it('names every running stage of a parallel run, and no stage outside the stages', () => {
+    status({ outline: { ...OUTLINE, stages: [stageOf(1, 'one'), stageOf(2, 'two'), stageOf(3, 'three')] } })
+    journal(
+      line(0, 'stage', { number: 1, name: 'one', event: 'start' }),
+      line(0, 'stage', { number: 2, name: 'two', event: 'start' }),
+      line(0, 'phase', { title: 'Implement' }),
+      line(1 * S, 'agent', { label: 'implement one', role: 'implementer', session: 'a', model: KIMI, phase: 'Implement' }),
+      line(1 * S, 'agent', { label: 'implement two', role: 'implementer', session: 'b', model: KIMI, phase: 'Implement' }),
+    )
+    const watch = new RunWatch(dir, { now: () => BASE + 60 * S })
+    watch.poll(running('a', 'b'))
+    expect(sidebarLines(watch.snapshot, BASE + 60 * S, 42)[1]!.text).toBe('stages 1+2/3 · Implement · 1m00s')
+    expect(chipText(watch.snapshot, BASE + 60 * S)).toBe('granny · stages 1+2/3 · Implement · 2 running · 1m00s')
+    journal(
+      line(70 * S, 'stage', { number: 1, name: 'one', event: 'end', outcome: 'clean' }),
+      line(70 * S, 'stage', { number: 2, name: 'two', event: 'end', outcome: 'clean' }),
+      line(71 * S, 'phase', { title: 'Final review' }),
+    )
+    watch.poll(running())
+    expect(sidebarLines(watch.snapshot, BASE + 80 * S, 42)[1]!.text).toBe('Final review · 9s')
+    expect(chipText(watch.snapshot, BASE + 80 * S)).toBe('granny · Final review · 0 running · 1m20s')
+  })
+})
+
 describe('a running run nothing writes to any more', () => {
   it('turns stale after 10 minutes without a change to status.json or the journal and without a running role session', () => {
     planRun()
@@ -388,13 +468,13 @@ describe('sidebarLines / chipText / toastFor', () => {
     return watch.snapshot
   }
 
-  it('lists the run, its phase and its current agents at width 42', () => {
+  it('lists the run, its phase and its current agents by action at width 42', () => {
     const lines = sidebarLines(snap(), now, 42)
     expect(lines.map(l => [l.text, l.tone])).toEqual([
       ['granny 523r · running', 'base'],
       ['Plan review · 2m00s', 'muted'],
-      ['✓ review plan review r2 codex · done 58s', 'success'],
-      ['● review plan review r2 t… · running 1m59s', 'info'],
+      ['✓ review r2 codex  gpt-5.5 · done 58s', 'success'],
+      ['● review r2 terra · running 1m59s', 'info'],
     ])
     expect(lines.every(l => l.text.length <= 42)).toBe(true)
     expect(lines.map(l => l.key)).toEqual([`run:${RUN}`, `phase:${RUN}:1`, 'agent:ses_c', 'agent:ses_r'])
@@ -402,7 +482,7 @@ describe('sidebarLines / chipText / toastFor', () => {
 
   it('fits every line to width 30', () => {
     const lines = sidebarLines(snap(), now, 30)
-    expect(lines.map(l => l.text)).toEqual(['granny 523r · running', 'Plan review · 2m00s', '✓ review plan revi… · done 58s', '● review plan… · running 1m59s'])
+    expect(lines.map(l => l.text)).toEqual(['granny 523r · running', 'Plan review · 2m00s', '✓ review r2 codex · done 58s', '● review r2 t… · running 1m59s'])
     expect(lines.every(l => l.text.length <= 30)).toBe(true)
   })
 
@@ -411,7 +491,7 @@ describe('sidebarLines / chipText / toastFor', () => {
     journal(line(0, 'phase', { title: 'Implement' }), line(S, 'agent', { label: 'implement one', role: 'implementer', session: 'ses_i', model: kimi, phase: 'Implement' }))
     const watch = new RunWatch(dir, { now: () => BASE + 61 * S })
     watch.poll(running('ses_i'))
-    expect(sidebarLines(watch.snapshot, BASE + 61 * S, 60).at(-1)!.text).toBe('● implement one  kimi-k3.1-pro · running 1m00s')
+    expect(sidebarLines(watch.snapshot, BASE + 61 * S, 60).at(-1)!.text).toBe('● implement  kimi-k3.1-pro · running 1m00s')
   })
 
   it('lists at most 8 agents, newest first, and counts the rest', () => {

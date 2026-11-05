@@ -1,11 +1,13 @@
-// The /granny navigator's model: the known runs as a tree of phases, rounds, agents and their
-// subagent sessions, a selection, and the detail of the selected node, laid out as rows of cells.
-// It reads only the hub's cached snapshots and opencode's in-memory session store.
-import { join } from 'node:path'
-import { clean, duration, pad, stamp } from '../runview/format'
-import { type AgentNode, AGENT_MARKERS, agentKey, nextAgent, type PhaseNode, type PhaseRow as Row, phaseRowText as rowText, runKey, type RunTree, phaseRows as visibleRows } from '../runview/tree'
-import { AGENT_TONES, type RunSnapshot, STATUS_TONES, type Tone } from './runwatch'
-import { attempt, type Cell } from './tui-view'
+// The /granny navigator's model: the shown run's work groups, agents, checks and subagent sessions,
+// the other known runs, a selection and the detail of the selected row, laid out as the shared page.
+// It reads the hub's cached snapshots and activity, and opencode's in-memory session list.
+import { type ActivityItem, activityLines, summarise } from '../runview/activity'
+import { clean, fit, pad } from '../runview/format'
+import { agentEnd, agentHead, type Cell, checksDetail, frame, groupDetail, headerText, paneSizes, runDetail, stepperCells, summaryCells, treeCells } from '../runview/layout'
+import { type AgentNode, agentKey, focusStage, nextAgent, type Row, type RunTree, stepsFor, visibleRows } from '../runview/tree'
+import type { MessageActivity } from './activity'
+import type { RunSnapshot } from './runwatch'
+import { attempt } from './tui-view'
 
 export interface NavRun {
   dir: string
@@ -24,61 +26,69 @@ export interface NavDeps {
   children(sessions: readonly string[]): ReadonlyMap<string, readonly ChildSession[]>
   /** Whether a role session is a child of the run's parent; undefined when the store does not know it. */
   linked(session: string): boolean | undefined
+  /** What the hub last read of a role session's messages. */
+  activity?(session: string): MessageActivity | undefined
+  /** Told the selected agent's session, or undefined off an agent, whenever that changes. */
+  onSelect?(session: string | undefined): void
+  home?: string
   now(): number
 }
 
-export type NavKey = 'up' | 'down' | 'pageup' | 'pagedown' | 'home' | 'end' | 'return' | 'space' | 'next' | 'prev' | 'parent' | 'back'
+export type NavKey = 'up' | 'down' | 'pageup' | 'pagedown' | 'home' | 'end' | 'return' | 'space' | 'next' | 'prev' | 'parent' | 'back' | 'verbose' | 'follow'
 
 export type NavAction = { type: 'open'; sessionID: string } | { type: 'parent'; sessionID: string } | { type: 'back' }
 
-export const NAV_HELP = '↑↓ move · Enter open · Space fold · Tab/] next agent · [ prev · p parent · Esc back'
-const SEPARATOR = ' │ '
-const WIDE = 100
 const NARROW_DETAIL = 4
-const AGENT_LINES = 40
-const PHASE_LINES = 200
 const UNREADABLE = 'run files not readable from this TUI - showing the role sessions only'
+const BLANK: Cell = { text: '', tone: 'base' }
 
 const clamp = (n: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, n))
 
-interface Detail {
-  head: Cell[]
-  body: Cell[]
-  foot: Cell[]
-}
-
 export class NavModel {
-  expanded: string
+  /** The run the page shows. */
+  shown: string
   selected = ''
+  verbose = false
+  private follow = true
+  private listTop = 0
+  private listRows = 0
+  private listRoom = 0
+  private listFor = ''
   private readonly folded = new Set<string>()
+  private readonly opened = new Set<string>()
   private readonly parents = new Map<string, string>()
   private readonly subs = new Map<string, ChildSession>()
   private runs: NavRun[] = []
   private rows: Row[] = []
   private top = 0
   private page = 10
+  private told: string | undefined | null = null
 
   constructor(
     private readonly deps: NavDeps,
     runId: string,
     select?: string,
   ) {
-    this.expanded = runId
+    this.shown = runId
     this.refresh()
     this.selected = select && this.rows.some(r => r.key === select && r.selectable) ? select : this.defaultSelection()
-    this.relayout()
+    this.settle()
   }
 
-  /** The run the navigator is expanded on. */
+  /** The run the page shows. */
   run(): NavRun | undefined {
-    return this.runs.find(r => r.snapshot.id === this.expanded)
+    return this.runs.find(r => r.snapshot.id === this.shown)
+  }
+
+  private tree(): RunTree | undefined {
+    return this.run()?.snapshot.tree
   }
 
   private defaultSelection(): string {
-    const tree = this.run()?.snapshot.tree
-    if (!tree) return this.rows.find(r => r.selectable)?.key ?? ''
-    const agent = [...tree.agents].reverse().find(a => a.state === 'running') ?? tree.agents.at(-1)
-    return agent ? agentKey(agent.session) : runKey(tree.id)
+    const tree = this.tree()
+    const agent = tree && ([...tree.agents].reverse().find(a => a.state === 'running') ?? tree.agents.at(-1))
+    if (agent) return agentKey(agent.session)
+    return this.rows.find(r => r.selectable)?.key ?? ''
   }
 
   private refresh() {
@@ -87,16 +97,21 @@ export class NavModel {
     } catch {
       this.runs = []
     }
+    if (!this.run() && this.runs.length) this.shown = this.runs.at(-1)!.snapshot.id
     this.subs.clear()
-    const sessions = [...new Set(this.runs.flatMap(r => r.snapshot.tree.agents.map(a => a.session)))]
-    const children = attempt(() => this.deps.children(sessions)) ?? new Map<string, readonly ChildSession[]>()
-    const trees = this.runs.map(r => this.withChildren(r.snapshot.tree, children))
-    this.rows = visibleRows(trees, this.folded, this.expanded)
+    const tree = this.tree()
+    const sessions = tree ? [...new Set(tree.agents.map(a => a.session))] : []
+    const children = (sessions.length ? attempt(() => this.deps.children(sessions)) : undefined) ?? new Map<string, readonly ChildSession[]>()
+    const trees = this.runs.map(r => (r.snapshot.id === this.shown ? this.withChildren(r.snapshot.tree, children) : r.snapshot.tree))
+    const shown = trees.find(t => t.id === this.shown)
+    const focus = shown ? focusStage(shown) : undefined
+    this.rows = visibleRows(trees, { run: this.shown, folded: this.folded, opened: this.opened, ...(focus !== undefined ? { focus } : {}), runs: trees.length > 1 ? 'list' : 'one' })
     for (const row of this.rows) if (row.parent) this.parents.set(row.key, row.parent)
   }
 
   /** The tree with each agent's subagents taken from its session's children, leaving the snapshot as it was. */
   private withChildren(tree: RunTree, children: ReadonlyMap<string, readonly ChildSession[]>): RunTree {
+    if (!children.size) return tree
     const copies = new Map<AgentNode, AgentNode>()
     const copy = (agent: AgentNode): AgentNode => {
       let out = copies.get(agent)
@@ -108,14 +123,24 @@ export class NavModel {
       }
       return out
     }
-    const phases: PhaseNode[] = tree.phases.map(phase => ({ ...phase, groups: phase.groups.map(group => ({ ...group, agents: group.agents.map(copy) })) }))
-    return { ...tree, phases, agents: tree.agents.map(copy) }
+    const groups = tree.groups.map(g => ({ ...g, agents: g.agents.map(copy), ...(g.checks ? { checks: { ...g.checks, ...(g.checks.after ? { after: copy(g.checks.after) } : {}) } } : {}) }))
+    return { ...tree, groups, agents: tree.agents.map(copy) }
   }
 
-  private relayout() {
+  /** Keeps the selection on a row that shows, and tells the hub which agent to read. */
+  private settle() {
     let key: string | undefined = this.selected
     while (key && !this.rows.some(r => r.key === key && r.selectable)) key = this.parents.get(key)
     this.selected = key ?? this.rows.find(r => r.selectable)?.key ?? ''
+    if (this.selected !== this.listFor) {
+      this.listFor = this.selected
+      this.follow = true
+    }
+    const row = this.selectedRow()
+    const session = row?.kind === 'agent' ? row.agent!.session : undefined
+    if (session === this.told) return
+    this.told = session
+    attempt(() => this.deps.onSelect?.(session))
   }
 
   private selectedRow(): Row | undefined {
@@ -126,36 +151,55 @@ export class NavModel {
 
   key(key: NavKey): NavAction | undefined {
     this.refresh()
-    this.relayout()
+    this.settle()
+    const action = this.press(key)
+    this.refresh()
+    this.settle()
+    return action
+  }
+
+  private press(key: NavKey): NavAction | undefined {
     const selectable = this.rows.filter(r => r.selectable)
     const at = selectable.findIndex(r => r.key === this.selected)
     const move = (delta: number) => {
       const next = selectable[clamp(at + delta, 0, selectable.length - 1)]
       if (next) this.selected = next.key
     }
+    const listing = this.listing()
+    const listPage = Math.max(1, this.listRoom - 1)
     switch (key) {
       case 'up':
         return void move(-1)
       case 'down':
         return void move(1)
       case 'pageup':
-        return void move(-this.page)
+        return void (listing ? this.scroll(-listPage) : move(-this.page))
       case 'pagedown':
-        return void move(this.page)
+        return void (listing ? this.scroll(listPage) : move(this.page))
       case 'home':
-        return void (this.selected = selectable[0]?.key ?? this.selected)
+        return void (listing ? this.scroll(-this.listRows) : (this.selected = selectable[0]?.key ?? this.selected))
       case 'end':
-        return void (this.selected = selectable.at(-1)?.key ?? this.selected)
+        return void (listing ? (this.follow = true) : (this.selected = selectable.at(-1)?.key ?? this.selected))
       case 'next':
       case 'prev':
         return void (this.selected = nextAgent(this.rows, this.selected, key === 'next' ? 1 : -1) ?? this.selected)
+      case 'verbose':
+        this.verbose = !this.verbose
+        this.follow = true
+        return
+      case 'follow':
+        if (listing) {
+          this.scroll(0)
+          this.follow = !this.follow
+        }
+        return
       case 'space':
-        return void this.fold()
+        return void this.toggle()
       case 'return': {
         const row = this.selectedRow()
         if (row?.kind === 'agent' && row.agent!.session) return { type: 'open', sessionID: row.agent!.session }
         if (row?.kind === 'sub') return { type: 'open', sessionID: row.sub!.name }
-        return void this.fold()
+        return void this.toggle()
       }
       case 'parent': {
         const parent = this.run()?.snapshot.parent
@@ -166,167 +210,156 @@ export class NavModel {
     }
   }
 
-  private fold() {
+  /** Whether the detail shows the verbose list, which then takes the page keys. */
+  private listing(): boolean {
+    return this.verbose && this.selectedRow()?.kind === 'agent'
+  }
+
+  /** Moves the verbose list by `delta` rows from what it shows; only a list that can move stops following. */
+  private scroll(delta: number) {
+    const max = Math.max(0, this.listRows - this.listRoom)
+    this.listTop = clamp((this.follow ? max : this.listTop) + delta, 0, max)
+    if (this.listTop < max) this.follow = false
+  }
+
+  /** Folds or opens the selected group, or shows the selected run. */
+  private toggle() {
     const row = this.selectedRow()
-    if (!row || (row.kind !== 'run' && row.kind !== 'phase')) return
-    if (row.kind === 'run' && row.run.id !== this.expanded) {
-      this.expanded = row.run.id
+    if (row?.kind === 'run' && row.run.id !== this.shown) {
+      this.shown = row.run.id
+      this.top = 0
+      this.refresh()
+      this.selected = this.defaultSelection()
+      return
+    }
+    if (row?.kind !== 'group' || row.folded === undefined) return
+    if (row.folded) {
+      this.opened.add(row.key)
       this.folded.delete(row.key)
-    } else if (this.folded.has(row.key)) this.folded.delete(row.key)
-    else this.folded.add(row.key)
-    this.refresh()
-    this.relayout()
+    } else {
+      this.folded.add(row.key)
+      this.opened.delete(row.key)
+    }
   }
 
   // --- layout -----------------------------------------------------------------------------------
 
-  /** The whole page: header, the panes and the key help, every row fitted to `width`. */
+  /** The whole page: header, stepper, the panes and the key help, every row exactly `width` long. */
   frame(width: number, height: number): Cell[][] {
     this.refresh()
-    this.relayout()
+    this.settle()
     const now = this.deps.now()
     const w = Math.max(1, Math.floor(width))
-    const h = Math.max(3, Math.floor(height))
-    const body = h - 2
-    const header: Cell[] = [{ text: pad(this.title(now), w), tone: 'base' }]
-    const help: Cell[] = [{ text: pad(NAV_HELP, w), tone: 'muted' }]
-    const detail = this.detail(now)
-    let rows: Cell[][]
-    if (w >= WIDE) {
-      const treeWidth = clamp(Math.round(w * 0.38), 36, 60)
-      const detailWidth = w - treeWidth - SEPARATOR.length
-      const left = this.treePane(treeWidth, body, now)
-      const right = compose(detail, body).map(c => ({ ...c, text: pad(c.text, detailWidth) }))
-      rows = left.map((cell, i) => [cell, { text: SEPARATOR, tone: 'muted' }, right[i] ?? { text: pad('', detailWidth), tone: 'base' }])
-    } else {
-      const lower = Math.min(NARROW_DETAIL, Math.max(0, body - 1))
-      const left = this.treePane(w, body - lower, now)
-      const below = compose(detail, lower).map(c => ({ ...c, text: pad(c.text, w) }))
-      while (below.length < lower) below.push({ text: pad('', w), tone: 'base' })
-      rows = [...left.map(cell => [cell]), ...below.map(cell => [cell])]
-    }
-    return [header, ...rows, help]
+    const sizes = paneSizes(w, height, NARROW_DETAIL)
+    const tree = this.tree()
+    const focus = tree ? focusStage(tree, this.selected) : undefined
+    const header: Cell[] = [{ text: tree ? headerText(tree, now, focus, w) : 'granny · no run', tone: 'base' }]
+    const stepper = tree ? stepperCells(stepsFor(tree, focus), w) : []
+    this.page = Math.max(1, sizes.left.height - 1)
+    const left = this.treePane(now, sizes.left.width, sizes.left.height)
+    const right = this.detail(now, sizes.right.width, sizes.right.height)
+    return frame({ header, stepper, left, right, help: [{ text: this.help(), tone: 'muted' }], width: w, height, split: NARROW_DETAIL })
   }
 
-  private title(now: number): string {
-    const s = this.run()?.snapshot
-    if (!s) return 'granny · no run'
-    return `granny ${s.id} · ${s.phase ?? 'Starting'} · ${s.status} · ${duration((s.end ?? now) - s.start)}`
+  private treePane(now: number, width: number, height: number): Cell[] {
+    const { cells, top } = treeCells(this.rows, this.selected, now, width, height, this.top)
+    this.top = top
+    return cells.map((cell, i) => {
+      const row = this.rows[top + i]
+      if (row?.kind !== 'sub') return cell
+      const child = this.subs.get(row.sub!.name)
+      const text = `${'  '.repeat(row.depth)}└ ${child?.running ? '●' : '✓'} ${clean(child?.title || row.sub!.name)}`
+      return { ...cell, text: pad(`${cell.selected ? '›' : ' '} ${fit(text, width - 2)}`, width), tone: child?.running ? 'info' : 'muted' }
+    })
   }
 
-  private treePane(width: number, height: number, now: number): Cell[] {
-    this.page = Math.max(1, height - 1)
-    const at = this.rows.findIndex(r => r.key === this.selected)
-    if (at >= 0) {
-      if (at < this.top) this.top = at
-      if (at >= this.top + height) this.top = at - height + 1
-    }
-    this.top = clamp(this.top, 0, Math.max(0, this.rows.length - height))
-    const out: Cell[] = []
-    for (const row of this.rows.slice(this.top, this.top + Math.max(0, height))) {
-      const chosen = row.key === this.selected
-      out.push({ text: pad(`${chosen ? '›' : ' '} ${this.rowLabel(row, now, width - 2)}`, width), tone: toneOf(row, this.subs), ...(chosen ? { selected: true } : {}) })
-    }
-    while (out.length < height) out.push({ text: pad('', width), tone: 'base' })
-    return out
+  private help(): string {
+    const row = this.selectedRow()
+    const enter =
+      row?.kind === 'agent' || row?.kind === 'sub'
+        ? 'Enter open session'
+        : row?.kind === 'group' && row.folded !== undefined
+          ? 'Enter fold'
+          : row?.kind === 'run' && row.run.id !== this.shown
+            ? 'Enter switch run'
+            : undefined
+    if (this.listing()) return ['↑↓ move', 'PgUp/PgDn scroll', `f follow ${this.follow ? 'on' : 'off'}`, 'v summary', enter, 'Tab next agent', 'p parent', 'Esc close'].join(' · ')
+    const verbose = row?.kind === 'agent' ? 'v details' : undefined
+    return ['↑↓ move', enter, 'Tab next agent', 'Space fold', verbose, 'p parent', 'Esc close'].filter(Boolean).join(' · ')
   }
 
-  private rowLabel(row: Row, now: number, width: number): string {
-    if (row.kind !== 'sub') return rowText(row, now, width)
-    const child = this.subs.get(row.sub!.name)
-    return `${'  '.repeat(row.depth)}└ ${child?.running ? '●' : '✓'} ${clean(child?.title || row.sub!.name)}`
-  }
-
-  private detail(now: number): Detail {
+  private detail(now: number, width: number, height: number): Cell[] {
+    if (height <= 0) return []
     const row = this.selectedRow()
     const run = this.runs.find(r => r.snapshot.id === row?.run.id) ?? this.run()
-    const note: Cell[] = run && !run.snapshot.readable ? [{ text: UNREADABLE, tone: 'warning' }] : []
-    if (!row || !run) return { head: [{ text: 'no granny run here', tone: 'muted' }], body: [], foot: [] }
-    const open: Cell[] = [{ text: 'Enter open session · p parent session', tone: 'muted' }]
+    if (!row || !run) return [{ text: 'no granny run here', tone: 'muted' }]
+    const note: Cell[] = run.snapshot.readable ? [] : [{ text: UNREADABLE, tone: 'warning' }]
+    const room = Math.max(0, height - note.length)
+    const tree = row.run
     switch (row.kind) {
-      case 'agent': {
-        const a = row.agent!
-        const state = a.activity ?? `${a.state} ${duration((a.end ?? now) - a.start)}`
-        const linked = attempt(() => this.deps.linked(a.session))
-        const head: Cell[] = [
-          ...note,
-          { text: `${a.label} (${a.role})`, tone: 'base' },
-          { text: `${a.model ?? 'default model'}${a.effort ? `/${a.effort}` : ''} · ${state}`, tone: AGENT_TONES[a.state] },
-          { text: `session ${a.session}${linked === undefined ? '' : linked ? ' · linked' : ' · not linked'}`, tone: 'muted' },
-        ]
-        if (a.error) head.push({ text: `error: ${a.error.split('\n')[0]}`, tone: 'error' })
-        if (a.subagents.length)
-          head.push({ text: `subagents: ${a.subagents.map(s => `${clean(this.subs.get(s.name)?.title || s.name)} ${this.subs.get(s.name)?.running ? '●' : '✓'}`).join(', ')}`, tone: 'muted' })
-        const lines = (row.phase?.lines ?? []).filter(l => mentions(l, a.label)).slice(-AGENT_LINES)
-        return { head, body: lines.map(text => ({ text, tone: 'base' })), foot: open }
-      }
+      case 'agent':
+        return [...note, ...this.agentDetail(row.agent!, now, width, room)]
       case 'sub': {
         const child = this.subs.get(row.sub!.name)
-        return {
-          head: [
-            ...note,
-            { text: clean(child?.title || row.sub!.name), tone: 'base' },
-            { text: child?.running ? 'running' : 'idle', tone: child?.running ? 'info' : 'muted' },
-            { text: `session ${row.sub!.name} · subagent of ${row.agent!.label}`, tone: 'muted' },
-          ],
-          body: [],
-          foot: open,
-        }
+        return [
+          ...note,
+          { text: clean(child?.title || row.sub!.name), tone: 'base' },
+          { text: child?.running ? 'running' : 'idle', tone: child?.running ? 'info' : 'muted' },
+          { text: `subagent of ${row.agent!.action}`, tone: 'muted' },
+        ]
       }
-      case 'phase': {
-        const p = row.phase!
-        return {
-          head: [...note, { text: `${p.marker} ${p.title} · ${duration((p.end ?? now) - p.start)}`, tone: 'base' }],
-          body: p.lines.slice(-PHASE_LINES).map(text => ({ text, tone: 'base' })),
-          foot: [],
-        }
-      }
+      case 'group':
+        return [...note, ...newest(groupDetail(tree, row.group!, now, width), room)]
+      case 'checks':
+        return [...note, ...newest(checksDetail(row.group!), room)]
       default: {
         const s = run.snapshot
-        const head: Cell[] = [...note, { text: `run ${s.id}`, tone: 'base' }, { text: `status   ${s.status}`, tone: STATUS_TONES[s.status] ?? 'base' }]
-        if (s.repo) head.push({ text: `repo     ${s.repo}`, tone: 'muted' })
-        if (s.branch) head.push({ text: `branch   ${s.branch}`, tone: 'muted' })
-        head.push({ text: `started  ${stamp(s.start) ?? '?'}`, tone: 'muted' })
-        if (s.status === 'running') head.push({ text: `phase    ${s.phase ?? 'Starting'}`, tone: 'muted' })
-        else head.push({ text: `ended    ${stamp(s.end) ?? '?'}`, tone: 'muted' })
-        head.push({ text: `result   ${join(run.dir, 'result.json')}`, tone: 'muted' })
-        if (s.error) head.push({ text: `error: ${s.error.split('\n')[0]}`, tone: 'error' })
-        return { head, body: [], foot: [{ text: `ask the agent for granny_status { runId: "${s.id}" } for the full record`, tone: 'muted' }] }
+        return [
+          ...note,
+          ...runDetail(tree, { ...(s.repo ? { repo: s.repo } : {}), dir: run.dir, ...(s.error ? { error: s.error } : {}) }),
+          BLANK,
+          { text: `ask the agent for granny_status { runId: "${s.id}" } for the full record`, tone: 'muted' },
+        ]
       }
     }
   }
-}
 
-const MARKS = ['▸', '■', '↻', '!']
-
-/** A journal line about `label`: its start, end, retries, provider errors and a failed link. */
-function mentions(line: string, label: string): boolean {
-  return MARKS.some(mark => line.includes(`${mark} ${label} `) || line.includes(`${mark} ${label}:`))
-}
-
-/** The detail fitted to `height` rows: the head, the newest body lines that fit, then the foot. */
-function compose(detail: Detail, height: number): Cell[] {
-  if (height <= 0) return []
-  const head = detail.head.slice(0, height)
-  const foot = detail.foot.slice(0, Math.max(0, height - head.length))
-  const room = Math.max(0, height - head.length - foot.length)
-  const body = room ? detail.body.slice(-room) : []
-  return [...head, ...body, ...foot]
-}
-
-function toneOf(row: Row, subs: ReadonlyMap<string, ChildSession>): Tone {
-  switch (row.kind) {
-    case 'run':
-      return STATUS_TONES[row.run.status] ?? 'base'
-    case 'group':
-      return 'muted'
-    case 'agent':
-      return AGENT_TONES[row.agent!.state]
-    case 'sub':
-      return subs.get(row.sub!.name)?.running ? 'info' : 'muted'
-    case 'phase': {
-      const marker = row.phase!.marker
-      return marker === AGENT_MARKERS.running ? 'info' : marker === AGENT_MARKERS.failed ? 'error' : marker === AGENT_MARKERS.cancelled ? 'warning' : 'base'
+  /** The agent's head, then its summary (NOW, TODO, RECENT, LAST SAID) or, verbose, every event in order. */
+  private agentDetail(agent: AgentNode, now: number, width: number, height: number): Cell[] {
+    const linked = attempt(() => this.deps.linked(agent.session))
+    const head = agentHead(agent, now, linked === undefined ? {} : { linked })
+    const activity = attempt(() => this.deps.activity?.(agent.session))
+    const items = withNotes(activity?.items ?? [], agent)
+    const room = Math.max(0, height - head.length - 1)
+    if (this.verbose) {
+      const lines = activityLines(items, agent.cwd, this.deps.home)
+      this.listRows = lines.length
+      this.listRoom = room
+      const max = Math.max(0, lines.length - room)
+      const top = this.follow ? max : clamp(this.listTop, 0, max)
+      const body: Cell[] = lines.length ? lines.slice(top, top + room).map(text => ({ text, tone: 'base' })) : [{ text: 'no activity yet', tone: 'muted' }]
+      return [...head, BLANK, ...body]
     }
+    const end = agentEnd(agent)
+    const live = end ? undefined : (activity?.now ?? (agent.state === 'running' ? { state: 'waiting' as const, since: items.at(-1)?.t ?? agent.start } : undefined))
+    const summary = summarise(items, now, { ...(agent.cwd ? { cwd: agent.cwd } : {}), ...(this.deps.home ? { home: this.deps.home } : {}), ...(live ? { live } : {}), ...(end ? { end } : {}) })
+    if (!end && !live) summary.now = { text: 'idle', tone: 'muted' }
+    return [...head, BLANK, ...summaryCells(summary, width, room)]
   }
+}
+
+/** The agent's journal notes merged into its activity by time. */
+function withNotes(items: readonly ActivityItem[], agent: AgentNode): ActivityItem[] {
+  if (!agent.notes.length) return [...items]
+  const notes = agent.notes.map((n): ActivityItem => ({ t: n.t, kind: 'note', text: n.text }))
+  return [...items, ...notes].sort((a, b) => (a.t ?? 0) - (b.t ?? 0))
+}
+
+/** A detail fitted to `height` rows: everything up to its first blank row, then the newest rows that fit. */
+function newest(cells: readonly Cell[], height: number): Cell[] {
+  if (cells.length <= height) return [...cells]
+  const blank = cells.findIndex(c => c.text === '')
+  const head = cells.slice(0, blank < 0 ? 0 : blank + 1).slice(0, height)
+  const room = height - head.length
+  return [...head, ...(room > 0 ? cells.slice(head.length).slice(-room) : [])]
 }

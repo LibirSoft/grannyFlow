@@ -608,6 +608,21 @@ describe('opencode plugin', () => {
     await finished(join(repo, '.granny/runs', /granny run (\S+) started/.exec(started)![1]!))
   })
 
+  it('tells the agent to point the user at the run navigator with watch full only', async () => {
+    const f = fakeContext()
+    await plugin.setup(f.ctx)
+    const sentence = 'Tell the user: /granny or <leader>j in the TUI opens the run navigator (stages, agents, live activity).'
+    for (const watch of ['full', 'panel', 'off']) {
+      writeFileSync(join(repo, 'granny.config.json'), JSON.stringify({ reviewers: [{ name: 'codex', engine: 'command', command: REVIEW_ONCE }], watch }))
+      git(repo, 'add', 'granny.config.json')
+      git(repo, 'commit', '-qm', `cfg ${watch}`)
+      const started = (await f.tools.get('granny_run').execute({ repo, branch: `feat/${watch}`, stages: [{ name: 'one', task: 'Do it.' }] }, { sessionID: 'parent' })).content
+      if (watch === 'full') expect(started).toContain(`\n${sentence}`)
+      else expect(started).not.toContain('run navigator')
+      await finished(join(repo, '.granny/runs', /granny run (\S+) started/.exec(started)![1]!))
+    }
+  })
+
   it('writes the run outline to status.json from the start, and a planning run as kind plan', async () => {
     const f = fakeContext({ hangUntilInterrupted: title => title === 'granny · implement one' || title === 'granny · plan' })
     await plugin.setup(f.ctx)

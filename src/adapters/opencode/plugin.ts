@@ -41,6 +41,8 @@ export const modelText = (model: ModelRef | undefined): string | null =>
 
 const norm = (dir: unknown) => (typeof dir === 'string' ? dir.replace(/\/+$/, '') : dir)
 
+export const NAVIGATOR_HINT = 'Tell the user: /granny or <leader>j in the TUI opens the run navigator (stages, agents, live activity).'
+
 // opencode re-imports the plugin as a new module on reload while earlier runs keep going.
 const SHARED = Symbol.for('granny-workflow.state')
 const shared: { runs: Map<string, RunState>; submissions: Map<string, unknown> } = ((globalThis as any)[SHARED] ??= {
@@ -324,7 +326,7 @@ export const createGrannyPlugin = ({ delays = DEFAULT_DELAYS, sleep = pause, kil
 
       return `granny run ${id} started on ${input.repo} (${input.branch}), ${input.goal !== undefined ? 'planning only' : `${input.stages?.length ?? 0} stage(s)${config.parallel ? `, up to ${config.maxParallel} in parallel` : ''}`}, threshold ${config.threshold}, maxRounds ${config.maxRounds}.
 Journal: ${join(dir, 'journal.jsonl')}
-You will receive a message when it finishes. Use granny_status { runId: "${id}" } to check progress and granny_cancel to stop it. Do not poll in a loop.${planReviewNotice(input, config)}${overridesNotice(layers, 'opencode')}`
+You will receive a message when it finishes. Use granny_status { runId: "${id}" } to check progress and granny_cancel to stop it. Do not poll in a loop.${config.watch === 'full' ? `\n${NAVIGATOR_HINT}` : ''}${planReviewNotice(input, config)}${overridesNotice(layers, 'opencode')}`
     }
 
     await ctx.tool.transform((editor: any) => {

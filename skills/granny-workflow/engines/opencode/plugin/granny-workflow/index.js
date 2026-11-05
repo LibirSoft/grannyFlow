@@ -2764,6 +2764,7 @@ function runOutline(input, config) {
 // src/adapters/opencode/plugin.ts
 var modelText = (model) => model ? `${model.providerID}/${model.id}${model.variant ? `#${model.variant}` : ""}` : null;
 var norm = (dir) => typeof dir === "string" ? dir.replace(/\/+$/, "") : dir;
+var NAVIGATOR_HINT = "Tell the user: /granny or <leader>j in the TUI opens the run navigator (stages, agents, live activity).";
 var SHARED = Symbol.for("granny-workflow.state");
 var shared = globalThis[SHARED] ??= {
   runs: new Map,
@@ -3050,7 +3051,8 @@ Call granny_status with runId "${id}" and report to the user.`);
       });
       return `granny run ${id} started on ${input.repo} (${input.branch}), ${input.goal !== undefined ? "planning only" : `${input.stages?.length ?? 0} stage(s)${config.parallel ? `, up to ${config.maxParallel} in parallel` : ""}`}, threshold ${config.threshold}, maxRounds ${config.maxRounds}.
 Journal: ${join2(dir, "journal.jsonl")}
-You will receive a message when it finishes. Use granny_status { runId: "${id}" } to check progress and granny_cancel to stop it. Do not poll in a loop.${planReviewNotice(input, config)}${overridesNotice(layers, "opencode")}`;
+You will receive a message when it finishes. Use granny_status { runId: "${id}" } to check progress and granny_cancel to stop it. Do not poll in a loop.${config.watch === "full" ? `
+${NAVIGATOR_HINT}` : ""}${planReviewNotice(input, config)}${overridesNotice(layers, "opencode")}`;
     };
     await ctx.tool.transform((editor) => {
       for (const [kind, name] of Object.entries(SUBMIT)) {
@@ -3119,6 +3121,7 @@ ${active.join(`
 });
 var plugin_default = createGrannyPlugin();
 export {
+  NAVIGATOR_HINT,
   createGrannyPlugin,
   plugin_default as default,
   globalConfigPath,
