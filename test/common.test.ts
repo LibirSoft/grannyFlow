@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'bun:test'
-import { dropPlaceholders, HEARTBEAT_MS, overridesNotice, planReviewWarning, RUN_INPUT_SCHEMA, RUN_TOOL_DESCRIPTION, withHeartbeat } from '../src/adapters/common'
+import { dropPlaceholders, HEARTBEAT_MS, hostModelErrors, overridesNotice, planReviewWarning, RUN_INPUT_SCHEMA, RUN_TOOL_DESCRIPTION, withHeartbeat } from '../src/adapters/common'
+import { resolveConfig } from '../src/core/config'
 import { checkInput, type RunInput } from '../src/core/engine'
 
 // The granny_run arguments gpt-5.6-luna sent through omp for a plain one-stage run: every optional
@@ -92,6 +93,14 @@ describe('overridesNotice', () => {
   it('says nothing without a run config, or when it changes nothing', () => {
     expect(overridesNotice([...files, undefined], 'omp')).toBe('')
     expect(overridesNotice([...files, { threshold: 70 }], 'omp')).toBe('')
+  })
+})
+
+describe('hostModelErrors', () => {
+  it('checks the model of every role at launch, the helper too', () => {
+    const layers = [{ roles: { granny: { model: 'g' }, helper: { model: 'h' }, planner: { model: 'p' }, implementer: { model: 'i' }, judge: { model: 'j' } } }]
+    const errors = hostModelErrors(resolveConfig(layers, 'omp'), layers, 'omp', model => (model.includes('/') ? undefined : 'not provider/model'), ['the config'])
+    expect(errors.map(e => e.slice(0, e.indexOf(':')))).toEqual(['roles.granny.model', 'roles.helper.model', 'roles.planner.model', 'roles.implementer.model', 'roles.judge.model'])
   })
 })
 

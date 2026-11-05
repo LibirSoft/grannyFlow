@@ -187,6 +187,8 @@ function lineOf(item: ActivityItem, cwd?: string, home?: string): string | undef
 
 interface Row {
   t?: number
+  /** The time of a burst's call before its newest. */
+  before?: number
   tool: string
   id?: string
   intent?: string
@@ -257,6 +259,7 @@ export function summarise(items: readonly ActivityItem[], at: number, opts: Summ
         if (burst) {
           prev.count++
           prev.args.push(arg)
+          prev.before = prev.t
           prev.t = t
           prev.id = item.id
           prev.open = true
@@ -315,7 +318,13 @@ export function summarise(items: readonly ActivityItem[], at: number, opts: Summ
 
   const live = opts.live ?? state
   const last = rows.at(-1)
-  if (!opts.end && live?.state === 'running' && last?.open && last.tool === live.tool && !last.names) rows.pop()
+  if (!opts.end && live?.state === 'running' && last?.open && last.tool === live.tool && !last.names) {
+    if (last.count > 1) {
+      last.count--
+      last.args.pop()
+      last.t = last.before
+    } else rows.pop()
+  }
   const max = opts.max ?? MAX_ROWS
   const recent = rows.slice(-max).reverse().map((row): RecentRow => ({ ...(row.t !== undefined ? { t: row.t } : {}), tool: row.tool, text: rowText(row), tone: row.tone }))
   const now = nowBlock(opts.end, live, opts.live?.heading ?? heading, at, cwd, home)

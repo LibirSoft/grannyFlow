@@ -96,6 +96,15 @@ describe('summarise', () => {
     expect(ended.recent.map(r => r.text)).toEqual(['Testing', '/a.ts'])
   })
 
+  it('keeps the finished calls of a burst in RECENT while its last call still runs', () => {
+    const reads = [1, 2, 3, 4, 5, 6].flatMap(i => [tool(i, 'read', { id: `r${i}`, arg: `/f${i}.ts` }), end(i, 'read', { id: `r${i}` })])
+    const r = summarise([...reads, tool(7, 'read', { id: 'r7', arg: '/f7.ts' })], at(8))
+    expect(r.recent.map(x => [clock(x.t), x.text])).toEqual([[clock(at(6)), '6 files · /f1.ts, /f2.ts, /f3.ts, /f4.ts, /f5.ts, /f6.ts']])
+    expect(r.now).toEqual({ text: '● read · 1s', tone: 'info', detail: '/f7.ts' })
+    const same = summarise([tool(1, 'read', { arg: '/a.ts' }), end(1, 'read'), tool(2, 'read', { arg: '/a.ts' }), end(2, 'read'), tool(3, 'read', { arg: '/a.ts' })], at(4))
+    expect(same.recent.map(x => x.text)).toEqual(['/a.ts  (2×)'])
+  })
+
   it('has nothing to say about an empty stream', () => {
     expect(summarise([], at(0))).toEqual({ recent: [] })
   })

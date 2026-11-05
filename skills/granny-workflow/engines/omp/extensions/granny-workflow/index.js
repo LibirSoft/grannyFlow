@@ -2476,7 +2476,7 @@ function planReviewNotice(input, config) {
 ${planReviewWarning(config.maxRounds)} Tell the user this in your next message.` : "";
 }
 var layerSources = (repo) => [globalConfigPath(), join(repo, "granny.config.json"), "the run's config"];
-var AGENT_ROLES = ["granny", "planner", "implementer", "judge"];
+var AGENT_ROLES = ["granny", "helper", "planner", "implementer", "judge"];
 var isObject2 = (v) => !!v && typeof v === "object" && !Array.isArray(v);
 function hostModelErrors(config, layers, host, problem, sources) {
   const from = (set) => {
@@ -3802,6 +3802,10 @@ function workGroups(tree, entries, now) {
         agent.group = group;
         agent.action = placed?.action ?? agent.label;
         const g = ensure(group, stageNumber(group));
+        if (g.number !== undefined && lastChecks.get(g.number)?.kind === "batch") {
+          g.checks = { state: "running", failed: [], lines: g.checks?.lines ?? [], t: agent.start };
+          lastChecks.set(g.number, { kind: "other" });
+        }
         g.agents.push(agent);
         push(g, agent.start, `\u25B8 ${agent.action} started`);
         for (const n of pendingLinks.get(agent.label) ?? [])

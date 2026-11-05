@@ -474,6 +474,10 @@ function workGroups(tree, entries, now) {
         agent.group = group;
         agent.action = placed?.action ?? agent.label;
         const g = ensure(group, stageNumber(group));
+        if (g.number !== undefined && lastChecks.get(g.number)?.kind === "batch") {
+          g.checks = { state: "running", failed: [], lines: g.checks?.lines ?? [], t: agent.start };
+          lastChecks.set(g.number, { kind: "other" });
+        }
         g.agents.push(agent);
         push(g, agent.start, `\u25B8 ${agent.action} started`);
         for (const n of pendingLinks.get(agent.label) ?? [])

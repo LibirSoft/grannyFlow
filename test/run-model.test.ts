@@ -237,6 +237,28 @@ describe('the stage-grouped run tree', () => {
     expect(rowText(visibleRows([cancelled], view())[1]!, NOW, 60)).toStartWith('▸ ⊘ 2 Client')
   })
 
+  it('shows only the latest batch of failed checks, and checks running again once a repair starts', () => {
+    n = 0
+    const impl = agent(3, `implement ${S1}`, 'implementer', 'Implement')
+    const repair = agent(60, `repair ${S1} implement #1`, 'implementer', 'Implement')
+    const head = [
+      j(2, 'stage', { number: 1, name: S1, event: 'start' }),
+      j(2, 'phase', { title: 'Implement' }),
+      impl.entry,
+      ended(50, impl),
+      j(51, 'phase', { title: 'Checks' }),
+      j(55, 'log', { message: `${S1}: check test failed (exit 1) - repair 1/2` }),
+      j(55, 'log', { message: `${S1}: check lint failed (exit 2) - repair 1/2` }),
+      repair.entry,
+    ]
+    const checksOf = (entries: JournalEntry[]) => {
+      const g = buildRunTree(RUN, entries, new Map(), NOW, new Map(), outlineOf()).groups[0]!
+      return [g.checks?.state, g.checks?.failed]
+    }
+    expect(checksOf(head)).toEqual(['running', []])
+    expect(checksOf([...head, ended(90, repair), j(95, 'log', { message: `${S1}: check test failed (exit 1) - repair 2/2` })])).toEqual(['failed', ['test']])
+  })
+
   it('reads a journal written before stages were journalled, with no outline and no cwd', () => {
     n = 0
     const impl1 = agent(3, 'implement one', 'implementer', 'Implement', { cwd: undefined })

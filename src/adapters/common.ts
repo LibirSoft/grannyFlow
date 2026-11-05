@@ -134,7 +134,7 @@ export function planReviewNotice(input: RunInput, config: { planReview: boolean;
 /** The config files a run reads, in layer order, as the start reply and refusals name them. */
 export const layerSources = (repo: string): string[] => [globalConfigPath(), join(repo, 'granny.config.json'), "the run's config"]
 
-const AGENT_ROLES: ConfigRole[] = ['granny', 'planner', 'implementer', 'judge']
+const AGENT_ROLES: ConfigRole[] = ['granny', 'helper', 'planner', 'implementer', 'judge']
 const isObject = (v: unknown): v is Record<string, any> => !!v && typeof v === 'object' && !Array.isArray(v)
 
 /**

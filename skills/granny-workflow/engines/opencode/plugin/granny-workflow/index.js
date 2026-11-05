@@ -2474,7 +2474,7 @@ function planReviewNotice(input, config) {
 ${planReviewWarning(config.maxRounds)} Tell the user this in your next message.` : "";
 }
 var layerSources = (repo) => [globalConfigPath(), join(repo, "granny.config.json"), "the run's config"];
-var AGENT_ROLES = ["granny", "planner", "implementer", "judge"];
+var AGENT_ROLES = ["granny", "helper", "planner", "implementer", "judge"];
 var isObject2 = (v) => !!v && typeof v === "object" && !Array.isArray(v);
 function hostModelErrors(config, layers, host, problem, sources) {
   const from = (set) => {
