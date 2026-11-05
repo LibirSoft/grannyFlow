@@ -5,7 +5,8 @@ import { GrannyCancelled, isCancelled } from '../../core/cancel'
 import { checkInput, runGranny, stageCheckErrors, type RunInput } from '../../core/engine'
 import { checkShape, SCHEMAS } from '../../core/schemas'
 import type { AgentRequest, Host, ResultKind } from '../../core/types'
-import { DEFAULT_DELAYS, dropPlaceholders, globalConfigPath, type HostOptions, KILL_GRACE_MS, pause, preflight, readJson, RUN_INPUT_SCHEMA, RUN_TOOL_DESCRIPTION, runCommand, runId, runStatus, stageRepos, stamp, SUBMIT, summarize } from '../common'
+import { DEFAULT_DELAYS, dropPlaceholders, globalConfigPath, type HostOptions, KILL_GRACE_MS, pause, preflight, readJson, RUN_INPUT_SCHEMA, RUN_TOOL_DESCRIPTION, runCommand, runDir, runId, runStatus, stageRepos, stamp, SUBMIT, summarize } from '../common'
+import { duration } from '../omp/panel'
 
 export { globalConfigPath, pause, preflight, stageRepos, summarize } from '../common'
 export type { RetryPolicy } from '../common'
@@ -22,6 +23,14 @@ interface RunState {
   sessions: Set<string>
   parent: string
   linked: boolean
+  active: Map<string, ActiveRole>
+}
+
+interface ActiveRole {
+  label: string
+  role: string
+  model: string | null
+  since: number
 }
 
 type ModelRef = { providerID: string; id: string; variant?: string }
@@ -125,12 +134,13 @@ export const createGrannyPlugin = ({ delays = DEFAULT_DELAYS, sleep = pause, kil
         sessions: new Set(),
         parent: parentSession,
         linked: true,
+        active: new Map(),
       }
       runs.set(id, run)
       const journal = (type: string, data: Record<string, unknown>) =>
         appendFileSync(join(dir, 'journal.jsonl'), JSON.stringify({ t: stamp(), type, ...data }) + '\n')
       const writeStatus = (extra: Record<string, unknown> = {}) =>
-        writeFileSync(join(dir, 'status.json'), JSON.stringify({ id, status: run.status, repo: input.repo, branch: input.branch, ...extra }, null, 2))
+        writeFileSync(join(dir, 'status.json'), JSON.stringify({ id, status: run.status, repo: input.repo, branch: input.branch, parent: parentSession, watch: config.watch, ...extra }, null, 2))
       writeFileSync(join(dir, 'input.json'), JSON.stringify({ ...input, config: layers }, null, 2))
       writeStatus({ startedAt: stamp() })
 
@@ -245,10 +255,23 @@ export const createGrannyPlugin = ({ delays = DEFAULT_DELAYS, sleep = pause, kil
           if (!tool) throw new Error(`no submit tool for result kind "${req.kind}"`)
           const model = modelRef(req.model) ?? parentModel
           const session = await createRoleSession(req, model)
-          journal('agent', { label: req.label, role: req.role, session: session.id, model: model ?? null, linked: session.linked })
+          journal('agent', { label: req.label, role: req.role, phase: req.phase, session: session.id, model: model ?? null, linked: session.linked })
+          run.active.set(session.id, { label: req.label, role: req.role, model: modelText(model), since: Date.now() })
+          const end = (outcome: 'done' | 'failed' | 'cancelled', error?: string) => {
+            run.active.delete(session.id)
+            try {
+              journal('agent-end', { label: req.label, session: session.id, outcome, ...(error !== undefined ? { error } : {}) })
+            } catch {}
+          }
           try {
             if (run.cancelled) throw new GrannyCancelled()
-            return await converse(req, tool, session.id)
+            const result = await converse(req, tool, session.id)
+            end(result === null ? 'failed' : 'done')
+            return result
+          } catch (e) {
+            if (isCancelled(e)) end('cancelled')
+            else end('failed', String((e as Error)?.message ?? e))
+            throw e
           } finally {
             run.sessions.delete(session.id)
           }
@@ -323,7 +346,14 @@ You will receive a message when it finishes. Use granny_status { runId: "${id}" 
         },
         execute: async (value: { runId?: string; repo?: string }) => {
           try {
-            return { content: runStatus(runs, value.runId, value.repo) }
+            const status = runStatus(runs, value.runId, value.repo)
+            const dir = runDir(runs, value.runId, value.repo)
+            const run = [...runs.values()].find(r => r.dir === dir && r.status === 'running')
+            const now = Date.now()
+            const active = [...(run?.active ?? [])].map(
+              ([session, a]) => `- ${a.label} (${a.role}${a.model ? `, ${a.model}` : ''}) session ${session} · ${duration(now - a.since)}`,
+            )
+            return { content: active.length ? `${status}\n\nactive roles:\n${active.join('\n')}` : status }
           } catch (e) {
             return { content: `granny_status failed: ${(e as Error).message}` }
           }

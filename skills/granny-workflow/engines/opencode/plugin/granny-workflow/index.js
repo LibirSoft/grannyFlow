@@ -2608,6 +2608,18 @@ ${result.length > 30000 ? result.slice(0, 30000) + `
 `);
 }
 
+// src/adapters/omp/panel.ts
+var PARSED_EVENTS = new Set(["message_start", "message_end", "tool_execution_start", "tool_execution_end", "turn_start", "turn_end"]);
+function duration(ms) {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  if (s < 60)
+    return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60)
+    return `${m}m${String(s % 60).padStart(2, "0")}s`;
+  return `${Math.floor(m / 60)}h${String(m % 60).padStart(2, "0")}m`;
+}
+
 // src/adapters/opencode/plugin.ts
 var modelText = (model) => model ? `${model.providerID}/${model.id}${model.variant ? `#${model.variant}` : ""}` : null;
 var norm = (dir) => typeof dir === "string" ? dir.replace(/\/+$/, "") : dir;
@@ -2697,12 +2709,13 @@ var createGrannyPlugin = ({ delays = DEFAULT_DELAYS, sleep = pause, killGraceMs 
         abort: new AbortController,
         sessions: new Set,
         parent: parentSession,
-        linked: true
+        linked: true,
+        active: new Map
       };
       runs.set(id, run);
       const journal = (type, data) => appendFileSync2(join2(dir, "journal.jsonl"), JSON.stringify({ t: stamp(), type, ...data }) + `
 `);
-      const writeStatus = (extra = {}) => writeFileSync(join2(dir, "status.json"), JSON.stringify({ id, status: run.status, repo: input.repo, branch: input.branch, ...extra }, null, 2));
+      const writeStatus = (extra = {}) => writeFileSync(join2(dir, "status.json"), JSON.stringify({ id, status: run.status, repo: input.repo, branch: input.branch, parent: parentSession, watch: config.watch, ...extra }, null, 2));
       writeFileSync(join2(dir, "input.json"), JSON.stringify({ ...input, config: layers }, null, 2));
       writeStatus({ startedAt: stamp() });
       let parentModel;
@@ -2823,11 +2836,26 @@ When done, call the \`${tool}\` tool exactly once with your result. That call is
             throw new Error(`no submit tool for result kind "${req.kind}"`);
           const model = modelRef(req.model) ?? parentModel;
           const session = await createRoleSession(req, model);
-          journal("agent", { label: req.label, role: req.role, session: session.id, model: model ?? null, linked: session.linked });
+          journal("agent", { label: req.label, role: req.role, phase: req.phase, session: session.id, model: model ?? null, linked: session.linked });
+          run.active.set(session.id, { label: req.label, role: req.role, model: modelText(model), since: Date.now() });
+          const end = (outcome, error) => {
+            run.active.delete(session.id);
+            try {
+              journal("agent-end", { label: req.label, session: session.id, outcome, ...error !== undefined ? { error } : {} });
+            } catch {}
+          };
           try {
             if (run.cancelled)
               throw new GrannyCancelled;
-            return await converse(req, tool, session.id);
+            const result = await converse(req, tool, session.id);
+            end(result === null ? "failed" : "done");
+            return result;
+          } catch (e) {
+            if (isCancelled(e))
+              end("cancelled");
+            else
+              end("failed", String(e?.message ?? e));
+            throw e;
           } finally {
             run.sessions.delete(session.id);
           }
@@ -2901,7 +2929,16 @@ You will receive a message when it finishes. Use granny_status { runId: "${id}" 
         },
         execute: async (value) => {
           try {
-            return { content: runStatus(runs, value.runId, value.repo) };
+            const status = runStatus(runs, value.runId, value.repo);
+            const dir = runDir(runs, value.runId, value.repo);
+            const run = [...runs.values()].find((r) => r.dir === dir && r.status === "running");
+            const now = Date.now();
+            const active = [...run?.active ?? []].map(([session, a]) => `- ${a.label} (${a.role}${a.model ? `, ${a.model}` : ""}) session ${session} \xB7 ${duration(now - a.since)}`);
+            return { content: active.length ? `${status}
+
+active roles:
+${active.join(`
+`)}` : status };
           } catch (e) {
             return { content: `granny_status failed: ${e.message}` };
           }

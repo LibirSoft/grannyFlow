@@ -48,6 +48,7 @@ interface Behaviour {
   moveIgnored?: (title: string) => boolean
   hangMove?: (title: string) => boolean
   removeFails?: boolean
+  promptFails?: (title: string) => boolean
 }
 
 function fakeContext(behaviour: Behaviour = {}) {
@@ -108,6 +109,7 @@ function fakeContext(behaviour: Behaviour = {}) {
         return Promise.resolve(true)
       },
       prompt: async (input: { sessionID: string; text: string }) => {
+        if (behaviour.promptFails?.(created.find(c => c.id === input.sessionID)?.title ?? '')) throw new Error('session.prompt: 500 Internal Server Error')
         prompts.push(input)
         calls.push(`prompt ${input.sessionID}`)
         pending.set(input.sessionID, input.text)
@@ -509,7 +511,12 @@ describe('opencode plugin', () => {
       meta('pr-ready check', 'granny', 'PR ready', 'opencode/parent-model'),
     ])
     expect(f.removed).toEqual([])
-    expect(journalOf(dir).filter(e => e.type === 'link-failed')).toEqual([])
+    const journal = journalOf(dir)
+    expect(journal.filter(e => e.type === 'link-failed')).toEqual([])
+    const agents = journal.filter(e => e.type === 'agent')
+    expect(agents.map(e => [e.label, e.phase, e.session, e.linked])).toEqual(f.created.map(s => [s.metadata['granny-workflow'].label, s.metadata['granny-workflow'].phase, s.id, true]))
+    expect(journal.filter(e => e.type === 'agent-end')).toEqual(agents.map(e => ({ t: expect.any(String), type: 'agent-end', label: e.label, session: e.session, outcome: 'done' })))
+    expect(JSON.parse(readRun(dir, 'status.json'))).toMatchObject({ id, status: 'done', parent: 'parent', watch: 'full' })
     expect(f.created[1].model).toEqual({ providerID: 'opencode', id: 'judge-model' })
     expect(f.created[1].permissions).toContainEqual({ action: 'edit', resource: '*', effect: 'deny' })
     expect(f.prompts.some(p => p.text.startsWith('You stopped without calling granny_submit_implementation'))).toBe(true)
@@ -608,6 +615,10 @@ describe('opencode plugin', () => {
     )
     expect(result.stages[0]).toMatchObject({ outcome: 'clean', rounds: 2 })
     expect(result.stages[0].history[0].findings[0].priority).toBeUndefined()
+    for (const label of ['judge one r1', 'judge one r1 retry']) {
+      const session = journal.find(e => e.type === 'agent' && e.label === label).session
+      expect(journal.filter(e => e.type === 'agent-end' && e.label === label)).toEqual([expect.objectContaining({ session, outcome: 'failed' })])
+    }
   })
 
   it('does not retry a provider error that waiting cannot fix', async () => {
@@ -693,6 +704,16 @@ describe('opencode plugin', () => {
     it('falls back when the moved session is not in the work directory', async () => {
       const journal = await fallsBack({ moveIgnored: title => title === 'granny · implement one' })
       expect(journal.find(e => e.type === 'link-failed').error).toContain('/parent-dir')
+    })
+
+    it('links the role sessions and records watch "off" in status.json when watching is off', async () => {
+      const f = fakeContext()
+      await plugin.setup(f.ctx)
+      const { dir } = await startRun(repo, f, { watch: 'off' })
+      expect(JSON.parse(readRun(dir, 'status.json'))).toMatchObject({ status: 'running', parent: 'parent', watch: 'off' })
+      await finished(dir)
+      expect(JSON.parse(readRun(dir, 'status.json'))).toMatchObject({ status: 'done', parent: 'parent', watch: 'off' })
+      expect(f.created.map(s => s.parentID)).toEqual(f.created.map(() => 'parent'))
     })
 
     it('does not move a role session that already starts in the work directory', async () => {
@@ -864,6 +885,34 @@ describe('opencode plugin', () => {
       const logs = journalOf(dir).filter(e => e.type === 'log').map(e => e.message)
       expect(logs.filter(m => /retrying once|review failed/.test(m))).toEqual([])
       expect(existsSync(join(dir, 'result.json'))).toBe(false)
+      const reviewer = f.created.find(s => reviewing(s.title)).id
+      expect(journalOf(dir).filter(e => e.type === 'agent-end' && e.label === 'review one r1 a')).toEqual([expect.objectContaining({ session: reviewer, outcome: 'cancelled' })])
+    })
+
+    it('lists the active roles in granny_status while the run is running, and none after it', async () => {
+      const reviewing = (title: string) => title === 'granny · review one r1 a'
+      const f = fakeContext({ hangUntilInterrupted: reviewing })
+      await createGrannyPlugin({ killGraceMs: 100 }).setup(f.ctx)
+      const { id, dir } = await startRun(repo, f, { reviewers: [{ name: 'a', engine: 'agent', model: { opencode: 'zai/glm-5.3#high' } }] })
+      await waitFor(() => f.prompts.some(p => p.sessionID === f.created.find(s => reviewing(s.title))?.id))
+      const session = f.created.find(s => reviewing(s.title)).id
+      const status = (await f.tools.get('granny_status').execute({ runId: id })).content
+      expect(status).toMatch(new RegExp(`\\n\\nactive roles:\\n- review one r1 a \\(reviewer, zai/glm-5\\.3#high\\) session ${session} · \\d+s$`))
+      expect(status).not.toContain('implement one (')
+
+      await f.tools.get('granny_cancel').execute({ runId: id })
+      await waitFor(() => readRun(dir, 'status.json').includes('"status": "cancelled"'), 2000)
+      expect((await f.tools.get('granny_status').execute({ runId: id })).content).not.toContain('active roles:')
+    })
+
+    it('journals a role whose prompt throws as failed with the error', async () => {
+      const f = fakeContext({ promptFails: title => title.startsWith('granny · review one r1 bad') })
+      await createGrannyPlugin({ killGraceMs: 100 }).setup(f.ctx)
+      const { dir } = await startRun(repo, f, { reviewers: [{ name: 'bad', engine: 'agent' }, { name: 'good', engine: 'agent' }] })
+      await finished(dir)
+      const ends = journalOf(dir).filter(e => e.type === 'agent-end' && e.label.startsWith('review one r1 bad'))
+      expect(ends.length).toBeGreaterThan(0)
+      for (const e of ends) expect(e).toMatchObject({ outcome: 'failed', error: 'session.prompt: 500 Internal Server Error' })
     })
 
     describe("when one reviewer's session cannot be created", () => {
