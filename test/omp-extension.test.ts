@@ -5,6 +5,7 @@ import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import extension, { blockReason, createGrannyExtension, isTransient, waitSeconds } from '../src/adapters/omp/extension'
+import { lineType, LiveRun, PARSED_EVENTS, type RoleActivity } from '../src/adapters/omp/panel'
 import { SCHEMAS } from '../src/core/schemas'
 import type { FakeOmpBehaviour } from './fake-omp'
 
@@ -43,6 +44,31 @@ function fakePi() {
 const CTX = { cwd: '/', model: { provider: 'omp-test', id: 'parent-model' } }
 const exec = (tool: any, params: unknown, ctx: unknown = CTX) => tool.execute('call-1', params, undefined, undefined, ctx)
 const textOf = (r: any) => r.content.map((c: any) => c.text).join('')
+
+function fakeUi() {
+  const calls: Array<{ fn: 'setWidget' | 'setStatus'; key: string; content: any; options?: any }> = []
+  const ui = {
+    setWidget: (key: string, content: any, options?: any) => void calls.push({ fn: 'setWidget', key, content, options }),
+    setStatus: (key: string, content: any) => void calls.push({ fn: 'setStatus', key, content }),
+  }
+  const last = (fn: string, key: string) => calls.filter(c => c.fn === fn && c.key === key).at(-1)
+  return {
+    ui,
+    calls,
+    widgets: (key: string) => calls.filter(c => c.fn === 'setWidget' && c.key === key),
+    widget: (key: string): string[] | undefined => last('setWidget', key)?.content,
+    status: (key: string): string | undefined => last('setStatus', key)?.content,
+  }
+}
+
+const ev = (event: unknown) => JSON.stringify(event)
+const update = (type: string, extra: Record<string, unknown> = {}) => ev({ type: 'message_update', assistantMessageEvent: { type, contentIndex: 0, ...extra } })
+
+function feed(role: RoleActivity, line: string, now: number) {
+  const type = lineType(line)
+  if (type !== undefined && !PARSED_EVENTS.has(type)) role.stream(type, line, now)
+  else role.event(JSON.parse(line), now)
+}
 
 const readRun = (dir: string, file: string) => (existsSync(join(dir, file)) ? readFileSync(join(dir, file), 'utf8') : '')
 const journalOf = (dir: string) => readRun(dir, 'journal.jsonl').trim().split('\n').filter(Boolean).map(l => JSON.parse(l))
@@ -236,6 +262,154 @@ describe('waitSeconds', () => {
   })
 })
 
+describe('live panel', () => {
+  it('follows a role from waiting through thinking, writing and its tool calls, with how long each state has lasted', () => {
+    let t = 0
+    const live = new LiveRun('r1', undefined, { now: () => t, renderEveryMs: 1000 })
+    const role = live.role({ label: 'plan', role: 'planner', model: 'openai/gpt', effort: 'max' })
+    live.start(role)
+    const lines = () => live.lines(Number.POSITIVE_INFINITY).slice(1)
+    expect(lines()).toEqual(['  plan (planner) · openai/gpt/max · starting 0s'])
+    feed(role, ev({ type: 'turn_start' }), t)
+    feed(role, ev({ type: 'message_start', message: { role: 'assistant', content: [] } }), t)
+    t = 5_000
+    expect(lines()[0]).toEndWith(' · waiting for model 5s')
+
+    feed(role, update('thinking_start'), t)
+    feed(role, update('thinking_delta', { delta: 'Let me look.\n\n**Comparing auth' }), t)
+    feed(role, update('thinking_delta', { delta: 'entication options**\n\nweighing both' }), t + 1000)
+    t += 192_000
+    expect(lines()[0]).toBe('  plan (planner) · openai/gpt/max · thinking 3m12s · "Comparing authentication options"')
+
+    feed(role, update('text_start'), t)
+    feed(role, update('text_delta', { delta: 'The plan' }), t)
+    expect(lines()[0]).toEndWith(' · writing 0s')
+    feed(role, update('toolcall_start'), t)
+    expect(lines()[0]).toEndWith(' · preparing a tool call 0s')
+
+    feed(role, ev({ type: 'tool_execution_start', toolCallId: 't1', toolName: 'read', args: { path: 'src/auth.ts' }, intent: 'Reading auth controller routes' }), t)
+    t += 3_000
+    expect(lines()[0]).toEndWith(' · running read: Reading auth controller routes 3s')
+    feed(role, ev({ type: 'tool_execution_end', toolCallId: 't1', toolName: 'read', result: {} }), t)
+    expect(lines()).toEqual(['  plan (planner) · openai/gpt/max · waiting for model 0s', '    last tool: Reading auth controller routes (0s ago)'])
+
+    feed(role, ev({ type: 'tool_execution_start', toolCallId: 't2', toolName: 'bash', args: { command: 'git   status\n--short' } }), t)
+    expect(lines()[0]).toEndWith(' · running bash: git status --short 0s')
+    feed(role, ev({ type: 'tool_execution_end', toolCallId: 't2', toolName: 'bash', result: {}, isError: true }), t)
+    t += 480_000
+    expect(lines()[1]).toBe('    last tool: bash: git status --short ✗ (8m00s ago)')
+  })
+
+  it('lists the subagents of a task call and marks them when it ends', () => {
+    const live = new LiveRun('r1', undefined, { now: () => 0, renderEveryMs: 1000 })
+    const role = live.role({ label: 'plan', role: 'planner' })
+    live.start(role)
+    const batch = { context: 'c', tasks: [{ name: 'BaselineGates', agent: 'explore', task: 'a' }, { agent: 'reviewer', task: 'b' }] }
+    expect(role.event({ type: 'tool_execution_start', toolCallId: 't1', toolName: 'task', args: batch }, 0)).toEqual(['BaselineGates', 'reviewer'])
+    expect(live.lines()[1]).toBe('  plan (planner) · default model · running task: BaselineGates, reviewer 0s')
+    expect(live.lines()[2]).toBe('    └ task: BaselineGates …, reviewer …')
+    role.event({ type: 'tool_execution_end', toolCallId: 't1', toolName: 'task', result: {} }, 0)
+    expect(live.lines()).toContain('    └ task: BaselineGates ✓, reviewer ✓')
+    expect(role.event({ type: 'tool_execution_start', toolCallId: 't2', toolName: 'task', args: { agent: 'explore', task: 'x' } }, 0)).toEqual(['explore'])
+    role.event({ type: 'tool_execution_end', toolCallId: 't2', toolName: 'task', result: {}, isError: true }, 0)
+    expect(live.lines()).toContain('    └ task: explore ✗')
+    expect(role.event({ type: 'tool_execution_start', toolCallId: 't3', toolName: 'read', args: {} }, 0)).toBeUndefined()
+  })
+
+  it('classifies message_update lines from their first bytes and reads the heading without parsing them whole', () => {
+    const tail = `,"partial":{"content":[${'{"type":"thinking","thinking":"'.repeat(20_000)}`
+    const writing = `{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"hi"}${tail}`
+    const thinking = `{"type":"message_update","assistantMessageEvent":{"type":"thinking_delta","contentIndex":0,"delta":"**Big \\\\ \\"quoted\\" heading**\\n"}${tail}`
+    const older = `{"type":"message_update","message":{"role":"assistant","content":[{"type":"text","text":"${'x'.repeat(50_000)}"}]},"assistantMessageEvent":{"type":"toolcall_start","contentIndex":1}}`
+    expect(() => JSON.parse(writing)).toThrow()
+    expect([lineType(writing), lineType(thinking), lineType(older)]).toEqual(['message_update', 'message_update', 'message_update'])
+    expect(PARSED_EVENTS.has('message_update')).toBe(false)
+
+    const live = new LiveRun('r1', undefined, { now: () => 0, renderEveryMs: 1000 })
+    const role = live.role({ label: 'judge', role: 'judge' })
+    live.start(role)
+    const parse = spyOn(JSON, 'parse')
+    try {
+      role.stream('message_update', writing, 0)
+      expect(role.state).toBe('writing')
+      role.stream('message_update', older, 0)
+      expect(role.state).toBe('preparing a tool call')
+      role.stream('message_update', update('thinking_start'), 0)
+      role.stream('message_update', thinking, 0)
+      expect(parse).not.toHaveBeenCalled()
+      expect(live.lines()[1]).toEndWith(' · thinking 0s · "Big \\ \"quoted\" heading"')
+      expect(parse.mock.calls.every(([arg]) => String(arg).length < 100)).toBe(true)
+    } finally {
+      parse.mockRestore()
+    }
+  })
+
+  it('draws at most once per renderEveryMs, refreshes on its own, and stops when closed', async () => {
+    let t = 1_000_000
+    const u = fakeUi()
+    const live = new LiveRun('r2', u.ui, { now: () => t, renderEveryMs: 1000 })
+    const role = live.role({ label: 'implement one', role: 'implementer', model: 'm' })
+    live.start(role)
+    for (let i = 0; i < 500; i++) {
+      role.stream('message_update', update('text_delta', { delta: 'x' }), t)
+      live.touch()
+    }
+    expect(u.widgets('granny-r2')).toHaveLength(1)
+    t += 999
+    live.touch()
+    expect(u.widgets('granny-r2')).toHaveLength(1)
+    t += 1
+    live.touch()
+    expect(u.widgets('granny-r2')).toHaveLength(2)
+    expect(u.widgets('granny-r2')[0]!.options).toEqual({ placement: 'aboveEditor' })
+    expect(u.status('granny-r2')).toBe('granny r2 · Starting · 1 active · 1s')
+
+    t += 1000
+    await Bun.sleep(300)
+    expect(u.widgets('granny-r2')).toHaveLength(3)
+    expect(u.widget('granny-r2')![1]).toEndWith(' · writing 2s')
+
+    const clear = live.close('done')
+    expect(u.widgets('granny-r2')).toHaveLength(4)
+    expect(u.widget('granny-r2')).toBeUndefined()
+    expect(u.status('granny-r2')).toBe('granny r2: done')
+    t += 5000
+    live.touch()
+    await Bun.sleep(300)
+    expect(u.widgets('granny-r2')).toHaveLength(4)
+    clear()
+    clear()
+    expect(u.status('granny-r2')).toBeUndefined()
+    expect(u.calls.filter(c => c.fn === 'setStatus' && c.content === undefined)).toHaveLength(1)
+  })
+
+  it('keeps the widget to 8 lines, collapsing the other roles into "+N more"', () => {
+    const live = new LiveRun('r3', undefined, { now: () => 0, renderEveryMs: 1000 })
+    for (let i = 1; i <= 6; i++) {
+      const role = live.role({ label: `review one r1 reviewer${i}`, role: 'reviewer' })
+      live.start(role)
+      role.event({ type: 'tool_execution_start', toolCallId: 't', toolName: 'read', args: { path: 'a.ts' } }, 0)
+      role.event({ type: 'tool_execution_end', toolCallId: 't', toolName: 'read', result: {} }, 0)
+    }
+    const lines = live.lines()
+    expect(lines).toHaveLength(8)
+    expect(lines.at(-1)).toBe('  +3 more')
+    expect(live.lines(Number.POSITIVE_INFINITY)).toHaveLength(13)
+    expect(live.status()).toBe('granny r3 · Starting · 6 active · 0s')
+  })
+
+  it('makes no UI call and keeps no timer without a UI', async () => {
+    const live = new LiveRun('r4', undefined, { now: () => 0, renderEveryMs: 1 })
+    const role = live.role({ label: 'judge one r1', role: 'judge' })
+    live.start(role)
+    live.setPhase('Review')
+    expect(live.lines()[0]).toBe('granny r4 · Review · 0s')
+    live.stop(role)
+    expect(live.lines()).toEqual(['granny r4 · Review · 0s', '  no role process running'])
+    live.close('done')()
+  })
+})
+
 describe('omp extension in a role process (child mode)', () => {
   let dir: string
   beforeEach(() => {
@@ -352,11 +526,11 @@ describe('omp extension in the user session (parent mode)', () => {
   const callsTo = (slug: string) => calls().filter(c => c.slug === slug)
   const flag = (argv: string[], name: string) => (argv.includes(name) ? argv[argv.indexOf(name) + 1] : undefined)
 
-  async function start(f: ReturnType<typeof fakePi>, config: Record<string, unknown> = {}) {
+  async function start(f: ReturnType<typeof fakePi>, config: Record<string, unknown> = {}, ctx: unknown = CTX) {
     writeFileSync(join(repo, 'granny.config.json'), JSON.stringify(config))
     git(repo, 'add', 'granny.config.json')
     git(repo, 'commit', '-qm', 'cfg')
-    const started = textOf(await exec(f.tools.get('granny_run'), { repo, branch: 'feat/x', stages: [{ name: 'one', task: 'Do it.' }] }))
+    const started = textOf(await exec(f.tools.get('granny_run'), { repo, branch: 'feat/x', stages: [{ name: 'one', task: 'Do it.' }] }, ctx))
     const id = /granny run (\S+) started/.exec(started)?.[1]
     if (!id) throw new Error(started)
     return { id, dir: join(repo, '.granny/runs', id) }
@@ -767,5 +941,138 @@ describe('omp extension in the user session (parent mode)', () => {
     await finished(dir)
     await waitFor(() => journalOf(dir).some(e => e.type === 'notify-failed'))
     expect(journalOf(dir)).toContainEqual(expect.objectContaining({ type: 'notify-failed', error: expect.stringContaining('session gone') }))
+  })
+
+  const tui = () => {
+    const u = fakeUi()
+    return { ...u, ctx: { ...CTX, hasUI: true, ui: u.ui } }
+  }
+
+  it('shows a live panel in the TUI - phase, role and model, the running intent, the last tool, the subagents - and granny_status shows it too', async () => {
+    const batch = { context: 'c', tasks: [{ name: 'BaselineGates', agent: 'explore', task: 'a' }, { name: 'PublishedContracts', agent: 'explore', task: 'b' }] }
+    behave({
+      events: {
+        'implement-one': [
+          { type: 'turn_start' },
+          { type: 'tool_execution_start', toolCallId: 't1', toolName: 'task', args: batch },
+          { type: 'tool_execution_end', toolCallId: 't1', toolName: 'task', result: {}, isError: false },
+          { type: 'tool_execution_start', toolCallId: 't2', toolName: 'bash', args: { command: 'git status --short' } },
+          { type: 'tool_execution_end', toolCallId: 't2', toolName: 'bash', result: {} },
+          { type: 'tool_execution_start', toolCallId: 't3', toolName: 'read', args: { path: 'plan.md' }, intent: 'Reading the plan' },
+        ],
+      },
+      hold: ['implement-one'],
+    })
+    const u = tui()
+    const f = fakePi()
+    await createGrannyExtension({ renderEveryMs: 10 })(f.pi as any)
+    const { id, dir } = await start(f, {}, u.ctx)
+    const key = `granny-${id}`
+    await waitFor(() => (u.widget(key) ?? []).some(l => l.includes('running read: Reading the plan')))
+    const lines = u.widget(key)!
+    expect(lines[0]).toStartWith(`granny ${id} · Implement · `)
+    expect(lines[1]).toStartWith('  implement one (implementer) · omp-test/parent-model · running read: Reading the plan ')
+    expect(lines[2]).toMatch(/^    last tool: bash: git status --short \(\d+s ago\)$/)
+    expect(lines[3]).toBe('    └ task: BaselineGates ✓, PublishedContracts ✓')
+    expect(lines).toHaveLength(4)
+    expect(u.widgets(key)[0]!.options).toEqual({ placement: 'aboveEditor' })
+    expect(u.status(key)).toMatch(new RegExp(`^granny ${id} · Implement · 1 active · \\d+s$`))
+    expect(journalOf(dir).filter(e => e.type === 'subagent')).toEqual([expect.objectContaining({ label: 'implement one', agents: ['BaselineGates', 'PublishedContracts'] })])
+
+    for (const params of [{ runId: id }, { repo }]) {
+      const status = textOf(await exec(f.tools.get('granny_status'), params))
+      expect(status).toContain('live (this omp process):\ngranny ')
+      expect(status).toContain('  implement one (implementer) · omp-test/parent-model · running read: Reading the plan ')
+    }
+
+    writeFileSync(join(fake, 'release-implement-one'), '')
+    expect((await finished(dir)).stages[0].outcome).toBe('clean')
+    expect(u.widget(key)).toBeUndefined()
+    expect(u.status(key)).toBe(`granny ${id}: done`)
+    expect(textOf(await exec(f.tools.get('granny_status'), { runId: id }))).not.toContain('live (this omp process)')
+  })
+
+  it('shows the thinking heading while a role thinks, and still reads message_end after lines it does not parse', async () => {
+    const tail = `,"partial":{"content":[${'{"type":"thinking","thinking":"'.repeat(20_000)}`
+    behave({
+      events: {
+        'implement-one': [
+          { type: 'message_start', message: { role: 'assistant', content: [] } },
+          { type: 'message_update', assistantMessageEvent: { type: 'thinking_start', contentIndex: 0 } },
+          { type: 'message_update', assistantMessageEvent: { type: 'thinking_delta', contentIndex: 0, delta: '**Comparing auth' } },
+          `{"type":"message_update","assistantMessageEvent":{"type":"thinking_delta","contentIndex":0,"delta":"entication options**\\n\\nweighing"}${tail}`,
+        ],
+        'judge-one-r1': [`{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"x"}${tail}`, `{"type":"tool_execution_update"${tail}`],
+      },
+      hold: ['implement-one'],
+      errors: [{ slug: 'judge-one-r1', message: '401 Invalid API key', times: 1 }],
+    })
+    const u = tui()
+    const f = fakePi()
+    await createGrannyExtension({ renderEveryMs: 10 })(f.pi as any)
+    const { id, dir } = await start(f, {}, u.ctx)
+    const key = `granny-${id}`
+    await waitFor(() => (u.widget(key) ?? []).some(l => l.includes('"Comparing authentication options"')))
+    expect(u.widget(key)![1]).toMatch(/^  implement one \(implementer\) · omp-test\/parent-model · thinking \d+s · "Comparing authentication options"$/)
+    writeFileSync(join(fake, 'release-implement-one'), '')
+    await finished(dir)
+    expect(journalOf(dir)).toContainEqual(expect.objectContaining({ type: 'provider-error', label: 'judge one r1', error: '401 Invalid API key', transient: false }))
+  })
+
+  it('removes the panel and leaves "failed" in the status line when a run fails, and the next run clears that status', async () => {
+    process.env.GRANNY_OMP_BIN = join(fake, 'no-such-omp')
+    const u = tui()
+    const f = fakePi()
+    await createGrannyExtension({ renderEveryMs: 10 })(f.pi as any)
+    const first = await start(f, {}, u.ctx)
+    await finished(first.dir)
+    const key = `granny-${first.id}`
+    expect(u.widgets(key).length).toBeGreaterThan(1)
+    expect(u.widget(key)).toBeUndefined()
+    expect(u.status(key)).toBe(`granny ${first.id}: failed`)
+    const second = await start(f, { maxRounds: 2 }, u.ctx)
+    expect(u.status(key)).toBeUndefined()
+    await finished(second.dir)
+    expect(u.status(`granny-${second.id}`)).toBe(`granny ${second.id}: failed`)
+  })
+
+  it('removes the panel and leaves "cancelled" in the status line when a run is cancelled', async () => {
+    behave({ wait: ['implement-one'] })
+    const u = tui()
+    const f = fakePi()
+    await createGrannyExtension({ killGraceMs: 100, renderEveryMs: 10 })(f.pi as any)
+    const { id, dir } = await start(f, {}, u.ctx)
+    await waitFor(() => existsSync(join(fake, 'wait-implement-one.pid')))
+    await waitFor(() => (u.widget(`granny-${id}`) ?? []).some(l => l.startsWith('  implement one (implementer)')))
+    await exec(f.tools.get('granny_cancel'), { runId: id })
+    await finished(dir)
+    expect(u.widget(`granny-${id}`)).toBeUndefined()
+    expect(u.status(`granny-${id}`)).toBe(`granny ${id}: cancelled`)
+  })
+
+  it('makes no UI call when the session has no UI', async () => {
+    behave({})
+    const u = fakeUi()
+    const f = fakePi()
+    await createGrannyExtension({ renderEveryMs: 1 })(f.pi as any)
+    const { dir } = await start(f, {}, { ...CTX, hasUI: false, ui: u.ui })
+    await finished(dir)
+    expect(u.calls).toEqual([])
+  })
+
+  it('keeps the run going when the UI throws', async () => {
+    behave({})
+    const f = fakePi()
+    await createGrannyExtension({ renderEveryMs: 1 })(f.pi as any)
+    let thrown = 0
+    const fail = () => {
+      thrown++
+      throw new Error('stale ui')
+    }
+    const { id, dir } = await start(f, {}, { ...CTX, hasUI: true, ui: { setWidget: fail, setStatus: fail } })
+    expect((await finished(dir)).stages[0].outcome).toBe('clean')
+    expect(thrown).toBeGreaterThan(2)
+    await waitFor(() => f.sent.length > 0)
+    expect(f.sent[0]!.message.content).toContain(`[granny] Run ${id} finished.`)
   })
 })

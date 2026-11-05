@@ -2543,18 +2543,19 @@ cancelled` } : { code: code ?? 1, output }));
       signal.addEventListener("abort", cancel, { once: true });
   });
 }
-function runStatus(runs, runIdArg, repo) {
-  let dir;
+function runDir(runs, runIdArg, repo) {
   if (runIdArg && runs.has(runIdArg))
-    dir = runs.get(runIdArg).dir;
-  else if (repo) {
-    const config = resolveConfig([readJson(globalConfigPath()), readJson(join(repo, "granny.config.json"))]);
-    const root = join(repo, config.workDir, "runs");
-    const ids = existsSync(root) ? readdirSync(root).sort() : [];
-    const pick = runIdArg ?? ids.at(-1);
-    if (pick && ids.includes(pick))
-      dir = join(root, pick);
-  }
+    return runs.get(runIdArg).dir;
+  if (!repo)
+    return;
+  const config = resolveConfig([readJson(globalConfigPath()), readJson(join(repo, "granny.config.json"))]);
+  const root = join(repo, config.workDir, "runs");
+  const ids = existsSync(root) ? readdirSync(root).sort() : [];
+  const pick = runIdArg ?? ids.at(-1);
+  return pick && ids.includes(pick) ? join(root, pick) : undefined;
+}
+function runStatus(runs, runIdArg, repo) {
+  const dir = runDir(runs, runIdArg, repo);
   if (!dir)
     return "No such granny run. Pass runId, or repo to see the latest run in that repo.";
   const read = (f) => existsSync(join(dir, f)) ? readFileSync(join(dir, f), "utf8") : "";

@@ -6,7 +6,8 @@ import { resolveConfig } from '../../core/config'
 import { checkInput, runGranny, stageCheckErrors, type RunInput } from '../../core/engine'
 import { checkShape, SCHEMAS } from '../../core/schemas'
 import type { AgentRequest, Host, ResultKind } from '../../core/types'
-import { DEFAULT_DELAYS, dropPlaceholders, globalConfigPath, type HostOptions, KILL_GRACE_MS, pause, preflight, readJson, RUN_INPUT_SCHEMA, RUN_TOOL_DESCRIPTION, runCommand, runId, runStatus, signalGroup, stageRepos, stamp, SUBMIT, summarize } from '../common'
+import { DEFAULT_DELAYS, dropPlaceholders, globalConfigPath, type HostOptions, KILL_GRACE_MS, pause, preflight, readJson, RUN_INPUT_SCHEMA, RUN_TOOL_DESCRIPTION, runCommand, runDir, runId, runStatus, signalGroup, stageRepos, stamp, SUBMIT, summarize } from '../common'
+import { lineType, LiveRun, type LiveOptions, PARSED_EVENTS, type RoleActivity } from './panel'
 
 // The omp (oh-my-pi) host. One file, two modes: in the user's omp session it registers granny_run,
 // granny_status, granny_wait and granny_cancel and runs the loop; every role runs as its own `omp --mode json`
@@ -58,11 +59,12 @@ interface RunState {
   reply?: string
   /** Pending granny_wait calls; set at the moment the run ends, so a run reports either to them or by notice. */
   waiters: Set<(reply: string) => void>
+  live: LiveRun
 }
 
 // omp re-runs the factory for every session in the process; runs started in one must stay visible to all.
 const SHARED = Symbol.for('granny-workflow.omp.state')
-const shared: { runs: Map<string, RunState> } = ((globalThis as any)[SHARED] ??= { runs: new Map() })
+const shared: { runs: Map<string, RunState>; clearStatus?: () => void } = ((globalThis as any)[SHARED] ??= { runs: new Map() })
 const { runs } = shared
 
 const text = (t: string): ToolResult => ({ content: [{ type: 'text', text: t }] })
@@ -253,7 +255,9 @@ export function isTransient(message: string): boolean {
 
 export type { RetryPolicy } from '../common'
 
-export type ExtensionOptions = HostOptions
+export type ExtensionOptions = HostOptions & LiveOptions
+
+const STATUS_KEEP_MS = 60_000
 
 interface Turn {
   code: number
@@ -310,7 +314,7 @@ function registerChild(pi: OmpApi, spec: ChildSpec) {
 }
 
 export const createGrannyExtension =
-  ({ delays = DEFAULT_DELAYS, sleep = pause, killGraceMs = KILL_GRACE_MS }: Partial<ExtensionOptions> = {}) =>
+  ({ delays = DEFAULT_DELAYS, sleep = pause, killGraceMs = KILL_GRACE_MS, now = Date.now, renderEveryMs = 1000 }: Partial<ExtensionOptions> = {}) =>
   (pi: OmpApi): void => {
     const child = process.env.GRANNY_OMP_CHILD
     if (child) return registerChild(pi, JSON.parse(child) as ChildSpec)
@@ -330,7 +334,10 @@ export const createGrannyExtension =
       const id = runId()
       const dir = join(input.repo, config.workDir, 'runs', id)
       mkdirSync(dir, { recursive: true })
-      const run: RunState = { id, dir, status: 'running', cancelled: false, abort: new AbortController(), children: new Set(), agents: 0, waiters: new Set() }
+      shared.clearStatus?.()
+      shared.clearStatus = undefined
+      const live = new LiveRun(id, ctx?.hasUI === true ? ctx.ui : undefined, { now, renderEveryMs })
+      const run: RunState = { id, dir, status: 'running', cancelled: false, abort: new AbortController(), children: new Set(), agents: 0, waiters: new Set(), live }
       runs.set(id, run)
       const journal = (type: string, data: Record<string, unknown>) =>
         appendFileSync(join(dir, 'journal.jsonl'), JSON.stringify({ t: stamp(), type, ...data }) + '\n')
@@ -343,18 +350,27 @@ export const createGrannyExtension =
       const bin = process.env.GRANNY_OMP_BIN ?? 'omp'
       const extensionFile = process.env.GRANNY_OMP_EXTENSION ?? fileURLToPath(import.meta.url)
 
-      const omp = (args: string[], prompt: string, cwd: string, spec: ChildSpec) =>
+      const omp = (args: string[], prompt: string, cwd: string, spec: ChildSpec, view: RoleActivity) =>
         new Promise<Turn>((resolve, reject) => {
           if (run.cancelled) return reject(new Error('cancelled'))
           const proc = spawn(bin, args, { cwd, env: { ...process.env, GRANNY_OMP_CHILD: JSON.stringify(spec) }, detached: true, stdio: ['pipe', 'pipe', 'pipe'] })
           run.children.add(proc)
+          live.start(view)
           let pending = ''
           let stderr = ''
           let assistant: Turn['assistant']
           const scan = (line: string) => {
             try {
+              const type = lineType(line)
+              if (type !== undefined && !PARSED_EVENTS.has(type)) {
+                view.stream(type, line, now())
+                return live.touch()
+              }
               const event = JSON.parse(line)
               if (event?.type === 'message_end' && event.message?.role === 'assistant') assistant = event.message
+              const agents = view.event(event, now())
+              if (agents) journal('subagent', { label: view.info.label, agents })
+              live.touch()
             } catch {}
           }
           proc.stdout!.on('data', d => {
@@ -369,17 +385,19 @@ export const createGrannyExtension =
           proc.stdin!.on('error', () => {})
           proc.on('error', (e: NodeJS.ErrnoException) => {
             run.children.delete(proc)
+            live.stop(view)
             reject(e.code === 'ENOENT' ? new Error(`cannot run omp: "${bin}" was not found - install omp or set GRANNY_OMP_BIN to its path`) : e)
           })
           proc.on('close', code => {
             run.children.delete(proc)
             if (pending) scan(pending)
+            live.stop(view)
             resolve({ code: code ?? 1, assistant, stderr })
           })
           proc.stdin!.end(prompt)
         })
 
-      const converse = async (req: AgentRequest, spec: ChildSpec, args: string[], session: string) => {
+      const converse = async (req: AgentRequest, spec: ChildSpec, args: string[], session: string, view: RoleActivity) => {
         const { tool } = spec
         let prompt = `${req.prompt}\n\nWhen done, call the \`${tool}\` tool exactly once with your result. That call is your final answer: the caller receives only its arguments.`
         let misses = 0
@@ -387,7 +405,7 @@ export const createGrannyExtension =
         let resume = false
         while (misses < 3) {
           rmSync(spec.out, { force: true })
-          const turn = await omp(resume ? [...args, '--continue'] : args, prompt, req.cwd, spec)
+          const turn = await omp(resume ? [...args, '--continue'] : args, prompt, req.cwd, spec, view)
           resume = true
           if (run.cancelled) throw new Error('cancelled')
           const got = readSubmission(spec.out)
@@ -438,7 +456,8 @@ export const createGrannyExtension =
             ...(req.effort ? ['--thinking', req.effort] : []),
           ]
           journal('agent', { label: req.label, role: req.role, session, model: model ?? null, ...(req.effort ? { effort: req.effort } : {}) })
-          return converse(req, spec, args, session)
+          const view = live.role({ label: req.label, role: req.role, model, effort: req.effort })
+          return converse(req, spec, args, session, view)
         },
         async run(command, cwd) {
           if (run.cancelled) return { code: 130, output: 'cancelled' }
@@ -446,7 +465,10 @@ export const createGrannyExtension =
           return runCommand(command, cwd, run.abort.signal, killGraceMs)
         },
         log: message => journal('log', { message }),
-        phase: title => journal('phase', { title }),
+        phase: title => {
+          journal('phase', { title })
+          live.setPhase(title)
+        },
       }
 
       const notify = (content: string) => {
@@ -461,6 +483,9 @@ export const createGrannyExtension =
 
       const settle = (reply: string, notice: string | undefined) => {
         run.reply = reply
+        const clear = live.close(run.status)
+        shared.clearStatus = clear
+        setTimeout(clear, STATUS_KEEP_MS).unref()
         const waiting = [...run.waiters]
         run.waiters.clear()
         for (const deliver of waiting) deliver(reply)
@@ -522,7 +547,10 @@ To wait in this turn, call granny_wait { runId: "${id}" }; otherwise end your tu
       loadMode: 'essential',
       async execute(_id, params: { runId?: string; repo?: string }) {
         try {
-          return text(runStatus(runs, params.runId, params.repo))
+          const status = runStatus(runs, params.runId, params.repo)
+          const dir = runDir(runs, params.runId, params.repo)
+          const run = [...runs.values()].find(r => r.dir === dir && r.status === 'running')
+          return text(run ? `${status}\n\nlive (this omp process):\n${run.live.lines(Number.POSITIVE_INFINITY).join('\n')}` : status)
         } catch (e) {
           return text(`granny_status failed: ${(e as Error).message}`)
         }

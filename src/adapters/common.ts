@@ -263,16 +263,19 @@ export function runCommand(command: string, cwd: string, signal: AbortSignal, ki
   })
 }
 
+/** The run directory granny_status reads: the run by id, else the latest run in `repo`. */
+export function runDir(runs: Map<string, { dir: string }>, runIdArg?: string, repo?: string): string | undefined {
+  if (runIdArg && runs.has(runIdArg)) return runs.get(runIdArg)!.dir
+  if (!repo) return undefined
+  const config = resolveConfig([readJson(globalConfigPath()), readJson(join(repo, 'granny.config.json'))])
+  const root = join(repo, config.workDir, 'runs')
+  const ids = existsSync(root) ? readdirSync(root).sort() : []
+  const pick = runIdArg ?? ids.at(-1)
+  return pick && ids.includes(pick) ? join(root, pick) : undefined
+}
+
 export function runStatus(runs: Map<string, { dir: string }>, runIdArg?: string, repo?: string): string {
-  let dir: string | undefined
-  if (runIdArg && runs.has(runIdArg)) dir = runs.get(runIdArg)!.dir
-  else if (repo) {
-    const config = resolveConfig([readJson(globalConfigPath()), readJson(join(repo, 'granny.config.json'))])
-    const root = join(repo, config.workDir, 'runs')
-    const ids = existsSync(root) ? readdirSync(root).sort() : []
-    const pick = runIdArg ?? ids.at(-1)
-    if (pick && ids.includes(pick)) dir = join(root, pick)
-  }
+  const dir = runDir(runs, runIdArg, repo)
   if (!dir) return 'No such granny run. Pass runId, or repo to see the latest run in that repo.'
   const read = (f: string) => (existsSync(join(dir!, f)) ? readFileSync(join(dir!, f), 'utf8') : '')
   const tail = read('journal.jsonl').trim().split('\n').slice(-40).join('\n')

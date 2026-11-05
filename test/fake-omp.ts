@@ -19,6 +19,10 @@ export interface FakeOmpBehaviour {
   hang?: string[]
   /** Slugs whose run hangs until SIGTERM, which ends it. */
   wait?: string[]
+  /** Lines the first run of a slug prints before anything else: objects as JSON, strings as they are. */
+  events?: Record<string, unknown[]>
+  /** Slugs whose first run, after its events, waits until `release-<slug>` exists in FAKE_OMP_DIR. */
+  hold?: string[]
 }
 
 export const CANNED: Record<string, unknown> = {
@@ -63,6 +67,12 @@ if (import.meta.main) {
   const end = (stopReason: string, errorMessage?: string) =>
     say({ type: 'message_end', message: { role: 'assistant', content: [], stopReason, ...(errorMessage ? { errorMessage } : {}) } })
 
+  if (attempt === 1) {
+    for (const line of behaviour.events?.[slug] ?? []) process.stdout.write(`${typeof line === 'string' ? line : JSON.stringify(line)}\n`)
+    if (behaviour.hold?.includes(slug)) {
+      while (!existsSync(join(dir, `release-${slug}`))) await Bun.sleep(10)
+    }
+  }
   if (behaviour.hang?.includes(slug)) {
     process.on('SIGTERM', () => {})
     writeFileSync(join(dir, `hang-${slug}.pid`), String(process.pid))
@@ -75,9 +85,8 @@ if (import.meta.main) {
   const error = behaviour.errors?.find(e => e.slug === slug && attempt <= e.times)
   if (error) {
     end('error', error.message)
-    process.exit(1)
-  }
-  if (!(behaviour.skipOnce?.includes(slug) && attempt === 1)) {
+    process.exitCode = 1
+  } else if (!(behaviour.skipOnce?.includes(slug) && attempt === 1)) {
     const tool = tools.get(spec.tool)
     let value: unknown = CANNED[spec.tool]
     if (spec.tool === 'granny_submit_findings') {
@@ -93,5 +102,5 @@ if (import.meta.main) {
     const blocked = await guards[0]({ type: 'tool_call', toolCallId: 'c1', toolName: spec.tool, input: value })
     if (!blocked?.block) await tool.execute('c1', value, undefined, undefined, { cwd: process.cwd() })
   }
-  end('stop')
+  if (!error) end('stop')
 }
