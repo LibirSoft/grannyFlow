@@ -1,7 +1,8 @@
-import { describe, expect, it } from 'bun:test'
+import { describe, expect, it, mock } from 'bun:test'
 import { readFileSync } from 'node:fs'
+import { builtinModules } from 'node:module'
 import { join } from 'node:path'
-import { buildClaudeCode, buildOmp, buildOpencode, buildReadOnlyGuard } from '../scripts/build'
+import { buildClaudeCode, buildOmp, buildOpencode, buildOpencodeTui, buildReadOnlyGuard } from '../scripts/build'
 import { CODEX_REVIEWER, finding, review } from './fake-host'
 
 const root = join(import.meta.dir, '..')
@@ -147,6 +148,30 @@ describe('opencode plugin bundle', () => {
 
   it('default-exports a v2 plugin definition', async () => {
     const mod = await import(join(root, 'skills/granny-workflow/engines/opencode/plugin/granny-workflow/index.js'))
+    expect(mod.default.id).toBe('granny-workflow')
+    expect(typeof mod.default.setup).toBe('function')
+  })
+})
+
+describe('opencode TUI plugin bundle', () => {
+  const bundle = join(root, 'skills/granny-workflow/engines/opencode/plugin/granny-workflow/tui.js')
+
+  it('is committed in sync with src/', async () => {
+    const built = await buildOpencodeTui()
+    expect(readFileSync(bundle, 'utf8')).toBe(built)
+  })
+
+  it('imports only the TUI runtime and node built-ins', () => {
+    const text = readFileSync(bundle, 'utf8')
+    const specifiers = [...text.matchAll(/^\s*import\s+(?:[^'"]*?\sfrom\s+)?["']([^"']+)["']/gm)].map(m => m[1]!)
+    expect(specifiers.length).toBeGreaterThan(0)
+    expect(specifiers.filter(s => !s.startsWith('node:') && !builtinModules.includes(s)).sort()).toEqual(['@opentui/solid', 'solid-js'])
+  })
+
+  it('default-exports a TUI plugin definition when the runtime resolves', async () => {
+    mock.module('@opentui/solid', () => ({ createElement: () => ({}), createTextNode: () => ({}), insertNode() {}, insert() {}, setProp() {} }))
+    mock.module('solid-js', () => ({ createSignal: (v: unknown) => [() => v, () => v], onCleanup() {} }))
+    const mod = await import(bundle)
     expect(mod.default.id).toBe('granny-workflow')
     expect(typeof mod.default.setup).toBe('function')
   })
