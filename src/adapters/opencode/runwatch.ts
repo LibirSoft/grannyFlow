@@ -5,9 +5,9 @@ import { readFileSync, statSync } from 'node:fs'
 import { basename, join } from 'node:path'
 import type { WatchMode } from '../../core/config'
 import { clean, duration, fit } from '../runview/format'
-import type { Tone } from '../runview/layout'
+import { AGENT_TONES, STATUS_TONES, type Tone } from '../runview/layout'
 import { TailReader, type TailOptions } from '../runview/tail'
-import { AGENT_MARKERS, type AgentNode, agentKey, type AgentState, buildRunTree, type JournalEntry, type LiveView, phaseKey, runKey, type RunTree } from '../runview/tree'
+import { AGENT_MARKERS, type AgentNode, agentKey, buildRunTree, type JournalEntry, type LiveView, phaseKey, runKey, type RunTree } from '../runview/tree'
 
 export interface RoleMeta {
   run: string
@@ -340,8 +340,7 @@ const terminal = (s: RunSnapshot) => TERMINAL.has(s.status)
 const fresh = (s: RunSnapshot, now: number) => s.end !== undefined && now - s.end < FRESH_MS
 const elapsed = (s: RunSnapshot, now: number) => duration((s.end ?? now) - s.start)
 
-export const STATUS_TONES: Record<string, Tone> = { running: 'info', done: 'success', failed: 'error', cancelled: 'warning' }
-export const AGENT_TONES: Record<AgentState, Tone> = { running: 'info', waiting: 'muted', done: 'success', failed: 'error', cancelled: 'warning' }
+export { AGENT_TONES, STATUS_TONES } from '../runview/layout'
 
 function agentLine(a: AgentNode, now: number, width: number): string {
   const marker = `${AGENT_MARKERS[a.state]} `

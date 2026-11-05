@@ -780,6 +780,14 @@ function phaseRowText(row, now, width = Number.POSITIVE_INFINITY) {
 import { readFileSync, statSync as statSync2 } from "fs";
 import { basename, join } from "path";
 
+// src/adapters/runview/activity.ts
+var SHELLS = new Set(["bash", "shell", "sh"]);
+
+// src/adapters/runview/layout.ts
+var STATUS_TONES = { running: "info", done: "success", failed: "error", cancelled: "warning" };
+var AGENT_TONES = { running: "info", waiting: "muted", done: "success", failed: "error", cancelled: "warning" };
+var STAGE_PHASES = new Set(["Implement", "Checks", "Review"]);
+
 // src/adapters/runview/tail.ts
 import { closeSync, openSync, readSync, statSync } from "fs";
 var MB = 1024 * 1024;
@@ -1124,8 +1132,6 @@ var shortId = (id) => id.slice(-4);
 var terminal = (s) => TERMINAL.has(s.status);
 var fresh = (s, now) => s.end !== undefined && now - s.end < FRESH_MS;
 var elapsed2 = (s, now) => duration((s.end ?? now) - s.start);
-var STATUS_TONES = { running: "info", done: "success", failed: "error", cancelled: "warning" };
-var AGENT_TONES = { running: "info", waiting: "muted", done: "success", failed: "error", cancelled: "warning" };
 function agentLine(a, now, width) {
   const marker = `${AGENT_MARKERS[a.state]} `;
   const tail = ` \xB7 ${a.activity ?? `${a.state} ${duration((a.end ?? now) - a.start)}`}`;
