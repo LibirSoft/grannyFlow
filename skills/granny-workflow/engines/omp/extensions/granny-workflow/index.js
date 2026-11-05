@@ -2610,6 +2610,21 @@ ${result.length > 30000 ? result.slice(0, 30000) + `
 `);
 }
 
+// src/adapters/runview/format.ts
+function clock(value) {
+  const d = new Date(typeof value === "number" || typeof value === "string" ? value : Number.NaN);
+  return Number.isNaN(d.getTime()) ? "--:--:--" : d.toTimeString().slice(0, 8);
+}
+function duration(ms) {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  if (s < 60)
+    return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60)
+    return `${m}m${String(s % 60).padStart(2, "0")}s`;
+  return `${Math.floor(m / 60)}h${String(m % 60).padStart(2, "0")}m`;
+}
+
 // src/adapters/omp/panel.ts
 var PARSED_EVENTS = new Set(["message_start", "message_end", "tool_execution_start", "tool_execution_end", "turn_start", "turn_end"]);
 var HEAD = 200;
@@ -2653,15 +2668,6 @@ function deltaOf(line) {
 function oneLine(value, max = 60) {
   const flat = value.replace(/\s+/g, " ").trim();
   return flat.length > max ? `${flat.slice(0, max - 1)}\u2026` : flat;
-}
-function duration(ms) {
-  const s = Math.max(0, Math.floor(ms / 1000));
-  if (s < 60)
-    return `${s}s`;
-  const m = Math.floor(s / 60);
-  if (m < 60)
-    return `${m}m${String(s % 60).padStart(2, "0")}s`;
-  return `${Math.floor(m / 60)}h${String(m % 60).padStart(2, "0")}m`;
 }
 var ARG_KEYS = ["path", "file_path", "file", "pattern", "command", "query", "url", "op"];
 function subagents(args) {
@@ -2976,16 +2982,12 @@ var ANSI = /\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[@-Z\\-_])/
 var CONTROL = /[\x00-\x08\x0b-\x1f\x7f]/g;
 var clean = (text) => text.replace(/\t/g, "  ").replace(ANSI, "").replace(CONTROL, "");
 var dateOf = (value) => new Date(typeof value === "number" || typeof value === "string" ? value : Number.NaN);
-function clock(value) {
-  const d = dateOf(value);
-  return Number.isNaN(d.getTime()) ? "--:--:--" : d.toTimeString().slice(0, 8);
-}
 function stamp2(value) {
   const d = dateOf(value);
   return Number.isNaN(d.getTime()) ? undefined : `${d.toISOString().slice(0, 10)} ${d.toTimeString().slice(0, 8)}`;
 }
 
-// src/adapters/omp/tail.ts
+// src/adapters/runview/tail.ts
 import { closeSync, openSync, readSync, statSync } from "fs";
 var MB = 1024 * 1024;
 var NEWLINE = 10;
@@ -3084,6 +3086,26 @@ class TailReader {
 `);
     return out;
   }
+}
+
+// src/adapters/omp/subagents.ts
+import { readdirSync as readdirSync2 } from "fs";
+import { join as join2 } from "path";
+function subagentFiles(session) {
+  const out = new Map;
+  try {
+    for (const dir of readdirSync2(session, { withFileTypes: true })) {
+      if (!dir.isDirectory())
+        continue;
+      try {
+        for (const file of readdirSync2(join2(session, dir.name), { withFileTypes: true })) {
+          if (file.isFile() && file.name.endsWith(".jsonl"))
+            out.set(file.name.slice(0, -".jsonl".length), join2(session, dir.name, file.name));
+        }
+      } catch {}
+    }
+  } catch {}
+  return new Map([...out].sort(([a], [b]) => a.localeCompare(b)));
 }
 
 // src/adapters/omp/transcript.ts
@@ -3221,9 +3243,7 @@ class LineBuffer {
   }
 }
 
-// src/adapters/omp/tree.ts
-import { readdirSync as readdirSync2 } from "fs";
-import { join as join2 } from "path";
+// src/adapters/runview/tree.ts
 var MAX_PHASE_ENTRIES = 200;
 var COMMAND_CHARS = 160;
 var PAD2 = " ".repeat(10);
@@ -3252,6 +3272,16 @@ function lastOf(items, match) {
   return;
 }
 var modelText = (model, effort) => `${model ?? "default model"}${effort ? `/${effort}` : ""}`;
+function modelOf(model) {
+  if (typeof model === "string")
+    return model;
+  if (!model || typeof model !== "object")
+    return;
+  const { providerID, id, variant } = model;
+  if (typeof providerID !== "string" || typeof id !== "string")
+    return;
+  return `${providerID}/${id}${typeof variant === "string" && variant ? `#${variant}` : ""}`;
+}
 function buildRunTree(run, entries, live, now, files = new Map) {
   const running = run.status === "running";
   const phases = [];
@@ -3269,6 +3299,10 @@ function buildRunTree(run, entries, live, now, files = new Map) {
     return node;
   };
   const current = (t) => phases.at(-1) ?? newPhase("Starting", t);
+  const phaseFor = (entry, t) => {
+    const title = typeof entry.phase === "string" && entry.phase ? entry.phase : undefined;
+    return title ? lastOf(phases, (p) => p.title === title) ?? newPhase(title, t) : current(t);
+  };
   const note = (phase, lines) => {
     phase.entries.push(lines);
     if (phase.entries.length > MAX_PHASE_ENTRIES)
@@ -3295,12 +3329,12 @@ function buildRunTree(run, entries, live, now, files = new Map) {
         break;
       }
       case "agent": {
-        const title = typeof entry.phase === "string" && entry.phase ? entry.phase : undefined;
-        const phase = title ? lastOf(phases, (p) => p.title === title) ?? newPhase(title, t) : current(t);
+        const phase = phaseFor(entry, t);
+        const model = modelOf(entry.model);
         const agent = {
           label: String(entry.label ?? "?"),
           role: String(entry.role ?? "?"),
-          ...typeof entry.model === "string" ? { model: entry.model } : {},
+          ...model ? { model } : {},
           ...typeof entry.effort === "string" ? { effort: entry.effort } : {},
           session: String(entry.session ?? ""),
           phase: phase.title,
@@ -3363,6 +3397,10 @@ function buildRunTree(run, entries, live, now, files = new Map) {
       case "error":
         note(current(t), at(t, `\u2717 run failed: ${String(entry.error ?? "")}`));
         break;
+      case "link-failed":
+        note(phaseFor(entry, t), at(t, `! ${entry.label}: not linked to the parent session (${String(entry.error ?? "").split(`
+`)[0]})`));
+        break;
     }
   }
   const end = running ? undefined : run.endedAt ?? lastTime;
@@ -3392,7 +3430,7 @@ function buildRunTree(run, entries, live, now, files = new Map) {
       agent.state = run.status === "cancelled" ? "cancelled" : run.status === "failed" ? "failed" : "done";
       agent.end = view?.endedAt ?? end;
     }
-    if (agent.state === "running" && view)
+    if (agent.state === "running" && view?.state !== undefined && view.since !== undefined)
       agent.activity = `${view.state} ${duration(now - view.since)}`;
     if (agent.state !== "running" && agent.state !== "waiting")
       ended(agent.session, agent.state, agent.end);
@@ -3496,22 +3534,6 @@ function rowText(row, now, width = Number.POSITIVE_INFINITY) {
     case "sub":
       return `${indent}\u2514 ${row.sub.name}${row.sub.path ? "" : " (no transcript yet)"}`;
   }
-}
-function subagentFiles(session) {
-  const out = new Map;
-  try {
-    for (const dir of readdirSync2(session, { withFileTypes: true })) {
-      if (!dir.isDirectory())
-        continue;
-      try {
-        for (const file of readdirSync2(join2(session, dir.name), { withFileTypes: true })) {
-          if (file.isFile() && file.name.endsWith(".jsonl"))
-            out.set(file.name.slice(0, -".jsonl".length), join2(session, dir.name, file.name));
-        }
-      } catch {}
-    }
-  } catch {}
-  return new Map([...out].sort(([a], [b]) => a.localeCompare(b)));
 }
 
 // src/adapters/omp/watch.ts

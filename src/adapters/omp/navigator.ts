@@ -5,9 +5,10 @@ import { readdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { stamp } from './format'
 import { duration, type LiveRun, type RoleActivity } from './panel'
-import { TailReader } from './tail'
+import { TailReader } from '../runview/tail'
+import { subagentFiles } from './subagents'
 import { LineBuffer, sessionEntryLines } from './transcript'
-import { AGENT_MARKERS, buildRunTree, type JournalEntry, nextAgent, type Row, rowText, runKey, type RunTree, subagentFiles, visibleRows } from './tree'
+import { AGENT_MARKERS, buildRunTree, type JournalEntry, nextAgent, type Row, rowText, runKey, type RunTree, visibleRows } from '../runview/tree'
 import { entryLines, fit, type Logged } from './watch'
 
 export interface NavRun {

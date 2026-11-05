@@ -1,6 +1,9 @@
 // The live view of a granny run in the omp session that started it: what each role process is
 // doing right now, read from its `omp --mode json` stdout. Shown as a TUI widget and status line,
 // and appended to granny_status.
+import { duration } from '../runview/format'
+
+export { duration }
 
 export interface PanelUi {
   setWidget(key: string, content: string[] | undefined, options?: { placement?: 'aboveEditor' | 'belowEditor' }): void
@@ -89,13 +92,6 @@ export function oneLine(value: string, max = 60): string {
   return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat
 }
 
-export function duration(ms: number): string {
-  const s = Math.max(0, Math.floor(ms / 1000))
-  if (s < 60) return `${s}s`
-  const m = Math.floor(s / 60)
-  if (m < 60) return `${m}m${String(s % 60).padStart(2, '0')}s`
-  return `${Math.floor(m / 60)}h${String(m % 60).padStart(2, '0')}m`
-}
 
 const ARG_KEYS = ['path', 'file_path', 'file', 'pattern', 'command', 'query', 'url', 'op']
 
