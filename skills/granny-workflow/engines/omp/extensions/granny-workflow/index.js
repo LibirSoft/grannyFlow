@@ -2467,6 +2467,13 @@ var RUN_INPUT_SCHEMA = {
   },
   required: ["repo", "branch"]
 };
+var DEFAULT_DELAYS = [30000, 120000, 300000, 600000];
+var KILL_GRACE_MS = 5000;
+function signalGroup(child, name) {
+  try {
+    process.kill(-child.pid, name);
+  } catch {}
+}
 function pause(ms, signal) {
   return new Promise((resolve) => {
     if (signal.aborted)
@@ -2494,15 +2501,10 @@ function runCommand(command, cwd, signal, killGraceMs) {
       signal.removeEventListener("abort", cancel);
       resolve(result);
     };
-    const signalGroup = (name) => {
-      try {
-        process.kill(-child.pid, name);
-      } catch {}
-    };
     const cancel = () => {
-      signalGroup("SIGTERM");
+      signalGroup(child, "SIGTERM");
       setTimeout(() => {
-        signalGroup("SIGKILL");
+        signalGroup(child, "SIGKILL");
         finish({ code: 130, output: `${output}
 cancelled` });
       }, killGraceMs).unref();
@@ -2742,7 +2744,6 @@ var TRANSIENT = /\b(429|502|503|504|529)\b|rate.?limit|too many requests|overloa
 function isTransient(message) {
   return TRANSIENT.test(message);
 }
-var DEFAULT_DELAYS = [30000, 120000, 300000, 600000];
 function turnError(turn) {
   if (turn.assistant?.stopReason === "error")
     return turn.assistant.errorMessage || "unknown provider error";
@@ -2760,11 +2761,6 @@ function readSubmission(path) {
   }
 }
 var slug2 = (label) => label.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 60) || "agent";
-function signalGroup(child, name) {
-  try {
-    process.kill(-child.pid, name);
-  } catch {}
-}
 function registerChild(pi, spec) {
   pi.registerTool({
     name: spec.tool,
@@ -2783,7 +2779,7 @@ function registerChild(pi, spec) {
     return reason ? { block: true, reason } : undefined;
   });
 }
-var createGrannyExtension = ({ delays = DEFAULT_DELAYS, sleep = pause, killGraceMs = 5000 } = {}) => (pi) => {
+var createGrannyExtension = ({ delays = DEFAULT_DELAYS, sleep = pause, killGraceMs = KILL_GRACE_MS } = {}) => (pi) => {
   const child = process.env.GRANNY_OMP_CHILD;
   if (child)
     return registerChild(pi, JSON.parse(child));

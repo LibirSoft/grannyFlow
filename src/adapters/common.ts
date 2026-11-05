@@ -1,4 +1,4 @@
-import { spawn, spawnSync } from 'node:child_process'
+import { spawn, spawnSync, type ChildProcess } from 'node:child_process'
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { isAbsolute, join } from 'node:path'
@@ -7,7 +7,7 @@ import type { RunInput } from '../core/engine'
 import type { CommandResult, PlanResult, Recheck, ResultKind, RunResult } from '../core/types'
 
 // Shared by the in-process host adapters (opencode, omp): config files, preflight, run ids,
-// the completion summary, the granny_run input schema and the command runner.
+// the completion summary, the granny_run input schema, the retry and cancel defaults and the command runner.
 
 export const SUBMIT: Partial<Record<ResultKind, string>> = {
   implementation: 'granny_submit_implementation',
@@ -176,6 +176,25 @@ export const RUN_INPUT_SCHEMA = {
   required: ['repo', 'branch'],
 }
 
+export interface RetryPolicy {
+  delays: number[]
+  sleep: (ms: number, signal: AbortSignal) => Promise<void>
+}
+
+export interface HostOptions extends RetryPolicy {
+  killGraceMs: number
+}
+
+export const DEFAULT_DELAYS = [30_000, 120_000, 300_000, 600_000]
+
+export const KILL_GRACE_MS = 5_000
+
+export function signalGroup(child: ChildProcess, name: NodeJS.Signals): void {
+  try {
+    process.kill(-child.pid!, name)
+  } catch {}
+}
+
 export function pause(ms: number, signal: AbortSignal): Promise<void> {
   return new Promise(resolve => {
     if (signal.aborted) return resolve()
@@ -201,16 +220,11 @@ export function runCommand(command: string, cwd: string, signal: AbortSignal, ki
       signal.removeEventListener('abort', cancel)
       resolve(result)
     }
-    const signalGroup = (name: NodeJS.Signals) => {
-      try {
-        process.kill(-child.pid!, name)
-      } catch {}
-    }
     const cancel = () => {
-      signalGroup('SIGTERM')
+      signalGroup(child, 'SIGTERM')
       // Not cleared on close: a member that ignores SIGTERM may not hold our pipes.
       setTimeout(() => {
-        signalGroup('SIGKILL')
+        signalGroup(child, 'SIGKILL')
         finish({ code: 130, output: `${output}\ncancelled` })
       }, killGraceMs).unref()
     }

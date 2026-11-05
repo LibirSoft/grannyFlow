@@ -6,7 +6,7 @@ import { resolveConfig } from '../../core/config'
 import { checkInput, runGranny, stageCheckErrors, type RunInput } from '../../core/engine'
 import { checkShape, SCHEMAS } from '../../core/schemas'
 import type { AgentRequest, Host, ResultKind } from '../../core/types'
-import { globalConfigPath, pause, preflight, readJson, RUN_INPUT_SCHEMA, runCommand, runId, runStatus, stageRepos, stamp, SUBMIT, summarize } from '../common'
+import { DEFAULT_DELAYS, globalConfigPath, type HostOptions, KILL_GRACE_MS, pause, preflight, readJson, RUN_INPUT_SCHEMA, runCommand, runId, runStatus, signalGroup, stageRepos, stamp, SUBMIT, summarize } from '../common'
 
 // The omp (oh-my-pi) host. One file, two modes: in the user's omp session it registers granny_run,
 // granny_status and granny_cancel and runs the loop; every role runs as its own `omp --mode json`
@@ -236,16 +236,9 @@ export function isTransient(message: string): boolean {
   return TRANSIENT.test(message)
 }
 
-export interface RetryPolicy {
-  delays: number[]
-  sleep: (ms: number, signal: AbortSignal) => Promise<void>
-}
+export type { RetryPolicy } from '../common'
 
-export interface ExtensionOptions extends RetryPolicy {
-  killGraceMs: number
-}
-
-const DEFAULT_DELAYS = [30_000, 120_000, 300_000, 600_000]
+export type ExtensionOptions = HostOptions
 
 interface Turn {
   code: number
@@ -270,12 +263,6 @@ function readSubmission(path: string): unknown {
 
 const slug = (label: string) => label.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 60) || 'agent'
 
-function signalGroup(child: ChildProcess, name: NodeJS.Signals) {
-  try {
-    process.kill(-child.pid!, name)
-  } catch {}
-}
-
 function registerChild(pi: OmpApi, spec: ChildSpec) {
   pi.registerTool({
     name: spec.tool,
@@ -296,7 +283,7 @@ function registerChild(pi: OmpApi, spec: ChildSpec) {
 }
 
 export const createGrannyExtension =
-  ({ delays = DEFAULT_DELAYS, sleep = pause, killGraceMs = 5_000 }: Partial<ExtensionOptions> = {}) =>
+  ({ delays = DEFAULT_DELAYS, sleep = pause, killGraceMs = KILL_GRACE_MS }: Partial<ExtensionOptions> = {}) =>
   (pi: OmpApi): void => {
     const child = process.env.GRANNY_OMP_CHILD
     if (child) return registerChild(pi, JSON.parse(child) as ChildSpec)

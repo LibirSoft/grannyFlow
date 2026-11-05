@@ -2465,6 +2465,13 @@ var RUN_INPUT_SCHEMA = {
   },
   required: ["repo", "branch"]
 };
+var DEFAULT_DELAYS = [30000, 120000, 300000, 600000];
+var KILL_GRACE_MS = 5000;
+function signalGroup(child, name) {
+  try {
+    process.kill(-child.pid, name);
+  } catch {}
+}
 function pause(ms, signal) {
   return new Promise((resolve) => {
     if (signal.aborted)
@@ -2492,15 +2499,10 @@ function runCommand(command, cwd, signal, killGraceMs) {
       signal.removeEventListener("abort", cancel);
       resolve(result);
     };
-    const signalGroup = (name) => {
-      try {
-        process.kill(-child.pid, name);
-      } catch {}
-    };
     const cancel = () => {
-      signalGroup("SIGTERM");
+      signalGroup(child, "SIGTERM");
       setTimeout(() => {
-        signalGroup("SIGKILL");
+        signalGroup(child, "SIGKILL");
         finish({ code: 130, output: `${output}
 cancelled` });
       }, killGraceMs).unref();
@@ -2597,8 +2599,7 @@ var TRANSIENT_STATUS = new Set([429, 502, 503, 504, 529]);
 function isTransient(error) {
   return TRANSIENT_TYPES.has(error.type) || TRANSIENT_STATUS.has(error.status ?? 0) || /overloaded/i.test(error.message);
 }
-var DEFAULT_DELAYS = [30000, 120000, 300000, 600000];
-var createGrannyPlugin = ({ delays = DEFAULT_DELAYS, sleep = pause, killGraceMs = 5000 } = {}) => ({
+var createGrannyPlugin = ({ delays = DEFAULT_DELAYS, sleep = pause, killGraceMs = KILL_GRACE_MS } = {}) => ({
   id: "granny-workflow",
   async setup(ctx) {
     const startRun = async (input, parentSession) => {

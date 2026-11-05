@@ -4,9 +4,10 @@ import { resolveConfig } from '../../core/config'
 import { checkInput, runGranny, stageCheckErrors, type RunInput } from '../../core/engine'
 import { checkShape, SCHEMAS } from '../../core/schemas'
 import type { AgentRequest, Host, ResultKind } from '../../core/types'
-import { globalConfigPath, pause, preflight, readJson, RUN_INPUT_SCHEMA, runCommand, runId, runStatus, stageRepos, stamp, SUBMIT, summarize } from '../common'
+import { DEFAULT_DELAYS, globalConfigPath, type HostOptions, KILL_GRACE_MS, pause, preflight, readJson, RUN_INPUT_SCHEMA, runCommand, runId, runStatus, stageRepos, stamp, SUBMIT, summarize } from '../common'
 
 export { globalConfigPath, pause, preflight, stageRepos, summarize } from '../common'
+export type { RetryPolicy } from '../common'
 
 type Status = 'running' | 'done' | 'failed' | 'cancelled'
 
@@ -86,18 +87,9 @@ export function isTransient(error: ProviderError): boolean {
   return TRANSIENT_TYPES.has(error.type) || TRANSIENT_STATUS.has(error.status ?? 0) || /overloaded/i.test(error.message)
 }
 
-export interface RetryPolicy {
-  delays: number[]
-  sleep: (ms: number, signal: AbortSignal) => Promise<void>
-}
+export type PluginOptions = HostOptions
 
-export interface PluginOptions extends RetryPolicy {
-  killGraceMs: number
-}
-
-const DEFAULT_DELAYS = [30_000, 120_000, 300_000, 600_000]
-
-export const createGrannyPlugin = ({ delays = DEFAULT_DELAYS, sleep = pause, killGraceMs = 5_000 }: Partial<PluginOptions> = {}) => ({
+export const createGrannyPlugin = ({ delays = DEFAULT_DELAYS, sleep = pause, killGraceMs = KILL_GRACE_MS }: Partial<PluginOptions> = {}) => ({
   id: 'granny-workflow',
   async setup(ctx: any) {
     const startRun = async (input: RunInput, parentSession: string): Promise<string> => {
