@@ -8,7 +8,7 @@ import { checkShape, SCHEMAS } from '../../core/schemas'
 import type { AgentRequest, Host, ResultKind } from '../../core/types'
 import { DEFAULT_DELAYS, dropPlaceholders, globalConfigPath, type HostOptions, KILL_GRACE_MS, pause, preflight, readJson, RUN_INPUT_SCHEMA, RUN_TOOL_DESCRIPTION, runCommand, runDir, runId, runStatus, signalGroup, stageRepos, stamp, SUBMIT, summarize } from '../common'
 import { lineType, LiveRun, type LiveOptions, PARSED_EVENTS, type RoleActivity } from './panel'
-import { EventLog } from './watch'
+import { EventLog, LogView } from './watch'
 
 // The omp (oh-my-pi) host. One file, two modes: in the user's omp session it registers granny_run,
 // granny_status, granny_wait and granny_cancel and runs the loop; every role runs as its own `omp --mode json`
@@ -44,7 +44,15 @@ export interface OmpApi {
   on(event: 'session_start', handler: (event: unknown, ctx: any) => Promise<void>): void
   getActiveTools?(): string[]
   setActiveTools?(toolNames: string[]): Promise<void>
-  sendMessage(message: { customType: string; content: string; display: boolean }, options: { deliverAs: 'aside' }): void
+  sendMessage(message: { customType: string; content: string; display: boolean }, options: { deliverAs: 'aside' } | { triggerTurn: false }): void
+  registerCommand?(
+    name: string,
+    options: {
+      description?: string
+      getArgumentCompletions?: (prefix: string) => Array<{ value: string; label: string; description?: string }> | null
+      handler: (args: string, ctx: any) => Promise<void>
+    },
+  ): void
 }
 
 type Status = 'running' | 'done' | 'failed' | 'cancelled'
@@ -260,6 +268,8 @@ export type { RetryPolicy } from '../common'
 export type ExtensionOptions = HostOptions & LiveOptions
 
 const STATUS_KEEP_MS = 60_000
+
+const WATCH_HELP = 'granny-workflow: watch a granny run - /granny picks a role and shows its event log live; /granny <runId> picks that run; /granny off|on hides or shows the run panel in this session'
 
 interface Turn {
   code: number
@@ -605,6 +615,55 @@ To wait in this turn, call granny_wait { runId: "${id}" }; otherwise end your tu
         })
       },
     })
+    const say = (ctx: any, message: string) => {
+      try {
+        if (ctx?.hasUI === true) ctx.ui.notify(message, 'info')
+        else pi.sendMessage({ customType: 'granny-workflow', content: message, display: true }, { triggerTurn: false })
+      } catch {}
+    }
+
+    const watchRun = async (args: string, ctx: any) => {
+      const arg = args.trim()
+      if (arg === 'off' || arg === 'on') {
+        shared.hidden = arg === 'off'
+        for (const run of runs.values()) if (run.status === 'running') run.live.setVisible(!shared.hidden)
+        return say(ctx, shared.hidden ? 'granny: the run panel is hidden in this session - /granny on shows it again.' : 'granny: the run panel is shown in this session.')
+      }
+      const all = [...runs.values()]
+      const run = arg ? runs.get(arg) : (all.filter(r => r.status === 'running').at(-1) ?? all.at(-1))
+      if (!run) return say(ctx, arg ? `granny: no run "${arg}" in this omp process - /granny watches the runs started here.` : 'granny: no granny run in this omp process yet.')
+      if (run.watch !== 'full') {
+        return say(ctx, `granny: watching is off for run ${run.id} (watch: "${run.watch}") - set "watch": "full" in granny.config.json or the run's config to log each role and watch it with /granny.`)
+      }
+      const roles = run.live.roles
+      if (!roles.length) return say(ctx, `granny: run ${run.id} has started no role yet.`)
+      const tui = ctx?.hasUI === true && typeof ctx.ui?.select === 'function' && typeof ctx.ui?.custom === 'function' && (ctx.mode === undefined || ctx.mode === 'tui')
+      if (!tui) return say(ctx, [`granny run ${run.id} - event log per role:`, ...roles.map(r => `  ${r.info.label} (${r.info.role}): ${r.info.log}`)].join('\n'))
+      const t = now()
+      const options = roles.map((r, i) => ({ label: `${i + 1}. ${r.info.label} (${r.info.role})`, description: r.summary(t) }))
+      const picked: string | undefined = await ctx.ui.select(`granny ${run.id} · ${run.live.phase} - pick a role to watch`, options)
+      const role = roles[options.findIndex(o => o.label === picked)]
+      if (!role?.info.log) return
+      const path = role.info.log
+      const title = () => `granny ${run.id} · ${role.info.label} (${role.info.role}) · ${role.active ? role.state : 'done'}`
+      await ctx.ui.custom((tuiHost: any, _theme: unknown, keys: any, done: (value: undefined) => void) => new LogView(path, title, tuiHost, keys, () => done(undefined)), { overlay: true })
+    }
+
+    pi.registerCommand?.('granny', {
+      description: WATCH_HELP,
+      getArgumentCompletions: prefix => {
+        const items = ['off', 'on', ...runs.keys()].filter(v => v.startsWith(prefix)).map(value => ({ value, label: value }))
+        return items.length ? items : null
+      },
+      handler: async (args, ctx) => {
+        try {
+          await watchRun(args ?? '', ctx)
+        } catch (e) {
+          say(ctx, `granny: /granny failed: ${(e as Error)?.message ?? e}`)
+        }
+      },
+    })
+
     pi.registerTool({
       name: 'granny_cancel',
       label: 'granny cancel',

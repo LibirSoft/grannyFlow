@@ -32,14 +32,16 @@ function makeRepo(): string {
 
 function fakePi() {
   const tools = new Map<string, any>()
+  const commands = new Map<string, any>()
   const handlers: Array<[string, any]> = []
   const sent: Array<{ message: any; options: any }> = []
   const pi = {
     registerTool: (t: any) => tools.set(t.name, t),
+    registerCommand: (name: string, options: any) => commands.set(name, options),
     on: (event: string, handler: any) => handlers.push([event, handler]),
     sendMessage: (message: any, options: any) => sent.push({ message, options }),
   }
-  return { pi, tools, handlers, sent }
+  return { pi, tools, commands, handlers, sent }
 }
 
 const CTX = { cwd: '/', model: { provider: 'omp-test', id: 'parent-model' } }
@@ -512,6 +514,7 @@ describe('omp extension in a role process (child mode)', () => {
     const f = fakePi()
     await extension(f.pi as any)
     expect([...f.tools.keys()]).toEqual(['granny_submit_judgement'])
+    expect([...f.commands.keys()]).toEqual([])
     const submit = f.tools.get('granny_submit_judgement')
     expect(submit.loadMode).toBe('essential')
     expect(submit.parameters).toBe(SCHEMAS.judge)
@@ -635,6 +638,9 @@ describe('omp extension in the user session (parent mode)', () => {
     }
     expect(f.tools.get('granny_run').parameters.required).toEqual(['repo', 'branch'])
     expect(f.handlers).toEqual([])
+    expect([...f.commands.keys()]).toEqual(['granny'])
+    expect(f.commands.get('granny').description).toContain('watch')
+    expect(f.commands.get('granny').getArgumentCompletions('o').map((i: any) => i.value)).toEqual(['off', 'on'])
   })
 
   it('refuses a Codex reviewer, which granny does not run on omp, without starting a run', async () => {
@@ -1244,6 +1250,132 @@ describe('omp extension in the user session (parent mode)', () => {
     } finally {
       spy.mockRestore()
     }
+  })
+
+  const commandUi = () => {
+    const u = fakeUi()
+    const notes: string[] = []
+    const selects: Array<{ title: string; options: Array<{ label: string; description?: string }> }> = []
+    const views: Array<{ view: any; options: any; renders: number[] }> = []
+    const ui = {
+      ...u.ui,
+      notify: (message: string) => void notes.push(message),
+      select: async (title: string, options: any[]) => {
+        selects.push({ title, options })
+        return options.find(o => o.label.includes('implement one'))?.label
+      },
+      custom: (factory: any, options: any) =>
+        new Promise(resolve => {
+          const renders: number[] = []
+          const view = factory({ requestRender: () => renders.push(1) }, {}, { matches: () => false }, resolve)
+          views.push({ view, options, renders })
+        }),
+    }
+    return { ...u, ui, notes, selects, views, ctx: { ...CTX, hasUI: true, mode: 'tui', ui } }
+  }
+
+  it('/granny lists the roles of the latest run and opens a role\'s event log live in an overlay until Esc', async () => {
+    behave({ events: { 'implement-one': STREAM }, hold: ['implement-one'] })
+    const c = commandUi()
+    const f = fakePi()
+    await createGrannyExtension({ renderEveryMs: 10 })(f.pi as any)
+    const { id, dir } = await start(f, {}, c.ctx)
+    await waitFor(() => sessionFiles(dir, 'events.jsonl').some(p => readFileSync(p, 'utf8').includes('"subagents"')))
+    const granny = f.commands.get('granny')
+
+    const opened = granny.handler('', c.ctx)
+    await waitFor(() => c.views.length === 1)
+    expect(c.selects[0]!.title).toContain(`granny ${id}`)
+    expect(c.selects[0]!.options).toEqual([{ label: '1. implement one (implementer)', description: expect.stringMatching(/^omp-test\/parent-model · waiting for model \d+s · \d+s$/) }])
+    expect(c.views[0]!.options).toEqual({ overlay: true })
+    const view = c.views[0]!.view
+    const lines: string[] = view.render(100)
+    expect(lines[0]).toMatch(new RegExp(`^granny ${id} · implement one \\(implementer\\) · waiting for model$`))
+    const body = lines.join('\n')
+    expect(body).toMatch(/\d\d:\d\d:\d\d  · thinking/)
+    expect(body).toContain('  » Reading the plan')
+    expect(body).toContain('  ▸ read: Reading the plan (plan.md)')
+    expect(body).toContain('  ✎ answer:\n')
+    expect(body).toContain('          Spawning helpers.')
+    expect(body).toContain('  └ task: BaselineGates')
+    expect(body).not.toContain('running read')
+    expect(body).not.toContain('process exited')
+    expect(lines.at(-1)).toBe('Esc closes')
+    expect(view.render(20).every((l: string) => l.length <= 20)).toBe(true)
+
+    writeFileSync(join(fake, 'release-implement-one'), '')
+    await finished(dir)
+    await waitFor(() => c.views[0]!.renders.length > 0, 3000)
+    expect(view.render(100).join('\n')).toMatch(/■ process exited 0/)
+    view.handleInput('x')
+    view.handleInput('\x1b')
+    expect(await opened).toBeUndefined()
+
+    const again = granny.handler(id, c.ctx)
+    await waitFor(() => c.views.length === 2)
+    const roles = c.selects[1]!.options
+    expect(roles.length).toBe(fs.readdirSync(join(dir, 'sessions')).length)
+    expect(roles.every(o => / · done · \d+s$/.test(o.description!))).toBe(true)
+    c.views[1]!.view.handleInput('q')
+    await again
+  })
+
+  it('/granny off hides the panel for this session and /granny on shows it again', async () => {
+    behave({ events: { 'implement-one': STREAM }, hold: ['implement-one'] })
+    const c = commandUi()
+    const f = fakePi()
+    await createGrannyExtension({ renderEveryMs: 10 })(f.pi as any)
+    const { id, dir } = await start(f, {}, c.ctx)
+    const key = `granny-${id}`
+    await waitFor(() => (c.widget(key) ?? []).some(l => l.includes('implement one')))
+    const granny = f.commands.get('granny')
+    try {
+      await granny.handler('off', c.ctx)
+      expect(c.widget(key)).toBeUndefined()
+      expect(c.status(key)).toBeUndefined()
+      expect(c.notes.at(-1)).toContain('/granny on')
+      const drawn = c.widgets(key).length
+      await Bun.sleep(100)
+      expect(c.widgets(key)).toHaveLength(drawn)
+    } finally {
+      await granny.handler('on', c.ctx)
+    }
+    await waitFor(() => (c.widget(key) ?? []).some(l => l.includes('implement one')))
+    expect(c.status(key)).toStartWith(`granny ${id} · `)
+    writeFileSync(join(fake, 'release-implement-one'), '')
+    await finished(dir)
+    expect(c.status(key)).toBe(`granny ${id}: done`)
+  })
+
+  it('/granny says watching is off for a run with watch "panel", and how to turn it on', async () => {
+    behave({ hold: ['implement-one'] })
+    const c = commandUi()
+    const f = fakePi()
+    await createGrannyExtension({ renderEveryMs: 10 })(f.pi as any)
+    const { id, dir } = await start(f, { watch: 'panel' }, c.ctx)
+    await waitFor(() => existsSync(join(dir, 'sessions')))
+    await f.commands.get('granny').handler('', c.ctx)
+    expect(c.notes.at(-1)).toBe(`granny: watching is off for run ${id} (watch: "panel") - set "watch": "full" in granny.config.json or the run's config to log each role and watch it with /granny.`)
+    expect(c.selects).toEqual([])
+    await f.commands.get('granny').handler('no-such-run', c.ctx)
+    expect(c.notes.at(-1)).toBe('granny: no run "no-such-run" in this omp process - /granny watches the runs started here.')
+    writeFileSync(join(fake, 'release-implement-one'), '')
+    await finished(dir)
+  })
+
+  it('/granny prints the event log paths without a UI', async () => {
+    behave({ hold: ['implement-one'] })
+    const f = fakePi()
+    await createGrannyExtension({ renderEveryMs: 10 })(f.pi as any)
+    const { id, dir } = await start(f, {}, { ...CTX, hasUI: false })
+    await waitFor(() => existsSync(join(fake, 'calls.jsonl')))
+    await f.commands.get('granny').handler('', { ...CTX, hasUI: false, mode: 'print', ui: {} })
+    const printed = f.sent.at(-1)!
+    expect(printed.options).toEqual({ triggerTurn: false })
+    expect(printed.message).toMatchObject({ customType: 'granny-workflow', display: true })
+    expect(printed.message.content).toBe(`granny run ${id} - event log per role:\n  implement one (implementer): ${join(dir, 'sessions', fs.readdirSync(join(dir, 'sessions'))[0]!, 'events.jsonl')}`)
+    writeFileSync(join(fake, 'release-implement-one'), '')
+    await finished(dir)
   })
 
   it('keeps the run going when the UI throws', async () => {

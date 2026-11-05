@@ -2795,6 +2795,12 @@ class RoleActivity {
     if (this.thinking.length > THINKING_TAIL)
       this.thinking = this.thinking.slice(-THINKING_TAIL);
   }
+  summary(now) {
+    const { model, effort } = this.info;
+    const doing = this.active ? `${this.state} ${duration(now - this.since)}` : "done";
+    const ran = this.startedAt === undefined ? "" : ` \xB7 ${duration((this.active ? now : this.endedAt ?? now) - this.startedAt)}`;
+    return `${model ?? "default model"}${effort ? `/${effort}` : ""} \xB7 ${doing}${ran}`;
+  }
   lines(now) {
     const { label, role, model, effort } = this.info;
     const heading = this.state === "thinking" && this.heading ? ` \xB7 "${this.heading}"` : "";
@@ -2930,7 +2936,10 @@ class LiveRun {
 
 // src/adapters/omp/watch.ts
 import { appendFileSync as appendFileSync2, closeSync, existsSync as existsSync2, openSync, readSync, statSync } from "fs";
+var VIEW_LINES = 40;
 var TAIL_BYTES = 256 * 1024;
+var TEXT_LINES = 12;
+
 class EventLog {
   path;
   now;
@@ -2953,6 +2962,132 @@ class EventLog {
         this.onError(e);
       } catch {}
     }
+  }
+}
+function readTail(path, maxBytes = TAIL_BYTES) {
+  if (!existsSync2(path))
+    return [];
+  const size = statSync(path).size;
+  const from = Math.max(0, size - maxBytes);
+  const buffer = Buffer.alloc(size - from);
+  const fd = openSync(path, "r");
+  try {
+    readSync(fd, buffer, 0, buffer.length, from);
+  } finally {
+    closeSync(fd);
+  }
+  const lines = buffer.toString("utf8").split(`
+`);
+  if (from > 0)
+    lines.shift();
+  const out = [];
+  for (const line of lines) {
+    if (!line.trim())
+      continue;
+    try {
+      out.push(JSON.parse(line));
+    } catch {}
+  }
+  return out;
+}
+var clock = (t) => {
+  const d = new Date(t);
+  return Number.isNaN(d.getTime()) ? "--:--:--" : d.toTimeString().slice(0, 8);
+};
+function entryLines(e) {
+  const at = clock(e.t);
+  switch (e.type) {
+    case "state":
+      return e.state.startsWith("running ") ? [] : [`${at}  \xB7 ${e.state}`];
+    case "heading":
+      return [`${at}  \xBB ${e.text}`];
+    case "tool": {
+      const what = e.intent ?? e.arg;
+      return [`${at}  \u25B8 ${e.name}${what ? `: ${what}` : ""}${e.intent && e.arg ? ` (${e.arg})` : ""}`];
+    }
+    case "tool-end":
+      return e.error ? [`${at}  \u2717 ${e.name} failed`] : [];
+    case "subagents":
+      return [`${at}  \u2514 task: ${e.agents.join(", ")}`];
+    case "text": {
+      const lines = e.text.split(`
+`);
+      const shown = lines.slice(0, TEXT_LINES).map((l) => `          ${l}`);
+      if (lines.length > TEXT_LINES)
+        shown.push(`          \u2026 ${lines.length - TEXT_LINES} more line(s)`);
+      return [`${at}  \u270E answer:`, ...shown];
+    }
+    case "exit":
+      return [`${at}  \u25A0 process exited ${e.code}`];
+  }
+  return [];
+}
+function formatEntries(entries, max = VIEW_LINES) {
+  return entries.flatMap(entryLines).slice(-max);
+}
+function fit(line, width) {
+  const flat = line.replace(/\t/g, "  ");
+  if (width <= 0)
+    return "";
+  return flat.length > width ? `${flat.slice(0, Math.max(0, width - 1))}\u2026` : flat;
+}
+
+class LogView {
+  path;
+  title;
+  tui;
+  keys;
+  done;
+  size = -1;
+  body = [];
+  timer;
+  closed = false;
+  constructor(path, title, tui, keys, done, refreshMs = 500) {
+    this.path = path;
+    this.title = title;
+    this.tui = tui;
+    this.keys = keys;
+    this.done = done;
+    this.timer = setInterval(() => {
+      if (this.read())
+        this.tui.requestRender();
+    }, refreshMs);
+    this.timer.unref?.();
+  }
+  read() {
+    let size = 0;
+    try {
+      size = existsSync2(this.path) ? statSync(this.path).size : 0;
+    } catch {}
+    if (size === this.size)
+      return false;
+    this.size = size;
+    try {
+      this.body = formatEntries(readTail(this.path));
+    } catch {
+      this.body = [];
+    }
+    return true;
+  }
+  render(width) {
+    this.read();
+    const body = this.body.length ? this.body : ["(no events yet)"];
+    return [this.title(), "", ...body, "", "Esc closes"].map((l) => fit(l, width));
+  }
+  invalidate() {}
+  handleInput(data) {
+    if (data === "\x1B" || data === "q" || this.keys?.matches?.(data, "tui.select.cancel"))
+      this.close();
+  }
+  close() {
+    if (this.closed)
+      return;
+    this.dispose();
+    this.done();
+  }
+  dispose() {
+    this.closed = true;
+    clearInterval(this.timer);
   }
 }
 
@@ -3158,6 +3293,7 @@ function isTransient(message) {
   return TRANSIENT.test(message);
 }
 var STATUS_KEEP_MS = 60000;
+var WATCH_HELP = "granny-workflow: watch a granny run - /granny picks a role and shows its event log live; /granny <runId> picks that run; /granny off|on hides or shows the run panel in this session";
 function turnError(turn) {
   if (turn.assistant?.stopReason === "error")
     return turn.assistant.errorMessage || "unknown provider error";
@@ -3510,6 +3646,61 @@ ${run.live.lines(Number.POSITIVE_INFINITY).join(`
         run.waiters.add(done);
         signal?.addEventListener("abort", onAbort, { once: true });
       });
+    }
+  });
+  const say = (ctx, message) => {
+    try {
+      if (ctx?.hasUI === true)
+        ctx.ui.notify(message, "info");
+      else
+        pi.sendMessage({ customType: "granny-workflow", content: message, display: true }, { triggerTurn: false });
+    } catch {}
+  };
+  const watchRun = async (args, ctx) => {
+    const arg = args.trim();
+    if (arg === "off" || arg === "on") {
+      shared.hidden = arg === "off";
+      for (const run of runs.values())
+        if (run.status === "running")
+          run.live.setVisible(!shared.hidden);
+      return say(ctx, shared.hidden ? "granny: the run panel is hidden in this session - /granny on shows it again." : "granny: the run panel is shown in this session.");
+    }
+    const all = [...runs.values()];
+    const run = arg ? runs.get(arg) : all.filter((r) => r.status === "running").at(-1) ?? all.at(-1);
+    if (!run)
+      return say(ctx, arg ? `granny: no run "${arg}" in this omp process - /granny watches the runs started here.` : "granny: no granny run in this omp process yet.");
+    if (run.watch !== "full") {
+      return say(ctx, `granny: watching is off for run ${run.id} (watch: "${run.watch}") - set "watch": "full" in granny.config.json or the run's config to log each role and watch it with /granny.`);
+    }
+    const roles = run.live.roles;
+    if (!roles.length)
+      return say(ctx, `granny: run ${run.id} has started no role yet.`);
+    const tui = ctx?.hasUI === true && typeof ctx.ui?.select === "function" && typeof ctx.ui?.custom === "function" && (ctx.mode === undefined || ctx.mode === "tui");
+    if (!tui)
+      return say(ctx, [`granny run ${run.id} - event log per role:`, ...roles.map((r) => `  ${r.info.label} (${r.info.role}): ${r.info.log}`)].join(`
+`));
+    const t = now();
+    const options = roles.map((r, i) => ({ label: `${i + 1}. ${r.info.label} (${r.info.role})`, description: r.summary(t) }));
+    const picked = await ctx.ui.select(`granny ${run.id} \xB7 ${run.live.phase} - pick a role to watch`, options);
+    const role = roles[options.findIndex((o) => o.label === picked)];
+    if (!role?.info.log)
+      return;
+    const path = role.info.log;
+    const title = () => `granny ${run.id} \xB7 ${role.info.label} (${role.info.role}) \xB7 ${role.active ? role.state : "done"}`;
+    await ctx.ui.custom((tuiHost, _theme, keys, done) => new LogView(path, title, tuiHost, keys, () => done(undefined)), { overlay: true });
+  };
+  pi.registerCommand?.("granny", {
+    description: WATCH_HELP,
+    getArgumentCompletions: (prefix) => {
+      const items = ["off", "on", ...runs.keys()].filter((v) => v.startsWith(prefix)).map((value) => ({ value, label: value }));
+      return items.length ? items : null;
+    },
+    handler: async (args, ctx) => {
+      try {
+        await watchRun(args ?? "", ctx);
+      } catch (e) {
+        say(ctx, `granny: /granny failed: ${e?.message ?? e}`);
+      }
     }
   });
   pi.registerTool({

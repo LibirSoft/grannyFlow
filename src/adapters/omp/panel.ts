@@ -266,6 +266,14 @@ export class RoleActivity {
     if (this.thinking.length > THINKING_TAIL) this.thinking = this.thinking.slice(-THINKING_TAIL)
   }
 
+  /** Model, what the role does now (or `done`) and how long it has run, for the /granny list. */
+  summary(now: number): string {
+    const { model, effort } = this.info
+    const doing = this.active ? `${this.state} ${duration(now - this.since)}` : 'done'
+    const ran = this.startedAt === undefined ? '' : ` · ${duration((this.active ? now : (this.endedAt ?? now)) - this.startedAt)}`
+    return `${model ?? 'default model'}${effort ? `/${effort}` : ''} · ${doing}${ran}`
+  }
+
   lines(now: number): string[] {
     const { label, role, model, effort } = this.info
     const heading = this.state === 'thinking' && this.heading ? ` · "${this.heading}"` : ''
