@@ -3,6 +3,7 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileS
 import { basename, dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { resolveConfig, type WatchMode } from '../../core/config'
+import { GrannyCancelled } from '../../core/cancel'
 import { checkInput, runGranny, stageCheckErrors, type RunInput } from '../../core/engine'
 import { checkShape, SCHEMAS } from '../../core/schemas'
 import type { AgentRequest, Host, ResultKind } from '../../core/types'
@@ -365,7 +366,7 @@ export const createGrannyExtension =
 
       const omp = (args: string[], prompt: string, cwd: string, spec: ChildSpec, view: RoleActivity) =>
         new Promise<Turn>((resolve, reject) => {
-          if (run.cancelled) return reject(new Error('cancelled'))
+          if (run.cancelled) return reject(new GrannyCancelled())
           const proc = spawn(bin, args, { cwd, env: { ...process.env, GRANNY_OMP_CHILD: JSON.stringify(spec) }, detached: true, stdio: ['pipe', 'pipe', 'pipe'] })
           run.children.add(proc)
           live.start(view)
@@ -421,7 +422,7 @@ export const createGrannyExtension =
           rmSync(spec.out, { force: true })
           const turn = await omp(resume ? [...args, '--continue'] : args, prompt, req.cwd, spec, view)
           resume = true
-          if (run.cancelled) throw new Error('cancelled')
+          if (run.cancelled) throw new GrannyCancelled()
           const got = readSubmission(spec.out)
           if (got !== undefined) {
             const errors = checkShape(req.schema, got)
@@ -439,7 +440,7 @@ export const createGrannyExtension =
               }
               backoffs++
               await sleep(backoffMs, run.abort.signal)
-              if (run.cancelled) throw new Error('cancelled')
+              if (run.cancelled) throw new GrannyCancelled()
               prompt = `Your previous turn ended on a provider error (${error.slice(0, 300)}). Continue the task where it stopped; when you are done, call \`${tool}\` exactly once with your result.`
               continue
             }
@@ -454,7 +455,7 @@ export const createGrannyExtension =
       const host: Host = {
         name: 'omp',
         async agent(req) {
-          if (run.cancelled) throw new Error('cancelled')
+          if (run.cancelled) throw new GrannyCancelled()
           const tool = SUBMIT[req.kind]
           if (!tool) throw new Error(`no submit tool for result kind "${req.kind}"`)
           const model = req.model ?? parentModel
@@ -478,6 +479,7 @@ export const createGrannyExtension =
           const view = live.role({ label: req.label, role: req.role, model, effort: req.effort, ...(log ? { log: path } : {}) }, log && (entry => log.write(entry)))
           return converse(req, spec, args, session, view)
         },
+        cancelled: () => run.cancelled,
         async run(command, cwd) {
           if (run.cancelled) return { code: 130, output: 'cancelled' }
           journal('command', { command })

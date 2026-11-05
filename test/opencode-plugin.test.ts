@@ -693,7 +693,8 @@ describe('opencode plugin', () => {
         await f.tools.get('granny_cancel').execute({ runId: id })
         await waitFor(() => readRun(dir, 'status.json').includes('"status": "cancelled"'), 2000)
         await waitFor(() => !alive(pid), 2000)
-        expect(journalOf(dir)).toContainEqual(expect.objectContaining({ type: 'log', message: expect.stringContaining('review command exited 130') }))
+        const logs = journalOf(dir).filter(e => e.type === 'log').map(e => e.message)
+        expect(logs.filter(m => /exited 130|retrying once|review failed/.test(m))).toEqual([])
       })
     }
 
@@ -713,7 +714,8 @@ describe('opencode plugin', () => {
       await waitFor(() => readRun(dir, 'status.json').includes('"status": "cancelled"'), 2000)
       await waitFor(() => !sleepers.some(alive), 2000)
       const logs = journalOf(dir).filter(e => e.type === 'log').map(e => e.message)
-      for (const name of ['a', 'b']) expect(logs).toContainEqual(expect.stringContaining(`one r1 ${name}: did not run - retrying once. review command exited 130`))
+      expect(logs.filter(m => /exited 130|retrying once|review failed/.test(m))).toEqual([])
+      expect(journalOf(dir).filter(e => e.type === 'command' && e.command.includes('sleep 300'))).toHaveLength(2)
     })
 
     it('interrupts every child session that is running, not only the last one started', async () => {
@@ -731,6 +733,22 @@ describe('opencode plugin', () => {
         'granny · review one r1 b',
         'granny · review one r1 c',
       ])
+    })
+
+    it('ends a run cancelled during an agent review as cancelled: no retry, no review-failed, no notice', async () => {
+      const reviewing = (title: string) => title === 'granny · review one r1 a'
+      const f = fakeContext({ hangUntilInterrupted: reviewing })
+      await createGrannyPlugin({ killGraceMs: 100 }).setup(f.ctx)
+      const { id, dir } = await startRun(repo, f, { reviewers: [{ name: 'a', engine: 'agent' }] })
+      await waitFor(() => f.created.some(s => reviewing(s.title)))
+
+      await f.tools.get('granny_cancel').execute({ runId: id })
+      await waitFor(() => readRun(dir, 'status.json').includes('"status": "cancelled"'), 2000)
+      expect(f.prompts.filter(p => p.sessionID === 'parent')).toEqual([])
+      expect(f.created.map(s => s.title)).toEqual(['granny · implement one', 'granny · review one r1 a'])
+      const logs = journalOf(dir).filter(e => e.type === 'log').map(e => e.message)
+      expect(logs.filter(m => /retrying once|review failed/.test(m))).toEqual([])
+      expect(existsSync(join(dir, 'result.json'))).toBe(false)
     })
 
     describe("when one reviewer's session cannot be created", () => {

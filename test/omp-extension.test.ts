@@ -596,7 +596,7 @@ describe('omp extension in the user session (parent mode)', () => {
     process.env.GRANNY_CONFIG = join(repo, 'no-global-config.json')
   })
   afterEach(() => {
-    for (const file of ['hang-implement-one.pid', 'wait-implement-one.pid']) {
+    for (const file of ['hang-implement-one.pid', 'wait-implement-one.pid', 'wait-review-one-r1-reviewer.pid']) {
       if (existsSync(join(fake, file))) {
         try {
           process.kill(Number(readFileSync(join(fake, file), 'utf8')), 'SIGKILL')
@@ -906,6 +906,27 @@ describe('omp extension in the user session (parent mode)', () => {
     expect(result).toEqual({ id, status: 'cancelled', finishedAt: expect.any(String), error: 'cancelled' })
     expect(JSON.parse(readRun(dir, 'status.json')).status).toBe('cancelled')
     expect(f.sent).toEqual([])
+  })
+
+  it('ends a run cancelled during a review as cancelled: no retry, no review-failed, no notice, the waiting granny_wait told', async () => {
+    behave({ wait: ['review-one-r1-reviewer'] })
+    const u = tui()
+    const f = fakePi()
+    await createGrannyExtension({ killGraceMs: 100, renderEveryMs: 10 })(f.pi as any)
+    const { id, dir } = await start(f, {}, u.ctx)
+    const reply = wait(f, { runId: id })
+    await waitFor(() => existsSync(join(fake, 'wait-review-one-r1-reviewer.pid')))
+    await exec(f.tools.get('granny_cancel'), { runId: id })
+    expect(await reply).toBe(`Run ${id} was cancelled.`)
+    expect(await finished(dir)).toEqual({ id, status: 'cancelled', finishedAt: expect.any(String), error: 'cancelled' })
+    expect(JSON.parse(readRun(dir, 'status.json')).status).toBe('cancelled')
+    expect(f.sent).toEqual([])
+    expect(u.widget(`granny-${id}`)).toBeUndefined()
+    expect(u.status(`granny-${id}`)).toBe(`granny ${id}: cancelled`)
+    const logs = journalOf(dir).filter(e => e.type === 'log').map(e => e.message)
+    expect(logs.filter(m => /retrying once|review failed/.test(m))).toEqual([])
+    expect(callsTo('review-one-r1-reviewer')).toHaveLength(1)
+    expect(calls().map(c => c.slug)).toEqual(['implement-one', 'review-one-r1-reviewer'])
   })
 
   it('tells the agent to wait with granny_wait or end its turn, never with a watcher of its own', async () => {

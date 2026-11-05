@@ -1,6 +1,7 @@
 import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { resolveConfig } from '../../core/config'
+import { GrannyCancelled } from '../../core/cancel'
 import { checkInput, runGranny, stageCheckErrors, type RunInput } from '../../core/engine'
 import { checkShape, SCHEMAS } from '../../core/schemas'
 import type { AgentRequest, Host, ResultKind } from '../../core/types'
@@ -138,7 +139,7 @@ export const createGrannyPlugin = ({ delays = DEFAULT_DELAYS, sleep = pause, kil
           submissions.delete(session)
           await ctx.session.prompt({ sessionID: session, text })
           await ctx.session.wait({ sessionID: session })
-          if (run.cancelled) throw new Error('cancelled')
+          if (run.cancelled) throw new GrannyCancelled()
           const got = submissions.get(session)
           if (got !== undefined) {
             const errors = checkShape(req.schema, got)
@@ -156,7 +157,7 @@ export const createGrannyPlugin = ({ delays = DEFAULT_DELAYS, sleep = pause, kil
               }
               backoffs++
               await sleep(backoffMs, run.abort.signal)
-              if (run.cancelled) throw new Error('cancelled')
+              if (run.cancelled) throw new GrannyCancelled()
               text = `Your previous turn ended on a provider error (${error.type}${error.message ? `: ${error.message.slice(0, 300)}` : ''}). Continue the task where it stopped; when you are done, call \`${tool}\` exactly once with your result.`
               continue
             }
@@ -171,7 +172,7 @@ export const createGrannyPlugin = ({ delays = DEFAULT_DELAYS, sleep = pause, kil
       const host: Host = {
         name: 'opencode',
         async agent(req) {
-          if (run.cancelled) throw new Error('cancelled')
+          if (run.cancelled) throw new GrannyCancelled()
           const tool = SUBMIT[req.kind]
           if (!tool) throw new Error(`no submit tool for result kind "${req.kind}"`)
           const model = modelRef(req.model) ?? parentModel
@@ -185,12 +186,13 @@ export const createGrannyPlugin = ({ delays = DEFAULT_DELAYS, sleep = pause, kil
           run.sessions.add(session.id)
           journal('agent', { label: req.label, role: req.role, session: session.id, model: model ?? null })
           try {
-            if (run.cancelled) throw new Error('cancelled')
+            if (run.cancelled) throw new GrannyCancelled()
             return await converse(req, tool, session.id)
           } finally {
             run.sessions.delete(session.id)
           }
         },
+        cancelled: () => run.cancelled,
         async run(command, cwd) {
           if (run.cancelled) return { code: 130, output: 'cancelled' }
           journal('command', { command })

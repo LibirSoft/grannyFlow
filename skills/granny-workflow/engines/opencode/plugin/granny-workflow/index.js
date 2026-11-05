@@ -2716,7 +2716,7 @@ When done, call the \`${tool}\` tool exactly once with your result. That call is
           await ctx.session.prompt({ sessionID: session, text });
           await ctx.session.wait({ sessionID: session });
           if (run.cancelled)
-            throw new Error("cancelled");
+            throw new GrannyCancelled;
           const got = submissions.get(session);
           if (got !== undefined) {
             const errors = checkShape(req.schema, got);
@@ -2736,7 +2736,7 @@ When done, call the \`${tool}\` tool exactly once with your result. That call is
               backoffs++;
               await sleep(backoffMs, run.abort.signal);
               if (run.cancelled)
-                throw new Error("cancelled");
+                throw new GrannyCancelled;
               text = `Your previous turn ended on a provider error (${error.type}${error.message ? `: ${error.message.slice(0, 300)}` : ""}). Continue the task where it stopped; when you are done, call \`${tool}\` exactly once with your result.`;
               continue;
             }
@@ -2751,7 +2751,7 @@ When done, call the \`${tool}\` tool exactly once with your result. That call is
         name: "opencode",
         async agent(req) {
           if (run.cancelled)
-            throw new Error("cancelled");
+            throw new GrannyCancelled;
           const tool = SUBMIT[req.kind];
           if (!tool)
             throw new Error(`no submit tool for result kind "${req.kind}"`);
@@ -2767,12 +2767,13 @@ When done, call the \`${tool}\` tool exactly once with your result. That call is
           journal("agent", { label: req.label, role: req.role, session: session.id, model: model ?? null });
           try {
             if (run.cancelled)
-              throw new Error("cancelled");
+              throw new GrannyCancelled;
             return await converse(req, tool, session.id);
           } finally {
             run.sessions.delete(session.id);
           }
         },
+        cancelled: () => run.cancelled,
         async run(command, cwd) {
           if (run.cancelled)
             return { code: 130, output: "cancelled" };
