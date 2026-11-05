@@ -169,6 +169,11 @@ export interface FakeCtxOptions {
   throwNavigate?: boolean
   width?: number
   height?: number
+  /** Each role session's messages in the TUI store, oldest first; the test may change them between ticks. */
+  messages?: Record<string, unknown[]>
+  /** A TUI without `data.session.message`: the plugin falls back to `client.message.list`. */
+  noMessageStore?: boolean
+  throwMessages?: boolean
 }
 
 export const THEME = {
@@ -193,6 +198,10 @@ export function fakeCtx(options: FakeCtxOptions = {}) {
   const familyCalls: string[] = []
   const listeners = new Map<string, Array<(event: unknown) => void>>()
   const stores = new Map<string, Record<string, unknown>>()
+  const messages = new Map<string, unknown[]>(Object.entries(options.messages ?? {}))
+  const messageReads: string[] = []
+  const syncCalls: string[] = []
+  const fetchCalls: Array<Record<string, unknown>> = []
   const opts = { ...options }
   let route: Record<string, unknown> = options.route ?? { type: 'session', sessionID: 'parent' }
 
@@ -269,6 +278,22 @@ export function fakeCtx(options: FakeCtxOptions = {}) {
           return [...sessions.values()].filter(s => root(s.id) === top).map(s => s.id)
         },
         status: (id: string) => (running.has(id) ? 'running' : 'idle'),
+        ...(options.noMessageStore
+          ? {}
+          : {
+              message: {
+                list(id: string) {
+                  messageReads.push(id)
+                  if (opts.throwMessages) throw new Error('list broke')
+                  return messages.get(id) ?? []
+                },
+                sync(id: string) {
+                  syncCalls.push(id)
+                  if (opts.throwMessages) throw new Error('sync broke')
+                  return Promise.resolve()
+                },
+              },
+            }),
       },
     },
     client: {
@@ -276,6 +301,13 @@ export function fakeCtx(options: FakeCtxOptions = {}) {
         async list(query: unknown) {
           listCalls.push(query)
           return { data: options.listed ?? [] }
+        },
+      },
+      message: {
+        async list(query: Record<string, unknown>) {
+          fetchCalls.push(query)
+          if (opts.throwMessages) throw new Error('fetch broke')
+          return { data: [...(messages.get(String(query.sessionID)) ?? [])].reverse(), cursor: {} }
         },
       },
     },
@@ -296,6 +328,10 @@ export function fakeCtx(options: FakeCtxOptions = {}) {
     familyCalls,
     listeners,
     stores,
+    messages,
+    messageReads,
+    syncCalls,
+    fetchCalls,
     get route() {
       return route
     },

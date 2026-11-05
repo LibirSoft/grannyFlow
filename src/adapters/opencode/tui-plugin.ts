@@ -2,8 +2,10 @@
 // sessions' metadata, watches their files on one timer, and shows them in the sidebar, the prompt
 // footer, toasts and the /granny navigator. It never talks to the server plugin; every ctx call is
 // guarded, so a broken or missing TUI API loses the view, never the run.
+import { homedir } from 'node:os'
 import { agentKey } from '../runview/tree'
 import type { LiveView } from '../runview/tree'
+import { type MessageActivity, messageActivity } from './activity'
 import { chipText, discoverRuns, type FoundRun, type FsLike, type RoleSession, RunWatch, type SessionLike, STATUS_TONES, sidebarLines, type Toast, toastFor } from './runwatch'
 import { type ChildSession, type NavAction, type NavKey, NavModel } from './tui-navigator'
 import { attempt, type TuiRuntime, View } from './tui-view'
@@ -22,6 +24,7 @@ export interface TuiOptions {
   tickMs?: number
   fs?: FsLike
   timers?: Timers
+  home?: string
 }
 
 const ID = 'granny-workflow'
@@ -38,6 +41,9 @@ const FRESH_MS = 60_000
 const TERMINAL = new Set(['done', 'failed', 'cancelled'])
 const WAKE_EVENTS = ['session.created', 'session.updated']
 const DEFAULT_SIZE = { width: 100, height: 30 }
+const MAX_ACTIVITIES = 8
+const FETCH_EVERY_MS = 3000
+const FETCH_LIMIT = 20
 
 const NAV_KEYS: Array<[string, string, NavKey]> = [
   ['up,k', 'up', 'up'],
@@ -51,6 +57,7 @@ const NAV_KEYS: Array<[string, string, NavKey]> = [
   ['tab,]', 'next agent', 'next'],
   ['[', 'previous agent', 'prev'],
   ['p', 'parent session', 'parent'],
+  ['v', 'details or summary', 'verbose'],
   ['escape,q', 'back', 'back'],
 ]
 
@@ -109,6 +116,12 @@ export class Hub {
   private hidden: { get(): boolean; set(off: boolean): void }
   private readonly unsubscribe: Array<() => void> = []
   private disposed = false
+  /** The navigator's selected agent: the one role session whose messages the tick reads. */
+  private watched?: string
+  private readonly activities = new Map<string, MessageActivity>()
+  private readonly synced = new Set<string>()
+  private readonly fetched = new Map<string, number>()
+  private readonly home?: string
 
   constructor(
     readonly rt: TuiRuntime,
@@ -123,6 +136,8 @@ export class Hub {
     this.bump = () => void setVersion(v => v + 1)
     this.view = new View(rt, () => this.ctx?.theme)
     this.hidden = this.memoryFlag()
+    const home = opts.home ?? attempt(() => homedir())
+    if (home) this.home = home
   }
 
   install() {
@@ -251,6 +266,9 @@ export class Hub {
         } catch {}
       }
       this.toast(toasts)
+      try {
+        if (this.readActivity()) changed = true
+      } catch {}
       if (changed) this.bump()
     } catch {}
     if (this.wakeTicks > 0) this.wakeTicks--
@@ -317,6 +335,64 @@ export class Hub {
       live.set(session, { active: status === 'running' })
     }
     return live
+  }
+
+  // --- live activity of the selected agent ------------------------------------------------------
+
+  /** What the hub last read of a role session's messages. */
+  activity(session: string): MessageActivity | undefined {
+    return this.activities.get(session)
+  }
+
+  /**
+   * Reads the selected agent's messages from the TUI store, once a tick and only while the navigator shows,
+   * so streamed deltas never redraw the page by themselves; true when they changed.
+   */
+  private readActivity(): boolean {
+    const session = this.watched
+    if (this.mounted <= 0 || !session) return false
+    const store = attempt(() => this.ctx.data.session.message)
+    if (!store || typeof store.list !== 'function') {
+      this.fetch(session)
+      return false
+    }
+    const messages = attempt(() => store.list(session))
+    if (!Array.isArray(messages)) return false
+    if (!messages.length && !this.synced.has(session)) {
+      this.synced.add(session)
+      const pending = attempt(() => store.sync(session))
+      if (pending && typeof pending.catch === 'function') pending.catch(() => {})
+    }
+    return this.keep(session, messageActivity(messages))
+  }
+
+  /** A TUI without the message store: one page of the session's messages from the server, at most every 3 s. */
+  private fetch(session: string) {
+    const now = this.now()
+    if (now - (this.fetched.get(session) ?? Number.NEGATIVE_INFINITY) < FETCH_EVERY_MS) return
+    this.fetched.set(session, now)
+    const pending = attempt(() => this.ctx.client.message.list({ sessionID: session, limit: FETCH_LIMIT, order: 'desc' }))
+    if (!pending || typeof pending.then !== 'function') return
+    pending.then(
+      (result: any) => {
+        try {
+          const page = Array.isArray(result?.data) ? [...result.data].reverse() : []
+          if (this.keep(session, messageActivity(page)) && !this.disposed) this.bump()
+        } catch {}
+      },
+      () => {},
+    )
+  }
+
+  private keep(session: string, activity: MessageActivity): boolean {
+    const before = this.activities.get(session)
+    this.activities.delete(session)
+    this.activities.set(session, activity)
+    for (const old of this.activities.keys()) {
+      if (this.activities.size <= MAX_ACTIVITIES) break
+      this.activities.delete(old)
+    }
+    return before?.key !== activity.key
   }
 
   private toast(toasts: Toast[]) {
@@ -444,6 +520,11 @@ export class Hub {
           const info = attempt(() => this.ctx.data.session.get(session))
           return info ? typeof info.parentID === 'string' && info.parentID.length > 0 : undefined
         },
+        activity: session => this.activity(session),
+        onSelect: session => {
+          this.watched = session
+        },
+        ...(this.home ? { home: this.home } : {}),
         now: this.now,
       },
       first ?? '',
@@ -519,7 +600,7 @@ export class Hub {
     const command = {
       id: 'granny.open',
       title: 'granny: run navigator',
-      description: 'Phases, rounds and roles of the granny runs of this session',
+      description: 'Stages, agents and live activity of the granny runs of this session',
       group: 'granny',
       palette: true,
       slash: { name: 'granny', arguments: true },
