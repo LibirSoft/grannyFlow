@@ -168,6 +168,8 @@ export class RoleActivity {
   end(now: number) {
     this.active = false
     this.endedAt = now
+    this.thinking = ''
+    this.unscanned = false
   }
 
   /** The role process closed with this exit code. */

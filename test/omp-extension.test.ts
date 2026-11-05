@@ -359,6 +359,9 @@ describe('live panel', () => {
     }
     expect(role.retainedChars).toBeLessThanOrEqual(8000)
     expect(live.lines()[1]).toEndWith(' · thinking 0s · "Early heading"')
+    live.stop(role)
+    expect(role.retainedChars).toBe(0)
+    expect(live.roles).toEqual([role])
   })
 
   it('draws at most once per renderEveryMs, refreshes on its own from the first draw, and stops when closed', async () => {

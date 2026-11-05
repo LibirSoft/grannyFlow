@@ -2698,6 +2698,8 @@ class RoleActivity {
   end(now) {
     this.active = false;
     this.endedAt = now;
+    this.thinking = "";
+    this.unscanned = false;
   }
   exit(code) {
     this.log?.({ type: "exit", code });
