@@ -61,9 +61,39 @@ const { runs } = shared
 const text = (t: string): ToolResult => ({ content: [{ type: 'text', text: t }] })
 
 const READ_ONLY_TOOLS = new Set(['read', 'grep', 'glob', 'find', 'ast_grep', 'lsp', 'bash', 'web_search', 'todo', 'think', 'wait', 'yield'])
-const PREFIXES = new Set(['{', '}', '!', 'if', 'then', 'else', 'elif', 'do', 'while', 'until', 'time', 'sudo', 'env', 'command', 'exec', 'nohup', 'nice', 'xargs'])
-const SHELLS = new Set(['bash', 'sh', 'zsh', 'dash'])
+const KEYWORDS = new Set(['{', '}', '!', 'if', 'then', 'else', 'elif', 'do', 'while', 'until', 'nohup'])
+const PREFIX_OPTIONS_WITH_VALUE = new Map<string, Set<string>>([
+  ['time', new Set(['-f', '-o'])],
+  ['sudo', new Set(['-u', '-g', '-C', '-D', '-h', '-p', '-r', '-t', '-U', '-T'])],
+  ['env', new Set(['-u', '-C', '--unset', '--chdir'])],
+  ['command', new Set()],
+  ['exec', new Set(['-a'])],
+  ['nice', new Set(['-n', '--adjustment'])],
+  ['xargs', new Set(['-I', '-L', '-n', '-P', '-s', '-d', '-E', '-a'])],
+  ['timeout', new Set(['-s', '-k', '--signal', '--kill-after'])],
+])
+const SHELLS = new Set(['bash', 'sh', 'zsh', 'dash', 'ksh'])
+const SHELL_OPTIONS_WITH_VALUE = new Set(['-o', '+o', '-O', '+O', '--rcfile', '--init-file'])
+const GITHUB_DENIED_OPS = new Set(['pr_create', 'pr_push', 'pr_checkout'])
 const GIT_OPTIONS_WITH_VALUE = new Set(['-C', '-c', '--git-dir', '--work-tree', '--namespace', '--config-env'])
+
+function closingParen(line: string, from: number): number {
+  let depth = 1
+  for (let k = from; k < line.length; k++) {
+    if (line[k] === '\\') k++
+    else if (line[k] === '(') depth++
+    else if (line[k] === ')' && --depth === 0) return k
+  }
+  return line.length
+}
+
+function closingBacktick(line: string, from: number): number {
+  for (let k = from; k < line.length; k++) {
+    if (line[k] === '\\') k++
+    else if (line[k] === '`') return k
+  }
+  return line.length
+}
 
 function simpleCommands(line: string): string[][] {
   const commands: string[][] = []
@@ -91,8 +121,13 @@ function simpleCommands(line: string): string[][] {
     } else if (c === '"') {
       let j = i + 1
       for (; j < line.length && line[j] !== '"'; j++) {
-        if (line[j] === '\\' && j + 1 < line.length) j++
-        word += line[j]
+        if (line[j] === '\\' && j + 1 < line.length) word += line[++j]
+        else if ((line[j] === '$' && line[j + 1] === '(') || line[j] === '`') {
+          const start = line[j] === '`' ? j + 1 : j + 2
+          const end = line[j] === '`' ? closingBacktick(line, start) : closingParen(line, start)
+          commands.push(...simpleCommands(line.slice(start, end)))
+          j = end
+        } else word += line[j]
       }
       inWord = true
       i = j
@@ -115,20 +150,44 @@ function simpleCommands(line: string): string[][] {
   return commands
 }
 
+function shellCommandString(args: string[]): string | undefined {
+  let c = false
+  for (let k = 0; k < args.length; k++) {
+    const a = args[k]!
+    if (SHELL_OPTIONS_WITH_VALUE.has(a)) k++
+    else if (/^-[A-Za-z]+$/.test(a)) {
+      if (a.includes('c')) c = true
+      if (/[oO]/.test(a)) k++
+    } else if (/^(\+[A-Za-z]+|--.+)$/.test(a)) continue
+    else return c ? (a === '--' ? args[k + 1] : a) : undefined
+  }
+  return undefined
+}
+
 function commandBlock(words: string[], access: Access): string | undefined {
   let i = 0
   while (i < words.length) {
     const w = words[i]!
-    if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(w) || PREFIXES.has(w)) i++
-    else if (w === 'timeout') {
+    const withValue = PREFIX_OPTIONS_WITH_VALUE.get(w)
+    if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(w) || KEYWORDS.has(w)) i++
+    else if (withValue) {
       i++
-      while (words[i]?.startsWith('-')) i++
-      i++
+      for (let o = words[i]; o?.startsWith('-'); o = words[i]) {
+        if (w === 'env' && /^(-S|--split-string)/.test(o)) {
+          const inline = o.startsWith('--') ? o.slice('--split-string='.length) : o.slice(2)
+          const split = inline || words[i + 1] || ''
+          return bashBlock([split, ...words.slice(inline ? i + 1 : i + 2)].join(' '), access)
+        }
+        i += withValue.has(o) ? 2 : 1
+        if (o === '--') break
+      }
+      if (w === 'timeout') i++
     } else break
   }
   const program = basename(words[i] ?? '')
   const rest = words.slice(i + 1)
-  if (SHELLS.has(program) && rest.includes('-c')) return bashBlock(rest[rest.indexOf('-c') + 1] ?? '', access)
+  const shellCommand = SHELLS.has(program) ? shellCommandString(rest) : undefined
+  if (shellCommand !== undefined) return bashBlock(shellCommand, access)
   if (program === 'eval') return bashBlock(rest.join(' '), access)
   if (program === 'gh') {
     let j = 0
@@ -160,6 +219,9 @@ function bashBlock(command: string, access: Access): string | undefined {
 /** Why a role's tool call is blocked, or undefined when it may run. */
 export function blockReason(toolName: string, input: any, access: Access, submitTool: string): string | undefined {
   if (toolName === 'ask') return 'granny: no one answers questions in a granny role - decide yourself and say what you assumed in your result'
+  if (toolName === 'github' && GITHUB_DENIED_OPS.has(String(input?.op))) {
+    return `granny: the github tool's ${input.op} is not allowed in a granny role - granny never pushes or touches pull requests; the user does`
+  }
   if (access === 'read-only' && toolName !== submitTool && !READ_ONLY_TOOLS.has(toolName)) {
     return `granny: this role is read-only - the ${toolName} tool is not allowed`
   }

@@ -105,6 +105,28 @@ describe('blockReason', () => {
     'cd /r && gh pr merge 1',
     'if true; then git push; fi',
     'ls\ngit push',
+    'bash -lc "git push"',
+    "sh -ec 'git push'",
+    'bash -l -c "git push"',
+    'bash -o pipefail -c "git push"',
+    'bash --norc -c "git push"',
+    'zsh -xc "cd /r && git push"',
+    'env -i git push',
+    'env - git push',
+    'env -u HOME git push',
+    'env -i FOO=1 git push',
+    'env -C /r git push',
+    'env --chdir=/r git push',
+    'env -S "git push"',
+    'sudo -u me git push',
+    'nice -n 5 git push',
+    'timeout -s KILL 30 git push',
+    'xargs -I{} git push',
+    'command -p git push',
+    'echo "$(git push)"',
+    'echo "x $(cd /r && git push) y"',
+    'echo "`git push`"',
+    'echo "$(echo "$(git push)")"',
   ]
   for (const command of denied) {
     it(`blocks ${JSON.stringify(command)} for every role`, () => {
@@ -125,6 +147,13 @@ describe('blockReason', () => {
     'gh issue list',
     'git show HEAD:a.txt',
     'git rev-parse HEAD@{1}',
+    'bash script.sh',
+    'bash -l script.sh -c "git push"',
+    'echo "\\$(git push)"',
+    "echo '$(git push)'",
+    'env -i git status',
+    'toString git push',
+    'constructor',
   ]
   for (const command of allowed) {
     it(`allows ${JSON.stringify(command)} for every role`, () => {
@@ -151,6 +180,19 @@ describe('blockReason', () => {
     }
     for (const command of ['git add a.txt', 'git commit -m x', 'cd /r && git commit --amend --no-edit', 'git -C /r add .']) {
       expect(bash(command, 'read-only')).toContain('read-only')
+    }
+  })
+
+  it('blocks the github tool from pushing or touching pull requests for every role', () => {
+    for (const op of ['pr_create', 'pr_push', 'pr_checkout']) {
+      expect(blockReason('github', { op }, 'write', SUBMIT)).toContain('not allowed')
+      expect(blockReason('github', { op, forceWithLease: true }, 'read-only', SUBMIT)).toBeString()
+    }
+  })
+
+  it('lets a writing role read through the github tool', () => {
+    for (const op of ['repo_view', 'file_read', 'search_issues', 'search_prs', 'search_code', 'search_commits', 'search_repos', 'run_watch']) {
+      expect(blockReason('github', { op }, 'write', SUBMIT)).toBeUndefined()
     }
   })
 
