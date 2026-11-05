@@ -116,6 +116,25 @@ describe('skill docs', () => {
     expect(readRoot('README.md')).toMatch(/^\| `planReview` \| `false` \|/m)
   })
 
+  it('says wherever plan review can be turned on that it costs many tokens and time, and to turn it on only when asked', () => {
+    for (const file of ['SKILL.md', 'references/config.md', 'references/claude-code.md', 'references/opencode.md', 'references/omp.md', 'references/cursor.md']) {
+      const text = read(file)
+      expect({ file, extra: text.includes('so it costs extra tokens') }).toEqual({ file, extra: false })
+      expect({ file, tokens: text.includes('many more tokens') }).toEqual({ file, tokens: true })
+      expect({ file, asked: /only when the user asks|unless the user asks for a plan review/.test(text) }).toEqual({ file, asked: true })
+    }
+    expect(read('references/setup.md')).toContain('plan review is off by default because every round is a full review + judge + fix')
+    expect(read('SKILL.md')).toContain('plan review on or off')
+  })
+
+  it("tells the agent in SKILL.md to keep the user's models and loop settings unless the user asked, and to ask on a provider error", () => {
+    const row = read('SKILL.md').split('\n').find(l => l.startsWith('| `config` |'))!
+    for (const key of ['roles.*.model', 'roles.*.effort', 'reviewers', 'threshold', 'maxRounds', 'checks']) expect(row).toContain(key)
+    expect(row).toContain('only when the user asked for that change in this conversation')
+    expect(row).toContain('stop and ask the user which model to use')
+    expect(row).toContain('overrides:')
+  })
+
   it('documents granny setup with the same threshold presets in the README, setup.md and the config reference', () => {
     expect(read('SKILL.md')).toContain('granny setup')
     expect(read('engines/opencode/agents/granny.md')).toContain('granny setup')
@@ -145,6 +164,71 @@ describe('skill docs', () => {
     expect(md).toContain('[references/omp.md](references/omp.md#install)')
     expect(read('references/omp.md')).toContain(OMP_INSTALL)
     expect(() => read('engines/omp/extensions/granny-workflow/index.js')).not.toThrow()
+  })
+
+  it('installs both opencode plugin entries and documents watching a run on opencode', () => {
+    const opencode = read('references/opencode.md')
+    for (const entry of ['index.js', 'tui.js']) {
+      expect(opencode).toContain(`\`${entry}\``)
+      expect(() => read(`engines/opencode/plugin/granny-workflow/${entry}`)).not.toThrow()
+    }
+    expect(opencode).toContain('features: { server: true, tui: true }')
+    expect(opencode).toContain('## Watching a run')
+    expect(opencode).toContain('`<leader>j`')
+    const config = read('references/config.md')
+    expect(config).toMatch(/^\| `watch` \| `"full"` \| omp and opencode:/m)
+    expect(config).toContain('[opencode.md](opencode.md#watching-a-run)')
+    expect(config).not.toMatch(/and opencode (accept|have their own views)/)
+  })
+
+  it('describes the run navigator page, its detail and its keys on omp and opencode', () => {
+    const page = ['granny · <branch> · stage <k>/<n> · <phase> · <elapsed>', 'Worktree ✓ › Implement ● › Checks › Review › Final review › PR ready', 'checks ✓', '`run details`', 'NOW', 'TODO', 'RECENT', 'LAST SAID', '✓ done in', '`v`', '`f`', 'short model']
+    for (const file of ['references/omp.md', 'references/opencode.md']) {
+      const text = read(file)
+      expect({ file, missing: page.filter(piece => !text.includes(piece)) }).toEqual({ file, missing: [] })
+      expect({ file, phases: text.includes('round and stage groups') }).toEqual({ file, phases: false })
+    }
+    const omp = read('references/omp.md')
+    const navigator = omp.slice(omp.indexOf('**Run navigator.**'))
+    expect(navigator.startsWith('**Run navigator.** `/granny` or `alt+w` in the omp TUI opens it; the run panel says so.')).toBe(true)
+    expect(omp).toContain('`t` opens')
+    const opencode = read('references/opencode.md')
+    expect(opencode).toContain('`data.session.message`')
+    expect(opencode).toContain('granny · stage <k>/<n> · <phase> · <n> running · <time>')
+    expect(opencode).toContain('Enter opens the session')
+  })
+
+  it('names the run files the views read in both host references', () => {
+    for (const file of ['references/omp.md', 'references/opencode.md']) {
+      const text = read(file)
+      const pieces = ['`outline`', 'stage { number, name, event, outcome? }', 'heartbeat { command }', '`cwd`']
+      expect({ file, missing: pieces.filter(piece => !text.includes(piece)) }).toEqual({ file, missing: [] })
+    }
+    expect(read('references/omp.md')).toContain('{ type: "todo", todos }')
+  })
+
+  it("states the model refusal and the rule on the user's models in both host references", () => {
+    for (const file of ['references/omp.md', 'references/opencode.md']) {
+      const text = read(file)
+      const pieces = ['`granny_run refused:`', 'host-keyed', 'only when the user asked for that change in this conversation', 'stop and ask the user which model to use', 'overrides: roles.implementer.model']
+      expect({ file, missing: pieces.filter(piece => !text.includes(piece)) }).toEqual({ file, missing: [] })
+    }
+    expect(read('SKILL.md')).toContain('`granny_run` refuses a model the host cannot run')
+    expect(read('references/config.md')).toContain('`granny_run` refuses')
+  })
+
+  it('shows no Claude Code alias as a model for every host in a JSON example, since opencode and omp refuse the run', () => {
+    const docs: Record<string, string> = { 'README.md': readRoot('README.md'), 'SKILL.md': read('SKILL.md') }
+    for (const f of readdirSync(join(skill, 'references'))) docs[`references/${f}`] = read(`references/${f}`)
+    const alias = /^(default|sonnet|opus|haiku|opusplan)(\[1m\])?$/i
+    const plain = Object.entries(docs).flatMap(([file, md]) =>
+      jsonBlocks(md).flatMap(block => {
+        const config = JSON.parse(block)
+        const models = [...Object.values<any>(config.roles ?? {}).map(r => r?.model), ...(config.reviewers ?? []).filter((r: any) => r?.engine === 'agent').map((r: any) => r.model)]
+        return models.filter(m => typeof m === 'string' && alias.test(m)).map(model => ({ file, model }))
+      }),
+    )
+    expect(plain).toEqual([])
   })
 
   it('names omp in the README, the package description and the hosts diagram', () => {

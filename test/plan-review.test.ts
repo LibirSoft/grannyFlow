@@ -3,7 +3,7 @@ import { spawn } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { resolveConfig, type ReviewerConfig } from '../src/core/config'
+import { planReviewWarning, resolveConfig, type ReviewerConfig } from '../src/core/config'
 import { checkInput, runGranny, type RunInput } from '../src/core/engine'
 import { agentPlanReviewPrompt, planReviewPrompt, type PromptContext } from '../src/core/prompts'
 import { parseCodexReview, reviewFailure } from '../src/core/review'
@@ -216,6 +216,17 @@ describe('the plan review', () => {
     expect(none.phases).toEqual(['Worktree', 'Implement', 'Review', 'PR ready'])
   })
 
+  it('logs the token and time warning with the round cap once, right after the Plan review phase starts', async () => {
+    const f = fakeHost({ worktree: WT, reviews: [review(planFinding('P2', 'Step 2 uses a removed flag')), 'No findings.'], scores: [{ 'codex-F1': 90 }] })
+    await runGranny(f.host, input({ plan: PLAN, config: { planReview: true, maxRounds: 3 } }))
+    const warnings = f.logs.filter(l => l === planReviewWarning(3))
+    expect(warnings).toHaveLength(1)
+    expect(f.logs.indexOf(warnings[0]!)).toBeLessThan(f.logs.indexOf('plan review r1: 1 finding(s)'))
+    const off = fakeHost()
+    await runGranny(off.host, input({ plan: PLAN }))
+    expect(off.logs.some(l => l.includes('tokens'))).toBe(false)
+  })
+
   it('skips a command reviewer without {prompt}, with a log line, and reviews with the others', async () => {
     const diffOnly = { name: 'diff-only', engine: 'command', command: 'my-review --base {base} --out {out}' }
     const f = fakeHost({ override: req => (req.role === 'reviewer' ? { findings: [] } : undefined) })
@@ -274,7 +285,7 @@ describe('the plan review', () => {
       ['review plan review r1 codex wait 1', 'Plan review'],
       ['review plan review r1 codex read', 'Plan review'],
     ])
-    expect(f.calls.find(c => c.label === 'review plan review r1 codex wait 1')!.prompt).toContain(`\ncd ${WT} && bash -c 'until [ -s .granny/review-plan-review-r1-codex.exit ]`)
+    expect(f.calls.find(c => c.label === 'review plan review r1 codex wait 1')!.prompt).toContain(`\n( cd ${WT} && bash -c 'until [ -s .granny/review-plan-review-r1-codex.exit ]`)
   })
 
   it('waits for a slow plan-review command on Claude Code until it is done, then reads its findings', async () => {

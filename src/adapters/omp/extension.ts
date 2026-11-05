@@ -2,14 +2,19 @@ import { spawn, type ChildProcess } from 'node:child_process'
 import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { basename, dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { resolveConfig } from '../../core/config'
+import { resolveConfig, type WatchMode } from '../../core/config'
+import { GrannyCancelled, isCancelled } from '../../core/cancel'
 import { checkInput, runGranny, stageCheckErrors, type RunInput } from '../../core/engine'
 import { checkShape, SCHEMAS } from '../../core/schemas'
 import type { AgentRequest, Host, ResultKind } from '../../core/types'
-import { DEFAULT_DELAYS, dropPlaceholders, globalConfigPath, type HostOptions, KILL_GRACE_MS, pause, preflight, readJson, RUN_INPUT_SCHEMA, RUN_TOOL_DESCRIPTION, runCommand, runId, runStatus, signalGroup, stageRepos, stamp, SUBMIT, summarize } from '../common'
+import { DEFAULT_DELAYS, dropPlaceholders, globalConfigPath, HEARTBEAT_MS, hostModelErrors, type HostOptions, KILL_GRACE_MS, layerSources, overridesNotice, pause, planReviewNotice, preflight, readJson, RUN_INPUT_SCHEMA, RUN_TOOL_DESCRIPTION, runCommand, runDir, runId, runStatus, signalGroup, stageRepos, stamp, statusError, SUBMIT, summarize, withHeartbeat } from '../common'
+import { lineType, LiveRun, type LiveOptions, PARSED_EVENTS, type RoleActivity, type RoleOutcome } from './panel'
+import { Navigator } from './navigator'
+import { type RunOutline, runOutline } from '../runview/outline'
+import { EventLog } from './watch'
 
 // The omp (oh-my-pi) host. One file, two modes: in the user's omp session it registers granny_run,
-// granny_status and granny_cancel and runs the loop; every role runs as its own `omp --mode json`
+// granny_status, granny_wait and granny_cancel and runs the loop; every role runs as its own `omp --mode json`
 // process that loads this same file with GRANNY_OMP_CHILD set, where it registers only the role's
 // submit tool and a tool_call guard.
 
@@ -32,13 +37,26 @@ interface OmpTool {
   description: string
   parameters: unknown
   loadMode?: 'essential' | 'discoverable'
+  interruptible?: boolean
   execute(toolCallId: string, params: any, signal: AbortSignal | undefined, onUpdate: unknown, ctx: any): Promise<ToolResult>
 }
 
 export interface OmpApi {
   registerTool(tool: OmpTool): void
   on(event: 'tool_call', handler: (event: { toolName: string; input: any }) => Promise<{ block: true; reason: string } | undefined>): void
-  sendMessage(message: { customType: string; content: string; display: boolean }, options: { triggerTurn: boolean; deliverAs: 'followUp' }): void
+  on(event: 'session_start', handler: (event: unknown, ctx: any) => Promise<void>): void
+  getActiveTools?(): string[]
+  setActiveTools?(toolNames: string[]): Promise<void>
+  sendMessage(message: { customType: string; content: string; display: boolean }, options: { deliverAs: 'aside' } | { triggerTurn: false }): void
+  registerCommand?(
+    name: string,
+    options: {
+      description?: string
+      getArgumentCompletions?: (prefix: string) => Array<{ value: string; label: string; description?: string }> | null
+      handler: (args: string, ctx: any) => Promise<void>
+    },
+  ): void
+  registerShortcut?(shortcut: string, options: { description?: string; handler: (ctx: any) => Promise<void> | void }): void
 }
 
 type Status = 'running' | 'done' | 'failed' | 'cancelled'
@@ -51,14 +69,29 @@ interface RunState {
   abort: AbortController
   children: Set<ChildProcess>
   agents: number
+  reply?: string
+  /** Pending granny_wait calls; set at the moment the run ends, so a run reports either to them or by notice. */
+  waiters: Set<(reply: string) => void>
+  live: LiveRun
+  watch: WatchMode
+  branch: string
+  outline: RunOutline
 }
 
 // omp re-runs the factory for every session in the process; runs started in one must stay visible to all.
 const SHARED = Symbol.for('granny-workflow.omp.state')
-const shared: { runs: Map<string, RunState> } = ((globalThis as any)[SHARED] ??= { runs: new Map() })
+const shared: { runs: Map<string, RunState>; clearStatus?: () => void; hidden?: boolean; navigating?: boolean } = ((globalThis as any)[SHARED] ??= { runs: new Map() })
 const { runs } = shared
 
 const text = (t: string): ToolResult => ({ content: [{ type: 'text', text: t }] })
+
+const WAIT_DEFAULT_SECONDS = 1800
+const WAIT_MAX_SECONDS = 7200
+
+export function waitSeconds(value: unknown): number {
+  const n = typeof value === 'string' && value.trim() ? Number(value) : value
+  return typeof n === 'number' && Number.isFinite(n) ? Math.min(WAIT_MAX_SECONDS, Math.max(1, Math.round(n))) : WAIT_DEFAULT_SECONDS
+}
 
 const READ_ONLY_TOOLS = new Set(['read', 'grep', 'glob', 'find', 'ast_grep', 'lsp', 'bash', 'web_search', 'todo', 'think', 'wait', 'yield'])
 const KEYWORDS = new Set(['{', '}', '!', 'if', 'then', 'else', 'elif', 'do', 'while', 'until', 'nohup'])
@@ -230,6 +263,12 @@ export function blockReason(toolName: string, input: any, access: Access, submit
   return reason ? `granny: ${reason}` : undefined
 }
 
+const CLAUDE_ALIAS = /^(default|sonnet|opus|haiku|opusplan)(\[1m\])?$/i
+
+/** omp takes fuzzy model ids, so only a Claude Code alias meant for every host is refused; one keyed to omp is the user's choice. */
+const ompModelProblem = (model: string, keyed: boolean): string | undefined =>
+  !keyed && CLAUDE_ALIAS.test(model) ? `"${model}" is a Claude Code model alias, not an omp model` : undefined
+
 const TRANSIENT = /\b(429|502|503|504|529)\b|rate.?limit|too many requests|overloaded|quota|timed? ?out|timeout|ETIMEDOUT|ECONNRESET|ECONNREFUSED|EPIPE|socket hang up|connection|other side closed|network|fetch failed/i
 
 export function isTransient(message: string): boolean {
@@ -238,7 +277,17 @@ export function isTransient(message: string): boolean {
 
 export type { RetryPolicy } from '../common'
 
-export type ExtensionOptions = HostOptions
+export type ExtensionOptions = HostOptions & LiveOptions
+
+const STATUS_KEEP_MS = 60_000
+
+const WATCH_HELP =
+  "granny-workflow: watch granny runs - /granny (or alt+w) opens the run navigator: a stepper of the run's steps, its stage groups with their agents, and what the selected agent is doing now (or its transcript); /granny <runId> opens it on that run; /granny off|on hides or shows the run panel in this session"
+
+const NAVIGATOR_HINT = '/granny or alt+w: agents'
+const NAVIGATOR_SENTENCE = '\nTell the user: /granny or alt+w opens the run navigator (stages, agents, live activity).'
+
+const OVERLAY = { width: '100%', maxHeight: '100%', margin: 0, fullscreen: true, mouseTracking: false }
 
 interface Turn {
   code: number
@@ -263,6 +312,10 @@ function readSubmission(path: string): unknown {
 
 const slug = (label: string) => label.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 60) || 'agent'
 
+const SUBAGENT_SUBMIT = "granny: only the role's top-level agent submits the result - return your findings to the agent that spawned you."
+
+// omp runs this factory again for every task subagent of a role, in the same process, so the role's
+// submit tool and guard reach the subagents too.
 function registerChild(pi: OmpApi, spec: ChildSpec) {
   pi.registerTool({
     name: spec.tool,
@@ -270,7 +323,8 @@ function registerChild(pi: OmpApi, spec: ChildSpec) {
     description: `granny-workflow: submit your final ${spec.kind} result. Call it exactly once, when your task is done.`,
     parameters: SCHEMAS[spec.kind],
     loadMode: 'essential',
-    async execute(_id, params) {
+    async execute(_id, params, _signal, _onUpdate, ctx) {
+      if (ctx?.agent?.kind === 'sub') return text(SUBAGENT_SUBMIT)
       mkdirSync(dirname(spec.out), { recursive: true })
       writeFileSync(spec.out, JSON.stringify(params))
       return text('Recorded. You are done - stop now.')
@@ -280,10 +334,17 @@ function registerChild(pi: OmpApi, spec: ChildSpec) {
     const reason = blockReason(event.toolName, event.input, spec.access, spec.tool)
     return reason ? { block: true, reason } : undefined
   })
+  pi.on('session_start', async (_event, ctx) => {
+    if (ctx?.agent?.kind !== 'sub') return
+    try {
+      const active = pi.getActiveTools?.()
+      if (active?.includes(spec.tool)) await pi.setActiveTools?.(active.filter(name => name !== spec.tool))
+    } catch {}
+  })
 }
 
 export const createGrannyExtension =
-  ({ delays = DEFAULT_DELAYS, sleep = pause, killGraceMs = KILL_GRACE_MS }: Partial<ExtensionOptions> = {}) =>
+  ({ delays = DEFAULT_DELAYS, sleep = pause, killGraceMs = KILL_GRACE_MS, heartbeatMs = HEARTBEAT_MS, now = Date.now, renderEveryMs = 1000 }: Partial<ExtensionOptions> = {}) =>
   (pi: OmpApi): void => {
     const child = process.env.GRANNY_OMP_CHILD
     if (child) return registerChild(pi, JSON.parse(child) as ChildSpec)
@@ -296,6 +357,8 @@ export const createGrannyExtension =
       const config = resolveConfig(layers, 'omp')
       const unknownChecks = stageCheckErrors(input.stages, config.checks)
       if (unknownChecks.length) return `granny_run refused:\n- ${unknownChecks.join('\n- ')}`
+      const badModels = hostModelErrors(config, layers, 'omp', ompModelProblem, layerSources(input.repo))
+      if (badModels.length) return `granny_run refused:\n- ${badModels.join('\n- ')}`
       const blockers = preflight(input.repo, input.branch, config.workDir, config.worktree)
       for (const repo of stageRepos(input)) blockers.push(...preflight(repo, input.branch, config.workDir, config.worktree).map(b => `${repo}: ${b}`))
       if (blockers.length) return `granny_run refused:\n- ${blockers.join('\n- ')}`
@@ -303,12 +366,17 @@ export const createGrannyExtension =
       const id = runId()
       const dir = join(input.repo, config.workDir, 'runs', id)
       mkdirSync(dir, { recursive: true })
-      const run: RunState = { id, dir, status: 'running', cancelled: false, abort: new AbortController(), children: new Set(), agents: 0 }
+      shared.clearStatus?.()
+      shared.clearStatus = undefined
+      const { watch } = config
+      const live = new LiveRun(id, watch !== 'off' && ctx?.hasUI === true ? ctx.ui : undefined, { now, renderEveryMs, ...(watch === 'full' ? { hint: NAVIGATOR_HINT } : {}) }, !shared.hidden)
+      const outline = runOutline(input, config)
+      const run: RunState = { id, dir, status: 'running', cancelled: false, abort: new AbortController(), children: new Set(), agents: 0, waiters: new Set(), live, watch, branch: input.branch, outline }
       runs.set(id, run)
       const journal = (type: string, data: Record<string, unknown>) =>
         appendFileSync(join(dir, 'journal.jsonl'), JSON.stringify({ t: stamp(), type, ...data }) + '\n')
       const writeStatus = (extra: Record<string, unknown> = {}) =>
-        writeFileSync(join(dir, 'status.json'), JSON.stringify({ id, status: run.status, repo: input.repo, branch: input.branch, ...extra }, null, 2))
+        writeFileSync(join(dir, 'status.json'), JSON.stringify({ id, status: run.status, repo: input.repo, branch: input.branch, outline, ...extra }, null, 2))
       writeFileSync(join(dir, 'input.json'), JSON.stringify({ ...input, config: layers }, null, 2))
       writeStatus({ startedAt: stamp() })
 
@@ -316,18 +384,27 @@ export const createGrannyExtension =
       const bin = process.env.GRANNY_OMP_BIN ?? 'omp'
       const extensionFile = process.env.GRANNY_OMP_EXTENSION ?? fileURLToPath(import.meta.url)
 
-      const omp = (args: string[], prompt: string, cwd: string, spec: ChildSpec) =>
+      const omp = (args: string[], prompt: string, cwd: string, spec: ChildSpec, view: RoleActivity) =>
         new Promise<Turn>((resolve, reject) => {
-          if (run.cancelled) return reject(new Error('cancelled'))
+          if (run.cancelled) return reject(new GrannyCancelled())
           const proc = spawn(bin, args, { cwd, env: { ...process.env, GRANNY_OMP_CHILD: JSON.stringify(spec) }, detached: true, stdio: ['pipe', 'pipe', 'pipe'] })
           run.children.add(proc)
+          live.start(view)
           let pending = ''
           let stderr = ''
           let assistant: Turn['assistant']
           const scan = (line: string) => {
             try {
+              const type = lineType(line)
+              if (type !== undefined && !PARSED_EVENTS.has(type)) {
+                view.stream(type, line, now())
+                return live.touch()
+              }
               const event = JSON.parse(line)
               if (event?.type === 'message_end' && event.message?.role === 'assistant') assistant = event.message
+              const agents = view.event(event, now())
+              if (agents) journal('subagent', { label: view.info.label, agents })
+              live.touch()
             } catch {}
           }
           proc.stdout!.on('data', d => {
@@ -342,17 +419,20 @@ export const createGrannyExtension =
           proc.stdin!.on('error', () => {})
           proc.on('error', (e: NodeJS.ErrnoException) => {
             run.children.delete(proc)
+            live.stop(view)
             reject(e.code === 'ENOENT' ? new Error(`cannot run omp: "${bin}" was not found - install omp or set GRANNY_OMP_BIN to its path`) : e)
           })
           proc.on('close', code => {
             run.children.delete(proc)
             if (pending) scan(pending)
+            view.exit(code ?? 1)
+            live.stop(view)
             resolve({ code: code ?? 1, assistant, stderr })
           })
           proc.stdin!.end(prompt)
         })
 
-      const converse = async (req: AgentRequest, spec: ChildSpec, args: string[], session: string) => {
+      const converse = async (req: AgentRequest, spec: ChildSpec, args: string[], session: string, view: RoleActivity) => {
         const { tool } = spec
         let prompt = `${req.prompt}\n\nWhen done, call the \`${tool}\` tool exactly once with your result. That call is your final answer: the caller receives only its arguments.`
         let misses = 0
@@ -360,9 +440,9 @@ export const createGrannyExtension =
         let resume = false
         while (misses < 3) {
           rmSync(spec.out, { force: true })
-          const turn = await omp(resume ? [...args, '--continue'] : args, prompt, req.cwd, spec)
+          const turn = await omp(resume ? [...args, '--continue'] : args, prompt, req.cwd, spec, view)
           resume = true
-          if (run.cancelled) throw new Error('cancelled')
+          if (run.cancelled) throw new GrannyCancelled()
           const got = readSubmission(spec.out)
           if (got !== undefined) {
             const errors = checkShape(req.schema, got)
@@ -380,7 +460,7 @@ export const createGrannyExtension =
               }
               backoffs++
               await sleep(backoffMs, run.abort.signal)
-              if (run.cancelled) throw new Error('cancelled')
+              if (run.cancelled) throw new GrannyCancelled()
               prompt = `Your previous turn ended on a provider error (${error.slice(0, 300)}). Continue the task where it stopped; when you are done, call \`${tool}\` exactly once with your result.`
               continue
             }
@@ -395,7 +475,7 @@ export const createGrannyExtension =
       const host: Host = {
         name: 'omp',
         async agent(req) {
-          if (run.cancelled) throw new Error('cancelled')
+          if (run.cancelled) throw new GrannyCancelled()
           const tool = SUBMIT[req.kind]
           if (!tool) throw new Error(`no submit tool for result kind "${req.kind}"`)
           const model = req.model ?? parentModel
@@ -410,44 +490,93 @@ export const createGrannyExtension =
             ...(model ? ['--model', model] : []),
             ...(req.effort ? ['--thinking', req.effort] : []),
           ]
-          journal('agent', { label: req.label, role: req.role, session, model: model ?? null, ...(req.effort ? { effort: req.effort } : {}) })
-          return converse(req, spec, args, session)
+          journal('agent', { label: req.label, role: req.role, phase: req.phase, session, model: model ?? null, ...(req.effort ? { effort: req.effort } : {}), cwd: req.cwd })
+          const path = join(session, 'events.jsonl')
+          const log =
+            watch === 'full'
+              ? new EventLog(path, now, e => journal('event-log-failed', { label: req.label, path, error: String((e as Error)?.message ?? e) }))
+              : undefined
+          const view = live.role({ label: req.label, role: req.role, model, effort: req.effort, session, phase: req.phase, cwd: req.cwd, ...(log ? { log: path } : {}) }, log && (entry => log.write(entry)))
+          const end = (outcome: RoleOutcome, error?: string) => {
+            view.outcome = outcome
+            if (error !== undefined) view.error = error
+            try {
+              journal('agent-end', { label: req.label, session, outcome, ...(error !== undefined ? { error } : {}) })
+            } catch {}
+          }
+          try {
+            const result = await converse(req, spec, args, session, view)
+            end(result === null ? 'failed' : 'done')
+            return result
+          } catch (e) {
+            if (isCancelled(e)) end('cancelled')
+            else end('failed', String((e as Error)?.message ?? e))
+            throw e
+          }
         },
+        cancelled: () => run.cancelled,
         async run(command, cwd) {
           if (run.cancelled) return { code: 130, output: 'cancelled' }
           journal('command', { command })
-          return runCommand(command, cwd, run.abort.signal, killGraceMs)
+          return withHeartbeat(() => runCommand(command, cwd, run.abort.signal, killGraceMs), () => journal('heartbeat', { command }), heartbeatMs)
         },
         log: message => journal('log', { message }),
-        phase: title => journal('phase', { title }),
+        phase: title => {
+          journal('phase', { title })
+          live.setPhase(title)
+        },
+        stage: ({ number, name, event, outcome }) => journal('stage', { number, name, event, ...(outcome ? { outcome } : {}) }),
       }
 
       const notify = (content: string) => {
         try {
-          pi.sendMessage({ customType: 'granny-workflow', content, display: true }, { triggerTurn: true, deliverAs: 'followUp' })
+          pi.sendMessage({ customType: 'granny-workflow', content, display: true }, { deliverAs: 'aside' })
         } catch (e) {
           journal('notify-failed', { error: String((e as Error)?.message ?? e) })
         }
       }
 
+      const writeResult = (result: unknown) => writeFileSync(join(dir, 'result.json'), JSON.stringify(result, null, 2))
+
+      const settle = (reply: string, notice: string | undefined) => {
+        run.reply = reply
+        const clear = live.close(run.status)
+        shared.clearStatus = clear
+        setTimeout(clear, STATUS_KEEP_MS).unref()
+        const waiting = [...run.waiters]
+        run.waiters.clear()
+        for (const deliver of waiting) deliver(reply)
+        if (waiting.length) journal('notified-via-wait', { waits: waiting.length })
+        else if (notice) notify(notice)
+      }
+
       void runGranny(host, { ...input, config: layers })
         .then(result => {
           run.status = 'done'
-          writeFileSync(join(dir, 'result.json'), JSON.stringify(result, null, 2))
           writeStatus({ finishedAt: stamp() })
-          notify(`[granny] Run ${id} finished.\n${summarize(result, config.worktree)}\nCall granny_status with runId "${id}" for the full result, verify load-bearing claims yourself, report to the user and wait. Do not push.`)
+          writeResult(result)
+          const reply = `[granny] Run ${id} finished.\n${summarize(result, config.worktree)}\nCall granny_status with runId "${id}" for the full result, verify load-bearing claims yourself, report to the user and wait. Do not push.`
+          settle(reply, reply)
         })
         .catch(error => {
+          if (run.reply !== undefined) return
           run.status = run.cancelled ? 'cancelled' : 'failed'
-          writeStatus({ finishedAt: stamp(), error: String(error?.stack ?? error) })
-          journal('error', { error: String(error?.message ?? error) })
-          if (!run.cancelled) notify(`[granny] Run ${id} failed: ${String(error?.message ?? error)}\nCall granny_status with runId "${id}" and report to the user.`)
+          const finishedAt = stamp()
+          const message = String(error?.message ?? error)
+          const reply = run.cancelled ? `Run ${id} was cancelled.` : `[granny] Run ${id} failed: ${message}\nCall granny_status with runId "${id}" and report to the user.`
+          try {
+            writeStatus({ finishedAt, error: statusError(error, run.cancelled) })
+            journal('error', { error: message })
+            writeResult({ id, status: run.status, finishedAt, error: message })
+          } finally {
+            settle(reply, run.cancelled ? undefined : reply)
+          }
         })
         .catch(() => {})
 
       return `granny run ${id} started on ${input.repo} (${input.branch}), ${input.goal !== undefined ? 'planning only' : `${input.stages?.length ?? 0} stage(s)${config.parallel ? `, up to ${config.maxParallel} in parallel` : ''}`}, threshold ${config.threshold}, maxRounds ${config.maxRounds}.
 Journal: ${join(dir, 'journal.jsonl')}
-You will receive a message when it finishes. Use granny_status { runId: "${id}" } to check progress and granny_cancel to stop it. Do not poll in a loop.`
+To wait in this turn, call granny_wait { runId: "${id}" }; otherwise end your turn - the finish message starts a new one. Never write your own watcher, sleep or poll loop on the run files. Use granny_status { runId: "${id}" } for progress and granny_cancel to stop it.${planReviewNotice(input, config)}${watch === 'full' ? NAVIGATOR_SENTENCE : ''}${overridesNotice(layers, 'omp')}`
     }
 
     pi.registerTool({
@@ -475,12 +604,128 @@ You will receive a message when it finishes. Use granny_status { runId: "${id}" 
       loadMode: 'essential',
       async execute(_id, params: { runId?: string; repo?: string }) {
         try {
-          return text(runStatus(runs, params.runId, params.repo))
+          const status = runStatus(runs, params.runId, params.repo)
+          const dir = runDir(runs, params.runId, params.repo)
+          const run = [...runs.values()].find(r => r.dir === dir && r.status === 'running')
+          return text(run ? `${status}\n\nlive (this omp process):\n${run.live.lines(Number.POSITIVE_INFINITY).join('\n')}` : status)
         } catch (e) {
           return text(`granny_status failed: ${(e as Error).message}`)
         }
       },
     })
+    pi.registerTool({
+      name: 'granny_wait',
+      label: 'granny wait',
+      description: `granny-workflow: wait in this turn until a granny run ends and return its result, or return when timeoutSeconds (default ${WAIT_DEFAULT_SECONDS}) pass - use it instead of your own watcher, sleep or poll loop on the run files.`,
+      parameters: {
+        type: 'object',
+        properties: {
+          runId: { type: 'string' },
+          timeoutSeconds: { type: 'number', description: `Seconds to wait while the run is still going, 1 to ${WAIT_MAX_SECONDS}; default ${WAIT_DEFAULT_SECONDS}` },
+        },
+        required: ['runId'],
+      },
+      loadMode: 'essential',
+      interruptible: true,
+      async execute(_id, params: { runId: string; timeoutSeconds?: number }, signal) {
+        const run = runs.get(params.runId)
+        if (!run) {
+          return text(`No granny run "${params.runId}" in this omp process. granny_wait waits only for a run started in this process - the run table is in memory; call granny_status({ repo }) to read a run's files.`)
+        }
+        if (run.reply !== undefined) return text(run.reply)
+        const stopped = `Stopped waiting; run ${run.id} is still running.`
+        if (signal?.aborted) return text(stopped)
+        const seconds = waitSeconds(params.timeoutSeconds)
+        return new Promise<ToolResult>(resolve => {
+          const done = (reply: string) => {
+            clearTimeout(timer)
+            signal?.removeEventListener('abort', onAbort)
+            run.waiters.delete(done)
+            resolve(text(reply))
+          }
+          const onAbort = () => done(stopped)
+          const timer = setTimeout(
+            () => done(`Run ${run.id} is still running after ${seconds} s. Call granny_wait again to keep waiting, or end your turn - the finish message will start a new one.`),
+            seconds * 1000,
+          )
+          run.waiters.add(done)
+          signal?.addEventListener('abort', onAbort, { once: true })
+        })
+      },
+    })
+    const say = (ctx: any, message: string) => {
+      try {
+        if (ctx?.hasUI === true) ctx.ui.notify(message, 'info')
+        else pi.sendMessage({ customType: 'granny-workflow', content: message, display: true }, { triggerTurn: false })
+      } catch {}
+    }
+
+    const watchRun = async (args: string, ctx: any) => {
+      const arg = args.trim()
+      if (arg === 'off' || arg === 'on') {
+        shared.hidden = arg === 'off'
+        for (const run of runs.values()) if (run.status === 'running') run.live.setVisible(!shared.hidden)
+        return say(ctx, shared.hidden ? 'granny: the run panel is hidden in this session - /granny on shows it again.' : 'granny: the run panel is shown in this session.')
+      }
+      const all = [...runs.values()]
+      const run = arg ? runs.get(arg) : (all.filter(r => r.status === 'running').at(-1) ?? all.at(-1))
+      if (!run) return say(ctx, arg ? `granny: no run "${arg}" in this omp process - /granny watches the runs started here.` : 'granny: no granny run in this omp process yet.')
+      if (run.watch !== 'full') {
+        return say(ctx, `granny: watching is off for run ${run.id} (watch: "${run.watch}") - set "watch": "full" in granny.config.json or the run's config to log each role and watch it with /granny.`)
+      }
+      const tui = ctx?.hasUI === true && typeof ctx.ui?.custom === 'function' && (ctx.mode === undefined || ctx.mode === 'tui')
+      if (!tui) {
+        const roles = run.live.roles
+        if (!roles.length) return say(ctx, `granny: run ${run.id} has started no role yet.`)
+        return say(ctx, [`granny run ${run.id} - event log per role:`, ...roles.map(r => `  ${r.info.label} (${r.info.role}): ${r.info.log}`)].join('\n'))
+      }
+      if (shared.navigating) return
+      shared.navigating = true
+      let navigator: Navigator | undefined
+      try {
+        await ctx.ui.custom(
+          (tuiHost: any, theme: unknown, keys: any, done: (value: undefined) => void) =>
+            (navigator = new Navigator({
+              runs: () => [...runs.values()].filter(r => r.watch === 'full'),
+              runId: run.id,
+              tui: tuiHost,
+              theme,
+              keys,
+              done: () => done(undefined),
+              now,
+              tickMs: renderEveryMs,
+            })),
+          { overlay: true, overlayOptions: OVERLAY },
+        )
+      } finally {
+        navigator?.dispose()
+        shared.navigating = false
+      }
+    }
+
+    pi.registerCommand?.('granny', {
+      description: WATCH_HELP,
+      getArgumentCompletions: prefix => {
+        const items = ['off', 'on', ...runs.keys()].filter(v => v.startsWith(prefix)).map(value => ({ value, label: value }))
+        return items.length ? items : null
+      },
+      handler: async (args, ctx) => {
+        try {
+          await watchRun(args ?? '', ctx)
+        } catch (e) {
+          say(ctx, `granny: /granny failed: ${(e as Error)?.message ?? e}`)
+        }
+      },
+    })
+    try {
+      pi.registerShortcut?.('alt+w', {
+        description: 'granny-workflow: open the run navigator',
+        handler: ctx => {
+          void watchRun('', ctx).catch(() => {})
+        },
+      })
+    } catch {}
+
     pi.registerTool({
       name: 'granny_cancel',
       label: 'granny cancel',

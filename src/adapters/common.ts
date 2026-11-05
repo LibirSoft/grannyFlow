@@ -2,9 +2,11 @@ import { spawn, spawnSync, type ChildProcess } from 'node:child_process'
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { isAbsolute, join } from 'node:path'
-import { resolveConfig } from '../core/config'
+import { isCancelled } from '../core/cancel'
+import { type ConfigRole, type GrannyConfig, type ModelSpec, planReviewWarning, resolveConfig, resolveModel } from '../core/config'
+export { planReviewWarning } from '../core/config'
 import type { RunInput } from '../core/engine'
-import type { CommandResult, PlanResult, Recheck, ResultKind, RunResult } from '../core/types'
+import type { CommandResult, HostName, PlanResult, Recheck, ResultKind, RunResult } from '../core/types'
 
 // Shared by the in-process host adapters (opencode, omp): config files, preflight, run ids,
 // the completion summary, the granny_run input schema, the retry and cancel defaults and the command runner.
@@ -72,6 +74,11 @@ export function stageRepos(input: RunInput): string[] {
   return [...new Set((input.stages ?? []).flatMap(st => (typeof st.repo === 'string' && top(st.repo) !== primary ? [top(st.repo)] : [])))]
 }
 
+/** status.json's error: the stack of a failure, only "cancelled" for a cancel. */
+export function statusError(error: unknown, cancelled: boolean): string {
+  return cancelled || isCancelled(error) ? 'cancelled' : String((error as Error)?.stack ?? error)
+}
+
 export function stamp(): string {
   return new Date().toISOString()
 }
@@ -118,8 +125,90 @@ export function summarize(result: RunResult, worktree: boolean): string {
   return lines.join('\n')
 }
 
-export const RUN_TOOL_DESCRIPTION =
-  'granny-workflow: start the implement → review → judge → fix loop in the background and return a run id. The granny-workflow skill, when installed, describes the inputs and the preflight. Send only the fields you set: leave an optional field out instead of sending "", [], {} or a default - an empty value is not a missing one (stages[].checks [] runs no checks, stages[].after [] starts the stage at once).'
+/** The start reply's plan review warning, for a run that will review a plan; empty otherwise. */
+export function planReviewNotice(input: RunInput, config: { planReview: boolean; maxRounds: number }): string {
+  const reviewsPlan = config.planReview && (input.plan !== undefined || input.goal !== undefined) && !((input.fromStage ?? 1) > 1)
+  return reviewsPlan ? `\n${planReviewWarning(config.maxRounds)} Tell the user this in your next message.` : ''
+}
+
+/** The config files a run reads, in layer order, as the start reply and refusals name them. */
+export const layerSources = (repo: string): string[] => [globalConfigPath(), join(repo, 'granny.config.json'), "the run's config"]
+
+const AGENT_ROLES: ConfigRole[] = ['granny', 'helper', 'planner', 'implementer', 'judge']
+const isObject = (v: unknown): v is Record<string, any> => !!v && typeof v === 'object' && !Array.isArray(v)
+
+/**
+ * The role and agent-reviewer models this host cannot run, one line each, checked at launch instead of at the
+ * role's first call. `problem` says what is wrong with a model, given whether it was keyed to this host.
+ */
+export function hostModelErrors(
+  config: GrannyConfig,
+  layers: unknown[],
+  host: Exclude<HostName, 'claude-code'>,
+  problem: (model: string, keyed: boolean) => string | undefined,
+  sources: string[],
+): string[] {
+  const from = (set: (layer: Record<string, any>) => boolean) => {
+    for (let i = layers.length - 1; i >= 0; i--) {
+      const layer = layers[i]
+      if (isObject(layer) && set(layer)) return ` (from ${sources[i] ?? `config layer ${i + 1}`})`
+    }
+    return ''
+  }
+  const check = (what: string, spec: ModelSpec | undefined, where: string): string[] => {
+    const model = resolveModel(spec, host)
+    const wrong = model === undefined ? undefined : problem(model, typeof spec !== 'string')
+    if (!wrong) return []
+    const claude = typeof spec === 'string' ? spec : (spec?.['claude-code'] ?? model)
+    return [`${what} "${model}"${where} - ${wrong}; give a host-keyed model, e.g. { "claude-code": "${claude}", "${host}": "<provider/model>" }`]
+  }
+  const roles = AGENT_ROLES.flatMap(role =>
+    check(`roles.${role}.model:`, config.roles[role].model, from(l => isObject(l.roles) && isObject(l.roles[role]) && l.roles[role].model !== undefined)),
+  )
+  const reviewers = config.reviewers.flatMap((rv, i) => (rv.engine === 'agent' ? check(`reviewers[${i}] "${rv.name}": model`, rv.model, from(l => Array.isArray(l.reviewers))) : []))
+  return [...roles, ...reviewers]
+}
+
+const USER_SETTINGS =
+  "roles.*.model, roles.*.effort, reviewers, threshold, maxRounds and checks come from the user's config files: override them in config only when the user asked for that change in this conversation. If a provider limit or error blocks the run, stop and ask the user which model to use instead of switching models yourself."
+
+export const RUN_TOOL_DESCRIPTION = `granny-workflow: start the implement → review → judge → fix loop in the background and return a run id. The granny-workflow skill, when installed, describes the inputs and the preflight. Send only the fields you set: leave an optional field out instead of sending "", [], {} or a default - an empty value is not a missing one (stages[].checks [] runs no checks, stages[].after [] starts the stage at once). Set config planReview only when the user asked for a plan review in this request - it costs many tokens and much time. ${USER_SETTINGS}`
+
+const shown = (value: unknown): string => {
+  if (value === undefined) return 'default'
+  if (typeof value === 'string') return value
+  return JSON.stringify(value)
+}
+
+const reviewersText = (list: GrannyConfig['reviewers'], host: HostName) =>
+  list.map(rv => `${rv.name} (${[rv.engine, resolveModel(rv.model, host)].filter(Boolean).join(', ')})`).join(', ')
+
+/** The start reply's line naming what the run's own config changed from the config files; empty when it changed nothing. */
+export function overridesNotice(layers: unknown[], host: HostName): string {
+  if (layers.at(-1) === undefined) return ''
+  const after = resolveConfig(layers, host)
+  let before: GrannyConfig
+  try {
+    before = resolveConfig(layers.slice(0, -1), host)
+  } catch {
+    before = resolveConfig([], host)
+  }
+  const changes: string[] = []
+  const note = (key: string, now: string, was: string) => {
+    if (now !== was) changes.push(`${key} ${now} (config: ${was})`)
+  }
+  for (const role of Object.keys(after.roles) as ConfigRole[]) {
+    note(`roles.${role}.model`, shown(resolveModel(after.roles[role].model, host)), shown(resolveModel(before.roles[role].model, host)))
+    note(`roles.${role}.effort`, shown(after.roles[role].effort), shown(before.roles[role].effort))
+  }
+  for (const key of Object.keys(after) as Array<keyof GrannyConfig>) {
+    if (key === 'roles') continue
+    if (key === 'reviewers') note(key, reviewersText(after.reviewers, host), reviewersText(before.reviewers, host))
+    else if (key === 'checks') note(key, after.checks.map(c => c.name).join(', ') || 'none', before.checks.map(c => c.name).join(', ') || 'none')
+    else note(key, shown(after[key]), shown(before[key]))
+  }
+  return changes.length ? `\noverrides: ${changes.join(', ')} - show this line to the user in your next message; they did not set these values in their config files.` : ''
+}
 
 const isEmpty = (v: unknown) => v === '' || (Array.isArray(v) && !v.length) || (!!v && typeof v === 'object' && !Array.isArray(v) && !Object.keys(v).length)
 
@@ -171,7 +260,7 @@ export const RUN_INPUT_SCHEMA = {
     plan: {
       type: 'array',
       items: { type: 'string' },
-      description: 'Absolute paths of the plan files (with goal: where the planner writes the plan). Every agent reads them; with config planReview on (off by default) the reviewers review them before stage 1 and the implementer fixes them in place, uncommitted',
+      description: 'Absolute paths of the plan files (with goal: where the planner writes the plan). Every agent reads them; with config planReview on the reviewers review them before stage 1 and the implementer fixes them in place, uncommitted. planReview is off by default: set it only when the user explicitly asked for a plan review in this request - every round is a review + judge + fix and costs many tokens and much time',
     },
     stages: {
       type: 'array',
@@ -198,7 +287,11 @@ export const RUN_INPUT_SCHEMA = {
       },
     },
     fromStage: { type: 'number', description: 'Only to resume an interrupted run: 1-based stage to resume from; earlier stages are skipped. Leave it out on a new run' },
-    config: { type: 'object', additionalProperties: true, description: 'Per-run overrides of granny.config.json (same shape)' },
+    config: {
+      type: 'object',
+      additionalProperties: true,
+      description: `Per-run overrides of granny.config.json (same shape). planReview is off by default: set it only when the user explicitly asked for a plan review in this request - it costs many tokens and much time. ${USER_SETTINGS}`,
+    },
   },
   required: ['repo', 'branch'],
 }
@@ -210,6 +303,38 @@ export interface RetryPolicy {
 
 export interface HostOptions extends RetryPolicy {
   killGraceMs: number
+  /** How often a running command journals a heartbeat. */
+  heartbeatMs: number
+}
+
+export const HEARTBEAT_MS = 60_000
+
+interface IntervalTimers {
+  setInterval(fn: () => void, ms: number): unknown
+  clearInterval(handle: unknown): void
+}
+
+const intervals: IntervalTimers = {
+  setInterval: (fn, ms) => setInterval(fn, ms),
+  clearInterval: handle => clearInterval(handle as ReturnType<typeof setInterval>),
+}
+
+/**
+ * Runs `work`, calling `beat` every `everyMs` until it settles: a command journals one entry when it starts and
+ * nothing while it runs, and a run view would otherwise take a long check for a dead run.
+ */
+export async function withHeartbeat<T>(work: () => Promise<T>, beat: () => void, everyMs: number, timers: IntervalTimers = intervals): Promise<T> {
+  const handle = timers.setInterval(() => {
+    try {
+      beat()
+    } catch {}
+  }, everyMs)
+  ;(handle as { unref?: () => void } | undefined)?.unref?.()
+  try {
+    return await work()
+  } finally {
+    timers.clearInterval(handle)
+  }
 }
 
 export const DEFAULT_DELAYS = [30_000, 120_000, 300_000, 600_000]
@@ -263,16 +388,19 @@ export function runCommand(command: string, cwd: string, signal: AbortSignal, ki
   })
 }
 
+/** The run directory granny_status reads: the run by id, else the latest run in `repo`. */
+export function runDir(runs: Map<string, { dir: string }>, runIdArg?: string, repo?: string): string | undefined {
+  if (runIdArg && runs.has(runIdArg)) return runs.get(runIdArg)!.dir
+  if (!repo) return undefined
+  const config = resolveConfig([readJson(globalConfigPath()), readJson(join(repo, 'granny.config.json'))])
+  const root = join(repo, config.workDir, 'runs')
+  const ids = existsSync(root) ? readdirSync(root).sort() : []
+  const pick = runIdArg ?? ids.at(-1)
+  return pick && ids.includes(pick) ? join(root, pick) : undefined
+}
+
 export function runStatus(runs: Map<string, { dir: string }>, runIdArg?: string, repo?: string): string {
-  let dir: string | undefined
-  if (runIdArg && runs.has(runIdArg)) dir = runs.get(runIdArg)!.dir
-  else if (repo) {
-    const config = resolveConfig([readJson(globalConfigPath()), readJson(join(repo, 'granny.config.json'))])
-    const root = join(repo, config.workDir, 'runs')
-    const ids = existsSync(root) ? readdirSync(root).sort() : []
-    const pick = runIdArg ?? ids.at(-1)
-    if (pick && ids.includes(pick)) dir = join(root, pick)
-  }
+  const dir = runDir(runs, runIdArg, repo)
   if (!dir) return 'No such granny run. Pass runId, or repo to see the latest run in that repo.'
   const read = (f: string) => (existsSync(join(dir!, f)) ? readFileSync(join(dir!, f), 'utf8') : '')
   const tail = read('journal.jsonl').trim().split('\n').slice(-40).join('\n')

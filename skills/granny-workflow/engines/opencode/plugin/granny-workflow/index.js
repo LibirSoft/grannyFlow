@@ -41,8 +41,12 @@ var DEFAULT_CONFIG = {
   ],
   checks: [],
   maxRepairs: 2,
-  readOnlyAgent: false
+  readOnlyAgent: false,
+  watch: "full"
 };
+function planReviewWarning(maxRounds) {
+  return `Plan review is on: before any code is written, every reviewer, the judge and the implementer go over the plan for up to ${maxRounds} round(s). Each round is a full review + judge + fix, so it uses many more tokens and can add a lot of time (tens of minutes per round on high-effort models).`;
+}
 var ROLES = ["granny", "helper", "planner", "implementer", "judge"];
 var TOP_KEYS = new Set(["$schema", "roles", "worktreeDir", ...Object.keys(DEFAULT_CONFIG).filter((k) => k !== "roles")]);
 var ROLE_KEYS = new Set(["model", "effort"]);
@@ -54,6 +58,7 @@ var ENGINES = ["auto", "codex", "codex-plugin", "agent", "command"];
 var PLUGIN_ENGINES = ["auto", "codex-plugin"];
 var CODEX_ENGINES = ["auto", "codex", "codex-plugin"];
 var MODES = ["review", "adversarial-review"];
+var WATCH_MODES = ["full", "panel", "off"];
 var NAME = /^[a-z0-9-]+$/;
 var isObject = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
 function resolveConfig(layers, host) {
@@ -228,6 +233,8 @@ function validate(c) {
     errors.push("aiAttribution must be a boolean");
   if (typeof c.readOnlyAgent !== "boolean")
     errors.push("readOnlyAgent must be a boolean");
+  if (!WATCH_MODES.includes(c.watch))
+    errors.push('watch must be "full", "panel" or "off"');
   if (!Array.isArray(c.rules) || !c.rules.every((r) => typeof r === "string"))
     errors.push("rules must be an array of strings");
   if (!isRepairs(c.maxRepairs))
@@ -301,6 +308,15 @@ function resolveModel(spec, host) {
     return spec;
   return spec[host];
 }
+
+// src/core/cancel.ts
+class GrannyCancelled extends Error {
+  constructor() {
+    super("cancelled");
+    this.name = "GrannyCancelled";
+  }
+}
+var isCancelled = (e) => e instanceof GrannyCancelled || typeof e === "object" && e !== null && e.name === "GrannyCancelled";
 
 // src/core/review.ts
 var MARKER = /^\s*[-*]\s*\[(P[0-3]|[A-Za-z]+)\](.*)$/;
@@ -1202,6 +1218,14 @@ var FINAL_REVIEW_PHASE = "Final review";
 var CHECKS_PHASE = "Checks";
 var TIMEOUT_PROBE = "if command -v timeout >/dev/null; then echo timeout; elif command -v gtimeout >/dev/null; then echo gtimeout; else exit 1; fi";
 var TIMEOUT_MISSING = /(^|[\s:])g?timeout: (command )?not found|command not found: g?timeout$/m;
+var EXIT_MARK = /\[granny\] exit=(\d+)[ \t]*(?:\r?\n|$)/g;
+var markExit = (command) => `( ${command} ) 2>&1; echo "[granny] exit=$?"`;
+function exitMarked(output) {
+  const last = [...output.matchAll(EXIT_MARK)].at(-1);
+  if (!last)
+    return;
+  return { code: Number(last[1]), output: output.slice(0, last.index) + output.slice(last.index + last[0].length) };
+}
 var saidSomething = (d) => typeof d === "string" && d.trim() && !/^\s*(none|n\/a|-|no deviations)?\.?\s*$/i.test(d) ? d : undefined;
 var slug = (s) => s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "stage";
 var trimPath = (s) => s.replace(/\/+$/, "") || "/";
@@ -1313,7 +1337,24 @@ async function runGranny(host, input) {
     const theirs = specs.filter((st) => repoOf(st) === repo).map(checksOf);
     return config.checks.filter((c) => theirs.some((list) => list.includes(c)));
   };
-  const call = async (role, kind, label, phase, prompt, access, rc, cwd) => host.agent({
+  const stopIfCancelled = () => {
+    if (host.cancelled?.())
+      throw new GrannyCancelled;
+  };
+  const guarded = async (start) => {
+    stopIfCancelled();
+    let r;
+    try {
+      r = await start();
+    } catch (e) {
+      stopIfCancelled();
+      throw e;
+    }
+    stopIfCancelled();
+    return r;
+  };
+  const run = (script, cwd) => guarded(() => host.run(script, cwd));
+  const call = async (role, kind, label, phase, prompt, access, rc, cwd) => guarded(() => host.agent({
     role,
     kind,
     label,
@@ -1324,21 +1365,26 @@ async function runGranny(host, input) {
     effort: rc.effort,
     access,
     cwd
-  });
-  const helped = (label, r, missing) => {
-    const ran = Boolean(r?.ran);
+  }));
+  const reported = (r) => {
+    const said = exitMarked(String(r?.output ?? ""));
+    const ran = said ? said.code === 0 : Boolean(r?.ran);
     const note = typeof r?.note === "string" && r.note.trim() ? r.note : undefined;
+    return { ran, code: said ? said.code : r?.exitCode ?? (ran ? 0 : "?"), output: said ? said.output : String(r?.output ?? ""), ...note ? { note } : {} };
+  };
+  const helped = (label, r, missing) => {
+    const { ran, code, output, note } = reported(r);
     if (ran && note)
       host.log(`${label}: the helper's note, kept out of the command's output: ${note}`);
-    return { ran, code: r?.exitCode ?? (ran ? 0 : "?"), output: r ? `${String(r.output ?? "")}${!ran && note ? `
+    return { ran, code, output: r ? `${output}${!ran && note ? `
 ${note}` : ""}` : missing };
   };
   const shell = async (label, phase, script, cwd, ask = gitCommandPrompt) => {
     if (host.run) {
-      const r = await host.run(script, cwd);
+      const r = await run(script, cwd);
       return { ran: r.code === 0, code: r.code, output: r.output };
     }
-    const prompt = ask(cwd, label, `cd ${shellQuote(cwd)} && ${script}`);
+    const prompt = ask(cwd, label, markExit(`cd ${shellQuote(cwd)} && ${script}`));
     return helped(label, await call("helper", "command", label, phase, prompt, "write", config.roles.helper, cwd), `the ${label} runner returned nothing`);
   };
   const readHead = async (label, phase, cwd) => {
@@ -1365,13 +1411,7 @@ ${note}` : ""}` : missing };
   };
   const setUpWorktree = async (repo, branch, from, label, shared) => {
     const script = worktreeScript(config, branch, from, worktreePath(repo, branch, config.worktreeDir, shared));
-    let r;
-    if (host.run)
-      r = await shell(label, "Worktree", script, repo);
-    else {
-      const prompt = worktreeCommandPrompt(repo, branch, `cd ${shellQuote(repo)} && ${script}`);
-      r = helped(label, await call("helper", "command", label, "Worktree", prompt, "write", config.roles.helper, repo), "the worktree runner returned nothing");
-    }
+    const r = await shell(label, "Worktree", script, repo, (_cwd, _step, command) => worktreeCommandPrompt(repo, branch, command));
     const path = r.ran ? reportedWorktree(r.output) : undefined;
     if (!path)
       throw new Error(`worktree setup failed${repo === primary && branch === input.branch ? "" : ` for ${repo} ${branch}`} (exit ${r.code}): ${r.output.slice(-2000)}`);
@@ -1605,34 +1645,36 @@ the last repair's deviations: ${deviations}` : ""}`;
     let output;
     let note;
     if (host.run) {
-      const r = await host.run(plan.script, cwd);
+      const r = await run(plan.script, cwd);
       ran = r.code === 0;
       output = r.output;
       if (!ran)
         note = `review command exited ${r.code}: ${r.output.slice(-2000)}`;
     } else {
       const job = detachedReview(plan, config, stem, cwd);
-      const step = (label, prompt) => call("helper", "command", label, phase, prompt, "read-only", config.roles.helper, cwd);
-      const started = await step(`review ${tag}`, reviewStartPrompt(p, name, rv.name, job.start));
+      const step = async (label, prompt) => {
+        const r = await call("helper", "command", label, phase, prompt, "read-only", config.roles.helper, cwd);
+        return r ? reported(r) : undefined;
+      };
+      const started = await step(`review ${tag}`, reviewStartPrompt(p, name, rv.name, markExit(job.start)));
       if (!started?.ran) {
-        const said = String(started?.output ?? "");
-        return { ran: false, findings: [], note: started ? `review command did not start (exit ${started.exitCode ?? "?"})${started.note ? ` (${started.note})` : ""}: ${said.slice(-2000)}` : "review runner returned nothing" };
+        return { ran: false, findings: [], note: started ? `review command did not start (exit ${started.code})${started.note ? ` (${started.note})` : ""}: ${started.output.slice(-2000)}` : "review runner returned nothing" };
       }
       let done = false;
       for (let n = 1;n <= MAX_WAITS && !done; n++) {
-        const w = await step(`review ${tag} wait ${n}`, reviewWaitPrompt(p, name, rv.name, n, MAX_WAITS, WAIT_SECONDS / 60, job.wait));
-        done = lineShaped(String(w?.output ?? ""), /^done$/) !== undefined;
+        const w = await step(`review ${tag} wait ${n}`, reviewWaitPrompt(p, name, rv.name, n, MAX_WAITS, WAIT_SECONDS / 60, markExit(job.wait)));
+        done = lineShaped(w?.output ?? "", /^done$/) !== undefined;
       }
       if (!done) {
-        await step(`review ${tag} stop`, reviewStopPrompt(p, name, rv.name, job.stop));
+        await step(`review ${tag} stop`, reviewStopPrompt(p, name, rv.name, markExit(job.stop)));
         const limit = `${MAX_WAITS} waits of up to ${WAIT_SECONDS / 60} minutes (${MAX_WAITS * WAIT_SECONDS / 60} minutes)`;
         return { ran: false, findings: [], note: `review command still running after ${limit} - stopped it` };
       }
-      const r = await step(`review ${tag} read`, reviewReadPrompt(p, name, rv.name, job.read));
+      const r = await step(`review ${tag} read`, reviewReadPrompt(p, name, rv.name, markExit(job.read)));
       ran = Boolean(r?.ran);
-      output = String(r?.output ?? "");
+      output = r?.output ?? "";
       if (!ran)
-        note = r ? `review command exited ${r.exitCode ?? "?"}${r.note ? ` (${r.note})` : ""}: ${output.slice(-2000)}` : "review runner returned nothing";
+        note = r ? `review command exited ${r.code}${r.note ? ` (${r.note})` : ""}: ${output.slice(-2000)}` : "review runner returned nothing";
     }
     host.log(`${tag}: reviewer: ${plan.backend ?? reportedBackend(output) ?? "not reported"}`);
     if (!ran)
@@ -1674,6 +1716,8 @@ the last repair's deviations: ${deviations}` : ""}`;
     try {
       return await review(lane, rv, name, subject, round, n);
     } catch (e) {
+      if (isCancelled(e))
+        throw e;
       return { ran: false, findings: [], note: `reviewer call failed: ${String(e?.message ?? e)}` };
     }
   };
@@ -1858,6 +1902,7 @@ ${judgeRetryNote(problems)}`, "read-only", config.roles.judge, lane.cwd);
     if (fromStage > 1)
       return skipped("skipped", `plan review skipped - the run resumes from stage ${fromStage}`);
     host.phase(PLAN_PHASE);
+    host.log(planReviewWarning(config.maxRounds));
     const name = "plan review";
     const able = config.reviewers.filter((rv) => rv.engine !== "command" || rv.command?.includes("{prompt}"));
     const unable = config.reviewers.filter((rv) => !able.includes(rv));
@@ -2109,6 +2154,11 @@ ${note}` : note } : result;
   const undelivered = new Set;
   let failure;
   const nameOf = (i) => `${i + 1} (${specs[i].name || `stage ${i + 1}`})`;
+  const stageEvent = (i, event, outcome) => {
+    try {
+      host.stage?.({ number: i + 1, name: specs[i].name || `stage ${i + 1}`, event, ...outcome ? { outcome } : {} });
+    } catch {}
+  };
   for (let i = 0;i < fromStage - 1; i++) {
     results[i] = { stage: specs[i].name || `stage ${i + 1}`, outcome: "skipped", rounds: 0, residual: [], unresolved: [], history: [] };
     done.add(i);
@@ -2127,16 +2177,19 @@ ${note}` : note } : result;
           results[i] = { stage: specs[i].name || `stage ${i + 1}`, outcome: "skipped", rounds: 0, residual: [], unresolved: [], history: [], note };
           done.add(i);
           undelivered.add(i);
+          stageEvent(i, "end", "skipped");
           continue;
         }
         if (running.size)
           host.log(`${specs[i].name || `stage ${i + 1}`}: starting in parallel with ${[...running.keys()].map((j) => specs[j].name || `stage ${j + 1}`).join(", ")}`);
+        stageEvent(i, "start");
         running.set(i, startStage(i).then((r) => {
           results[i] = r;
           if (r.outcome === "no-changes" || r.outcome === "checks-failed")
             undelivered.add(i);
           done.add(i);
           running.delete(i);
+          stageEvent(i, "end", r.outcome);
         }, (error) => {
           failure ??= { error };
           running.delete(i);
@@ -2150,7 +2203,8 @@ ${note}` : note } : result;
   const unfinished = specs.map((_, i) => i).filter((i) => !done.has(i));
   if (failure) {
     const finished = [...done].sort((a, b) => a - b).filter((i) => i >= fromStage - 1);
-    host.log(`a stage failed - waited for the stages already running. Finished: ${finished.map(nameOf).join(", ") || "none"}. Not finished: ${unfinished.map(nameOf).join(", ")}`);
+    if (!isCancelled(failure.error))
+      host.log(`a stage failed - waited for the stages already running. Finished: ${finished.map(nameOf).join(", ") || "none"}. Not finished: ${unfinished.map(nameOf).join(", ")}`);
     throw failure.error;
   }
   if (unfinished.length)
@@ -2360,6 +2414,9 @@ function stageRepos(input) {
   const primary = top(input.repo);
   return [...new Set((input.stages ?? []).flatMap((st) => typeof st.repo === "string" && top(st.repo) !== primary ? [top(st.repo)] : []))];
 }
+function statusError(error, cancelled) {
+  return cancelled || isCancelled(error) ? "cancelled" : String(error?.stack ?? error);
+}
 function stamp() {
   return new Date().toISOString();
 }
@@ -2411,7 +2468,77 @@ function summarize(result, worktree) {
   return lines.join(`
 `);
 }
-var RUN_TOOL_DESCRIPTION = 'granny-workflow: start the implement \u2192 review \u2192 judge \u2192 fix loop in the background and return a run id. The granny-workflow skill, when installed, describes the inputs and the preflight. Send only the fields you set: leave an optional field out instead of sending "", [], {} or a default - an empty value is not a missing one (stages[].checks [] runs no checks, stages[].after [] starts the stage at once).';
+function planReviewNotice(input, config) {
+  const reviewsPlan = config.planReview && (input.plan !== undefined || input.goal !== undefined) && !((input.fromStage ?? 1) > 1);
+  return reviewsPlan ? `
+${planReviewWarning(config.maxRounds)} Tell the user this in your next message.` : "";
+}
+var layerSources = (repo) => [globalConfigPath(), join(repo, "granny.config.json"), "the run's config"];
+var AGENT_ROLES = ["granny", "helper", "planner", "implementer", "judge"];
+var isObject2 = (v) => !!v && typeof v === "object" && !Array.isArray(v);
+function hostModelErrors(config, layers, host, problem, sources) {
+  const from = (set) => {
+    for (let i = layers.length - 1;i >= 0; i--) {
+      const layer = layers[i];
+      if (isObject2(layer) && set(layer))
+        return ` (from ${sources[i] ?? `config layer ${i + 1}`})`;
+    }
+    return "";
+  };
+  const check = (what, spec, where) => {
+    const model = resolveModel(spec, host);
+    const wrong = model === undefined ? undefined : problem(model, typeof spec !== "string");
+    if (!wrong)
+      return [];
+    const claude = typeof spec === "string" ? spec : spec?.["claude-code"] ?? model;
+    return [`${what} "${model}"${where} - ${wrong}; give a host-keyed model, e.g. { "claude-code": "${claude}", "${host}": "<provider/model>" }`];
+  };
+  const roles = AGENT_ROLES.flatMap((role) => check(`roles.${role}.model:`, config.roles[role].model, from((l) => isObject2(l.roles) && isObject2(l.roles[role]) && l.roles[role].model !== undefined)));
+  const reviewers = config.reviewers.flatMap((rv, i) => rv.engine === "agent" ? check(`reviewers[${i}] "${rv.name}": model`, rv.model, from((l) => Array.isArray(l.reviewers))) : []);
+  return [...roles, ...reviewers];
+}
+var USER_SETTINGS = "roles.*.model, roles.*.effort, reviewers, threshold, maxRounds and checks come from the user's config files: override them in config only when the user asked for that change in this conversation. If a provider limit or error blocks the run, stop and ask the user which model to use instead of switching models yourself.";
+var RUN_TOOL_DESCRIPTION = `granny-workflow: start the implement \u2192 review \u2192 judge \u2192 fix loop in the background and return a run id. The granny-workflow skill, when installed, describes the inputs and the preflight. Send only the fields you set: leave an optional field out instead of sending "", [], {} or a default - an empty value is not a missing one (stages[].checks [] runs no checks, stages[].after [] starts the stage at once). Set config planReview only when the user asked for a plan review in this request - it costs many tokens and much time. ${USER_SETTINGS}`;
+var shown = (value) => {
+  if (value === undefined)
+    return "default";
+  if (typeof value === "string")
+    return value;
+  return JSON.stringify(value);
+};
+var reviewersText = (list, host) => list.map((rv) => `${rv.name} (${[rv.engine, resolveModel(rv.model, host)].filter(Boolean).join(", ")})`).join(", ");
+function overridesNotice(layers, host) {
+  if (layers.at(-1) === undefined)
+    return "";
+  const after = resolveConfig(layers, host);
+  let before;
+  try {
+    before = resolveConfig(layers.slice(0, -1), host);
+  } catch {
+    before = resolveConfig([], host);
+  }
+  const changes = [];
+  const note = (key, now, was) => {
+    if (now !== was)
+      changes.push(`${key} ${now} (config: ${was})`);
+  };
+  for (const role of Object.keys(after.roles)) {
+    note(`roles.${role}.model`, shown(resolveModel(after.roles[role].model, host)), shown(resolveModel(before.roles[role].model, host)));
+    note(`roles.${role}.effort`, shown(after.roles[role].effort), shown(before.roles[role].effort));
+  }
+  for (const key of Object.keys(after)) {
+    if (key === "roles")
+      continue;
+    if (key === "reviewers")
+      note(key, reviewersText(after.reviewers, host), reviewersText(before.reviewers, host));
+    else if (key === "checks")
+      note(key, after.checks.map((c) => c.name).join(", ") || "none", before.checks.map((c) => c.name).join(", ") || "none");
+    else
+      note(key, shown(after[key]), shown(before[key]));
+  }
+  return changes.length ? `
+overrides: ${changes.join(", ")} - show this line to the user in your next message; they did not set these values in their config files.` : "";
+}
 var isEmpty = (v) => v === "" || Array.isArray(v) && !v.length || !!v && typeof v === "object" && !Array.isArray(v) && !Object.keys(v).length;
 function dropPlaceholders(input) {
   if (!input || typeof input !== "object")
@@ -2461,7 +2588,7 @@ var RUN_INPUT_SCHEMA = {
     plan: {
       type: "array",
       items: { type: "string" },
-      description: "Absolute paths of the plan files (with goal: where the planner writes the plan). Every agent reads them; with config planReview on (off by default) the reviewers review them before stage 1 and the implementer fixes them in place, uncommitted"
+      description: "Absolute paths of the plan files (with goal: where the planner writes the plan). Every agent reads them; with config planReview on the reviewers review them before stage 1 and the implementer fixes them in place, uncommitted. planReview is off by default: set it only when the user explicitly asked for a plan review in this request - every round is a review + judge + fix and costs many tokens and much time"
     },
     stages: {
       type: "array",
@@ -2488,10 +2615,32 @@ var RUN_INPUT_SCHEMA = {
       }
     },
     fromStage: { type: "number", description: "Only to resume an interrupted run: 1-based stage to resume from; earlier stages are skipped. Leave it out on a new run" },
-    config: { type: "object", additionalProperties: true, description: "Per-run overrides of granny.config.json (same shape)" }
+    config: {
+      type: "object",
+      additionalProperties: true,
+      description: `Per-run overrides of granny.config.json (same shape). planReview is off by default: set it only when the user explicitly asked for a plan review in this request - it costs many tokens and much time. ${USER_SETTINGS}`
+    }
   },
   required: ["repo", "branch"]
 };
+var HEARTBEAT_MS = 60000;
+var intervals = {
+  setInterval: (fn, ms) => setInterval(fn, ms),
+  clearInterval: (handle) => clearInterval(handle)
+};
+async function withHeartbeat(work, beat, everyMs, timers = intervals) {
+  const handle = timers.setInterval(() => {
+    try {
+      beat();
+    } catch {}
+  }, everyMs);
+  handle?.unref?.();
+  try {
+    return await work();
+  } finally {
+    timers.clearInterval(handle);
+  }
+}
 var DEFAULT_DELAYS = [30000, 120000, 300000, 600000];
 var KILL_GRACE_MS = 5000;
 function signalGroup(child, name) {
@@ -2543,18 +2692,19 @@ cancelled` } : { code: code ?? 1, output }));
       signal.addEventListener("abort", cancel, { once: true });
   });
 }
-function runStatus(runs, runIdArg, repo) {
-  let dir;
+function runDir(runs, runIdArg, repo) {
   if (runIdArg && runs.has(runIdArg))
-    dir = runs.get(runIdArg).dir;
-  else if (repo) {
-    const config = resolveConfig([readJson(globalConfigPath()), readJson(join(repo, "granny.config.json"))]);
-    const root = join(repo, config.workDir, "runs");
-    const ids = existsSync(root) ? readdirSync(root).sort() : [];
-    const pick = runIdArg ?? ids.at(-1);
-    if (pick && ids.includes(pick))
-      dir = join(root, pick);
-  }
+    return runs.get(runIdArg).dir;
+  if (!repo)
+    return;
+  const config = resolveConfig([readJson(globalConfigPath()), readJson(join(repo, "granny.config.json"))]);
+  const root = join(repo, config.workDir, "runs");
+  const ids = existsSync(root) ? readdirSync(root).sort() : [];
+  const pick = runIdArg ?? ids.at(-1);
+  return pick && ids.includes(pick) ? join(root, pick) : undefined;
+}
+function runStatus(runs, runIdArg, repo) {
+  const dir = runDir(runs, runIdArg, repo);
   if (!dir)
     return "No such granny run. Pass runId, or repo to see the latest run in that repo.";
   const read = (f) => existsSync(join(dir, f)) ? readFileSync(join(dir, f), "utf8") : "";
@@ -2574,7 +2724,47 @@ ${result.length > 30000 ? result.slice(0, 30000) + `
 `);
 }
 
+// src/adapters/runview/format.ts
+function duration(ms) {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  if (s < 60)
+    return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60)
+    return `${m}m${String(s % 60).padStart(2, "0")}s`;
+  return `${Math.floor(m / 60)}h${String(m % 60).padStart(2, "0")}m`;
+}
+var ANSI = /\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[@-Z\\-_])/g;
+var CONTROL = /[\x00-\x08\x0b-\x1f\x7f]/g;
+var clean = (text) => text.replace(/\t/g, "  ").replace(ANSI, "").replace(CONTROL, "");
+
+// src/adapters/runview/outline.ts
+function runOutline(input, config) {
+  const kind = input.goal !== undefined ? "plan" : "implement";
+  const fromStage = input.fromStage ?? 1;
+  const stages = (input.stages ?? []).map((st, i) => ({
+    number: i + 1,
+    name: clean(st.name || `stage ${i + 1}`),
+    implement: st.implement !== false,
+    review: st.review !== false,
+    checks: (st.checks === undefined ? config.checks.length : st.checks.length) > 0
+  }));
+  return {
+    kind,
+    branch: clean(input.branch),
+    worktree: config.worktree,
+    planReview: config.planReview && (kind === "plan" || input.plan !== undefined && fromStage === 1),
+    finalReview: config.finalReview && stages.length > 1,
+    reviewers: config.reviewers.map((r) => clean(r.name)),
+    fromStage,
+    stages
+  };
+}
+
 // src/adapters/opencode/plugin.ts
+var modelText = (model) => model ? `${model.providerID}/${model.id}${model.variant ? `#${model.variant}` : ""}` : null;
+var norm = (dir) => typeof dir === "string" ? dir.replace(/\/+$/, "") : dir;
+var NAVIGATOR_HINT = "Tell the user: /granny or <leader>j in the TUI opens the run navigator (stages, agents, live activity).";
 var SHARED = Symbol.for("granny-workflow.state");
 var shared = globalThis[SHARED] ??= {
   runs: new Map,
@@ -2591,6 +2781,14 @@ function modelRef(spec) {
   }
   return { providerID: main.slice(0, slash), id: main.slice(slash + 1), ...variant ? { variant } : {} };
 }
+var opencodeModelProblem = (model) => {
+  try {
+    modelRef(model);
+    return;
+  } catch {
+    return 'opencode models are "provider/model[#variant]"';
+  }
+};
 function permissions(access) {
   const rules = [
     { action: "*", resource: "*", effect: "allow" },
@@ -2626,7 +2824,7 @@ var TRANSIENT_STATUS = new Set([429, 502, 503, 504, 529]);
 function isTransient(error) {
   return TRANSIENT_TYPES.has(error.type) || TRANSIENT_STATUS.has(error.status ?? 0) || /overloaded/i.test(error.message);
 }
-var createGrannyPlugin = ({ delays = DEFAULT_DELAYS, sleep = pause, killGraceMs = KILL_GRACE_MS } = {}) => ({
+var createGrannyPlugin = ({ delays = DEFAULT_DELAYS, sleep = pause, killGraceMs = KILL_GRACE_MS, heartbeatMs = HEARTBEAT_MS } = {}) => ({
   id: "granny-workflow",
   async setup(ctx) {
     const startRun = async (input, parentSession) => {
@@ -2642,6 +2840,11 @@ var createGrannyPlugin = ({ delays = DEFAULT_DELAYS, sleep = pause, killGraceMs 
         return `granny_run refused:
 - ${unknownChecks.join(`
 - `)}`;
+      const badModels = hostModelErrors(config, layers, "opencode", opencodeModelProblem, layerSources(input.repo));
+      if (badModels.length)
+        return `granny_run refused:
+- ${badModels.join(`
+- `)}`;
       const blockers = preflight(input.repo, input.branch, config.workDir, config.worktree);
       for (const repo of stageRepos(input))
         blockers.push(...preflight(repo, input.branch, config.workDir, config.worktree).map((b) => `${repo}: ${b}`));
@@ -2652,11 +2855,23 @@ var createGrannyPlugin = ({ delays = DEFAULT_DELAYS, sleep = pause, killGraceMs 
       const id = runId();
       const dir = join2(input.repo, config.workDir, "runs", id);
       mkdirSync2(dir, { recursive: true });
-      const run = { id, repo: input.repo, dir, status: "running", cancelled: false, abort: new AbortController, sessions: new Set };
+      const run = {
+        id,
+        repo: input.repo,
+        dir,
+        status: "running",
+        cancelled: false,
+        abort: new AbortController,
+        sessions: new Set,
+        parent: parentSession,
+        linked: true,
+        active: new Map
+      };
       runs.set(id, run);
       const journal = (type, data) => appendFileSync2(join2(dir, "journal.jsonl"), JSON.stringify({ t: stamp(), type, ...data }) + `
 `);
-      const writeStatus = (extra = {}) => writeFileSync(join2(dir, "status.json"), JSON.stringify({ id, status: run.status, repo: input.repo, branch: input.branch, ...extra }, null, 2));
+      const outline = runOutline(input, config);
+      const writeStatus = (extra = {}) => writeFileSync(join2(dir, "status.json"), JSON.stringify({ id, status: run.status, repo: input.repo, branch: input.branch, parent: parentSession, watch: config.watch, outline, ...extra }, null, 2));
       writeFileSync(join2(dir, "input.json"), JSON.stringify({ ...input, config: layers }, null, 2));
       writeStatus({ startedAt: stamp() });
       let parentModel;
@@ -2682,7 +2897,7 @@ When done, call the \`${tool}\` tool exactly once with your result. That call is
           await ctx.session.prompt({ sessionID: session, text });
           await ctx.session.wait({ sessionID: session });
           if (run.cancelled)
-            throw new Error("cancelled");
+            throw new GrannyCancelled;
           const got = submissions.get(session);
           if (got !== undefined) {
             const errors = checkShape(req.schema, got);
@@ -2702,7 +2917,7 @@ When done, call the \`${tool}\` tool exactly once with your result. That call is
               backoffs++;
               await sleep(backoffMs, run.abort.signal);
               if (run.cancelled)
-                throw new Error("cancelled");
+                throw new GrannyCancelled;
               text = `Your previous turn ended on a provider error (${error.type}${error.message ? `: ${error.message.slice(0, 300)}` : ""}). Continue the task where it stopped; when you are done, call \`${tool}\` exactly once with your result.`;
               continue;
             }
@@ -2713,40 +2928,104 @@ When done, call the \`${tool}\` tool exactly once with your result. That call is
         journal("agent-failed", { label: req.label, session });
         return null;
       };
+      const createRoleSession = async (req, model) => {
+        const base = {
+          title: `granny \xB7 ${req.label}`,
+          agent: "build",
+          ...model ? { model } : {},
+          permissions: permissions(req.access),
+          metadata: {
+            "granny-workflow": { run: id, dir, parent: parentSession, label: req.label, role: req.role, phase: req.phase, model: modelText(model) }
+          }
+        };
+        const make = async (input) => {
+          const session = await ctx.session.create(input);
+          run.sessions.add(session.id);
+          if (run.cancelled) {
+            run.sessions.delete(session.id);
+            throw new GrannyCancelled;
+          }
+          return session;
+        };
+        if (run.linked) {
+          let sessionID;
+          try {
+            const session = await make({ ...base, parentID: parentSession });
+            sessionID = session.id;
+            if (norm(session.location?.directory) === norm(req.cwd))
+              return { id: session.id, linked: true };
+            await ctx.session.move({ sessionID, directory: req.cwd });
+            await ctx.session.wait({ sessionID });
+            if (run.cancelled)
+              throw new GrannyCancelled;
+            const info = await ctx.session.get({ sessionID });
+            if (norm(info?.location?.directory) !== norm(req.cwd)) {
+              throw new Error(`session ${sessionID} is in ${info?.location?.directory} after the move, not in ${req.cwd}`);
+            }
+            return { id: session.id, linked: true };
+          } catch (e) {
+            if (sessionID !== undefined)
+              run.sessions.delete(sessionID);
+            if (isCancelled(e) || run.cancelled)
+              throw isCancelled(e) ? e : new GrannyCancelled;
+            if (run.linked) {
+              run.linked = false;
+              journal("link-failed", { label: req.label, error: String(e?.message ?? e) });
+            }
+            if (sessionID !== undefined) {
+              try {
+                await ctx.session.remove({ sessionID });
+              } catch {}
+            }
+          }
+        }
+        const session = await make({ ...base, location: { directory: req.cwd } });
+        return { id: session.id, linked: false };
+      };
       const host = {
         name: "opencode",
         async agent(req) {
           if (run.cancelled)
-            throw new Error("cancelled");
+            throw new GrannyCancelled;
           const tool = SUBMIT[req.kind];
           if (!tool)
             throw new Error(`no submit tool for result kind "${req.kind}"`);
           const model = modelRef(req.model) ?? parentModel;
-          const session = await ctx.session.create({
-            title: `granny \xB7 ${req.label}`,
-            agent: "build",
-            ...model ? { model } : {},
-            location: { directory: req.cwd },
-            permissions: permissions(req.access)
-          });
-          run.sessions.add(session.id);
-          journal("agent", { label: req.label, role: req.role, session: session.id, model: model ?? null });
+          const session = await createRoleSession(req, model);
+          journal("agent", { label: req.label, role: req.role, phase: req.phase, session: session.id, model: model ?? null, linked: session.linked, cwd: req.cwd });
+          run.active.set(session.id, { label: req.label, role: req.role, model: modelText(model), since: Date.now() });
+          const end = (outcome, error) => {
+            run.active.delete(session.id);
+            try {
+              journal("agent-end", { label: req.label, session: session.id, outcome, ...error !== undefined ? { error } : {} });
+            } catch {}
+          };
           try {
             if (run.cancelled)
-              throw new Error("cancelled");
-            return await converse(req, tool, session.id);
+              throw new GrannyCancelled;
+            const result = await converse(req, tool, session.id);
+            end(result === null ? "failed" : "done");
+            return result;
+          } catch (e) {
+            if (isCancelled(e))
+              end("cancelled");
+            else
+              end("failed", String(e?.message ?? e));
+            throw e;
           } finally {
             run.sessions.delete(session.id);
           }
         },
+        cancelled: () => run.cancelled,
         async run(command, cwd) {
           if (run.cancelled)
             return { code: 130, output: "cancelled" };
           journal("command", { command });
-          return runCommand(command, cwd, run.abort.signal, killGraceMs);
+          return withHeartbeat(() => runCommand(command, cwd, run.abort.signal, killGraceMs), () => journal("heartbeat", { command }), heartbeatMs);
         },
         log: (message) => journal("log", { message }),
-        phase: (title) => journal("phase", { title })
+        phase: (title) => journal("phase", { title }),
+        stage: ({ number, name, event, outcome }) => journal("stage", { number, name, event, ...outcome ? { outcome } : {} })
       };
       const notify = async (text) => {
         try {
@@ -2764,7 +3043,7 @@ ${summarize(result, config.worktree)}
 Call granny_status with runId "${id}" for the full result, verify load-bearing claims yourself, report to the user and wait. Do not push.`);
       }).catch(async (error) => {
         run.status = run.cancelled ? "cancelled" : "failed";
-        writeStatus({ finishedAt: stamp(), error: String(error?.stack ?? error) });
+        writeStatus({ finishedAt: stamp(), error: statusError(error, run.cancelled) });
         journal("error", { error: String(error?.message ?? error) });
         if (!run.cancelled)
           await notify(`[granny] Run ${id} failed: ${String(error?.message ?? error)}
@@ -2772,7 +3051,8 @@ Call granny_status with runId "${id}" and report to the user.`);
       });
       return `granny run ${id} started on ${input.repo} (${input.branch}), ${input.goal !== undefined ? "planning only" : `${input.stages?.length ?? 0} stage(s)${config.parallel ? `, up to ${config.maxParallel} in parallel` : ""}`}, threshold ${config.threshold}, maxRounds ${config.maxRounds}.
 Journal: ${join2(dir, "journal.jsonl")}
-You will receive a message when it finishes. Use granny_status { runId: "${id}" } to check progress and granny_cancel to stop it. Do not poll in a loop.`;
+You will receive a message when it finishes. Use granny_status { runId: "${id}" } to check progress and granny_cancel to stop it. Do not poll in a loop.${config.watch === "full" ? `
+${NAVIGATOR_HINT}` : ""}${planReviewNotice(input, config)}${overridesNotice(layers, "opencode")}`;
     };
     await ctx.tool.transform((editor) => {
       for (const [kind, name] of Object.entries(SUBMIT)) {
@@ -2807,7 +3087,16 @@ You will receive a message when it finishes. Use granny_status { runId: "${id}" 
         },
         execute: async (value) => {
           try {
-            return { content: runStatus(runs, value.runId, value.repo) };
+            const status = runStatus(runs, value.runId, value.repo);
+            const dir = runDir(runs, value.runId, value.repo);
+            const run = [...runs.values()].find((r) => r.dir === dir && r.status === "running");
+            const now = Date.now();
+            const active = [...run?.active ?? []].map(([session, a]) => `- ${a.label} (${a.role}${a.model ? `, ${a.model}` : ""}) session ${session} \xB7 ${duration(now - a.since)}`);
+            return { content: active.length ? `${status}
+
+active roles:
+${active.join(`
+`)}` : status };
           } catch (e) {
             return { content: `granny_status failed: ${e.message}` };
           }
@@ -2832,11 +3121,13 @@ You will receive a message when it finishes. Use granny_status { runId: "${id}" 
 });
 var plugin_default = createGrannyPlugin();
 export {
+  NAVIGATOR_HINT,
   createGrannyPlugin,
   plugin_default as default,
   globalConfigPath,
   isTransient,
   modelRef,
+  modelText,
   pause,
   permissions,
   preflight,

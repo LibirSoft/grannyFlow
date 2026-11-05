@@ -1,7 +1,8 @@
-import { describe, expect, it } from 'bun:test'
+import { describe, expect, it, mock } from 'bun:test'
 import { readFileSync } from 'node:fs'
+import { builtinModules } from 'node:module'
 import { join } from 'node:path'
-import { buildClaudeCode, buildOmp, buildOpencode, buildReadOnlyGuard } from '../scripts/build'
+import { buildClaudeCode, buildOmp, buildOpencode, buildOpencodeTui, buildReadOnlyGuard } from '../scripts/build'
 import { CODEX_REVIEWER, finding, review } from './fake-host'
 
 const root = join(import.meta.dir, '..')
@@ -66,15 +67,16 @@ describe('claude-code workflow.js', () => {
     const setup = calls[0]!
     expect(setup.opts).toMatchObject({ label: 'worktree', phase: 'Worktree', model: 'haiku', effort: 'low' })
     expect(setup.prompt.startsWith('READ-ONLY ROLE')).toBe(false)
-    expect(setup.prompt).toContain('\ncd /r && ex="$(git rev-parse --git-common-dir)/info/exclude"')
+    expect(setup.prompt).toContain('\n( cd /r && ex="$(git rev-parse --git-common-dir)/info/exclude"')
+    expect(setup.prompt).toContain(' ) 2>&1; echo "[granny] exit=$?"\n')
     expect(setup.prompt).toContain('wt=/r-worktrees/feat-x;')
     expect(calls[1]!.opts).toMatchObject({ label: 'head one', phase: 'Implement', model: 'haiku', effort: 'low' })
-    expect(calls[1]!.prompt).toContain('\ncd /r-worktrees/feat-x && git rev-parse --verify HEAD\n')
+    expect(calls[1]!.prompt).toContain('\n( cd /r-worktrees/feat-x && git rev-parse --verify HEAD ) 2>&1; echo "[granny] exit=$?"\n')
     const impl = calls[2]!
     expect(impl.opts).toMatchObject({ label: 'implement one', phase: 'Implement', model: 'opus', effort: 'high' })
     expect(impl.prompt).toContain('Working repo: /r-worktrees/feat-x, branch `feat/x`')
     const runner = calls.find(c => c.opts.label === 'review one r1 codex')!
-    expect(runner.prompt).toContain('\ncd /r-worktrees/feat-x && if [ -s .granny/review-one-r1-codex.pid ]')
+    expect(runner.prompt).toContain('\n( cd /r-worktrees/feat-x && if [ -s .granny/review-one-r1-codex.pid ]')
     expect(calls.filter(c => c.opts.label.startsWith('review one r1 codex')).map(c => c.opts.label)).toEqual(['review one r1 codex', 'review one r1 codex wait 1', 'review one r1 codex read'])
     expect(runner.prompt.startsWith('READ-ONLY ROLE')).toBe(true)
     expect(runner.opts).toMatchObject({ model: 'haiku', effort: 'low' })
@@ -145,8 +147,39 @@ describe('opencode plugin bundle', () => {
     expect(readFileSync(join(root, 'skills/granny-workflow/engines/opencode/plugin/granny-workflow/index.js'), 'utf8')).toBe(built)
   })
 
+  it('bundles no module of the omp adapter, in the server plugin or the TUI plugin', () => {
+    for (const file of ['index.js', 'tui.js']) {
+      const text = readFileSync(join(root, 'skills/granny-workflow/engines/opencode/plugin/granny-workflow', file), 'utf8')
+      expect(text.match(/^\/\/ src\/adapters\/omp\/.*$/gm) ?? []).toEqual([])
+    }
+  })
+
   it('default-exports a v2 plugin definition', async () => {
     const mod = await import(join(root, 'skills/granny-workflow/engines/opencode/plugin/granny-workflow/index.js'))
+    expect(mod.default.id).toBe('granny-workflow')
+    expect(typeof mod.default.setup).toBe('function')
+  })
+})
+
+describe('opencode TUI plugin bundle', () => {
+  const bundle = join(root, 'skills/granny-workflow/engines/opencode/plugin/granny-workflow/tui.js')
+
+  it('is committed in sync with src/', async () => {
+    const built = await buildOpencodeTui()
+    expect(readFileSync(bundle, 'utf8')).toBe(built)
+  })
+
+  it('imports only the TUI runtime and node built-ins', () => {
+    const text = readFileSync(bundle, 'utf8')
+    const specifiers = [...text.matchAll(/^\s*import\s+(?:[^'"]*?\sfrom\s+)?["']([^"']+)["']/gm)].map(m => m[1]!)
+    expect(specifiers.length).toBeGreaterThan(0)
+    expect(specifiers.filter(s => !s.startsWith('node:') && !builtinModules.includes(s)).sort()).toEqual(['@opentui/solid', 'solid-js'])
+  })
+
+  it('default-exports a TUI plugin definition when the runtime resolves', async () => {
+    mock.module('@opentui/solid', () => ({ createElement: () => ({}), createTextNode: () => ({}), insertNode() {}, insert() {}, setProp() {} }))
+    mock.module('solid-js', () => ({ createSignal: (v: unknown) => [() => v, () => v], onCleanup() {} }))
+    const mod = await import(bundle)
     expect(mod.default.id).toBe('granny-workflow')
     expect(typeof mod.default.setup).toBe('function')
   })
@@ -176,6 +209,6 @@ describe('omp extension bundle', () => {
       delete process.env.GRANNY_OMP_CHILD
     }
     expect(tools).toEqual(['granny_submit_findings'])
-    expect(events).toEqual(['tool_call'])
+    expect(events).toEqual(['tool_call', 'session_start'])
   })
 })

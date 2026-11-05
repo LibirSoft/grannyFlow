@@ -22,7 +22,7 @@ Layers, later wins:
 | `threshold` | `70` | a finding whose computed priority is **strictly above** this is sent back to the implementer (rule 7 of [the decision table](#the-decision-table)); P0/P1 (also `critical`/`high`) skip the judge and are always sent, and so is a finding the judge did not classify, also on its one retry. |
 | `alwaysFix` | `["critical", "major"]` | impact classes the implementer always fixes, whatever their likelihood, fix cost and priority (rule 6 of [the decision table](#the-decision-table)); `[]`: only `threshold` decides. Values: `critical`, `major`, `moderate`, `minor`, `none` |
 | `maxRounds` | `4` | review rounds per stage, for the plan review and for the final review; the stage ends `round-cap` after the last one. Check repairs are not review rounds and do not count |
-| `planReview` | `false` | `true`: with a `plan` in the run's input, review the plan files before stage 1 - see [Plan review](#plan-review). It costs extra tokens; no effect without `plan` |
+| `planReview` | `false` | `true`: with a `plan` in the run's input, review the plan files before stage 1 - see [Plan review](#plan-review). Each round is a full review + judge + fix, so it uses many more tokens and makes the run much longer (`maxRounds` caps the rounds); set it only when the user asks for a plan review. No effect without `plan` |
 | `finalReview` | `true` | after the last stage, review each repo's whole branch (`<base>...HEAD`) once more for cross-stage duplication, inconsistencies and merge resolutions - see [Final review](#final-review). Skipped for a repo with one stage and no lane merge; `false`: never |
 | `parallel` | `true` | run independent stages at the same time - stages in different repos, and stages whose `after` frees them from the one before; a same-repo stage runs in its own worktree and is merged back - see [Parallel stages](#parallel-stages). `false`: one stage at a time, in list order |
 | `maxParallel` | `3` | the most stages running at once (each runs its own reviewers too) |
@@ -36,6 +36,7 @@ Layers, later wins:
 | `language` | `"English"` | language of code, comments, commits and the PR body; the planner writes the plan and the `agent` reviewers their findings in it |
 | `aiAttribution` | `false` | `false` forbids Co-Authored-By / "Generated with" lines and the final check greps for them |
 | `readOnlyAgent` | `false` | Claude Code only: `true` runs `agent` reviewers, the judge and the extraction agent as the `granny-readonly` agent type (Read, Grep, Glob and Bash; no Edit or Write) with a PreToolUse hook that lets their Bash run only read-only git and shell commands - see [Read-only roles](#read-only-roles). Install the agent and the hook first; without the agent the run stops at the first reviewer with `agent type 'granny-readonly' not found`. opencode enforces read-only with permissions and ignores it |
+| `watch` | `"full"` | omp and opencode: how much of a running run you can watch - `"full"` everything: on omp the live panel, an event log per role and the run navigator, on opencode the sidebar section, the prompt-footer chip, toasts and the `/granny` navigator; `"panel"` the omp panel, or the opencode sidebar section and chip, only; `"off"` none of them. The run itself is the same in every mode - see [Watching a run](#watching-a-run). Claude Code accepts it and ignores it |
 | `rules` | red-green tests; code comments default none | extra house rules appended to every agent prompt that carries the run's header (the implementer's, the planner's and an `agent` reviewer's); `[]` removes them |
 | `$schema` | | accepted and ignored, so an editor can point a config file at a JSON schema of your own; granny ships none |
 
@@ -54,8 +55,10 @@ A role's or a reviewer's `model` is either one string for every host, or an obje
 
 - **Claude Code** passes it to `agent({ model })`: `opus`, `sonnet`, `haiku`, or a model ID the session accepts. `effort` (`low`, `medium`, `high`, `xhigh`, `max`) is passed as the agent's reasoning effort.
 - **opencode** needs `provider/model`, optionally `#variant` (`anthropic/claude-sonnet-5-5#high`); list them with `opencode models`. `effort` is ignored - use the variant suffix. A role with no model uses the model of the session that called `granny_run`.
-- **omp** takes what `omp --model` takes: `provider/id` (exact, `anthropic/claude-sonnet-5-5`), a fuzzy id (`opus`) or a model role from the omp settings (`slow`); list them with `omp models`. `effort` is passed as `--thinking <effort>`. A role with no model uses the model of the session that called `granny_run`.
+- **omp** takes what `omp --model` takes: `provider/id` (exact, `anthropic/claude-sonnet-5-5`), a fuzzy id (keyed to omp, `{ "omp": "opus" }`) or a model role from the omp settings (`slow`); list them with `omp models`. `effort` is passed as `--thinking <effort>`. A role with no model uses the model of the session that called `granny_run`.
 - **Cursor** reads no config; set `model:` in the subagent files (see cursor.md).
+
+On opencode and omp `granny_run` refuses a run with a model the host cannot run, before anything starts, with one line per entry, the config layer it came from and the fix. A Claude Code alias (`sonnet`, `opus`, ...) written as one string for every host is refused on both, so key it to `claude-code` in a config you share between hosts. Claude Code takes its aliases.
 
 A host key that is missing means "inherit" on that host. Reviewers take `model` and `effort` from their own entry, never from a role.
 
@@ -157,7 +160,7 @@ A failed gate ends the stage `checks-failed` without a review (or ends its revie
 
 The labels are `check <stage> <check>` (`check final review <check>` for the `final` gate, `check pr-ready check <check>` for the `pr-ready` one), `status <stage> <gate>` and `commit <stage> <gate> #<n>` for the clean-tree step, the logs `<stage>: check tests failed (exit 1) - repair 1/2` and `<stage>: checks green after 1 repair (implement: tests)`. The result records every run: `stages[].checks`, and the `final` gate's, the final review's and the `pr-ready` one's in `checks` (and `repos[].checks`), each `{ at, attempt, head?, results: [{ name, passed, code, metric?, note? }] }` - `head` is the SHA of HEAD right after the checks ran (`git rev-parse --verify HEAD`, missing when it could not be read); outputs are not kept. A `pr-ready` run also sets `recheck: { passed, note? }` (and `repos[].recheck`).
 
-On **opencode** and **omp** granny executes the command itself. On **Claude Code** the Workflow script has no shell, so a helper agent (role `helper`, `roles.helper`'s model and effort) runs it and reports the exit code and output; the check is only as reliable as that report. When the helper returns nothing or no exit code, granny runs the check once more; failing again, the gate ends `checks-failed` with the note `check runner failed` (code `?`) and no repair - the code may be fine, so the implementer is not asked to change it. On **Cursor** the session runs the checks itself.
+On **opencode** and **omp** granny executes the command itself. On **Claude Code** the Workflow script has no shell, so a helper agent (role `helper`, `roles.helper`'s model and effort) runs it and reports the exit code and output; the check is only as reliable as that report. Since Claude Code's Bash tool shows no exit code when a command succeeds, every command a helper runs ends with `echo "[granny] exit=$?"` (as `( cd <dir> && <command> ) 2>&1; echo "[granny] exit=$?"`), and granny takes the exit code from the last such line of the output over what the helper reports, and drops that line from the output; the git reads, the status reads, the timeout probe, the worktree setup, the merge steps and the start, wait, read and stop steps of a detached review command run the same way. When the helper returns nothing, or neither that line nor an exit code, granny runs the check once more; failing again, the gate ends `checks-failed` with the note `check runner failed` (code `?`) and no repair - the code may be fine, so the implementer is not asked to change it. On **Cursor** the session runs the checks itself.
 
 **The timeout command.** A check with `timeout` needs GNU coreutils `timeout`; macOS has none by default, and `brew install coreutils` installs it as `gtimeout`. When a check the stages select has a `timeout`, granny looks once per run, before the worktree setup and any agent, for `timeout` and then `gtimeout` on PATH (label `timeout probe`; on Claude Code through the helper, retried once when it returns no exit code), and wraps the checks in the one it finds (logged `` checks: no `timeout` on PATH - the checks with a timeout run in `gtimeout` ``). With neither, the run stops with ``checks with a timeout (<names>) run as `timeout <s> bash -c '<run>'`, but neither `timeout` nor `gtimeout` is on PATH - install GNU coreutils (macOS: `brew install coreutils`), or drop `timeout` from those checks``. A check with a timeout that still exits 127 with `timeout: command not found` (or `gtimeout: ...`) in its output is a runner failure, like a helper that returns nothing: the gate ends `checks-failed` with the note `<timeout command> command not found` and no repair. Exit 127 for the check's own command (`bun: command not found`) is a red check and gets repairs.
 
@@ -165,7 +168,7 @@ On **opencode** and **omp** granny executes the command itself. On **Claude Code
 
 ## Plan review
 
-The run's `plan` input is one absolute path or a list of them (a relative path is rejected before anything runs). Every agent prompt, the judge's and a command reviewer's `{prompt}` name them: `Plan files - read them first: <paths>`. The plan review is optional and off by default; enable it with `"planReview": true`. It runs every reviewer, the judge and the implementer over the plan for up to `maxRounds` rounds before any code is written, so it costs extra tokens. With it on, the run reviews the plan files in phase "Plan review", after the worktree setup and before stage 1. It is skipped - and the result's `plan` says `skipped` - when the run resumes with `fromStage` > 1; with `planReview` off the result's `plan` says `review-skipped`. A run without `plan` has no `plan` in its result.
+The run's `plan` input is one absolute path or a list of them (a relative path is rejected before anything runs). Every agent prompt, the judge's and a command reviewer's `{prompt}` name them: `Plan files - read them first: <paths>`. The plan review is optional and off by default; enable it with `"planReview": true`. It runs every reviewer, the judge and the implementer over the plan for up to `maxRounds` rounds before any code is written; each round is a full review + judge + fix, so it uses many more tokens and makes the run much longer (tens of minutes per round on high-effort models). Set it only when the user asks for a plan review. The `granny_run` schema on omp and opencode tells the agent so, their start reply carries the warning with the round cap for the agent to pass on, and every host logs it once when the plan review starts (journal, `granny_status`, the run views, the Claude Code Workflow log). With it on, the run reviews the plan files in phase "Plan review", after the worktree setup and before stage 1. It is skipped - and the result's `plan` says `skipped` - when the run resumes with `fromStage` > 1; with `planReview` off the result's `plan` says `review-skipped`. A run without `plan` has no `plan` in its result.
 
 The loop is a stage's review loop on the plan files instead of a diff: every reviewer in parallel, the one retry, P0/P1 straight to the implementer, the judge for the rest (with a plan-review judge prompt) and its duplicates, `threshold`, and the `maxRounds` cap. Labels and log lines read `plan review r<n> <name>`, the outputs are `<workDir>/review-plan-review-r<n>-<name>.md` and `.log` (on Claude Code the command runs in the start, wait and read steps of [On Claude Code](#on-claude-code)), and finding ids are `<name>-F<n>` as in a stage. Each reviewer gets a plan-review prompt asking, against the actual repo, for wrong assumptions about the code or its dependencies, missing steps, risky ordering, acceptance criteria that cannot be tested, and version drift, in the form `- [P1] Title — <absolute plan path>:<line>` ([prompts.md](prompts.md) shows it). Findings keep that absolute path.
 
@@ -236,7 +239,7 @@ On Claude Code it goes through `opencode run`, because a Claude Code agent runs 
 {
   "reviewers": [
     { "name": "codex", "engine": "auto" },
-    { "name": "opus", "engine": "agent", "model": "opus", "effort": "high" },
+    { "name": "opus", "engine": "agent", "model": { "claude-code": "opus" }, "effort": "high" },
     { "name": "glm", "engine": "command", "command": "opencode run -m opencode/glm-5.3-flash-free {prompt}" }
   ]
 }
@@ -367,7 +370,7 @@ On Claude Code the judge runs on `haiku` by default. Since it only classifies an
 The deciding case was a fail-open `git status` probe the user fixed later: Haiku classified it `major` (fix) in both runs, Sonnet `moderate` (residual) in both, reasoning that it was a rare failure - likelihood lowering impact, which the rubric forbids. To trade the extra fix rounds for Sonnet's fewer ones, set:
 
 ```json
-{ "roles": { "judge": { "model": "sonnet" } } }
+{ "roles": { "judge": { "model": { "claude-code": "sonnet" } } } }
 ```
 
 On opencode and omp the judge keeps the session model unless `roles.judge.model` names one.
@@ -500,12 +503,36 @@ Findings are read from lines shaped like Codex's output - the built-in reviewer'
 
 The word severities map to `critical` → P0, `high` → P1, `medium` → P2, `low` → P3; for them the location is the last parenthesised part of the line (an ` — ` location is accepted too). Other bracketed words (`[note]`) are not findings. A marker bullet indented under a finding belongs to that finding's detail; it is neither a finding nor a marker. If the output has more markers than parseable findings, a granny agent (`roles.granny`) extracts them instead. If it recovers fewer findings than markers, it is asked once more with the expected count; still short, the reviewer did not run (above), and when the retry ends short too, the stage ends `review-failed` with the marker, parser and extraction counts and the raw review output in its note - findings are never dropped silently and the stage is never reported clean. Output in which the Codex plugin says it got no usable result (`Codex did not return valid structured JSON.`, `Codex returned JSON with an unexpected review shape.`, `Codex review completed without any stdout output.`, and for the plan review's `task`, `Codex did not return a final message.`) also means the reviewer did not run, even when the command exited 0. Output with no marker at all reads as a clean review only when the no-findings sentence is all there is: `No findings.` or the Codex plugin's `No material findings.` (case and the period do not matter) on a line of its own, with nothing else but granny's leading `[granny] reviewer: ...` line and the plugin's frame - its `# Codex Review` or `# Codex Adversarial Review` heading and `Target: ...` line, and in its structured render with `Verdict: approve` the one-paragraph summary before the sentence and the `Next steps:` and `Reasoning:` lists of one-line bullets after it, which the plugin prints around the sentence when its findings list is empty. A no-findings line next to anything else - a finding written as prose or as a heading in another section, a second summary paragraph, `Verdict: needs-attention`, text after the sentence - does not make the output clean. Otherwise - prose findings, a native Codex review (the plugin's `review` or `codex exec review`), or a sentence like `Review could not be completed: ... No code was inspected` that the CLI prints with exit 0 when its sandbox cannot run commands - a granny agent (`roles.granny`) reads it (`extract <stage> r<n> <reviewer>`, after the log line `<stage> r<n> <reviewer>: no finding in the expected form and not just "No findings." - asking an agent to extract findings`): the findings it extracts go on as the reviewer's findings; with none, the review is clean only when the agent confirms (`clean: true`) that the output is a finished review saying the changes have no problems, and otherwise the reviewer did not run (above), with the note `reviewer output had no findings in the expected form and was not just No findings, and an extraction found none in it` and the raw output. A clean native Codex review (`No actionable regressions were identified. Type checking passed; ...`) therefore costs one extraction call: the sentence is the model's own prose, worded differently and followed by different caveats on every run, so granny does not match a phrase in it, and the extraction agent confirms it as clean.
 
+## Watching a run
+
+`watch` decides what the session that started a run shows of it, on omp and on opencode. The run, its journal and `granny_status` are the same in every mode.
+
+On omp:
+
+- `"full"` (default): the live panel and status line, plus a condensed event log per role process (`sessions/<n>-<label>/events.jsonl`: state changes, reasoning headings, tool calls, the final text of each answer) and the run navigator (`/granny`, `alt+w`): the run's stages and agents, what the selected agent is doing now, its full event list or its transcript.
+- `"panel"`: the live panel and status line only; no event log, and `/granny` and `alt+w` say watching is off for that run.
+- `"off"`: no panel, no status line, no event log.
+
+On opencode, where the TUI plugin entry `tui.js` draws the view:
+
+- `"full"` (default): a sidebar section with the run's stage, phase and agents, a chip in the prompt footer, toasts on phase changes, failed roles and the run's end, and the run navigator (`/granny`, `<leader>j`): the run's stages and agents beside what the selected agent is doing now, and Enter opens a role's opencode session.
+- `"panel"`: the sidebar section and the chip only; `/granny` says watching is off for that run.
+- `"off"`: none of them.
+
+The role sessions are children of the session that called `granny_run` in every mode, so opencode's Subagents tab lists them even with `"off"`.
+
+```json
+{ "watch": "panel" }
+```
+
+Claude Code (`/workflows`) has its own view of a run; it accepts the key and ignores it. Details: [omp.md](omp.md#watching-a-role), [opencode.md](opencode.md#watching-a-run).
+
 ## Example: everything set
 
 ```json
 {
   "roles": {
-    "granny": { "model": "sonnet", "effort": "medium" },
+    "granny": { "model": { "claude-code": "sonnet", "opencode": "anthropic/claude-sonnet-5-5", "omp": "anthropic/claude-sonnet-5-5" }, "effort": "medium" },
     "implementer": { "model": { "claude-code": "opus", "opencode": "anthropic/claude-opus-5-5#high", "omp": "anthropic/claude-opus-5-5" }, "effort": "high" },
     "judge": { "model": { "claude-code": "sonnet", "opencode": "anthropic/claude-sonnet-5-5", "omp": "anthropic/claude-sonnet-5-5" } }
   },

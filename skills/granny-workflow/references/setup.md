@@ -56,7 +56,7 @@ Ask these five, each with the current value (or the default) marked:
 
 5. **Where to save** - this project (`<repo>/granny.config.json`, default; commit it to share it with the team) or every project (`~/.config/granny/config.json`).
 
-Plan review, round cap and language keep their defaults. Mention in one line that the user can ask for them (`planReview`, `maxRounds`, `language`), and set them only when asked.
+Plan review, round cap and language keep their defaults. Mention in one line that the user can ask for them (`planReview`, `maxRounds`, `language`), and set them only when asked; say that plan review is off by default because every round is a full review + judge + fix, which uses many more tokens and makes runs much longer. When the user asks to turn it on, state that cost, with the round cap (`maxRounds`), before writing it.
 
 ## 3. Write
 

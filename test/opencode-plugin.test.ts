@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import plugin, { createGrannyPlugin, isTransient, modelRef, pause, permissions, preflight, providerError, summarize } from '../src/adapters/opencode/plugin'
 import { brokerCompanion, records, sessionEndHook } from './fake-companion'
+import { planReviewWarning } from '../src/core/config'
 
 const git = (cwd: string, ...args: string[]) => {
   const r = spawnSync('git', args, { cwd, encoding: 'utf8' })
@@ -43,11 +44,22 @@ interface Behaviour {
   providerError?: (title: string, attempt: number) => FakeError | undefined
   hangUntilInterrupted?: (title: string) => boolean
   createFails?: (title: string) => boolean
+  parentDir?: string
+  moveFails?: (title: string) => boolean
+  moveIgnored?: (title: string) => boolean
+  hangMove?: (title: string) => boolean
+  removeFails?: boolean
+  promptFails?: (title: string) => boolean
 }
 
 function fakeContext(behaviour: Behaviour = {}) {
   const tools = new Map<string, any>()
   const created: any[] = []
+  const creates: any[] = []
+  const moves: Array<{ sessionID: string; directory: string }> = []
+  const removed: string[] = []
+  const calls: string[] = []
+  const parent = { id: 'parent', model: { providerID: 'opencode', id: 'parent-model' }, location: { directory: behaviour.parentDir ?? '/parent-dir' } }
   const prompts: Array<{ sessionID: string; text: string }> = []
   const pending = new Map<string, string>()
   const messages = new Map<string, any[]>()
@@ -64,21 +76,51 @@ function fakeContext(behaviour: Behaviour = {}) {
       },
     },
     session: {
-      get: async () => ({ id: 'parent', model: { providerID: 'opencode', id: 'parent-model' } }),
+      get: async ({ sessionID }: { sessionID: string }) => {
+        if (sessionID === 'parent') return structuredClone(parent)
+        const s = created.find(c => c.id === sessionID)
+        if (!s) throw new Error(`session.get: no session ${sessionID}`)
+        return structuredClone(s)
+      },
       create: async (input: any) => {
+        creates.push(input)
         if (behaviour.createFails?.(input.title)) throw new Error('session.create: 503 Service Unavailable')
-        const s = { id: `ses_${++n}`, ...input }
+        const location = input.parentID ? parent.location : input.location
+        const s = { id: `ses_${++n}`, ...input, location: structuredClone(location) }
         created.push(s)
         messages.set(s.id, [])
-        return s
+        return structuredClone(s)
+      },
+      move: async (input: { sessionID: string; directory: string }) => {
+        moves.push(input)
+        calls.push(`move ${input.sessionID}`)
+        const s = created.find(c => c.id === input.sessionID)
+        const title = s?.title ?? ''
+        if (behaviour.moveFails?.(title)) throw new Error('session.move: directory not found')
+        if (behaviour.hangMove?.(title)) {
+          await new Promise<void>(resolve => wake.set(input.sessionID, resolve))
+          return {}
+        }
+        if (!behaviour.moveIgnored?.(title)) s.location = { directory: input.directory }
+        return {}
+      },
+      remove: ({ sessionID }: { sessionID: string }) => {
+        removed.push(sessionID)
+        if (behaviour.removeFails) throw new Error('session.remove: 500')
+        return Promise.resolve(true)
       },
       prompt: async (input: { sessionID: string; text: string }) => {
+        if (behaviour.promptFails?.(created.find(c => c.id === input.sessionID)?.title ?? '')) throw new Error('session.prompt: 500 Internal Server Error')
         prompts.push(input)
+        calls.push(`prompt ${input.sessionID}`)
         pending.set(input.sessionID, input.text)
         messages.get(input.sessionID)?.push({ type: 'user', text: input.text })
         return {}
       },
       wait: async ({ sessionID }: { sessionID: string }) => {
+        if (!pending.has(sessionID)) return
+        const text = pending.get(sessionID)!
+        pending.delete(sessionID)
         const log = messages.get(sessionID) ?? []
         const attempt = (attempts.get(sessionID) ?? 0) + 1
         attempts.set(sessionID, attempt)
@@ -93,7 +135,6 @@ function fakeContext(behaviour: Behaviour = {}) {
           return
         }
         log.push({ type: 'assistant', finish: 'stop', content: [] }, { type: 'idle', outcome: 'succeeded' })
-        const text = pending.get(sessionID) ?? ''
         const name = /(granny_submit_\w+)/.exec(text)?.[1]
         if (!name) return
         if (behaviour.skipSubmitOnce && !skipped) {
@@ -115,7 +156,7 @@ function fakeContext(behaviour: Behaviour = {}) {
       },
     },
   }
-  return { ctx, tools, created, prompts, interrupted }
+  return { ctx, tools, created, creates, moves, removed, calls, prompts, interrupted }
 }
 
 const REVIEW_ONCE = `test -n {base} && if [ -e .granny/reviewed ]; then echo "No findings." > {out}; else touch .granny/reviewed; printf '%s\\n' '- [P2] Real issue — a.txt:1' '  detail' > {out}; fi`
@@ -347,12 +388,13 @@ describe('opencode plugin', () => {
       const started = await f.tools.get('granny_run').execute({ repo, branch: 'feat/x', plan: [plan], stages: [{ name: 'one', task: 'Do it.' }] }, { sessionID: 'parent' })
       const id = /granny run (\S+) started/.exec(started.content)?.[1]
       expect(id).toBeDefined()
-      return { id: id!, dir: join(repo, '.granny/runs', id!), plan }
+      return { id: id!, dir: join(repo, '.granny/runs', id!), plan, started: started.content as string }
     }
 
     it('reviews the plan, has a plan-fix session submit through granny_submit_plan_fix, then implements', async () => {
       const f = fakeContext()
-      const { id, dir, plan } = await runWithPlan(f, { planReview: true, reviewers: [planReviewer(false)] })
+      const { id, dir, plan, started } = await runWithPlan(f, { planReview: true, reviewers: [planReviewer(false)] })
+      expect(started).toContain(`${planReviewWarning(4)} Tell the user this in your next message.`)
       const result = await finished(dir)
       delete process.env.PLAN_FILE
       expect(result.plan).toMatchObject({ outcome: 'clean', rounds: 2 })
@@ -371,6 +413,15 @@ describe('opencode plugin', () => {
       expect(done).toContain(`[granny] Run ${id} finished.`)
       expect(done).toContain('- plan review: clean, 2 review round(s)\n- one: clean')
       expect(done).toContain('- final review: skipped, 0 review round(s) - one stage and no lane merge, so its stage review already covered the whole branch\n- final: gates green')
+    })
+
+    it('says nothing about a plan review in its start reply when planReview is off', async () => {
+      const f = fakeContext()
+      const { dir, started } = await runWithPlan(f, { reviewers: [planReviewer(false)] })
+      expect(started).not.toContain('Plan review is on')
+      expect(started).not.toContain('tokens')
+      await finished(dir)
+      delete process.env.PLAN_FILE
     })
 
     it('stops before stage 1 when the plan review hits the round cap, and says so', async () => {
@@ -416,6 +467,31 @@ describe('opencode plugin', () => {
     expect(f.created).toHaveLength(0)
   })
 
+  it('refuses a model opencode cannot run before any session starts, naming the entry, its config file and the host-keyed fix', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'granny-global-'))
+    const global = join(home, 'config.json')
+    process.env.GRANNY_CONFIG = global
+    writeFileSync(global, JSON.stringify({ reviewers: [{ name: 'sonnet', engine: 'agent', model: 'sonnet' }], roles: { judge: { model: { opencode: 'haiku' } } } }))
+    const f = fakeContext()
+    await plugin.setup(f.ctx)
+    const run = (config?: unknown) => f.tools.get('granny_run').execute({ repo, branch: 'feat/x', stages: [{ task: 't' }], ...(config ? { config } : {}) }, { sessionID: 'parent' })
+    const refused = (await run()).content
+    expect(refused).toStartWith('granny_run refused:\n- ')
+    expect(refused).toContain(`reviewers[0] "sonnet": model "sonnet" (from ${global})`)
+    expect(refused).toContain('opencode models are "provider/model[#variant]"')
+    expect(refused).toContain('{ "claude-code": "sonnet", "opencode": "<provider/model>" }')
+    expect(refused).toContain(`roles.judge.model: "haiku" (from ${global})`)
+    expect(existsSync(join(repo, '.granny/runs'))).toBe(false)
+    expect(f.created).toHaveLength(0)
+
+    const fixed = { reviewers: [{ name: 'sonnet', engine: 'agent', model: { 'claude-code': 'sonnet', opencode: 'anthropic/claude-sonnet' } }], roles: { judge: { model: { opencode: 'opencode/judge' } } } }
+    const started = (await run(fixed)).content
+    expect(started).toContain('granny run ')
+    const id = /granny run (\S+) started/.exec(started)![1]!
+    await finished(join(repo, '.granny/runs', id))
+    rmSync(home, { recursive: true, force: true })
+  })
+
   it('refuses adversarial-review on engine auto, which means the Codex CLI on opencode, without creating sessions', async () => {
     const f = fakeContext()
     await plugin.setup(f.ctx)
@@ -448,6 +524,7 @@ describe('opencode plugin', () => {
     const started = await f.tools.get('granny_run').execute({ repo, branch: 'feat/x', stages: [{ name: 'one', task: 'Do it.' }] }, { sessionID: 'parent' })
     const id = /granny run (\S+) started/.exec(started.content)?.[1]
     expect(id).toBeDefined()
+    expect(started.content).not.toContain('overrides:')
 
     const dir = join(repo, '.granny/runs', id!)
     await waitFor(() => existsSync(join(dir, 'result.json'))).catch(e => {
@@ -460,6 +537,38 @@ describe('opencode plugin', () => {
 
     expect(f.created.map(s => s.title)).toEqual(['granny · implement one', 'granny · judge one r1', 'granny · fix one r1', 'granny · pr-ready check'])
     expect(f.created[0]).toMatchObject({ agent: 'build', model: { providerID: 'opencode', id: 'parent-model' }, location: { directory: repo } })
+    expect(f.creates.map(c => [c.parentID, 'location' in c])).toEqual(f.creates.map(() => ['parent', false]))
+    expect(f.moves).toEqual(f.created.map(s => ({ sessionID: s.id, directory: repo })))
+    for (const s of f.created) expect(f.calls.indexOf(`move ${s.id}`)).toBeLessThan(f.calls.indexOf(`prompt ${s.id}`))
+    const meta = (label: string, role: string, phase: string, model: string) => ({ 'granny-workflow': { run: id, dir, parent: 'parent', label, role, phase, model } })
+    expect(f.created.map(s => s.metadata)).toEqual([
+      meta('implement one', 'implementer', 'Implement', 'opencode/parent-model'),
+      meta('judge one r1', 'judge', 'Review', 'opencode/judge-model'),
+      meta('fix one r1', 'implementer', 'Implement', 'opencode/parent-model'),
+      meta('pr-ready check', 'granny', 'PR ready', 'opencode/parent-model'),
+    ])
+    expect(f.removed).toEqual([])
+    const journal = journalOf(dir)
+    expect(journal.filter(e => e.type === 'link-failed')).toEqual([])
+    const agents = journal.filter(e => e.type === 'agent')
+    expect(agents.map(e => [e.label, e.phase, e.session, e.linked])).toEqual(f.created.map(s => [s.metadata['granny-workflow'].label, s.metadata['granny-workflow'].phase, s.id, true]))
+    expect(journal.filter(e => e.type === 'agent-end')).toEqual(agents.map(e => ({ t: expect.any(String), type: 'agent-end', label: e.label, session: e.session, outcome: 'done' })))
+    expect(JSON.parse(readRun(dir, 'status.json'))).toMatchObject({ id, status: 'done', parent: 'parent', watch: 'full' })
+    expect(JSON.parse(readRun(dir, 'status.json')).outline).toEqual({
+      kind: 'implement',
+      branch: 'feat/x',
+      worktree: true,
+      planReview: false,
+      finalReview: false,
+      reviewers: ['codex'],
+      fromStage: 1,
+      stages: [{ number: 1, name: 'one', implement: true, review: true, checks: false }],
+    })
+    expect(agents.map(e => e.cwd)).toEqual(agents.map(() => repo))
+    expect(journal.filter(e => e.type === 'stage').map(({ t: _t, type: _type, ...e }) => e)).toEqual([
+      { number: 1, name: 'one', event: 'start' },
+      { number: 1, name: 'one', event: 'end', outcome: 'clean' },
+    ])
     expect(f.created[1].model).toEqual({ providerID: 'opencode', id: 'judge-model' })
     expect(f.created[1].permissions).toContainEqual({ action: 'edit', resource: '*', effect: 'deny' })
     expect(f.prompts.some(p => p.text.startsWith('You stopped without calling granny_submit_implementation'))).toBe(true)
@@ -473,6 +582,65 @@ describe('opencode plugin', () => {
     expect(status.content).toContain('"status": "done"')
     expect(status.content).toContain('"outcome": "clean"')
     expect(git(repo, 'status', '--porcelain')).toBe('')
+  })
+
+  it('journals a heartbeat while a long command runs, and none after it ends', async () => {
+    const f = fakeContext()
+    await createGrannyPlugin({ heartbeatMs: 40 }).setup(f.ctx)
+    const { dir } = await startRun(repo, f, { checks: [{ name: 'slow', run: 'sleep 0.3' }] })
+    await finished(dir)
+    const beats = journalOf(dir).filter(e => e.type === 'heartbeat')
+    expect(beats.length).toBeGreaterThanOrEqual(3)
+    for (const beat of beats) expect(beat.command).toContain('sleep 0.3')
+    await Bun.sleep(150)
+    expect(journalOf(dir).filter(e => e.type === 'heartbeat')).toHaveLength(beats.length)
+  })
+
+  it('lists in its start reply what the run config changed from the config files, for the agent to show the user', async () => {
+    writeFileSync(join(repo, 'granny.config.json'), JSON.stringify({ reviewers: [{ name: 'codex', engine: 'command', command: REVIEW_ONCE }], roles: { implementer: { model: { opencode: 'openai/gpt-x' } } } }))
+    git(repo, 'add', 'granny.config.json')
+    git(repo, 'commit', '-qm', 'cfg')
+    const f = fakeContext()
+    await plugin.setup(f.ctx)
+    const config = { roles: { implementer: { model: 'kimi-code/k3.1-pro' } }, threshold: 50 }
+    const started = (await f.tools.get('granny_run').execute({ repo, branch: 'feat/x', stages: [{ name: 'one', task: 'Do it.' }], config }, { sessionID: 'parent' })).content
+    expect(started).toContain('\noverrides: roles.implementer.model kimi-code/k3.1-pro (config: openai/gpt-x), threshold 50 (config: 70) - show this line to the user in your next message')
+    await finished(join(repo, '.granny/runs', /granny run (\S+) started/.exec(started)![1]!))
+  })
+
+  it('tells the agent to point the user at the run navigator with watch full only', async () => {
+    const f = fakeContext()
+    await plugin.setup(f.ctx)
+    const sentence = 'Tell the user: /granny or <leader>j in the TUI opens the run navigator (stages, agents, live activity).'
+    for (const watch of ['full', 'panel', 'off']) {
+      writeFileSync(join(repo, 'granny.config.json'), JSON.stringify({ reviewers: [{ name: 'codex', engine: 'command', command: REVIEW_ONCE }], watch }))
+      git(repo, 'add', 'granny.config.json')
+      git(repo, 'commit', '-qm', `cfg ${watch}`)
+      const started = (await f.tools.get('granny_run').execute({ repo, branch: `feat/${watch}`, stages: [{ name: 'one', task: 'Do it.' }] }, { sessionID: 'parent' })).content
+      if (watch === 'full') expect(started).toContain(`\n${sentence}`)
+      else expect(started).not.toContain('run navigator')
+      await finished(join(repo, '.granny/runs', /granny run (\S+) started/.exec(started)![1]!))
+    }
+  })
+
+  it('writes the run outline to status.json from the start, and a planning run as kind plan', async () => {
+    const f = fakeContext({ hangUntilInterrupted: title => title === 'granny · implement one' || title === 'granny · plan' })
+    await plugin.setup(f.ctx)
+    const run = await startRun(repo, f)
+    expect(JSON.parse(readRun(run.dir, 'status.json'))).toMatchObject({ status: 'running', outline: { kind: 'implement', branch: 'feat/x', stages: [{ number: 1, name: 'one' }] } })
+    await waitFor(() => f.prompts.length > 0)
+    await f.tools.get('granny_cancel').execute({ runId: run.id })
+    await waitFor(() => readRun(run.dir, 'status.json').includes('"status": "cancelled"'))
+    expect(JSON.parse(readRun(run.dir, 'status.json')).outline).toMatchObject({ kind: 'implement' })
+
+    const started = await f.tools.get('granny_run').execute({ repo, branch: 'feat/x', goal: 'Build it.' }, { sessionID: 'parent' })
+    const id = /granny run (\S+) started/.exec(started.content)![1]!
+    const dir = join(repo, '.granny/runs', id)
+    expect(JSON.parse(readRun(dir, 'status.json')).outline).toMatchObject({ kind: 'plan', stages: [], finalReview: false })
+    await waitFor(() => journalOf(dir).some(e => e.type === 'agent'))
+    expect(journalOf(dir).find(e => e.type === 'agent')).toMatchObject({ label: 'plan', cwd: repo })
+    await f.tools.get('granny_cancel').execute({ runId: id })
+    await waitFor(() => readRun(dir, 'status.json').includes('"status": "cancelled"'))
   })
 
   it('works in a worktree of its own when repo is on another branch, and keeps the run files in repo', async () => {
@@ -490,6 +658,9 @@ describe('opencode plugin', () => {
     expect(result).toMatchObject({ repo, worktree: wt })
     expect(result.stages[0]).toMatchObject({ outcome: 'clean', rounds: 2 })
     expect(f.created.map(s => s.location.directory)).toEqual(f.created.map(() => wt))
+    expect(journalOf(dir).filter(e => e.type === 'agent').map(e => e.cwd)).toEqual(f.created.map(() => wt))
+    expect(f.created.map(s => s.parentID)).toEqual(f.created.map(() => 'parent'))
+    expect(f.moves).toEqual(f.created.map(s => ({ sessionID: s.id, directory: wt })))
     expect(existsSync(join(wt, '.granny/reviewed'))).toBe(true)
     expect(existsSync(join(repo, '.granny/reviewed'))).toBe(false)
     expect(git(wt, 'branch', '--show-current')).toBe('feat/x')
@@ -556,6 +727,10 @@ describe('opencode plugin', () => {
     )
     expect(result.stages[0]).toMatchObject({ outcome: 'clean', rounds: 2 })
     expect(result.stages[0].history[0].findings[0].priority).toBeUndefined()
+    for (const label of ['judge one r1', 'judge one r1 retry']) {
+      const session = journal.find(e => e.type === 'agent' && e.label === label).session
+      expect(journal.filter(e => e.type === 'agent-end' && e.label === label)).toEqual([expect.objectContaining({ session, outcome: 'failed' })])
+    }
   })
 
   it('does not retry a provider error that waiting cannot fix', async () => {
@@ -600,8 +775,82 @@ describe('opencode plugin', () => {
     await waitFor(() => sleeping)
     await f.tools.get('granny_cancel').execute({ runId: id })
     await waitFor(() => readRun(dir, 'status.json').includes('"status": "cancelled"'))
+    expect(JSON.parse(readRun(dir, 'status.json')).error).toBe('cancelled')
     expect(promptsTo(f, 'granny · implement one')).toHaveLength(1)
     expect(f.created).toHaveLength(1)
+  })
+
+  describe('linking role sessions to the parent session', () => {
+    const fallsBack = async (behaviour: Behaviour) => {
+      const f = fakeContext(behaviour)
+      await plugin.setup(f.ctx)
+      const { id, dir } = await startRun(repo, f)
+      const result = await finished(dir)
+      expect(readRun(dir, 'status.json')).toContain('"status": "done"')
+      expect(result.stages[0]).toMatchObject({ outcome: 'clean' })
+      const [first, ...rest] = f.created
+      expect(first).toMatchObject({ title: 'granny · implement one', parentID: 'parent' })
+      expect(f.removed).toEqual([first.id])
+      expect(rest.length).toBeGreaterThan(0)
+      for (const s of rest) {
+        expect(s.parentID).toBeUndefined()
+        expect(s.location).toEqual({ directory: repo })
+        expect(s.metadata['granny-workflow']).toMatchObject({ run: id, dir, parent: 'parent', label: s.title.slice('granny · '.length) })
+      }
+      expect(f.moves.map(m => m.sessionID)).toEqual([first.id])
+      expect(f.prompts.some(p => p.sessionID === first.id)).toBe(false)
+      const journal = journalOf(dir)
+      expect(journal.filter(e => e.type === 'link-failed')).toEqual([expect.objectContaining({ label: 'implement one', error: expect.any(String) })])
+      expect(journal.filter(e => e.type === 'agent').map(e => e.linked)).toEqual(rest.map(() => false))
+      return journal
+    }
+
+    it('falls back to top-level sessions in the work directory for the rest of the run when the move fails', async () => {
+      const journal = await fallsBack({ moveFails: title => title === 'granny · implement one' })
+      expect(journal.find(e => e.type === 'link-failed').error).toContain('session.move: directory not found')
+    })
+
+    it('still falls back when the half-made session cannot be removed', async () => {
+      await fallsBack({ moveFails: title => title === 'granny · implement one', removeFails: true })
+    })
+
+    it('falls back when the moved session is not in the work directory', async () => {
+      const journal = await fallsBack({ moveIgnored: title => title === 'granny · implement one' })
+      expect(journal.find(e => e.type === 'link-failed').error).toContain('/parent-dir')
+    })
+
+    it('links the role sessions and records watch "off" in status.json when watching is off', async () => {
+      const f = fakeContext()
+      await plugin.setup(f.ctx)
+      const { dir } = await startRun(repo, f, { watch: 'off' })
+      expect(JSON.parse(readRun(dir, 'status.json'))).toMatchObject({ status: 'running', parent: 'parent', watch: 'off' })
+      await finished(dir)
+      expect(JSON.parse(readRun(dir, 'status.json'))).toMatchObject({ status: 'done', parent: 'parent', watch: 'off' })
+      expect(f.created.map(s => s.parentID)).toEqual(f.created.map(() => 'parent'))
+    })
+
+    it('does not move a role session that already starts in the work directory', async () => {
+      const f = fakeContext({ parentDir: `${repo}/` })
+      await plugin.setup(f.ctx)
+      const { dir } = await startRun(repo, f)
+      await finished(dir)
+      expect(f.moves).toEqual([])
+      expect(f.created.map(s => s.parentID)).toEqual(f.created.map(() => 'parent'))
+      expect(journalOf(dir).filter(e => e.type === 'agent').map(e => e.linked)).toEqual(f.created.map(() => true))
+    })
+
+    it('ends the run cancelled when it is cancelled while a role session is being moved', async () => {
+      const f = fakeContext({ hangMove: title => title === 'granny · implement one' })
+      await createGrannyPlugin({ killGraceMs: 100 }).setup(f.ctx)
+      const { id, dir } = await startRun(repo, f)
+      await waitFor(() => f.moves.length === 1)
+      await f.tools.get('granny_cancel').execute({ runId: id })
+      await waitFor(() => readRun(dir, 'status.json').includes('"status": "cancelled"'), 2000)
+      expect(f.interrupted).toEqual([f.created[0].id])
+      expect(f.prompts).toEqual([])
+      expect(f.created).toHaveLength(1)
+      expect(journalOf(dir).filter(e => e.type === 'link-failed' || e.type === 'agent')).toEqual([])
+    })
   })
 
   describe('when opencode reloads the plugin while a run is in progress', () => {
@@ -693,7 +942,8 @@ describe('opencode plugin', () => {
         await f.tools.get('granny_cancel').execute({ runId: id })
         await waitFor(() => readRun(dir, 'status.json').includes('"status": "cancelled"'), 2000)
         await waitFor(() => !alive(pid), 2000)
-        expect(journalOf(dir)).toContainEqual(expect.objectContaining({ type: 'log', message: expect.stringContaining('review command exited 130') }))
+        const logs = journalOf(dir).filter(e => e.type === 'log').map(e => e.message)
+        expect(logs.filter(m => /exited 130|retrying once|review failed/.test(m))).toEqual([])
       })
     }
 
@@ -713,7 +963,8 @@ describe('opencode plugin', () => {
       await waitFor(() => readRun(dir, 'status.json').includes('"status": "cancelled"'), 2000)
       await waitFor(() => !sleepers.some(alive), 2000)
       const logs = journalOf(dir).filter(e => e.type === 'log').map(e => e.message)
-      for (const name of ['a', 'b']) expect(logs).toContainEqual(expect.stringContaining(`one r1 ${name}: did not run - retrying once. review command exited 130`))
+      expect(logs.filter(m => /exited 130|retrying once|review failed/.test(m))).toEqual([])
+      expect(journalOf(dir).filter(e => e.type === 'command' && e.command.includes('sleep 300'))).toHaveLength(2)
     })
 
     it('interrupts every child session that is running, not only the last one started', async () => {
@@ -731,6 +982,50 @@ describe('opencode plugin', () => {
         'granny · review one r1 b',
         'granny · review one r1 c',
       ])
+    })
+
+    it('ends a run cancelled during an agent review as cancelled: no retry, no review-failed, no notice', async () => {
+      const reviewing = (title: string) => title === 'granny · review one r1 a'
+      const f = fakeContext({ hangUntilInterrupted: reviewing })
+      await createGrannyPlugin({ killGraceMs: 100 }).setup(f.ctx)
+      const { id, dir } = await startRun(repo, f, { reviewers: [{ name: 'a', engine: 'agent' }] })
+      await waitFor(() => f.created.some(s => reviewing(s.title)))
+
+      await f.tools.get('granny_cancel').execute({ runId: id })
+      await waitFor(() => readRun(dir, 'status.json').includes('"status": "cancelled"'), 2000)
+      expect(f.prompts.filter(p => p.sessionID === 'parent')).toEqual([])
+      expect(f.created.map(s => s.title)).toEqual(['granny · implement one', 'granny · review one r1 a'])
+      const logs = journalOf(dir).filter(e => e.type === 'log').map(e => e.message)
+      expect(logs.filter(m => /retrying once|review failed/.test(m))).toEqual([])
+      expect(existsSync(join(dir, 'result.json'))).toBe(false)
+      const reviewer = f.created.find(s => reviewing(s.title)).id
+      expect(journalOf(dir).filter(e => e.type === 'agent-end' && e.label === 'review one r1 a')).toEqual([expect.objectContaining({ session: reviewer, outcome: 'cancelled' })])
+    })
+
+    it('lists the active roles in granny_status while the run is running, and none after it', async () => {
+      const reviewing = (title: string) => title === 'granny · review one r1 a'
+      const f = fakeContext({ hangUntilInterrupted: reviewing })
+      await createGrannyPlugin({ killGraceMs: 100 }).setup(f.ctx)
+      const { id, dir } = await startRun(repo, f, { reviewers: [{ name: 'a', engine: 'agent', model: { opencode: 'zai/glm-5.3#high' } }] })
+      await waitFor(() => f.prompts.some(p => p.sessionID === f.created.find(s => reviewing(s.title))?.id))
+      const session = f.created.find(s => reviewing(s.title)).id
+      const status = (await f.tools.get('granny_status').execute({ runId: id })).content
+      expect(status).toMatch(new RegExp(`\\n\\nactive roles:\\n- review one r1 a \\(reviewer, zai/glm-5\\.3#high\\) session ${session} · \\d+s$`))
+      expect(status).not.toContain('implement one (')
+
+      await f.tools.get('granny_cancel').execute({ runId: id })
+      await waitFor(() => readRun(dir, 'status.json').includes('"status": "cancelled"'), 2000)
+      expect((await f.tools.get('granny_status').execute({ runId: id })).content).not.toContain('active roles:')
+    })
+
+    it('journals a role whose prompt throws as failed with the error', async () => {
+      const f = fakeContext({ promptFails: title => title.startsWith('granny · review one r1 bad') })
+      await createGrannyPlugin({ killGraceMs: 100 }).setup(f.ctx)
+      const { dir } = await startRun(repo, f, { reviewers: [{ name: 'bad', engine: 'agent' }, { name: 'good', engine: 'agent' }] })
+      await finished(dir)
+      const ends = journalOf(dir).filter(e => e.type === 'agent-end' && e.label.startsWith('review one r1 bad'))
+      expect(ends.length).toBeGreaterThan(0)
+      for (const e of ends) expect(e).toMatchObject({ outcome: 'failed', error: 'session.prompt: 500 Internal Server Error' })
     })
 
     describe("when one reviewer's session cannot be created", () => {

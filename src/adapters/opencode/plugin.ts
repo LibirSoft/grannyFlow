@@ -1,10 +1,13 @@
 import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { resolveConfig } from '../../core/config'
+import { GrannyCancelled, isCancelled } from '../../core/cancel'
 import { checkInput, runGranny, stageCheckErrors, type RunInput } from '../../core/engine'
 import { checkShape, SCHEMAS } from '../../core/schemas'
 import type { AgentRequest, Host, ResultKind } from '../../core/types'
-import { DEFAULT_DELAYS, dropPlaceholders, globalConfigPath, type HostOptions, KILL_GRACE_MS, pause, preflight, readJson, RUN_INPUT_SCHEMA, RUN_TOOL_DESCRIPTION, runCommand, runId, runStatus, stageRepos, stamp, SUBMIT, summarize } from '../common'
+import { DEFAULT_DELAYS, dropPlaceholders, globalConfigPath, HEARTBEAT_MS, hostModelErrors, type HostOptions, KILL_GRACE_MS, layerSources, overridesNotice, pause, planReviewNotice, preflight, readJson, RUN_INPUT_SCHEMA, RUN_TOOL_DESCRIPTION, runCommand, runDir, runId, runStatus, stageRepos, stamp, statusError, SUBMIT, summarize, withHeartbeat } from '../common'
+import { duration } from '../runview/format'
+import { runOutline } from '../runview/outline'
 
 export { globalConfigPath, pause, preflight, stageRepos, summarize } from '../common'
 export type { RetryPolicy } from '../common'
@@ -19,9 +22,26 @@ interface RunState {
   cancelled: boolean
   abort: AbortController
   sessions: Set<string>
+  parent: string
+  linked: boolean
+  active: Map<string, ActiveRole>
+}
+
+interface ActiveRole {
+  label: string
+  role: string
+  model: string | null
+  since: number
 }
 
 type ModelRef = { providerID: string; id: string; variant?: string }
+
+export const modelText = (model: ModelRef | undefined): string | null =>
+  model ? `${model.providerID}/${model.id}${model.variant ? `#${model.variant}` : ''}` : null
+
+const norm = (dir: unknown) => (typeof dir === 'string' ? dir.replace(/\/+$/, '') : dir)
+
+export const NAVIGATOR_HINT = 'Tell the user: /granny or <leader>j in the TUI opens the run navigator (stages, agents, live activity).'
 
 // opencode re-imports the plugin as a new module on reload while earlier runs keep going.
 const SHARED = Symbol.for('granny-workflow.state')
@@ -39,6 +59,15 @@ export function modelRef(spec: string | undefined): ModelRef | undefined {
     throw new Error(`opencode models are "provider/model[#variant]", got "${spec}" - set roles.<role>.model.opencode in granny.config.json`)
   }
   return { providerID: main!.slice(0, slash), id: main!.slice(slash + 1), ...(variant ? { variant } : {}) }
+}
+
+const opencodeModelProblem = (model: string): string | undefined => {
+  try {
+    modelRef(model)
+    return undefined
+  } catch {
+    return 'opencode models are "provider/model[#variant]"'
+  }
 }
 
 export function permissions(access: AgentRequest['access']) {
@@ -89,7 +118,7 @@ export function isTransient(error: ProviderError): boolean {
 
 export type PluginOptions = HostOptions
 
-export const createGrannyPlugin = ({ delays = DEFAULT_DELAYS, sleep = pause, killGraceMs = KILL_GRACE_MS }: Partial<PluginOptions> = {}) => ({
+export const createGrannyPlugin = ({ delays = DEFAULT_DELAYS, sleep = pause, killGraceMs = KILL_GRACE_MS, heartbeatMs = HEARTBEAT_MS }: Partial<PluginOptions> = {}) => ({
   id: 'granny-workflow',
   async setup(ctx: any) {
     const startRun = async (input: RunInput, parentSession: string): Promise<string> => {
@@ -100,6 +129,8 @@ export const createGrannyPlugin = ({ delays = DEFAULT_DELAYS, sleep = pause, kil
       const config = resolveConfig(layers, 'opencode')
       const unknownChecks = stageCheckErrors(input.stages, config.checks)
       if (unknownChecks.length) return `granny_run refused:\n- ${unknownChecks.join('\n- ')}`
+      const badModels = hostModelErrors(config, layers, 'opencode', opencodeModelProblem, layerSources(input.repo))
+      if (badModels.length) return `granny_run refused:\n- ${badModels.join('\n- ')}`
       const blockers = preflight(input.repo, input.branch, config.workDir, config.worktree)
       for (const repo of stageRepos(input)) blockers.push(...preflight(repo, input.branch, config.workDir, config.worktree).map(b => `${repo}: ${b}`))
       if (blockers.length) return `granny_run refused:\n- ${blockers.join('\n- ')}`
@@ -107,12 +138,24 @@ export const createGrannyPlugin = ({ delays = DEFAULT_DELAYS, sleep = pause, kil
       const id = runId()
       const dir = join(input.repo, config.workDir, 'runs', id)
       mkdirSync(dir, { recursive: true })
-      const run: RunState = { id, repo: input.repo, dir, status: 'running', cancelled: false, abort: new AbortController(), sessions: new Set() }
+      const run: RunState = {
+        id,
+        repo: input.repo,
+        dir,
+        status: 'running',
+        cancelled: false,
+        abort: new AbortController(),
+        sessions: new Set(),
+        parent: parentSession,
+        linked: true,
+        active: new Map(),
+      }
       runs.set(id, run)
       const journal = (type: string, data: Record<string, unknown>) =>
         appendFileSync(join(dir, 'journal.jsonl'), JSON.stringify({ t: stamp(), type, ...data }) + '\n')
+      const outline = runOutline(input, config)
       const writeStatus = (extra: Record<string, unknown> = {}) =>
-        writeFileSync(join(dir, 'status.json'), JSON.stringify({ id, status: run.status, repo: input.repo, branch: input.branch, ...extra }, null, 2))
+        writeFileSync(join(dir, 'status.json'), JSON.stringify({ id, status: run.status, repo: input.repo, branch: input.branch, parent: parentSession, watch: config.watch, outline, ...extra }, null, 2))
       writeFileSync(join(dir, 'input.json'), JSON.stringify({ ...input, config: layers }, null, 2))
       writeStatus({ startedAt: stamp() })
 
@@ -138,7 +181,7 @@ export const createGrannyPlugin = ({ delays = DEFAULT_DELAYS, sleep = pause, kil
           submissions.delete(session)
           await ctx.session.prompt({ sessionID: session, text })
           await ctx.session.wait({ sessionID: session })
-          if (run.cancelled) throw new Error('cancelled')
+          if (run.cancelled) throw new GrannyCancelled()
           const got = submissions.get(session)
           if (got !== undefined) {
             const errors = checkShape(req.schema, got)
@@ -156,7 +199,7 @@ export const createGrannyPlugin = ({ delays = DEFAULT_DELAYS, sleep = pause, kil
               }
               backoffs++
               await sleep(backoffMs, run.abort.signal)
-              if (run.cancelled) throw new Error('cancelled')
+              if (run.cancelled) throw new GrannyCancelled()
               text = `Your previous turn ended on a provider error (${error.type}${error.message ? `: ${error.message.slice(0, 300)}` : ''}). Continue the task where it stopped; when you are done, call \`${tool}\` exactly once with your result.`
               continue
             }
@@ -168,36 +211,95 @@ export const createGrannyPlugin = ({ delays = DEFAULT_DELAYS, sleep = pause, kil
         return null
       }
 
+      const createRoleSession = async (req: AgentRequest, model: ModelRef | undefined): Promise<{ id: string; linked: boolean }> => {
+        const base = {
+          title: `granny · ${req.label}`,
+          agent: 'build',
+          ...(model ? { model } : {}),
+          permissions: permissions(req.access),
+          metadata: {
+            'granny-workflow': { run: id, dir, parent: parentSession, label: req.label, role: req.role, phase: req.phase, model: modelText(model) },
+          },
+        }
+        const make = async (input: Record<string, unknown>) => {
+          const session = await ctx.session.create(input)
+          run.sessions.add(session.id)
+          if (run.cancelled) {
+            run.sessions.delete(session.id)
+            throw new GrannyCancelled()
+          }
+          return session
+        }
+        if (run.linked) {
+          let sessionID: string | undefined
+          try {
+            const session = await make({ ...base, parentID: parentSession })
+            sessionID = session.id
+            if (norm(session.location?.directory) === norm(req.cwd)) return { id: session.id, linked: true }
+            await ctx.session.move({ sessionID, directory: req.cwd })
+            await ctx.session.wait({ sessionID })
+            if (run.cancelled) throw new GrannyCancelled()
+            const info = await ctx.session.get({ sessionID })
+            if (norm(info?.location?.directory) !== norm(req.cwd)) {
+              throw new Error(`session ${sessionID} is in ${info?.location?.directory} after the move, not in ${req.cwd}`)
+            }
+            return { id: session.id, linked: true }
+          } catch (e) {
+            if (sessionID !== undefined) run.sessions.delete(sessionID)
+            if (isCancelled(e) || run.cancelled) throw isCancelled(e) ? e : new GrannyCancelled()
+            if (run.linked) {
+              run.linked = false
+              journal('link-failed', { label: req.label, error: String((e as Error)?.message ?? e) })
+            }
+            if (sessionID !== undefined) {
+              try {
+                await ctx.session.remove({ sessionID })
+              } catch {}
+            }
+          }
+        }
+        const session = await make({ ...base, location: { directory: req.cwd } })
+        return { id: session.id, linked: false }
+      }
+
       const host: Host = {
         name: 'opencode',
         async agent(req) {
-          if (run.cancelled) throw new Error('cancelled')
+          if (run.cancelled) throw new GrannyCancelled()
           const tool = SUBMIT[req.kind]
           if (!tool) throw new Error(`no submit tool for result kind "${req.kind}"`)
           const model = modelRef(req.model) ?? parentModel
-          const session = await ctx.session.create({
-            title: `granny · ${req.label}`,
-            agent: 'build',
-            ...(model ? { model } : {}),
-            location: { directory: req.cwd },
-            permissions: permissions(req.access),
-          })
-          run.sessions.add(session.id)
-          journal('agent', { label: req.label, role: req.role, session: session.id, model: model ?? null })
+          const session = await createRoleSession(req, model)
+          journal('agent', { label: req.label, role: req.role, phase: req.phase, session: session.id, model: model ?? null, linked: session.linked, cwd: req.cwd })
+          run.active.set(session.id, { label: req.label, role: req.role, model: modelText(model), since: Date.now() })
+          const end = (outcome: 'done' | 'failed' | 'cancelled', error?: string) => {
+            run.active.delete(session.id)
+            try {
+              journal('agent-end', { label: req.label, session: session.id, outcome, ...(error !== undefined ? { error } : {}) })
+            } catch {}
+          }
           try {
-            if (run.cancelled) throw new Error('cancelled')
-            return await converse(req, tool, session.id)
+            if (run.cancelled) throw new GrannyCancelled()
+            const result = await converse(req, tool, session.id)
+            end(result === null ? 'failed' : 'done')
+            return result
+          } catch (e) {
+            if (isCancelled(e)) end('cancelled')
+            else end('failed', String((e as Error)?.message ?? e))
+            throw e
           } finally {
             run.sessions.delete(session.id)
           }
         },
+        cancelled: () => run.cancelled,
         async run(command, cwd) {
           if (run.cancelled) return { code: 130, output: 'cancelled' }
           journal('command', { command })
-          return runCommand(command, cwd, run.abort.signal, killGraceMs)
+          return withHeartbeat(() => runCommand(command, cwd, run.abort.signal, killGraceMs), () => journal('heartbeat', { command }), heartbeatMs)
         },
         log: message => journal('log', { message }),
         phase: title => journal('phase', { title }),
+        stage: ({ number, name, event, outcome }) => journal('stage', { number, name, event, ...(outcome ? { outcome } : {}) }),
       }
 
       const notify = async (text: string) => {
@@ -217,14 +319,14 @@ export const createGrannyPlugin = ({ delays = DEFAULT_DELAYS, sleep = pause, kil
         })
         .catch(async error => {
           run.status = run.cancelled ? 'cancelled' : 'failed'
-          writeStatus({ finishedAt: stamp(), error: String(error?.stack ?? error) })
+          writeStatus({ finishedAt: stamp(), error: statusError(error, run.cancelled) })
           journal('error', { error: String(error?.message ?? error) })
           if (!run.cancelled) await notify(`[granny] Run ${id} failed: ${String(error?.message ?? error)}\nCall granny_status with runId "${id}" and report to the user.`)
         })
 
       return `granny run ${id} started on ${input.repo} (${input.branch}), ${input.goal !== undefined ? 'planning only' : `${input.stages?.length ?? 0} stage(s)${config.parallel ? `, up to ${config.maxParallel} in parallel` : ''}`}, threshold ${config.threshold}, maxRounds ${config.maxRounds}.
 Journal: ${join(dir, 'journal.jsonl')}
-You will receive a message when it finishes. Use granny_status { runId: "${id}" } to check progress and granny_cancel to stop it. Do not poll in a loop.`
+You will receive a message when it finishes. Use granny_status { runId: "${id}" } to check progress and granny_cancel to stop it. Do not poll in a loop.${config.watch === 'full' ? `\n${NAVIGATOR_HINT}` : ''}${planReviewNotice(input, config)}${overridesNotice(layers, 'opencode')}`
     }
 
     await ctx.tool.transform((editor: any) => {
@@ -260,7 +362,14 @@ You will receive a message when it finishes. Use granny_status { runId: "${id}" 
         },
         execute: async (value: { runId?: string; repo?: string }) => {
           try {
-            return { content: runStatus(runs, value.runId, value.repo) }
+            const status = runStatus(runs, value.runId, value.repo)
+            const dir = runDir(runs, value.runId, value.repo)
+            const run = [...runs.values()].find(r => r.dir === dir && r.status === 'running')
+            const now = Date.now()
+            const active = [...(run?.active ?? [])].map(
+              ([session, a]) => `- ${a.label} (${a.role}${a.model ? `, ${a.model}` : ''}) session ${session} · ${duration(now - a.since)}`,
+            )
+            return { content: active.length ? `${status}\n\nactive roles:\n${active.join('\n')}` : status }
           } catch (e) {
             return { content: `granny_status failed: ${(e as Error).message}` }
           }

@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process'
 import { existsSync, statSync } from 'node:fs'
 import { isAbsolute, join } from 'node:path'
 import { priorityOf } from '../src/core/review'
-import type { AgentRequest, CommandResult, Host, HostName } from '../src/core/types'
+import type { AgentRequest, CommandResult, Host, HostName, StageEvent } from '../src/core/types'
 
 export type Review = CommandResult | string
 export type Reviews = Review[] | Record<string, Review[]> | ((command: string) => Review | Promise<Review>)
@@ -74,6 +74,17 @@ const isRead = (command: string) => command.includes('exit "${code:-1}"')
 const isStop = (command: string) => command.includes('echo stopped')
 const jobOf = (command: string) => /review-[^\s']*?-r\d+-[a-z0-9-]+(?=\.(?:exit|out|pid))/.exec(command)?.[0] ?? ''
 
+const MARK_HEAD = /^\( (?=cd )/
+const MARK_TAIL = ' ) 2>&1; echo "[granny] exit=$?"'
+/** The command inside the exit-code wrapper the engine puts around a helper's shell step. */
+const unmarked = (line: string) => (MARK_HEAD.test(line) && line.endsWith(MARK_TAIL) ? line.slice(2, -MARK_TAIL.length) : line)
+/** What the real wrapper adds: the exit code as a last line, right after the command's own output. */
+const withMark = (r: unknown, on: boolean) => {
+  if (!on || !r || typeof r !== 'object') return r
+  const out = r as { output?: unknown; exitCode?: unknown }
+  return typeof out.exitCode === 'number' ? { ...out, output: `${String(out.output ?? '')}[granny] exit=${out.exitCode}\n` } : r
+}
+
 const cdTarget = (line: string) => {
   const quoted = /^cd ((?:'[^']*'(?:\\''[^']*')*)|\S+) && /.exec(line)?.[1] ?? ''
   return quoted.startsWith("'") ? quoted.slice(1, -1).replaceAll(`'\\''`, "'") : quoted
@@ -103,6 +114,7 @@ export function fakeHost(opts: FakeOptions = {}) {
   const setups: Setup[] = []
   const logs: string[] = []
   const phases: string[] = []
+  const stages: StageEvent[] = []
   const probes: string[] = []
   let impl = 0
   const jobs = new Map<string, { script: string; result?: CommandResult; waits: number; exit?: string }>()
@@ -138,7 +150,12 @@ export function fakeHost(opts: FakeOptions = {}) {
     return next === undefined ? CLEAN : asResult(next)
   }
 
-  const detached = async (command: string): Promise<unknown> => {
+  /** `command` is the step without the exit-code wrapper; `line` is what the helper was asked to run. */
+  const detached = async (command: string, line: string, marked: boolean): Promise<unknown> => {
+    const r = await detachedStep(command, line)
+    return withMark(r, marked && !opts.shell)
+  }
+  const detachedStep = async (command: string, line: string): Promise<unknown> => {
     const cwd = cdTarget(command)
     const key = `${cwd}\0${jobOf(command)}`
     if (START.test(command)) {
@@ -148,7 +165,7 @@ export function fakeHost(opts: FakeOptions = {}) {
       const file = unquote(exit!)
       const job: { script: string; result?: CommandResult; waits: number; exit?: string } = { script, waits: 0, exit: isAbsolute(file) ? file : join(cwd, file) }
       jobs.set(key, job)
-      if (opts.shell) return noted(command, await bash(command, '/', opts.shell.env))
+      if (opts.shell) return noted(command, await bash(line, '/', opts.shell.env))
       job.result = await nextReview(script, '/')
       return { ran: true, exitCode: 0, output: 'started\n' }
     }
@@ -164,14 +181,14 @@ export function fakeHost(opts: FakeOptions = {}) {
         const r = opts.wait(command, job.waits)
         return r === null ? null : noted(command, asResult(r))
       }
-      if (opts.shell) return noted(command, await bash(command, '/', opts.shell.env))
+      if (opts.shell) return noted(command, await bash(line, '/', opts.shell.env))
       return noted(command, { code: 0, output: 'done\n' })
     }
     if (isStop(command)) {
       stops.push(command)
-      return opts.shell ? noted(command, await bash(command, '/', opts.shell.env)) : { ran: true, exitCode: 0, output: 'stopped\n' }
+      return opts.shell ? noted(command, await bash(line, '/', opts.shell.env)) : { ran: true, exitCode: 0, output: 'stopped\n' }
     }
-    if (opts.shell) return noted(job.script, await bash(command, '/', opts.shell.env))
+    if (opts.shell) return noted(job.script, await bash(line, '/', opts.shell.env))
     return noted(job.script, job.result ?? CLEAN)
   }
   const isDetached = (command: string) => START.test(command) || isWait(command) || isRead(command) || isStop(command)
@@ -180,14 +197,16 @@ export function fakeHost(opts: FakeOptions = {}) {
     name: opts.name ?? 'opencode',
     async agent(req) {
       requests.push(req)
+      const marked = req.kind === 'command' && req.prompt.includes(MARK_TAIL)
+      const plain = marked ? req.prompt.split('\n').map(unmarked).join('\n') : req.prompt
       if (req.label === 'worktree' || (req.kind === 'command' && req.label.startsWith('worktree '))) {
-        const line = /Run exactly this:\n(.+)\n/.exec(req.prompt)?.[1] ?? ''
+        const line = /Run exactly this:\n(.+)\n/.exec(plain)?.[1] ?? ''
         setups.push({ command: line, cwd: '/', request: req })
-        return noted(line, await setUp(line, '/', cdTarget(line)))
+        return withMark(noted(line, await setUp(line, '/', cdTarget(line))), marked)
       }
-      if (req.kind === 'command' && isProbe(req.prompt)) {
-        const line = /Run exactly this:\n(.+)\n/.exec(req.prompt)?.[1] ?? ''
-        return noted(line, await probe(line, req.cwd))
+      if (req.kind === 'command' && isProbe(plain)) {
+        const line = /Run exactly this:\n(.+)\n/.exec(plain)?.[1] ?? ''
+        return withMark(noted(line, await probe(line, req.cwd)), marked)
       }
       calls.push(req)
       const custom = await opts.override?.(req)
@@ -211,11 +230,12 @@ export function fakeHost(opts: FakeOptions = {}) {
           return { perFinding, rationale: 'r' }
         }
         case 'command': {
-          const step = /Run exactly this[^\n]*:\n(.+)\n/.exec(req.prompt)?.[1] ?? ''
-          if (isDetached(step)) return detached(step)
-          const script = /never cut it short\):\n(.+)\n/.exec(req.prompt)?.[1] ?? /Run exactly this:\n(.+)\n/.exec(req.prompt)?.[1] ?? ''
+          const line = /Run exactly this[^\n]*:\n(.+)\n/.exec(req.prompt)?.[1] ?? ''
+          const step = unmarked(line)
+          if (isDetached(step)) return detached(step, line, marked)
+          const script = /never cut it short\):\n(.+)\n/.exec(plain)?.[1] ?? /Run exactly this:\n(.+)\n/.exec(plain)?.[1] ?? ''
           commands.push(script)
-          return noted(script, await nextReview(script, '/'))
+          return withMark(noted(script, await nextReview(script, '/')), marked)
         }
         case 'findings':
           return { findings: [] }
@@ -225,6 +245,7 @@ export function fakeHost(opts: FakeOptions = {}) {
     },
     log: m => logs.push(m),
     phase: t => phases.push(t),
+    stage: e => stages.push(e),
   }
   if (opts.direct !== false) {
     host.run = async (command: string, cwd: string) => {
@@ -238,7 +259,7 @@ export function fakeHost(opts: FakeOptions = {}) {
       return nextReview(command, cwd)
     }
   }
-  return { host, calls, requests, commands, cwds, setups, logs, phases, probes, stops }
+  return { host, calls, requests, commands, cwds, setups, logs, phases, stages, probes, stops }
 }
 
 export const finding = (severity: string, title: string, file = 'src/a.ts', line = 3) =>

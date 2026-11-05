@@ -1,4 +1,5 @@
-import { resolveConfig, resolveModel, type CheckConfig, type GrannyConfig, type ReviewerConfig, type RoleConfig } from './config'
+import { GrannyCancelled, isCancelled } from './cancel'
+import { planReviewWarning, resolveConfig, resolveModel, type CheckConfig, type GrannyConfig, type ReviewerConfig, type RoleConfig } from './config'
 import {
   agentPlanReviewPrompt,
   agentReviewPrompt,
@@ -54,6 +55,8 @@ import type {
   Role,
   RoundRecord,
   RunResult,
+  StageEvent,
+  StageOutcome,
   StageResult,
   StageSpec,
 } from './types'
@@ -66,6 +69,21 @@ const FINAL_REVIEW_PHASE = 'Final review'
 const CHECKS_PHASE = 'Checks'
 const TIMEOUT_PROBE = 'if command -v timeout >/dev/null; then echo timeout; elif command -v gtimeout >/dev/null; then echo gtimeout; else exit 1; fi'
 const TIMEOUT_MISSING = /(^|[\s:])g?timeout: (command )?not found|command not found: g?timeout$/m
+
+const EXIT_MARK = /\[granny\] exit=(\d+)[ \t]*(?:\r?\n|$)/g
+
+/**
+ * Claude Code's Bash tool shows no exit code when a command succeeds, so the helper cannot always report one:
+ * the command prints its own as a last line. A subshell, not a brace group, so a script's own `exit` still reaches it.
+ */
+export const markExit = (command: string) => `( ${command} ) 2>&1; echo "[granny] exit=$?"`
+
+/** The exit code from the last marker line, and the output without that line. */
+export function exitMarked(output: string): { code: number; output: string } | undefined {
+  const last = [...output.matchAll(EXIT_MARK)].at(-1)
+  if (!last) return undefined
+  return { code: Number(last[1]), output: output.slice(0, last.index) + output.slice(last.index! + last[0].length) }
+}
 
 export type RepoInput = string | { repo: string; base?: string }
 
@@ -215,33 +233,58 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
     return config.checks.filter(c => theirs.some(list => list.includes(c)))
   }
 
+  const stopIfCancelled = () => {
+    if (host.cancelled?.()) throw new GrannyCancelled()
+  }
+  const guarded = async <T>(start: () => Promise<T>): Promise<T> => {
+    stopIfCancelled()
+    let r: T
+    try {
+      r = await start()
+    } catch (e) {
+      stopIfCancelled()
+      throw e
+    }
+    stopIfCancelled()
+    return r
+  }
+  const run = (script: string, cwd: string) => guarded(() => host.run!(script, cwd))
+
   const call = async (role: Role, kind: ResultKind, label: string, phase: string, prompt: string, access: AgentRequest['access'], rc: RoleConfig, cwd: string) =>
-    host.agent({
-      role,
-      kind,
-      label,
-      phase,
-      prompt,
-      schema: SCHEMAS[kind],
-      model: resolveModel(rc.model, host.name),
-      effort: rc.effort,
-      access,
-      cwd,
-    })
+    guarded(() =>
+      host.agent({
+        role,
+        kind,
+        label,
+        phase,
+        prompt,
+        schema: SCHEMAS[kind],
+        model: resolveModel(rc.model, host.name),
+        effort: rc.effort,
+        access,
+        cwd,
+      }),
+    )
+
+  const reported = (r: any): { ran: boolean; code: number | string; output: string; note?: string } => {
+    const said = exitMarked(String(r?.output ?? ''))
+    const ran = said ? said.code === 0 : Boolean(r?.ran)
+    const note = typeof r?.note === 'string' && r.note.trim() ? r.note : undefined
+    return { ran, code: said ? said.code : (r?.exitCode ?? (ran ? 0 : '?')), output: said ? said.output : String(r?.output ?? ''), ...(note ? { note } : {}) }
+  }
 
   const helped = (label: string, r: any, missing: string): { ran: boolean; code: number | string; output: string } => {
-    const ran = Boolean(r?.ran)
-    const note = typeof r?.note === 'string' && r.note.trim() ? r.note : undefined
+    const { ran, code, output, note } = reported(r)
     if (ran && note) host.log(`${label}: the helper's note, kept out of the command's output: ${note}`)
-    return { ran, code: r?.exitCode ?? (ran ? 0 : '?'), output: r ? `${String(r.output ?? '')}${!ran && note ? `\n${note}` : ''}` : missing }
+    return { ran, code, output: r ? `${output}${!ran && note ? `\n${note}` : ''}` : missing }
   }
 
   const shell = async (label: string, phase: string, script: string, cwd: string, ask = gitCommandPrompt): Promise<{ ran: boolean; code: number | string; output: string }> => {
     if (host.run) {
-      const r = await host.run(script, cwd)
+      const r = await run(script, cwd)
       return { ran: r.code === 0, code: r.code, output: r.output }
     }
-    const prompt = ask(cwd, label, `cd ${shellQuote(cwd)} && ${script}`)
+    const prompt = ask(cwd, label, markExit(`cd ${shellQuote(cwd)} && ${script}`))
     return helped(label, await call('helper', 'command', label, phase, prompt, 'write', config.roles.helper, cwd), `the ${label} runner returned nothing`)
   }
 
@@ -271,12 +314,7 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
 
   const setUpWorktree = async (repo: string, branch: string, from: string, label: string, shared: boolean): Promise<string> => {
     const script = worktreeScript(config, branch, from, worktreePath(repo, branch, config.worktreeDir, shared))
-    let r: { ran: boolean; code: number | string; output: string }
-    if (host.run) r = await shell(label, 'Worktree', script, repo)
-    else {
-      const prompt = worktreeCommandPrompt(repo, branch, `cd ${shellQuote(repo)} && ${script}`)
-      r = helped(label, await call('helper', 'command', label, 'Worktree', prompt, 'write', config.roles.helper, repo), 'the worktree runner returned nothing')
-    }
+    const r = await shell(label, 'Worktree', script, repo, (_cwd, _step, command) => worktreeCommandPrompt(repo, branch, command))
     const path = r.ran ? reportedWorktree(r.output) : undefined
     if (!path) throw new Error(`worktree setup failed${repo === primary && branch === input.branch ? '' : ` for ${repo} ${branch}`} (exit ${r.code}): ${r.output.slice(-2000)}`)
     host.log(`worktree${repo === primary && branch === input.branch ? '' : ` ${baseName(repo)} ${branch}`}: ${path}`)
@@ -500,32 +538,34 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
     let output: string
     let note: string | undefined
     if (host.run) {
-      const r = await host.run(plan.script, cwd)
+      const r = await run(plan.script, cwd)
       ran = r.code === 0
       output = r.output
       if (!ran) note = `review command exited ${r.code}: ${r.output.slice(-2000)}`
     } else {
       const job = detachedReview(plan, config, stem, cwd)
-      const step = (label: string, prompt: string) => call('helper', 'command', label, phase, prompt, 'read-only', config.roles.helper, cwd)
-      const started = await step(`review ${tag}`, reviewStartPrompt(p, name, rv.name, job.start))
+      const step = async (label: string, prompt: string) => {
+        const r = await call('helper', 'command', label, phase, prompt, 'read-only', config.roles.helper, cwd)
+        return r ? reported(r) : undefined
+      }
+      const started = await step(`review ${tag}`, reviewStartPrompt(p, name, rv.name, markExit(job.start)))
       if (!started?.ran) {
-        const said = String(started?.output ?? '')
-        return { ran: false, findings: [], note: started ? `review command did not start (exit ${started.exitCode ?? '?'})${started.note ? ` (${started.note})` : ''}: ${said.slice(-2000)}` : 'review runner returned nothing' }
+        return { ran: false, findings: [], note: started ? `review command did not start (exit ${started.code})${started.note ? ` (${started.note})` : ''}: ${started.output.slice(-2000)}` : 'review runner returned nothing' }
       }
       let done = false
       for (let n = 1; n <= MAX_WAITS && !done; n++) {
-        const w = await step(`review ${tag} wait ${n}`, reviewWaitPrompt(p, name, rv.name, n, MAX_WAITS, WAIT_SECONDS / 60, job.wait))
-        done = lineShaped(String(w?.output ?? ''), /^done$/) !== undefined
+        const w = await step(`review ${tag} wait ${n}`, reviewWaitPrompt(p, name, rv.name, n, MAX_WAITS, WAIT_SECONDS / 60, markExit(job.wait)))
+        done = lineShaped(w?.output ?? '', /^done$/) !== undefined
       }
       if (!done) {
-        await step(`review ${tag} stop`, reviewStopPrompt(p, name, rv.name, job.stop))
+        await step(`review ${tag} stop`, reviewStopPrompt(p, name, rv.name, markExit(job.stop)))
         const limit = `${MAX_WAITS} waits of up to ${WAIT_SECONDS / 60} minutes (${(MAX_WAITS * WAIT_SECONDS) / 60} minutes)`
         return { ran: false, findings: [], note: `review command still running after ${limit} - stopped it` }
       }
-      const r = await step(`review ${tag} read`, reviewReadPrompt(p, name, rv.name, job.read))
+      const r = await step(`review ${tag} read`, reviewReadPrompt(p, name, rv.name, markExit(job.read)))
       ran = Boolean(r?.ran)
-      output = String(r?.output ?? '')
-      if (!ran) note = r ? `review command exited ${r.exitCode ?? '?'}${r.note ? ` (${r.note})` : ''}: ${output.slice(-2000)}` : 'review runner returned nothing'
+      output = r?.output ?? ''
+      if (!ran) note = r ? `review command exited ${r.code}${r.note ? ` (${r.note})` : ''}: ${output.slice(-2000)}` : 'review runner returned nothing'
     }
     host.log(`${tag}: reviewer: ${plan.backend ?? reportedBackend(output) ?? 'not reported'}`)
     if (!ran) return { ran, findings: [], note }
@@ -565,6 +605,7 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
     try {
       return await review(lane, rv, name, subject, round, n)
     } catch (e) {
+      if (isCancelled(e)) throw e
       return { ran: false, findings: [], note: `reviewer call failed: ${String((e as Error)?.message ?? e)}` }
     }
   }
@@ -756,6 +797,7 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
     if (fromStage > 1) return skipped('skipped', `plan review skipped - the run resumes from stage ${fromStage}`)
 
     host.phase(PLAN_PHASE)
+    host.log(planReviewWarning(config.maxRounds))
     const name = 'plan review'
     const able = config.reviewers.filter(rv => rv.engine !== 'command' || rv.command?.includes('{prompt}'))
     const unable = config.reviewers.filter(rv => !able.includes(rv))
@@ -1002,6 +1044,11 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
   const undelivered = new Set<number>()
   let failure: { error: unknown } | undefined
   const nameOf = (i: number) => `${i + 1} (${specs[i]!.name || `stage ${i + 1}`})`
+  const stageEvent = (i: number, event: StageEvent['event'], outcome?: StageOutcome) => {
+    try {
+      host.stage?.({ number: i + 1, name: specs[i]!.name || `stage ${i + 1}`, event, ...(outcome ? { outcome } : {}) })
+    } catch {}
+  }
   for (let i = 0; i < fromStage - 1; i++) {
     results[i] = { stage: specs[i]!.name || `stage ${i + 1}`, outcome: 'skipped', rounds: 0, residual: [], unresolved: [], history: [] }
     done.add(i)
@@ -1024,9 +1071,11 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
           results[i] = { stage: specs[i]!.name || `stage ${i + 1}`, outcome: 'skipped', rounds: 0, residual: [], unresolved: [], history: [], note }
           done.add(i)
           undelivered.add(i)
+          stageEvent(i, 'end', 'skipped')
           continue
         }
         if (running.size) host.log(`${specs[i]!.name || `stage ${i + 1}`}: starting in parallel with ${[...running.keys()].map(j => specs[j]!.name || `stage ${j + 1}`).join(', ')}`)
+        stageEvent(i, 'start')
         running.set(
           i,
           startStage(i).then(
@@ -1035,6 +1084,7 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
               if (r.outcome === 'no-changes' || r.outcome === 'checks-failed') undelivered.add(i)
               done.add(i)
               running.delete(i)
+              stageEvent(i, 'end', r.outcome)
             },
             error => {
               failure ??= { error }
@@ -1050,7 +1100,7 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
   const unfinished = specs.map((_, i) => i).filter(i => !done.has(i))
   if (failure) {
     const finished = [...done].sort((a, b) => a - b).filter(i => i >= fromStage - 1)
-    host.log(`a stage failed - waited for the stages already running. Finished: ${finished.map(nameOf).join(', ') || 'none'}. Not finished: ${unfinished.map(nameOf).join(', ')}`)
+    if (!isCancelled(failure.error)) host.log(`a stage failed - waited for the stages already running. Finished: ${finished.map(nameOf).join(', ') || 'none'}. Not finished: ${unfinished.map(nameOf).join(', ')}`)
     throw failure.error
   }
   if (unfinished.length) throw new Error(`scheduler stopped with stages that never started: ${unfinished.map(nameOf).join(', ')}`)

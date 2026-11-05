@@ -2,8 +2,8 @@
 // @bun
 // src/adapters/omp/extension.ts
 import { spawn as spawn2 } from "child_process";
-import { appendFileSync as appendFileSync2, existsSync as existsSync2, mkdirSync as mkdirSync2, readFileSync as readFileSync2, rmSync, writeFileSync } from "fs";
-import { basename, dirname, join as join2 } from "path";
+import { appendFileSync as appendFileSync3, existsSync as existsSync2, mkdirSync as mkdirSync2, readFileSync as readFileSync3, rmSync, writeFileSync } from "fs";
+import { basename, dirname, join as join4 } from "path";
 import { fileURLToPath } from "url";
 
 // src/core/types.ts
@@ -43,8 +43,12 @@ var DEFAULT_CONFIG = {
   ],
   checks: [],
   maxRepairs: 2,
-  readOnlyAgent: false
+  readOnlyAgent: false,
+  watch: "full"
 };
+function planReviewWarning(maxRounds) {
+  return `Plan review is on: before any code is written, every reviewer, the judge and the implementer go over the plan for up to ${maxRounds} round(s). Each round is a full review + judge + fix, so it uses many more tokens and can add a lot of time (tens of minutes per round on high-effort models).`;
+}
 var ROLES = ["granny", "helper", "planner", "implementer", "judge"];
 var TOP_KEYS = new Set(["$schema", "roles", "worktreeDir", ...Object.keys(DEFAULT_CONFIG).filter((k) => k !== "roles")]);
 var ROLE_KEYS = new Set(["model", "effort"]);
@@ -56,6 +60,7 @@ var ENGINES = ["auto", "codex", "codex-plugin", "agent", "command"];
 var PLUGIN_ENGINES = ["auto", "codex-plugin"];
 var CODEX_ENGINES = ["auto", "codex", "codex-plugin"];
 var MODES = ["review", "adversarial-review"];
+var WATCH_MODES = ["full", "panel", "off"];
 var NAME = /^[a-z0-9-]+$/;
 var isObject = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
 function resolveConfig(layers, host) {
@@ -230,6 +235,8 @@ function validate(c) {
     errors.push("aiAttribution must be a boolean");
   if (typeof c.readOnlyAgent !== "boolean")
     errors.push("readOnlyAgent must be a boolean");
+  if (!WATCH_MODES.includes(c.watch))
+    errors.push('watch must be "full", "panel" or "off"');
   if (!Array.isArray(c.rules) || !c.rules.every((r) => typeof r === "string"))
     errors.push("rules must be an array of strings");
   if (!isRepairs(c.maxRepairs))
@@ -303,6 +310,15 @@ function resolveModel(spec, host) {
     return spec;
   return spec[host];
 }
+
+// src/core/cancel.ts
+class GrannyCancelled extends Error {
+  constructor() {
+    super("cancelled");
+    this.name = "GrannyCancelled";
+  }
+}
+var isCancelled = (e) => e instanceof GrannyCancelled || typeof e === "object" && e !== null && e.name === "GrannyCancelled";
 
 // src/core/review.ts
 var MARKER = /^\s*[-*]\s*\[(P[0-3]|[A-Za-z]+)\](.*)$/;
@@ -1204,6 +1220,14 @@ var FINAL_REVIEW_PHASE = "Final review";
 var CHECKS_PHASE = "Checks";
 var TIMEOUT_PROBE = "if command -v timeout >/dev/null; then echo timeout; elif command -v gtimeout >/dev/null; then echo gtimeout; else exit 1; fi";
 var TIMEOUT_MISSING = /(^|[\s:])g?timeout: (command )?not found|command not found: g?timeout$/m;
+var EXIT_MARK = /\[granny\] exit=(\d+)[ \t]*(?:\r?\n|$)/g;
+var markExit = (command) => `( ${command} ) 2>&1; echo "[granny] exit=$?"`;
+function exitMarked(output) {
+  const last = [...output.matchAll(EXIT_MARK)].at(-1);
+  if (!last)
+    return;
+  return { code: Number(last[1]), output: output.slice(0, last.index) + output.slice(last.index + last[0].length) };
+}
 var saidSomething = (d) => typeof d === "string" && d.trim() && !/^\s*(none|n\/a|-|no deviations)?\.?\s*$/i.test(d) ? d : undefined;
 var slug = (s) => s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "stage";
 var trimPath = (s) => s.replace(/\/+$/, "") || "/";
@@ -1315,7 +1339,24 @@ async function runGranny(host, input) {
     const theirs = specs.filter((st) => repoOf(st) === repo).map(checksOf);
     return config.checks.filter((c) => theirs.some((list) => list.includes(c)));
   };
-  const call = async (role, kind, label, phase, prompt, access, rc, cwd) => host.agent({
+  const stopIfCancelled = () => {
+    if (host.cancelled?.())
+      throw new GrannyCancelled;
+  };
+  const guarded = async (start) => {
+    stopIfCancelled();
+    let r;
+    try {
+      r = await start();
+    } catch (e) {
+      stopIfCancelled();
+      throw e;
+    }
+    stopIfCancelled();
+    return r;
+  };
+  const run = (script, cwd) => guarded(() => host.run(script, cwd));
+  const call = async (role, kind, label, phase, prompt, access, rc, cwd) => guarded(() => host.agent({
     role,
     kind,
     label,
@@ -1326,21 +1367,26 @@ async function runGranny(host, input) {
     effort: rc.effort,
     access,
     cwd
-  });
-  const helped = (label, r, missing) => {
-    const ran = Boolean(r?.ran);
+  }));
+  const reported = (r) => {
+    const said = exitMarked(String(r?.output ?? ""));
+    const ran = said ? said.code === 0 : Boolean(r?.ran);
     const note = typeof r?.note === "string" && r.note.trim() ? r.note : undefined;
+    return { ran, code: said ? said.code : r?.exitCode ?? (ran ? 0 : "?"), output: said ? said.output : String(r?.output ?? ""), ...note ? { note } : {} };
+  };
+  const helped = (label, r, missing) => {
+    const { ran, code, output, note } = reported(r);
     if (ran && note)
       host.log(`${label}: the helper's note, kept out of the command's output: ${note}`);
-    return { ran, code: r?.exitCode ?? (ran ? 0 : "?"), output: r ? `${String(r.output ?? "")}${!ran && note ? `
+    return { ran, code, output: r ? `${output}${!ran && note ? `
 ${note}` : ""}` : missing };
   };
   const shell = async (label, phase, script, cwd, ask = gitCommandPrompt) => {
     if (host.run) {
-      const r = await host.run(script, cwd);
+      const r = await run(script, cwd);
       return { ran: r.code === 0, code: r.code, output: r.output };
     }
-    const prompt = ask(cwd, label, `cd ${shellQuote(cwd)} && ${script}`);
+    const prompt = ask(cwd, label, markExit(`cd ${shellQuote(cwd)} && ${script}`));
     return helped(label, await call("helper", "command", label, phase, prompt, "write", config.roles.helper, cwd), `the ${label} runner returned nothing`);
   };
   const readHead = async (label, phase, cwd) => {
@@ -1367,13 +1413,7 @@ ${note}` : ""}` : missing };
   };
   const setUpWorktree = async (repo, branch, from, label, shared) => {
     const script = worktreeScript(config, branch, from, worktreePath(repo, branch, config.worktreeDir, shared));
-    let r;
-    if (host.run)
-      r = await shell(label, "Worktree", script, repo);
-    else {
-      const prompt = worktreeCommandPrompt(repo, branch, `cd ${shellQuote(repo)} && ${script}`);
-      r = helped(label, await call("helper", "command", label, "Worktree", prompt, "write", config.roles.helper, repo), "the worktree runner returned nothing");
-    }
+    const r = await shell(label, "Worktree", script, repo, (_cwd, _step, command) => worktreeCommandPrompt(repo, branch, command));
     const path = r.ran ? reportedWorktree(r.output) : undefined;
     if (!path)
       throw new Error(`worktree setup failed${repo === primary && branch === input.branch ? "" : ` for ${repo} ${branch}`} (exit ${r.code}): ${r.output.slice(-2000)}`);
@@ -1607,34 +1647,36 @@ the last repair's deviations: ${deviations}` : ""}`;
     let output;
     let note;
     if (host.run) {
-      const r = await host.run(plan.script, cwd);
+      const r = await run(plan.script, cwd);
       ran = r.code === 0;
       output = r.output;
       if (!ran)
         note = `review command exited ${r.code}: ${r.output.slice(-2000)}`;
     } else {
       const job = detachedReview(plan, config, stem, cwd);
-      const step = (label, prompt) => call("helper", "command", label, phase, prompt, "read-only", config.roles.helper, cwd);
-      const started = await step(`review ${tag}`, reviewStartPrompt(p, name, rv.name, job.start));
+      const step = async (label, prompt) => {
+        const r = await call("helper", "command", label, phase, prompt, "read-only", config.roles.helper, cwd);
+        return r ? reported(r) : undefined;
+      };
+      const started = await step(`review ${tag}`, reviewStartPrompt(p, name, rv.name, markExit(job.start)));
       if (!started?.ran) {
-        const said = String(started?.output ?? "");
-        return { ran: false, findings: [], note: started ? `review command did not start (exit ${started.exitCode ?? "?"})${started.note ? ` (${started.note})` : ""}: ${said.slice(-2000)}` : "review runner returned nothing" };
+        return { ran: false, findings: [], note: started ? `review command did not start (exit ${started.code})${started.note ? ` (${started.note})` : ""}: ${started.output.slice(-2000)}` : "review runner returned nothing" };
       }
       let done = false;
       for (let n = 1;n <= MAX_WAITS && !done; n++) {
-        const w = await step(`review ${tag} wait ${n}`, reviewWaitPrompt(p, name, rv.name, n, MAX_WAITS, WAIT_SECONDS / 60, job.wait));
-        done = lineShaped(String(w?.output ?? ""), /^done$/) !== undefined;
+        const w = await step(`review ${tag} wait ${n}`, reviewWaitPrompt(p, name, rv.name, n, MAX_WAITS, WAIT_SECONDS / 60, markExit(job.wait)));
+        done = lineShaped(w?.output ?? "", /^done$/) !== undefined;
       }
       if (!done) {
-        await step(`review ${tag} stop`, reviewStopPrompt(p, name, rv.name, job.stop));
+        await step(`review ${tag} stop`, reviewStopPrompt(p, name, rv.name, markExit(job.stop)));
         const limit = `${MAX_WAITS} waits of up to ${WAIT_SECONDS / 60} minutes (${MAX_WAITS * WAIT_SECONDS / 60} minutes)`;
         return { ran: false, findings: [], note: `review command still running after ${limit} - stopped it` };
       }
-      const r = await step(`review ${tag} read`, reviewReadPrompt(p, name, rv.name, job.read));
+      const r = await step(`review ${tag} read`, reviewReadPrompt(p, name, rv.name, markExit(job.read)));
       ran = Boolean(r?.ran);
-      output = String(r?.output ?? "");
+      output = r?.output ?? "";
       if (!ran)
-        note = r ? `review command exited ${r.exitCode ?? "?"}${r.note ? ` (${r.note})` : ""}: ${output.slice(-2000)}` : "review runner returned nothing";
+        note = r ? `review command exited ${r.code}${r.note ? ` (${r.note})` : ""}: ${output.slice(-2000)}` : "review runner returned nothing";
     }
     host.log(`${tag}: reviewer: ${plan.backend ?? reportedBackend(output) ?? "not reported"}`);
     if (!ran)
@@ -1676,6 +1718,8 @@ the last repair's deviations: ${deviations}` : ""}`;
     try {
       return await review(lane, rv, name, subject, round, n);
     } catch (e) {
+      if (isCancelled(e))
+        throw e;
       return { ran: false, findings: [], note: `reviewer call failed: ${String(e?.message ?? e)}` };
     }
   };
@@ -1860,6 +1904,7 @@ ${judgeRetryNote(problems)}`, "read-only", config.roles.judge, lane.cwd);
     if (fromStage > 1)
       return skipped("skipped", `plan review skipped - the run resumes from stage ${fromStage}`);
     host.phase(PLAN_PHASE);
+    host.log(planReviewWarning(config.maxRounds));
     const name = "plan review";
     const able = config.reviewers.filter((rv) => rv.engine !== "command" || rv.command?.includes("{prompt}"));
     const unable = config.reviewers.filter((rv) => !able.includes(rv));
@@ -2111,6 +2156,11 @@ ${note}` : note } : result;
   const undelivered = new Set;
   let failure;
   const nameOf = (i) => `${i + 1} (${specs[i].name || `stage ${i + 1}`})`;
+  const stageEvent = (i, event, outcome) => {
+    try {
+      host.stage?.({ number: i + 1, name: specs[i].name || `stage ${i + 1}`, event, ...outcome ? { outcome } : {} });
+    } catch {}
+  };
   for (let i = 0;i < fromStage - 1; i++) {
     results[i] = { stage: specs[i].name || `stage ${i + 1}`, outcome: "skipped", rounds: 0, residual: [], unresolved: [], history: [] };
     done.add(i);
@@ -2129,16 +2179,19 @@ ${note}` : note } : result;
           results[i] = { stage: specs[i].name || `stage ${i + 1}`, outcome: "skipped", rounds: 0, residual: [], unresolved: [], history: [], note };
           done.add(i);
           undelivered.add(i);
+          stageEvent(i, "end", "skipped");
           continue;
         }
         if (running.size)
           host.log(`${specs[i].name || `stage ${i + 1}`}: starting in parallel with ${[...running.keys()].map((j) => specs[j].name || `stage ${j + 1}`).join(", ")}`);
+        stageEvent(i, "start");
         running.set(i, startStage(i).then((r) => {
           results[i] = r;
           if (r.outcome === "no-changes" || r.outcome === "checks-failed")
             undelivered.add(i);
           done.add(i);
           running.delete(i);
+          stageEvent(i, "end", r.outcome);
         }, (error) => {
           failure ??= { error };
           running.delete(i);
@@ -2152,7 +2205,8 @@ ${note}` : note } : result;
   const unfinished = specs.map((_, i) => i).filter((i) => !done.has(i));
   if (failure) {
     const finished = [...done].sort((a, b) => a - b).filter((i) => i >= fromStage - 1);
-    host.log(`a stage failed - waited for the stages already running. Finished: ${finished.map(nameOf).join(", ") || "none"}. Not finished: ${unfinished.map(nameOf).join(", ")}`);
+    if (!isCancelled(failure.error))
+      host.log(`a stage failed - waited for the stages already running. Finished: ${finished.map(nameOf).join(", ") || "none"}. Not finished: ${unfinished.map(nameOf).join(", ")}`);
     throw failure.error;
   }
   if (unfinished.length)
@@ -2362,6 +2416,9 @@ function stageRepos(input) {
   const primary = top(input.repo);
   return [...new Set((input.stages ?? []).flatMap((st) => typeof st.repo === "string" && top(st.repo) !== primary ? [top(st.repo)] : []))];
 }
+function statusError(error, cancelled) {
+  return cancelled || isCancelled(error) ? "cancelled" : String(error?.stack ?? error);
+}
 function stamp() {
   return new Date().toISOString();
 }
@@ -2413,7 +2470,77 @@ function summarize(result, worktree) {
   return lines.join(`
 `);
 }
-var RUN_TOOL_DESCRIPTION = 'granny-workflow: start the implement \u2192 review \u2192 judge \u2192 fix loop in the background and return a run id. The granny-workflow skill, when installed, describes the inputs and the preflight. Send only the fields you set: leave an optional field out instead of sending "", [], {} or a default - an empty value is not a missing one (stages[].checks [] runs no checks, stages[].after [] starts the stage at once).';
+function planReviewNotice(input, config) {
+  const reviewsPlan = config.planReview && (input.plan !== undefined || input.goal !== undefined) && !((input.fromStage ?? 1) > 1);
+  return reviewsPlan ? `
+${planReviewWarning(config.maxRounds)} Tell the user this in your next message.` : "";
+}
+var layerSources = (repo) => [globalConfigPath(), join(repo, "granny.config.json"), "the run's config"];
+var AGENT_ROLES = ["granny", "helper", "planner", "implementer", "judge"];
+var isObject2 = (v) => !!v && typeof v === "object" && !Array.isArray(v);
+function hostModelErrors(config, layers, host, problem, sources) {
+  const from = (set) => {
+    for (let i = layers.length - 1;i >= 0; i--) {
+      const layer = layers[i];
+      if (isObject2(layer) && set(layer))
+        return ` (from ${sources[i] ?? `config layer ${i + 1}`})`;
+    }
+    return "";
+  };
+  const check = (what, spec, where) => {
+    const model = resolveModel(spec, host);
+    const wrong = model === undefined ? undefined : problem(model, typeof spec !== "string");
+    if (!wrong)
+      return [];
+    const claude = typeof spec === "string" ? spec : spec?.["claude-code"] ?? model;
+    return [`${what} "${model}"${where} - ${wrong}; give a host-keyed model, e.g. { "claude-code": "${claude}", "${host}": "<provider/model>" }`];
+  };
+  const roles = AGENT_ROLES.flatMap((role) => check(`roles.${role}.model:`, config.roles[role].model, from((l) => isObject2(l.roles) && isObject2(l.roles[role]) && l.roles[role].model !== undefined)));
+  const reviewers = config.reviewers.flatMap((rv, i) => rv.engine === "agent" ? check(`reviewers[${i}] "${rv.name}": model`, rv.model, from((l) => Array.isArray(l.reviewers))) : []);
+  return [...roles, ...reviewers];
+}
+var USER_SETTINGS = "roles.*.model, roles.*.effort, reviewers, threshold, maxRounds and checks come from the user's config files: override them in config only when the user asked for that change in this conversation. If a provider limit or error blocks the run, stop and ask the user which model to use instead of switching models yourself.";
+var RUN_TOOL_DESCRIPTION = `granny-workflow: start the implement \u2192 review \u2192 judge \u2192 fix loop in the background and return a run id. The granny-workflow skill, when installed, describes the inputs and the preflight. Send only the fields you set: leave an optional field out instead of sending "", [], {} or a default - an empty value is not a missing one (stages[].checks [] runs no checks, stages[].after [] starts the stage at once). Set config planReview only when the user asked for a plan review in this request - it costs many tokens and much time. ${USER_SETTINGS}`;
+var shown = (value) => {
+  if (value === undefined)
+    return "default";
+  if (typeof value === "string")
+    return value;
+  return JSON.stringify(value);
+};
+var reviewersText = (list, host) => list.map((rv) => `${rv.name} (${[rv.engine, resolveModel(rv.model, host)].filter(Boolean).join(", ")})`).join(", ");
+function overridesNotice(layers, host) {
+  if (layers.at(-1) === undefined)
+    return "";
+  const after = resolveConfig(layers, host);
+  let before;
+  try {
+    before = resolveConfig(layers.slice(0, -1), host);
+  } catch {
+    before = resolveConfig([], host);
+  }
+  const changes = [];
+  const note = (key, now, was) => {
+    if (now !== was)
+      changes.push(`${key} ${now} (config: ${was})`);
+  };
+  for (const role of Object.keys(after.roles)) {
+    note(`roles.${role}.model`, shown(resolveModel(after.roles[role].model, host)), shown(resolveModel(before.roles[role].model, host)));
+    note(`roles.${role}.effort`, shown(after.roles[role].effort), shown(before.roles[role].effort));
+  }
+  for (const key of Object.keys(after)) {
+    if (key === "roles")
+      continue;
+    if (key === "reviewers")
+      note(key, reviewersText(after.reviewers, host), reviewersText(before.reviewers, host));
+    else if (key === "checks")
+      note(key, after.checks.map((c) => c.name).join(", ") || "none", before.checks.map((c) => c.name).join(", ") || "none");
+    else
+      note(key, shown(after[key]), shown(before[key]));
+  }
+  return changes.length ? `
+overrides: ${changes.join(", ")} - show this line to the user in your next message; they did not set these values in their config files.` : "";
+}
 var isEmpty = (v) => v === "" || Array.isArray(v) && !v.length || !!v && typeof v === "object" && !Array.isArray(v) && !Object.keys(v).length;
 function dropPlaceholders(input) {
   if (!input || typeof input !== "object")
@@ -2463,7 +2590,7 @@ var RUN_INPUT_SCHEMA = {
     plan: {
       type: "array",
       items: { type: "string" },
-      description: "Absolute paths of the plan files (with goal: where the planner writes the plan). Every agent reads them; with config planReview on (off by default) the reviewers review them before stage 1 and the implementer fixes them in place, uncommitted"
+      description: "Absolute paths of the plan files (with goal: where the planner writes the plan). Every agent reads them; with config planReview on the reviewers review them before stage 1 and the implementer fixes them in place, uncommitted. planReview is off by default: set it only when the user explicitly asked for a plan review in this request - every round is a review + judge + fix and costs many tokens and much time"
     },
     stages: {
       type: "array",
@@ -2490,10 +2617,32 @@ var RUN_INPUT_SCHEMA = {
       }
     },
     fromStage: { type: "number", description: "Only to resume an interrupted run: 1-based stage to resume from; earlier stages are skipped. Leave it out on a new run" },
-    config: { type: "object", additionalProperties: true, description: "Per-run overrides of granny.config.json (same shape)" }
+    config: {
+      type: "object",
+      additionalProperties: true,
+      description: `Per-run overrides of granny.config.json (same shape). planReview is off by default: set it only when the user explicitly asked for a plan review in this request - it costs many tokens and much time. ${USER_SETTINGS}`
+    }
   },
   required: ["repo", "branch"]
 };
+var HEARTBEAT_MS = 60000;
+var intervals = {
+  setInterval: (fn, ms) => setInterval(fn, ms),
+  clearInterval: (handle) => clearInterval(handle)
+};
+async function withHeartbeat(work, beat, everyMs, timers = intervals) {
+  const handle = timers.setInterval(() => {
+    try {
+      beat();
+    } catch {}
+  }, everyMs);
+  handle?.unref?.();
+  try {
+    return await work();
+  } finally {
+    timers.clearInterval(handle);
+  }
+}
 var DEFAULT_DELAYS = [30000, 120000, 300000, 600000];
 var KILL_GRACE_MS = 5000;
 function signalGroup(child, name) {
@@ -2545,18 +2694,19 @@ cancelled` } : { code: code ?? 1, output }));
       signal.addEventListener("abort", cancel, { once: true });
   });
 }
-function runStatus(runs, runIdArg, repo) {
-  let dir;
+function runDir(runs, runIdArg, repo) {
   if (runIdArg && runs.has(runIdArg))
-    dir = runs.get(runIdArg).dir;
-  else if (repo) {
-    const config = resolveConfig([readJson(globalConfigPath()), readJson(join(repo, "granny.config.json"))]);
-    const root = join(repo, config.workDir, "runs");
-    const ids = existsSync(root) ? readdirSync(root).sort() : [];
-    const pick = runIdArg ?? ids.at(-1);
-    if (pick && ids.includes(pick))
-      dir = join(root, pick);
-  }
+    return runs.get(runIdArg).dir;
+  if (!repo)
+    return;
+  const config = resolveConfig([readJson(globalConfigPath()), readJson(join(repo, "granny.config.json"))]);
+  const root = join(repo, config.workDir, "runs");
+  const ids = existsSync(root) ? readdirSync(root).sort() : [];
+  const pick = runIdArg ?? ids.at(-1);
+  return pick && ids.includes(pick) ? join(root, pick) : undefined;
+}
+function runStatus(runs, runIdArg, repo) {
+  const dir = runDir(runs, runIdArg, repo);
   if (!dir)
     return "No such granny run. Pass runId, or repo to see the latest run in that repo.";
   const read = (f) => existsSync(join(dir, f)) ? readFileSync(join(dir, f), "utf8") : "";
@@ -2576,11 +2726,2864 @@ ${result.length > 30000 ? result.slice(0, 30000) + `
 `);
 }
 
+// src/adapters/runview/format.ts
+function clock(value) {
+  const d = new Date(typeof value === "number" || typeof value === "string" ? value : Number.NaN);
+  return Number.isNaN(d.getTime()) ? "--:--:--" : d.toTimeString().slice(0, 8);
+}
+function duration(ms) {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  if (s < 60)
+    return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60)
+    return `${m}m${String(s % 60).padStart(2, "0")}s`;
+  return `${Math.floor(m / 60)}h${String(m % 60).padStart(2, "0")}m`;
+}
+var ANSI = /\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[@-Z\\-_])/g;
+var CONTROL = /[\x00-\x08\x0b-\x1f\x7f]/g;
+var clean = (text) => text.replace(/\t/g, "  ").replace(ANSI, "").replace(CONTROL, "");
+function fit(text, width) {
+  const flat = text.replace(/\t/g, "  ");
+  if (width < 1)
+    return "";
+  return flat.length > width ? `${flat.slice(0, width - 1)}\u2026` : flat;
+}
+var pad = (text, width) => fit(text, width).padEnd(Math.max(0, width));
+function shortModel(model, effort) {
+  if (!model)
+    return effort ? `default model/${effort}` : "default model";
+  const [main = "", variant] = model.split("#");
+  const id = main.slice(main.lastIndexOf("/") + 1);
+  return [id, variant && variant !== "default" ? variant : undefined, effort].filter(Boolean).join("/");
+}
+var CD = /^cd\s+('(?:[^']|'\\'')*'|"[^"]*"|\S+)\s*&&\s*/;
+var escape = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+var BOUNDARY = `(^|[\\s'"=(:])`;
+function shortArg(text, cwd, home) {
+  let out = clean(text).trim().replace(CD, "");
+  const dir = cwd?.replace(/\/+$/, "");
+  if (dir) {
+    out = out.replace(new RegExp(`${BOUNDARY}${escape(dir)}/`, "g"), "$1").replace(new RegExp(`${BOUNDARY}${escape(dir)}(?=$|[\\s'"])`, "g"), "$1.");
+  }
+  const root = home?.replace(/\/+$/, "");
+  if (root)
+    out = out.replace(new RegExp(`${BOUNDARY}${escape(root)}/`, "g"), "$1~/");
+  return out.replace(/\s+/g, " ").trim();
+}
+var dateOf = (value) => new Date(typeof value === "number" || typeof value === "string" ? value : Number.NaN);
+function stamp2(value) {
+  const d = dateOf(value);
+  return Number.isNaN(d.getTime()) ? undefined : `${d.toISOString().slice(0, 10)} ${d.toTimeString().slice(0, 8)}`;
+}
+
+// src/adapters/runview/activity.ts
+var ARG_KEYS = ["path", "file_path", "file", "pattern", "command", "query", "url", "description", "op"];
+var ARG_CHARS = 400;
+var TEXT_CHARS = 120;
+var SAID_CHARS = 400;
+var COMMAND_CHARS = 40;
+var BURST_MS = 5000;
+var BURST_NAMES = 10;
+var MAX_ROWS = 200;
+var SHELLS = new Set(["bash", "shell", "sh"]);
+var oneLine = (text) => clean(text).replace(/\s+/g, " ").trim();
+function argOf(input) {
+  if (!input || typeof input !== "object")
+    return;
+  const args = input;
+  const key = ARG_KEYS.find((k) => typeof args[k] === "string" && args[k].trim());
+  return key ? oneLine(args[key]).slice(0, ARG_CHARS) : undefined;
+}
+var KINDS = {
+  thinking: "thinking",
+  writing: "writing",
+  starting: "starting",
+  "waiting for model": "waiting",
+  waiting: "waiting",
+  "preparing a tool call": "preparing",
+  preparing: "preparing"
+};
+var shortOf = (name, arg, cwd, home) => {
+  if (!arg)
+    return;
+  const short = shortArg(arg, cwd, home);
+  return SHELLS.has(name ?? "") ? fit(short, COMMAND_CHARS) : short;
+};
+var firstLine = (text) => clean(text).split(`
+`).map((l) => l.trim()).find(Boolean) ?? "";
+var TODO_MARKS = { done: "\u2713", active: "\u25CF", pending: "\xB7" };
+var todoText = (todos) => todos.map((t) => `${TODO_MARKS[t.state]} ${oneLine(t.text)}`).join("  ");
+function activityLines(items, cwd, home) {
+  const out = [];
+  let last = "";
+  for (const item of items) {
+    const body = lineOf(item, cwd, home);
+    if (body === undefined || body === last)
+      continue;
+    last = body;
+    out.push(`${clock(item.t)}  ${body}`);
+  }
+  return out;
+}
+function lineOf(item, cwd, home) {
+  const name = oneLine(item.name ?? "tool");
+  switch (item.kind) {
+    case "state":
+      return item.text ? `\xB7 ${oneLine(item.text)}` : undefined;
+    case "heading":
+      return item.text ? `\xBB ${oneLine(item.text)}` : undefined;
+    case "tool": {
+      const arg = item.arg ? shortArg(item.arg, cwd, home) : "";
+      const what = item.intent ? `${oneLine(item.intent)}${arg ? ` \xB7 ${arg}` : ""}` : arg;
+      return `\u25B8 ${name.padEnd(6)} ${what}`.trimEnd();
+    }
+    case "tool-end":
+      return item.failed ? `\u2717 ${name} failed${item.text ? `: ${firstLine(item.text)}` : ""}` : undefined;
+    case "error":
+      return `\u2717 ${name} failed${item.text ? `: ${firstLine(item.text)}` : ""}`;
+    case "subagents":
+      return `\u2514 task: ${(item.names ?? []).map(oneLine).join(", ")}`;
+    case "text": {
+      const said = firstLine(item.text ?? "");
+      return said ? `\u270E "${fit(said, TEXT_CHARS)}"` : undefined;
+    }
+    case "todo":
+      return `\u25B8 ${"todo".padEnd(6)} ${todoText(item.todos ?? [])}`;
+    case "note":
+      return item.text ? oneLine(item.text) : undefined;
+    case "exit":
+      return `\u25A0 process exited ${item.code ?? "?"}`;
+  }
+}
+var baseName2 = (path) => path.slice(path.lastIndexOf("/") + 1);
+var isRef = (arg) => arg.startsWith("skill://");
+function rowText(row) {
+  if (row.note !== undefined)
+    return row.note;
+  const mark = row.mark ? ` ${row.mark}` : "";
+  const error = row.error ? ` ${row.error}` : "";
+  if (row.names)
+    return `${row.names.join(", ")}${row.mark ? mark : " \u2026"}${error}`;
+  const unique = [...new Set(row.args)];
+  if (row.count > 1 && unique.length === 1)
+    return `${unique[0]}  (${row.count}\xD7)${mark}${error}`;
+  if (row.count > 1 && unique.length > 1) {
+    const refs = unique.every(isRef);
+    const shown = unique.slice(0, BURST_NAMES).map((a) => refs ? baseName2(a) : a);
+    return `${row.count} ${refs ? "skill refs" : "files"} \xB7 ${shown.join(", ")}${unique.length > BURST_NAMES ? ", \u2026" : ""}${mark}${error}`;
+  }
+  return `${row.intent ?? row.args[0] ?? ""}${mark}${error}`.trim();
+}
+function summarise(items, at, opts = {}) {
+  const { cwd, home } = opts;
+  const rows = [];
+  let state;
+  let heading;
+  let todo;
+  let said;
+  const openRow = (name, id) => {
+    for (let i = rows.length - 1;i >= 0; i--) {
+      const row = rows[i];
+      if (row.note === undefined && row.open && (id !== undefined ? row.id === id : row.tool === name))
+        return row;
+    }
+    return;
+  };
+  for (const item of items) {
+    const t = item.t ?? at;
+    switch (item.kind) {
+      case "state": {
+        const kind = KINDS[oneLine(item.text ?? "")];
+        if (kind)
+          state = { state: kind, since: t };
+        break;
+      }
+      case "heading":
+        if (item.text)
+          heading = oneLine(item.text);
+        break;
+      case "tool": {
+        const tool = oneLine(item.name ?? "tool");
+        const intent = item.intent ? oneLine(item.intent) : undefined;
+        const arg = isRef(item.arg ?? "") ? item.arg : shortOf(tool, item.arg, cwd, home);
+        state = { state: "running", tool, ...item.arg ? { arg: item.arg } : {}, ...intent ? { intent } : {}, since: t };
+        const prev = rows.at(-1);
+        const same = prev?.args.every((a) => a === arg) && prev.intent === intent;
+        const burst = prev && prev.note === undefined && prev.tool === tool && !prev.names && !prev.mark && !prev.error && tool !== "task" && arg !== undefined && prev.args.length === prev.count && prev.t !== undefined && t - prev.t <= BURST_MS && (same || !SHELLS.has(tool));
+        if (burst) {
+          prev.count++;
+          prev.args.push(arg);
+          prev.before = prev.t;
+          prev.t = t;
+          prev.id = item.id;
+          prev.open = true;
+          if (prev.intent !== intent)
+            delete prev.intent;
+          break;
+        }
+        rows.push({ t, tool, ...item.id ? { id: item.id } : {}, ...intent ? { intent } : {}, args: arg ? [arg] : [], count: 1, tone: "base", open: true });
+        break;
+      }
+      case "subagents": {
+        const row = openRow("task", undefined);
+        const names = (item.names ?? []).map(oneLine);
+        if (row)
+          row.names = names;
+        else
+          rows.push({ t, tool: "task", args: [], count: 1, names, tone: "base", open: true });
+        break;
+      }
+      case "tool-end": {
+        const row = openRow(item.name, item.id);
+        if (row) {
+          row.open = false;
+          if (item.failed) {
+            row.mark = "\u2717";
+            row.tone = "error";
+          } else if (row.names)
+            row.mark = "\u2713";
+        }
+        if (state?.state === "running" && (state.tool === item.name || item.name === undefined))
+          state = { state: "waiting", since: t };
+        break;
+      }
+      case "error": {
+        const row = openRow(item.name, item.id) ?? [...rows].reverse().find((r) => r.tool === item.name);
+        if (row) {
+          row.open = false;
+          row.mark = "\u2717";
+          row.tone = "error";
+          if (item.text)
+            row.error = firstLine(item.text);
+        }
+        break;
+      }
+      case "todo":
+        todo = (item.todos ?? []).map((x) => ({ text: oneLine(x.text), state: x.state }));
+        break;
+      case "text": {
+        const lines = clean(item.text ?? "").split(`
+`).map((l) => l.trim()).filter(Boolean);
+        if (lines.length)
+          said = fit(lines.join(" ").replace(/\s+/g, " "), SAID_CHARS);
+        if (state?.state === "writing")
+          state = { state: "waiting", since: t };
+        break;
+      }
+      case "note":
+        if (item.text)
+          rows.push({ t, tool: "", args: [], count: 1, note: oneLine(item.text), tone: "warning", open: false });
+        break;
+      case "exit":
+        state = undefined;
+        break;
+    }
+  }
+  const live = opts.live ?? state;
+  const last = rows.at(-1);
+  if (!opts.end && live?.state === "running" && last?.open && last.tool === live.tool && !last.names) {
+    if (last.count > 1) {
+      last.count--;
+      last.args.pop();
+      last.t = last.before;
+    } else
+      rows.pop();
+  }
+  const max = opts.max ?? MAX_ROWS;
+  const recent = rows.slice(-max).reverse().map((row) => ({ ...row.t !== undefined ? { t: row.t } : {}, tool: row.tool, text: rowText(row), tone: row.tone }));
+  const now = nowBlock(opts.end, live, opts.live?.heading ?? heading, at, cwd, home);
+  return { ...now ? { now } : {}, ...todo ? { todo } : {}, recent, ...said ? { lastSaid: said } : {} };
+}
+function nowBlock(end, state, heading, at, cwd, home) {
+  if (end) {
+    const took = duration((end.end ?? at) - end.start);
+    if (end.state === "done")
+      return { text: `\u2713 done in ${took}`, tone: "success" };
+    if (end.state === "cancelled")
+      return { text: `\u2298 cancelled after ${took}`, tone: "warning" };
+    return { text: `\u2717 failed after ${took}${end.error ? `: ${firstLine(end.error)}` : ""}`, tone: "error" };
+  }
+  if (!state)
+    return;
+  const took = duration(at - state.since);
+  const extra = heading ? { heading } : {};
+  switch (state.state) {
+    case "running": {
+      const detail = state.intent ? oneLine(state.intent) : shortOf(state.tool, state.arg, cwd, home);
+      return { text: `\u25CF ${state.tool ?? "tool"} \xB7 ${took}`, tone: "info", ...detail ? { detail } : {}, ...extra };
+    }
+    case "thinking":
+    case "writing":
+      return { text: `\u25CF ${state.state} ${took}`, tone: "info", ...extra };
+    case "preparing":
+      return { text: `\u25CF preparing a tool call ${took}`, tone: "info", ...extra };
+    case "waiting":
+      return { text: `\u2026 waiting for model ${took}`, tone: "muted", ...extra };
+    case "starting":
+      return { text: `\u2026 starting ${took}`, tone: "muted", ...extra };
+  }
+}
+
+// src/adapters/omp/panel.ts
+var PARSED_EVENTS = new Set(["message_start", "message_end", "tool_execution_start", "tool_execution_end", "turn_start", "turn_end"]);
+var HEAD = 200;
+var MAX_LINES = 8;
+var THINKING_TAIL = 4000;
+var LOG_ARG = 200;
+var LOG_TEXT = 4000;
+function stringAfter(text, marker) {
+  const i = text.indexOf(marker);
+  if (i < 0)
+    return;
+  const start = i + marker.length;
+  const end = text.indexOf('"', start);
+  return end < 0 ? undefined : text.slice(start, end);
+}
+function lineType(line) {
+  return stringAfter(line.slice(0, HEAD), '"type":"');
+}
+function streamType(line) {
+  return stringAfter(line, '"assistantMessageEvent":{"type":"');
+}
+function deltaOf(line) {
+  const marker = '"delta":"';
+  const at = line.indexOf(marker);
+  if (at < 0)
+    return "";
+  const start = at + marker.length;
+  for (let j = start;j < line.length; j++) {
+    if (line[j] === "\\")
+      j++;
+    else if (line[j] === '"') {
+      try {
+        return JSON.parse(line.slice(start - 1, j + 1));
+      } catch {
+        return "";
+      }
+    }
+  }
+  return "";
+}
+function oneLine2(value, max = 60) {
+  const flat = value.replace(/\s+/g, " ").trim();
+  return flat.length > max ? `${flat.slice(0, max - 1)}\u2026` : flat;
+}
+function subagents(args) {
+  const items = Array.isArray(args?.tasks) ? args.tasks : [args];
+  return items.map((t) => oneLine2(String(t?.name || t?.agent || "task"), 40));
+}
+var callId = (event) => event?.toolCallId === undefined ? {} : { id: String(event.toolCallId) };
+function toolEntry(event) {
+  const intent = typeof event?.intent === "string" && event.intent.trim() ? oneLine2(event.intent, LOG_ARG) : undefined;
+  const raw = argOf(event?.args);
+  const arg = raw ? oneLine2(raw, LOG_ARG) : undefined;
+  return { type: "tool", ...callId(event), name: String(event?.toolName ?? "tool"), ...intent ? { intent } : {}, ...arg ? { arg } : {} };
+}
+var TODO_STATES = { completed: "done", in_progress: "active", pending: "pending", blocked: "pending" };
+function todosOf(result) {
+  const phases = result?.details?.phases;
+  if (!Array.isArray(phases))
+    return;
+  const out = [];
+  for (const phase of phases) {
+    for (const task of Array.isArray(phase?.tasks) ? phase.tasks : []) {
+      const state = TODO_STATES[task?.status];
+      if (state && typeof task.content === "string" && task.content.trim())
+        out.push({ text: oneLine2(task.content, LOG_ARG), state });
+    }
+  }
+  return out.length ? out : undefined;
+}
+function finalText(message) {
+  const parts = Array.isArray(message?.content) ? message.content : [];
+  return parts.filter((p) => p?.type === "text" && typeof p.text === "string").map((p) => p.text).join(`
+`).trim().slice(0, LOG_TEXT);
+}
+function describe(event, cwd) {
+  const name = String(event?.toolName ?? "tool");
+  if (typeof event?.intent === "string" && event.intent.trim())
+    return { name, detail: oneLine2(event.intent), intent: true };
+  if (name === "task")
+    return { name, detail: oneLine2(subagents(event?.args).join(", ")) };
+  const arg = argOf(event?.args);
+  return { name, detail: arg ? oneLine2(shortArg(arg, cwd), 60) : undefined };
+}
+var NOW_KINDS = { starting: "starting", "waiting for model": "waiting", thinking: "thinking", writing: "writing", "preparing a tool call": "preparing" };
+var HEADING = /(?:^|\n)[ \t]*\*\*([^*\n]+)\*\*/g;
+
+class RoleActivity {
+  info;
+  log;
+  state = "starting";
+  since;
+  heading;
+  lastTool;
+  task;
+  startedAt;
+  endedAt;
+  active = false;
+  outcome;
+  error;
+  thinking = "";
+  unscanned = false;
+  running = new Map;
+  constructor(info, now, log) {
+    this.info = info;
+    this.log = log;
+    this.since = now;
+  }
+  set(state, now) {
+    if (state === this.state)
+      return;
+    this.state = state;
+    this.since = now;
+    this.log?.({ type: "state", state });
+  }
+  begin(now) {
+    this.running.clear();
+    this.startedAt ??= now;
+    this.active = true;
+    this.set("starting", now);
+  }
+  end(now) {
+    this.active = false;
+    this.endedAt = now;
+    this.thinking = "";
+    this.unscanned = false;
+  }
+  exit(code) {
+    this.log?.({ type: "exit", code });
+  }
+  stream(type, line, now) {
+    if (type !== "message_update")
+      return;
+    switch (streamType(line)) {
+      case "thinking_start":
+        this.thinking = "";
+        this.unscanned = false;
+        this.heading = undefined;
+        this.set("thinking", now);
+        break;
+      case "thinking_delta": {
+        const delta = deltaOf(line);
+        this.thinking += delta;
+        if (delta.includes("*"))
+          this.unscanned = true;
+        if (this.unscanned && this.log || this.thinking.length > 2 * THINKING_TAIL)
+          this.flush();
+        this.set("thinking", now);
+        break;
+      }
+      case "text_start":
+      case "text_delta":
+        this.set("writing", now);
+        break;
+      case "toolcall_start":
+      case "toolcall_delta":
+        this.set("preparing a tool call", now);
+        break;
+    }
+  }
+  event(event, now) {
+    switch (event?.type) {
+      case "turn_start":
+        this.set("waiting for model", now);
+        return;
+      case "message_start":
+        if (event.message?.role === "assistant")
+          this.set("waiting for model", now);
+        return;
+      case "message_end": {
+        if (event.message?.role !== "assistant" || !this.log)
+          return;
+        const text = finalText(event.message);
+        if (text)
+          this.log({ type: "text", text });
+        return;
+      }
+      case "tool_execution_start": {
+        const call = describe(event, this.info.cwd);
+        this.running.set(String(event.toolCallId), call);
+        this.set(running(call), now);
+        this.log?.(toolEntry(event));
+        if (call.name !== "task")
+          return;
+        const agents = subagents(event.args);
+        this.task = { id: String(event.toolCallId), agents };
+        this.log?.({ type: "subagents", agents });
+        return agents;
+      }
+      case "tool_execution_end": {
+        const id = String(event.toolCallId);
+        const call = this.running.get(id) ?? describe(event, this.info.cwd);
+        this.running.delete(id);
+        const error = event.isError === true;
+        this.lastTool = { text: call.intent || !call.detail ? call.detail ?? call.name : `${call.name}: ${call.detail}`, at: now, error };
+        if (this.task?.id === id)
+          this.task.mark = error ? "\u2717" : "\u2713";
+        const todos = error || !this.log ? undefined : todosOf(event.result);
+        if (todos)
+          this.log?.({ type: "todo", todos });
+        this.log?.({ type: "tool-end", ...callId(event), name: call.name, ...error ? { error: true } : {} });
+        const other = [...this.running.values()].at(-1);
+        this.set(other ? running(other) : "waiting for model", now);
+        return;
+      }
+    }
+    return;
+  }
+  now() {
+    if (!this.active)
+      return;
+    const heading = this.heading ? { heading: this.heading } : {};
+    const call = [...this.running.values()].at(-1);
+    if (call && this.state.startsWith("running ")) {
+      const what = call.detail ? call.intent ? { intent: call.detail } : { arg: call.detail } : {};
+      return { state: "running", tool: call.name, ...what, since: this.since, ...heading };
+    }
+    const state = NOW_KINDS[this.state];
+    return state ? { state, since: this.since, ...heading } : undefined;
+  }
+  get retainedChars() {
+    return this.thinking.length;
+  }
+  flush() {
+    if (this.unscanned) {
+      this.unscanned = false;
+      let heading;
+      for (const m of this.thinking.matchAll(HEADING))
+        heading = m[1];
+      const text = heading?.trim() ? oneLine2(heading) : undefined;
+      if (text && text !== this.heading) {
+        this.heading = text;
+        this.log?.({ type: "heading", text });
+      }
+    }
+    if (this.thinking.length > THINKING_TAIL)
+      this.thinking = this.thinking.slice(-THINKING_TAIL);
+  }
+  summary(now) {
+    const { model, effort } = this.info;
+    const doing = this.active ? `${this.state} ${duration(now - this.since)}` : "done";
+    const ran = this.startedAt === undefined ? "" : ` \xB7 ${duration((this.active ? now : this.endedAt ?? now) - this.startedAt)}`;
+    return `${model ?? "default model"}${effort ? `/${effort}` : ""} \xB7 ${doing}${ran}`;
+  }
+  lines(now) {
+    const { label, role, model, effort } = this.info;
+    const heading = this.state === "thinking" && this.heading ? ` \xB7 "${this.heading}"` : "";
+    const out = [`  ${label} (${role}) \xB7 ${model ?? "default model"}${effort ? `/${effort}` : ""} \xB7 ${this.state} ${duration(now - this.since)}${heading}`];
+    if (this.lastTool)
+      out.push(`    last tool: ${this.lastTool.text}${this.lastTool.error ? " \u2717" : ""} (${duration(now - this.lastTool.at)} ago)`);
+    if (this.task)
+      out.push(`    \u2514 task: ${this.task.agents.map((a) => `${a} ${this.task.mark ?? "\u2026"}`).join(", ")}`);
+    return out;
+  }
+}
+var running = (call) => `running ${call.name}${call.detail ? `: ${call.detail}` : ""}`;
+
+class LiveRun {
+  id;
+  ui;
+  options;
+  visible;
+  phase = "Starting";
+  startedAt;
+  roles = [];
+  active = new Set;
+  lastDraw = Number.NEGATIVE_INFINITY;
+  closed = false;
+  timer;
+  constructor(id, ui, options, visible = true) {
+    this.id = id;
+    this.ui = ui;
+    this.options = options;
+    this.visible = visible;
+    this.startedAt = options.now();
+  }
+  get key() {
+    return `granny-${this.id}`;
+  }
+  now() {
+    return this.options.now();
+  }
+  role(info, log) {
+    const role = new RoleActivity(info, this.options.now(), log);
+    this.roles.push(role);
+    return role;
+  }
+  start(role) {
+    role.begin(this.options.now());
+    this.active.add(role);
+    this.touch();
+  }
+  stop(role) {
+    role.end(this.options.now());
+    this.active.delete(role);
+    this.touch();
+  }
+  setVisible(visible) {
+    if (visible === this.visible || this.closed)
+      return;
+    this.visible = visible;
+    if (visible) {
+      this.lastDraw = Number.NEGATIVE_INFINITY;
+      return this.touch();
+    }
+    this.call((ui) => ui.setWidget(this.key, undefined));
+    this.call((ui) => ui.setStatus(this.key, undefined));
+  }
+  setPhase(title) {
+    this.phase = title;
+    this.touch();
+  }
+  lines(max = MAX_LINES) {
+    const now = this.options.now();
+    const out = [`granny ${this.id} \xB7 ${this.phase} \xB7 ${duration(now - this.startedAt)}`];
+    const roles = [...this.active];
+    if (!roles.length)
+      out.push("  no role process running");
+    for (let i = 0;i < roles.length; i++) {
+      const role = roles[i];
+      role.flush();
+      const more = roles.length - i - 1;
+      const room = max - out.length - (more ? 1 : 0);
+      const lines = role.lines(now);
+      if (i > 0 && lines.length > room) {
+        out.push(`  +${roles.length - i} more`);
+        break;
+      }
+      out.push(...lines.slice(0, Math.max(1, room)));
+    }
+    return out;
+  }
+  status() {
+    return `granny ${this.id} \xB7 ${this.phase} \xB7 ${this.active.size} active \xB7 ${duration(this.options.now() - this.startedAt)}`;
+  }
+  call(fn) {
+    if (!this.ui)
+      return;
+    try {
+      fn(this.ui);
+    } catch {}
+  }
+  touch() {
+    if (!this.ui || this.closed || !this.visible)
+      return;
+    if (!this.timer) {
+      this.timer = setInterval(() => this.touch(), Math.max(10, Math.min(250, this.options.renderEveryMs)));
+      this.timer.unref?.();
+    }
+    const now = this.options.now();
+    if (now - this.lastDraw < this.options.renderEveryMs)
+      return;
+    this.lastDraw = now;
+    const lines = this.lines();
+    if (this.options.hint)
+      lines[0] = `${lines[0]} \xB7 ${this.options.hint}`;
+    const status = this.status();
+    this.call((ui) => ui.setWidget(this.key, lines, { placement: "aboveEditor" }));
+    this.call((ui) => ui.setStatus(this.key, status));
+  }
+  close(outcome) {
+    this.closed = true;
+    if (this.timer)
+      clearInterval(this.timer);
+    this.active.clear();
+    if (!this.visible)
+      return () => {};
+    this.call((ui) => ui.setWidget(this.key, undefined));
+    this.call((ui) => ui.setStatus(this.key, `granny ${this.id}: ${outcome}`));
+    let cleared = !this.ui;
+    return () => {
+      if (cleared)
+        return;
+      cleared = true;
+      this.call((ui) => ui.setStatus(this.key, undefined));
+    };
+  }
+}
+
+// src/adapters/omp/navigator.ts
+import { readdirSync as readdirSync3, readFileSync as readFileSync2 } from "fs";
+import { homedir as homedir2 } from "os";
+import { join as join3 } from "path";
+
+// src/adapters/runview/tree.ts
+var MAX_PHASE_ENTRIES = 200;
+var COMMAND_CHARS2 = 160;
+var PAD = " ".repeat(10);
+var AGENT_MARKERS = { running: "\u25CF", waiting: "\u2026", done: "\u2713", failed: "\u2717", cancelled: "\u2298" };
+var GROUP = /^(?:review|judge|fix|extract)\s+(.+?)\s+r(\d+)\b/;
+var STAGE = /^implement (.+)$/;
+function roundOf(label) {
+  const round = GROUP.exec(label);
+  if (round)
+    return `${round[1]} \xB7 round ${round[2]}`;
+  return STAGE.exec(label)?.[1];
+}
+var timeOf = (entry) => {
+  const t = entry.t ? Date.parse(entry.t) : Number.NaN;
+  return Number.isNaN(t) ? undefined : t;
+};
+var at = (t, text) => {
+  const [first, ...rest] = clean(text).split(`
+`);
+  return [`${clock(t)}  ${first}`, ...rest.map((l) => `${PAD}${l}`)];
+};
+function lastOf(items, match) {
+  for (let i = items.length - 1;i >= 0; i--)
+    if (match(items[i]))
+      return items[i];
+  return;
+}
+var modelText = (model, effort) => `${model ?? "default model"}${effort ? `/${effort}` : ""}`;
+function modelOf(model) {
+  if (typeof model === "string")
+    return model;
+  if (!model || typeof model !== "object")
+    return;
+  const { providerID, id, variant } = model;
+  if (typeof providerID !== "string" || typeof id !== "string")
+    return;
+  return `${providerID}/${id}${typeof variant === "string" && variant ? `#${variant}` : ""}`;
+}
+function buildRunTree(run, entries, live, now, files = new Map, outline) {
+  const running = run.status === "running";
+  const phases = [];
+  const agents = [];
+  const bySession = new Map;
+  const subagentNames = new Map;
+  const outcomes = new Map;
+  const failed = new Map;
+  const firstTime = entries.map(timeOf).find((t) => t !== undefined);
+  const start = run.startedAt ?? firstTime ?? now;
+  let lastTime = start;
+  const newPhase = (title, t) => {
+    const node = { index: phases.length, title, start: t, marker: "\u2713", groups: [], lines: [], entries: [], byGroup: new Map, agentNodes: [] };
+    phases.push(node);
+    return node;
+  };
+  const current = (t) => phases.at(-1) ?? newPhase("Starting", t);
+  const phaseFor = (entry, t) => {
+    const title = typeof entry.phase === "string" && entry.phase ? entry.phase : undefined;
+    return title ? lastOf(phases, (p) => p.title === title) ?? newPhase(title, t) : current(t);
+  };
+  const note = (phase, lines) => {
+    phase.entries.push(lines);
+    if (phase.entries.length > MAX_PHASE_ENTRIES)
+      phase.entries.shift();
+  };
+  const phaseOf = new Map;
+  const noted = new Set;
+  const ended = (session, state, t) => {
+    const agent = bySession.get(session);
+    const phase = agent && phaseOf.get(agent);
+    if (!agent || !phase || noted.has(agent))
+      return;
+    noted.add(agent);
+    note(phase, at(t, `\u25A0 ${agent.label} ${state}${t === undefined ? "" : ` ${duration(t - agent.start)}`}`));
+  };
+  for (const entry of entries) {
+    const t = timeOf(entry) ?? lastTime;
+    lastTime = Math.max(lastTime, t);
+    switch (entry.type) {
+      case "phase": {
+        const title = String(entry.title ?? "");
+        if (phases.at(-1)?.title !== title)
+          newPhase(title, t);
+        break;
+      }
+      case "agent": {
+        const phase = phaseFor(entry, t);
+        const raw = modelOf(entry.model);
+        const model = raw === undefined ? undefined : clean(raw);
+        const agent = {
+          label: clean(String(entry.label ?? "?")),
+          role: clean(String(entry.role ?? "?")),
+          ...model ? { model } : {},
+          ...typeof entry.effort === "string" ? { effort: clean(entry.effort) } : {},
+          session: String(entry.session ?? ""),
+          phase: phase.title,
+          start: t,
+          state: "waiting",
+          subagents: [],
+          action: clean(String(entry.label ?? "?")),
+          group: "",
+          ...typeof entry.cwd === "string" && entry.cwd ? { cwd: clean(entry.cwd) } : {},
+          notes: [],
+          ...typeof entry.linked === "boolean" ? { linked: entry.linked } : {}
+        };
+        agents.push(agent);
+        bySession.set(agent.session, agent);
+        phase.agentNodes.push(agent);
+        phaseOf.set(agent, phase);
+        const name = roundOf(agent.label);
+        const key = name ?? "";
+        let group = phase.byGroup.get(key);
+        if (!group) {
+          group = { ...name ? { title: name } : {}, agents: [] };
+          phase.byGroup.set(key, group);
+          phase.groups.push(group);
+        }
+        group.agents.push(agent);
+        note(phase, at(t, `\u25B8 ${agent.label} started (${agent.role} \xB7 ${modelText(agent.model, agent.effort)})`));
+        break;
+      }
+      case "agent-end": {
+        const outcome = entry.outcome === "done" || entry.outcome === "failed" || entry.outcome === "cancelled" ? entry.outcome : "failed";
+        outcomes.set(String(entry.session), { outcome, end: t, ...typeof entry.error === "string" ? { error: clean(entry.error) } : {} });
+        ended(String(entry.session), outcome, t);
+        break;
+      }
+      case "agent-failed":
+        failed.set(String(entry.session), { end: t, ...typeof entry.error === "string" ? { error: clean(entry.error) } : {} });
+        ended(String(entry.session), "failed", t);
+        break;
+      case "subagent": {
+        const agent = lastOf(agents, (a) => a.label === clean(String(entry.label ?? "?")));
+        if (!agent)
+          break;
+        const names = subagentNames.get(agent) ?? [];
+        for (const name of Array.isArray(entry.agents) ? entry.agents : [])
+          if (!names.includes(clean(String(name))))
+            names.push(clean(String(name)));
+        subagentNames.set(agent, names);
+        break;
+      }
+      case "log":
+        note(current(t), at(t, String(entry.message ?? "")));
+        break;
+      case "command":
+        note(current(t), at(t, `$ ${String(entry.command ?? "").split(`
+`)[0].slice(0, COMMAND_CHARS2)}`));
+        break;
+      case "retry":
+        note(current(t), at(t, `\u21BB ${entry.label} retry ${entry.attempt}: ${String(entry.reason ?? "").split(`
+`)[0]}`));
+        break;
+      case "provider-error":
+        note(current(t), at(t, `! ${entry.label} provider error${entry.backoffMs !== undefined ? ` (retry in ${duration(Number(entry.backoffMs))})` : ""}: ${String(entry.error ?? "").split(`
+`)[0]}`));
+        break;
+      case "error":
+        note(current(t), at(t, `\u2717 run failed: ${String(entry.error ?? "")}`));
+        break;
+      case "link-failed":
+        note(phaseFor(entry, t), at(t, `! ${entry.label}: not linked to the parent session (${String(entry.error ?? "").split(`
+`)[0]})`));
+        break;
+    }
+  }
+  const end = running ? undefined : run.endedAt ?? lastTime;
+  for (const agent of agents) {
+    const view = live.get(agent.session);
+    const recorded = outcomes.get(agent.session);
+    const failure = failed.get(agent.session);
+    if (recorded) {
+      agent.state = recorded.outcome;
+      agent.end = recorded.end;
+      if (recorded.error)
+        agent.error = recorded.error;
+    } else if (failure) {
+      agent.state = "failed";
+      agent.end = failure.end;
+      if (failure.error)
+        agent.error = failure.error;
+    } else if (view?.outcome) {
+      agent.state = view.outcome;
+      if (view.endedAt !== undefined)
+        agent.end = view.endedAt;
+      if (view.error)
+        agent.error = clean(view.error);
+    } else if (running)
+      agent.state = view?.active ? "running" : "waiting";
+    else {
+      agent.state = run.status === "cancelled" ? "cancelled" : run.status === "failed" ? "failed" : "done";
+      agent.end = view?.endedAt ?? end;
+    }
+    if (agent.state === "running" && view?.state !== undefined && view.since !== undefined)
+      agent.activity = `${view.state} ${duration(now - view.since)}`;
+    if (agent.state !== "running" && agent.state !== "waiting")
+      ended(agent.session, agent.state, agent.end);
+    const names = subagentNames.get(agent);
+    if (names) {
+      const found = files.get(agent.session);
+      agent.subagents = found?.size ? [...found].map(([name, path]) => ({ name, path })) : names.map((name) => ({ name }));
+    }
+  }
+  phases.forEach((phase, i) => {
+    const next = phases[i + 1];
+    phase.end = next ? next.start : end;
+    const last = i === phases.length - 1;
+    const states = phase.agentNodes.map((a) => a.state);
+    if (states.includes("running") || running && last)
+      phase.marker = "\u25CF";
+    else if (last && run.status === "cancelled" || states.includes("cancelled"))
+      phase.marker = "\u2298";
+    else if (states.includes("failed") || last && run.status === "failed")
+      phase.marker = "\u2717";
+    else
+      phase.marker = "\u2713";
+    phase.lines = phase.entries.flat();
+  });
+  const tree = {
+    id: run.id,
+    status: run.status,
+    start,
+    ...end !== undefined ? { end } : {},
+    ...phases.length ? { phase: phases.at(-1).title } : {},
+    ...run.branch ?? outline?.branch ? { branch: clean(run.branch ?? outline.branch) } : {},
+    ...outline ? { outline } : {},
+    phases: phases.map(({ entries: _e, byGroup: _g, agentNodes: _a, ...phase }) => phase),
+    agents,
+    groups: [],
+    steps: [],
+    running: []
+  };
+  workGroups(tree, entries, now);
+  tree.steps = stepsFor(tree, focusStage(tree));
+  return tree;
+}
+var VERBS = ["resolve merge", "implement", "commit", "repair", "review", "judge", "fix", "extract"];
+var AT = "(?:implement|fix r\\d+|final)";
+var SHAPES = {
+  "resolve merge": /^$/,
+  implement: /^$/,
+  commit: new RegExp(`^${AT}(?: (#\\d+))?$`),
+  repair: new RegExp(`^${AT} (#\\d+)$`),
+  review: /^(r\d+) (\S+)((?: #\d+)?(?: wait \d+| read| stop)?)$/,
+  judge: /^(r\d+)((?: retry)?)$/,
+  fix: /^(r\d+)$/,
+  extract: /^(r\d+) (\S+)((?: retry)?)$/
+};
+function actionOf(verb, rest, reviewers) {
+  const m = SHAPES[verb].exec(rest);
+  if (!m)
+    return;
+  switch (verb) {
+    case "commit":
+    case "repair":
+      return m[1] ? `${verb} ${m[1]}` : verb;
+    case "review":
+      return `review ${m[1]}${reviewers === 1 ? "" : ` ${m[2]}`}${m[3]}`;
+    case "judge":
+      return `judge ${m[1]}${m[2]}`;
+    case "fix":
+      return `fix ${m[1]}`;
+    case "extract":
+      return `extract ${m[1]} ${m[2]}${m[3]}`;
+    default:
+      return verb;
+  }
+}
+var SUBJECTS = [
+  ["plan review", "plan-review"],
+  ["final review", "final-review"]
+];
+function placeOf(label, stages, reviewers, pick = (n) => n[0]) {
+  if (label === "plan")
+    return { group: "plan", action: "plan" };
+  if (label === "pr-ready check" || label.startsWith("pr-ready check "))
+    return { group: "pr-ready", action: label };
+  const subjects = [
+    ...SUBJECTS.map(([name, group]) => [name, group]),
+    ...[...new Set(stages.map((s) => s.name))].map((name) => [name, stages.filter((s) => s.name === name).map((s) => s.number).sort((a, b) => a - b)])
+  ].sort((a, b) => b[0].length - a[0].length);
+  for (const verb of VERBS) {
+    if (!label.startsWith(`${verb} `))
+      continue;
+    const tail = label.slice(verb.length + 1);
+    for (const [name, target] of subjects) {
+      if (tail !== name && !tail.startsWith(`${name} `))
+        continue;
+      const rest = tail.slice(name.length + 1);
+      if (typeof target === "string") {
+        const action = actionOf(verb, rest, reviewers) ?? (target === "final-review" ? actionOf(verb, rest.replace(/^\S+ /, ""), reviewers) : undefined);
+        if (action)
+          return { group: target, action };
+        continue;
+      }
+      const action = actionOf(verb, rest, reviewers);
+      if (action)
+        return { group: `stage:${pick(target)}`, action };
+    }
+  }
+  return;
+}
+var FIXED_GROUPS = { plan: "Plan", "plan-review": "Plan review", "final-review": "Final review", "pr-ready": "PR ready" };
+var PHASE_GROUPS = { Plan: "plan", "Plan review": "plan-review", "Final review": "final-review", "PR ready": "pr-ready" };
+var DONE_OUTCOMES = new Set(["clean", "residual-only", "review-skipped"]);
+var MAX_GROUP_LINES = 200;
+var MAX_CHECK_LINES = 50;
+var BUSY = new Set(["running", "waiting"]);
+var rankOf = (key, number) => key === "plan" ? 0 : key === "plan-review" ? 1 : number !== undefined ? 2 + number / 1e6 : key === "final-review" ? 3 : key === "pr-ready" ? 4 : 5;
+var stageNumber = (key) => key.startsWith("stage:") ? Number(key.slice("stage:".length)) : undefined;
+function stageNames(entries, outline) {
+  const names = new Map;
+  for (const st of outline?.stages ?? [])
+    names.set(st.number, st.name);
+  for (const e of entries)
+    if (e.type === "stage" && typeof e.number === "number" && typeof e.name === "string" && !names.has(e.number))
+      names.set(e.number, clean(e.name));
+  if (!names.size) {
+    for (const e of entries) {
+      const m = e.type === "agent" ? STAGE.exec(clean(String(e.label ?? ""))) : null;
+      if (m && ![...names.values()].includes(m[1]))
+        names.set(names.size + 1, m[1]);
+    }
+  }
+  return [...names].map(([number, name]) => ({ number, name })).sort((a, b) => a.number - b.number);
+}
+function workGroups(tree, entries, now) {
+  const { outline } = tree;
+  const stages = stageNames(entries, outline);
+  const reviewers = outline?.reviewers.length;
+  const groups = new Map;
+  const ensure = (key, number) => {
+    let g = groups.get(key);
+    if (!g) {
+      const title = number !== undefined ? stages.find((s) => s.number === number)?.name ?? `stage ${number}` : FIXED_GROUPS[key] ?? key.slice("other:".length);
+      g = { key, title, ...number !== undefined ? { number } : {}, state: "upcoming", agents: [], lines: [] };
+      groups.set(key, g);
+    }
+    return g;
+  };
+  if (outline?.kind === "plan")
+    ensure("plan");
+  if (outline?.planReview)
+    ensure("plan-review");
+  for (const st of stages)
+    ensure(`stage:${st.number}`, st.number);
+  if (outline?.finalReview)
+    ensure("final-review");
+  if (outline?.kind === "implement")
+    ensure("pr-ready");
+  const marks = new Map;
+  const reached = new Set;
+  const pendingLinks = new Map;
+  const lastChecks = new Map;
+  const byLabel = (label) => lastOf(tree.agents, (a) => a.label === label);
+  const runningNow = () => [...marks].filter(([, m]) => m.start !== undefined && m.end === undefined).map(([n]) => n);
+  const pick = (numbers) => numbers.find((n) => marks.get(n)?.end === undefined) ?? numbers[0];
+  const timed = new Map;
+  const push = (g, t, text) => {
+    const list = timed.get(g) ?? [];
+    list.push({ t: t ?? Number.POSITIVE_INFINITY, text });
+    timed.set(g, list);
+  };
+  const checkLines = new Map;
+  const note = (agent, t, text) => {
+    if (agent)
+      agent.notes.push({ t, text: clean(text) });
+  };
+  const named = [...stages].sort((a, b) => b.name.length - a.name.length);
+  const logGroup = (message) => {
+    for (const st of named) {
+      if (!message.startsWith(st.name))
+        continue;
+      const after = message.slice(st.name.length);
+      if (!after.startsWith(":") && !ROUND.test(after))
+        continue;
+      const n = pick(stages.filter((s) => s.name === st.name).map((s) => s.number));
+      return { group: ensure(`stage:${n}`, n), ...after.startsWith(":") ? { rest: after.slice(1).trimStart() } : {} };
+    }
+    if (message.startsWith("plan review"))
+      return { group: ensure("plan-review"), rest: message };
+    if (message.startsWith("final review"))
+      return { group: ensure("final-review"), rest: message };
+    if (message.startsWith("plan:"))
+      return { group: ensure("plan"), rest: message };
+    if (message.startsWith("pr-ready check"))
+      return { group: ensure("pr-ready"), rest: message };
+    return;
+  };
+  let agentIndex = 0;
+  let lastTime = tree.start;
+  for (const entry of entries) {
+    const t = (entry.t ? Date.parse(entry.t) : Number.NaN) || lastTime;
+    lastTime = Math.max(lastTime, t);
+    switch (entry.type) {
+      case "stage": {
+        const n = Number(entry.number);
+        if (!Number.isInteger(n))
+          break;
+        const mark = marks.get(n) ?? {};
+        if (entry.event === "start")
+          mark.start = t;
+        else if (entry.event === "end") {
+          mark.end = t;
+          if (typeof entry.outcome === "string")
+            mark.outcome = clean(entry.outcome);
+        }
+        marks.set(n, mark);
+        ensure(`stage:${n}`, n);
+        break;
+      }
+      case "phase": {
+        const title = String(entry.title ?? "");
+        const key = PHASE_GROUPS[title];
+        if (key) {
+          reached.add(key);
+          const g = ensure(key);
+          g.start ??= t;
+        }
+        if (title === "Checks") {
+          const run = runningNow();
+          const n = run.length === 1 ? run[0] : !marks.size ? stageNumber(lastOf(tree.agents.slice(0, agentIndex), (a) => a.group.startsWith("stage:"))?.group ?? "") : undefined;
+          if (n !== undefined) {
+            const g = ensure(`stage:${n}`, n);
+            g.checks = { state: "running", failed: [], lines: g.checks?.lines ?? [], t };
+            lastChecks.set(n, { kind: "other" });
+          }
+        }
+        break;
+      }
+      case "agent": {
+        const agent = tree.agents[agentIndex++];
+        if (!agent)
+          break;
+        const placed = placeOf(agent.label, stages, reviewers, pick);
+        const run = runningNow();
+        const group = placed?.group ?? (run.length === 1 ? `stage:${run[0]}` : `other:${agent.phase}`);
+        agent.group = group;
+        agent.action = placed?.action ?? agent.label;
+        const g = ensure(group, stageNumber(group));
+        if (g.number !== undefined && lastChecks.get(g.number)?.kind === "batch") {
+          g.checks = { state: "running", failed: [], lines: g.checks?.lines ?? [], t: agent.start };
+          lastChecks.set(g.number, { kind: "other" });
+        }
+        g.agents.push(agent);
+        push(g, agent.start, `\u25B8 ${agent.action} started`);
+        for (const n of pendingLinks.get(agent.label) ?? [])
+          agent.notes.push(n);
+        pendingLinks.delete(agent.label);
+        break;
+      }
+      case "retry":
+        note(byLabel(clean(String(entry.label ?? ""))), t, `\u21BB retry ${entry.attempt}: ${String(entry.reason ?? "").split(`
+`)[0]}`);
+        break;
+      case "provider-error":
+        note(byLabel(clean(String(entry.label ?? ""))), t, `! provider error${entry.backoffMs !== undefined ? ` (retry in ${duration(Number(entry.backoffMs))})` : ""}: ${String(entry.error?.message ?? entry.error ?? "").split(`
+`)[0]}`);
+        break;
+      case "agent-failed":
+        note(tree.agents.find((a) => a.session === String(entry.session)), t, `\u2717 failed${typeof entry.error === "string" ? `: ${entry.error.split(`
+`)[0]}` : ""}`);
+        break;
+      case "link-failed": {
+        const label = clean(String(entry.label ?? ""));
+        const list = pendingLinks.get(label) ?? [];
+        list.push({ t, text: clean(`! not linked to the parent session: ${String(entry.error ?? "").split(`
+`)[0]}`) });
+        pendingLinks.set(label, list);
+        break;
+      }
+      case "log": {
+        const message = clean(String(entry.message ?? ""));
+        const found = logGroup(message);
+        if (!found)
+          break;
+        const { group: g, rest } = found;
+        push(g, t, message);
+        if (g.number === undefined || rest === undefined)
+          break;
+        const n = g.number;
+        const green = rest.startsWith("checks green");
+        const failedCheck = CHECK_FAILED.exec(rest);
+        const gaveUp = rest.startsWith("checks-failed - ");
+        if (!green && !failedCheck && !gaveUp && !/\bcheck/.test(rest))
+          break;
+        const raw = checkLines.get(g) ?? [];
+        raw.push({ t, text: message });
+        checkLines.set(g, raw);
+        const lines = [];
+        if (green) {
+          g.checks = { state: "passed", failed: [], lines, t };
+          lastChecks.set(n, { kind: "other" });
+        } else if (failedCheck) {
+          const batch = lastChecks.get(n)?.kind === "batch" && g.checks?.state === "failed";
+          g.checks = { state: "failed", failed: batch ? [...g.checks.failed, failedCheck[1]] : [failedCheck[1]], lines, t };
+          lastChecks.set(n, { kind: "batch" });
+        } else if (gaveUp) {
+          g.checks = { state: "failed", failed: g.checks?.state === "failed" ? g.checks.failed : [], lines, t };
+          lastChecks.set(n, { kind: "other" });
+        }
+        break;
+      }
+    }
+  }
+  const { status } = tree;
+  const ended = status === "failed" || status === "cancelled";
+  const lastPhase = tree.phases.at(-1)?.title;
+  const currentKey = lastPhase ? PHASE_GROUPS[lastPhase] : undefined;
+  const list = [...groups.values()].sort((a, b) => rankOf(a.key, a.number) - rankOf(b.key, b.number));
+  for (const g of list) {
+    for (const a of g.agents)
+      if (a.state !== "running" && a.state !== "waiting")
+        push(g, a.end, `\u25A0 ${a.action} ${a.state}${a.end === undefined ? "" : ` ${duration(a.end - a.start)}`}`);
+    g.lines = (timed.get(g) ?? []).sort((x, y) => x.t - y.t).slice(-MAX_GROUP_LINES).flatMap((e) => at(Number.isFinite(e.t) ? e.t : undefined, e.text));
+    if (g.checks)
+      g.checks.lines = (checkLines.get(g) ?? []).slice(-MAX_CHECK_LINES).flatMap((e) => at(e.t, e.text));
+    const busy = g.agents.some((a) => BUSY.has(a.state));
+    const starts = g.agents.map((a) => a.start);
+    const ends = g.agents.map((a) => a.end).filter((e) => e !== undefined);
+    if (g.number !== undefined) {
+      const mark = marks.get(g.number);
+      if (outline && g.number < outline.fromStage) {
+        g.state = "skipped";
+        g.note = `resumed from stage ${outline.fromStage}`;
+      } else if (mark?.end !== undefined) {
+        g.outcome = mark.outcome;
+        g.state = mark.outcome === "skipped" ? "skipped" : DONE_OUTCOMES.has(mark.outcome ?? "clean") ? "done" : "failed";
+        if (g.state === "done" || g.state === "skipped")
+          delete g.outcome;
+        if (mark.start !== undefined)
+          g.start = mark.start;
+        if (mark.start !== undefined || g.state !== "skipped")
+          g.end = mark.end;
+      } else if (mark?.start !== undefined) {
+        g.state = "running";
+        g.start = mark.start;
+      } else if (g.agents.length) {
+        g.state = busy ? "running" : "done";
+        g.start = Math.min(...starts);
+        if (!busy && ends.length)
+          g.end = Math.max(...ends);
+      }
+    } else {
+      const phases = tree.phases.filter((p) => PHASE_GROUPS[p.title] === g.key);
+      const was = reached.has(g.key) || g.agents.length > 0;
+      if (was) {
+        g.start = Math.min(...[...phases.map((p) => p.start), ...starts]);
+        const last = phases.at(-1);
+        const end = Math.max(...[...last?.end !== undefined ? [last.end] : [], ...ends]);
+        g.state = busy || status === "running" && currentKey === g.key ? "running" : "done";
+        if (g.state === "done" && Number.isFinite(end))
+          g.end = end;
+      }
+    }
+    if (g.state === "running" && ended) {
+      g.state = status === "cancelled" ? "cancelled" : "failed";
+      g.end ??= tree.end;
+    }
+    if (g.state === "running" && status === "done") {
+      g.state = "done";
+      g.end ??= tree.end;
+    }
+    if (g.checks && g.checks.state === "running" && g.state !== "running")
+      delete g.checks;
+    if (g.checks) {
+      const t = g.checks.t;
+      const after = lastOf(g.agents, (a) => a.end !== undefined && a.end <= t) ?? lastOf(g.agents, (a) => a.start <= t);
+      if (after)
+        g.checks.after = after;
+    }
+  }
+  if (ended && !list.some((g) => g.state === "failed" || g.state === "cancelled")) {
+    const last = lastOf(list, (g) => g.state === "done" && g.number === undefined && g.key === currentKey);
+    if (last)
+      last.state = status === "cancelled" ? "cancelled" : "failed";
+  }
+  tree.groups = list;
+  tree.running = list.filter((g) => g.number !== undefined && g.state === "running").sort((a, b) => (a.start ?? now) - (b.start ?? now)).map((g) => g.number);
+}
+var ROUND = /^ r\d+\b/;
+var CHECK_FAILED = /^check (.+?) failed \(/;
+function focusStage(tree, selectedKey) {
+  if (selectedKey) {
+    const groupKey = selectedKey.startsWith(`group:${tree.id}:`) ? selectedKey.slice(`group:${tree.id}:`.length) : undefined;
+    const checks = selectedKey.startsWith(`checks:${tree.id}:`) ? Number(selectedKey.slice(`checks:${tree.id}:`.length)) : undefined;
+    const session = selectedKey.startsWith("agent:") ? selectedKey.slice("agent:".length) : selectedKey.startsWith("sub:") ? selectedKey.slice("sub:".length, selectedKey.lastIndexOf(":")) : undefined;
+    const agent = session !== undefined ? tree.agents.find((a) => a.session === session) : undefined;
+    const n = groupKey ? stageNumber(groupKey) : checks !== undefined && Number.isInteger(checks) ? checks : agent ? stageNumber(agent.group) : undefined;
+    if (n !== undefined && tree.groups.some((g) => g.number === n))
+      return n;
+  }
+  if (tree.running.length)
+    return tree.running.at(-1);
+  const started = tree.groups.filter((g) => g.number !== undefined && g.start !== undefined).sort((a, b) => a.start - b.start);
+  return started.at(-1)?.number;
+}
+var ORDER = { Worktree: 0, Plan: 1, "Plan review": 2, Implement: 3, Checks: 3, Review: 3, "Final review": 4, "PR ready": 5 };
+var REVIEWING = /^(review|judge|fix|extract) /;
+var IMPLEMENTING = /^implement$/;
+var FAILED_STEP = { "checks-failed": "Checks", "round-cap": "Review", "review-failed": "Review", "no-changes": "Implement", "gates-red": "Implement" };
+function stepsFor(tree, focus) {
+  const { outline, status } = tree;
+  const titles = tree.phases.map((p) => p.title);
+  const seen = new Set(titles);
+  if (!outline) {
+    const unique = [...new Set(titles)];
+    return unique.map((title, i) => ({
+      title,
+      state: i < unique.length - 1 ? "done" : status === "running" ? "current" : status === "failed" ? "failed" : status === "cancelled" ? "skipped" : "done"
+    }));
+  }
+  const firstStage = outline.stages.find((s) => s.number >= outline.fromStage) ?? outline.stages[0];
+  const stage = outline.stages.find((s) => s.number === focus) ?? firstStage;
+  const group = tree.groups.find((g) => g.number === (focus ?? -1));
+  const run = [];
+  if (outline.worktree || seen.has("Worktree"))
+    run.push("Worktree");
+  if (outline.kind === "plan") {
+    run.push("Plan");
+    if (outline.planReview || seen.has("Plan review"))
+      run.push("Plan review");
+  } else {
+    if (outline.planReview || seen.has("Plan review"))
+      run.push("Plan review");
+    if (stage?.implement !== false)
+      run.push("Implement");
+    if (stage?.checks || group?.checks)
+      run.push("Checks");
+    if (stage?.review !== false)
+      run.push("Review");
+    if (outline.finalReview || seen.has("Final review"))
+      run.push("Final review");
+    run.push("PR ready");
+  }
+  const latest = titles.length ? ORDER[titles.at(-1)] ?? -1 : -1;
+  const end = status === "failed" ? "failed" : status === "cancelled" ? "skipped" : status === "running" ? "current" : "done";
+  const stageSteps = run.filter((t) => ORDER[t] === 3);
+  const stageStates = stageStepStates(stageSteps, group, latest, end);
+  return run.map((title) => {
+    const o = ORDER[title];
+    if (o === 3)
+      return { title, state: stageStates.get(title) ?? "upcoming" };
+    return { title, state: o < latest ? "done" : o === latest ? end : "upcoming" };
+  });
+}
+function stageStepStates(steps, group, latest, end) {
+  const out = new Map;
+  const all = (state) => steps.forEach((s) => out.set(s, state));
+  if (!group || group.state === "upcoming" || latest < 3) {
+    all(latest > 3 && group?.state !== "upcoming" ? "done" : "upcoming");
+    return out;
+  }
+  if (group.state === "skipped")
+    return all("skipped"), out;
+  if (group.state === "done")
+    return all("done"), out;
+  let at;
+  let state;
+  if (group.state === "failed" && group.outcome) {
+    at = FAILED_STEP[group.outcome] ?? steps.at(-1);
+    state = "failed";
+  } else {
+    const reviewing = group.agents.some((a) => REVIEWING.test(`${a.action} `));
+    const implemented = group.agents.some((a) => IMPLEMENTING.test(a.action) && a.end !== undefined);
+    at = reviewing ? "Review" : group.checks || implemented ? "Checks" : "Implement";
+    state = group.state === "running" ? "current" : group.state === "cancelled" ? "skipped" : group.state === "failed" ? "failed" : end;
+  }
+  const order = ["Implement", "Checks", "Review"];
+  let index = steps.indexOf(at);
+  if (index < 0) {
+    const want = order.indexOf(at);
+    index = steps.findIndex((s) => order.indexOf(s) > want);
+    if (index < 0)
+      index = steps.length - 1;
+  }
+  steps.forEach((s, i) => out.set(s, i < index ? "done" : i === index ? state : "upcoming"));
+  return out;
+}
+var groupKey = (runId, key) => `group:${runId}:${key}`;
+var checksKey = (runId, n) => `checks:${runId}:${n}`;
+function visibleRows(trees, view) {
+  const rows = [];
+  const tree = trees.find((t) => t.id === view.run);
+  if (tree) {
+    for (const g of tree.groups) {
+      const gk = groupKey(tree.id, g.key);
+      if (g.state === "upcoming") {
+        rows.push({ key: gk, kind: "group", depth: 0, selectable: true, run: tree, group: g });
+        continue;
+      }
+      const open = view.opened.has(gk) || !view.folded.has(gk) && (g.state === "running" || g.number !== undefined && g.number === view.focus);
+      rows.push({ key: gk, kind: "group", depth: 0, selectable: true, run: tree, group: g, folded: !open });
+      if (!open)
+        continue;
+      const checksRow = () => ({ key: checksKey(tree.id, g.number), kind: "checks", depth: 1, selectable: true, run: tree, group: g, parent: gk });
+      let placed = !g.checks;
+      if (g.checks && !g.checks.after) {
+        rows.push(checksRow());
+        placed = true;
+      }
+      for (const agent of g.agents) {
+        const ak = agentKey(agent.session);
+        rows.push({ key: ak, kind: "agent", depth: 1, selectable: true, run: tree, group: g, agent, parent: gk });
+        for (const sub of agent.subagents)
+          rows.push({ key: subKey(agent.session, sub.name), kind: "sub", depth: 2, selectable: true, run: tree, group: g, agent, sub, parent: ak });
+        if (!placed && g.checks?.after === agent) {
+          rows.push(checksRow());
+          placed = true;
+        }
+      }
+    }
+  }
+  if (view.runs === "list") {
+    rows.push({ key: "label:runs", kind: "label", depth: 0, selectable: false, run: tree ?? trees[0] });
+    for (const t of trees)
+      rows.push({ key: runKey(t.id), kind: "run", depth: 0, selectable: true, run: t, shown: t.id === view.run });
+  } else if (tree)
+    rows.push({ key: runKey(tree.id), kind: "run", depth: 0, selectable: true, run: tree, shown: true, details: true });
+  return rows;
+}
+var GROUP_MARKERS = { upcoming: "", running: "\u25CF", done: "\u2713", failed: "\u2717", skipped: "\u2298", cancelled: "\u2298" };
+var RUN_MARKERS = { running: "\u25CF", done: "\u2713", failed: "\u2717", cancelled: "\u2298" };
+var MIN_ELAPSED_WIDTH = 24;
+var MIN_NAME = 8;
+function aligned(left, right, width) {
+  if (!right || width < MIN_ELAPSED_WIDTH)
+    return fit(left, width);
+  if (!Number.isFinite(width))
+    return `${left}  ${right}`;
+  const room = width - right.length - 2;
+  return `${fit(left, room).padEnd(room)}  ${right}`;
+}
+var span = (start, end, now) => start === undefined ? undefined : duration((end ?? now) - start);
+function rowText2(row, now, width = Number.POSITIVE_INFINITY) {
+  const indent = "  ".repeat(row.depth);
+  switch (row.kind) {
+    case "group": {
+      const g = row.group;
+      const name = g.number !== undefined ? `${g.number} ${g.title}` : g.title;
+      if (g.state === "upcoming")
+        return fit(`    ${name}`, width);
+      const head = `${row.folded ? "\u25B8" : "\u25BE"} ${GROUP_MARKERS[g.state]} `;
+      const right = span(g.start, g.end, now);
+      const tail = g.state === "failed" && g.outcome ? ` ${g.outcome}` : "";
+      const full = `${head}${name}${tail}`;
+      const room = !Number.isFinite(width) ? Number.POSITIVE_INFINITY : width - (right && width >= MIN_ELAPSED_WIDTH ? right.length + 2 : 0);
+      if (!tail || full.length <= room || room - head.length - tail.length < MIN_NAME)
+        return aligned(tail && full.length > room ? `${head}${name}` : full, right, width);
+      return aligned(`${head}${fit(name, room - head.length - tail.length)}${tail}`, right, width);
+    }
+    case "agent": {
+      const a = row.agent;
+      return aligned(`${indent}${AGENT_MARKERS[a.state]} ${a.action}`, span(a.start, a.end, now), width);
+    }
+    case "checks": {
+      const c = row.group.checks;
+      const text = !c ? "checks" : c.state === "running" ? "checks \u2026" : c.state === "passed" ? "checks \u2713" : `checks \u2717${c.failed.length ? ` ${c.failed.join(", ")}` : ""}`;
+      return fit(`${indent}${text}`, width);
+    }
+    case "sub":
+      return fit(`${indent}\u2514 ${AGENT_MARKERS[row.agent.state]} ${row.sub.name}`, width);
+    case "label":
+      return fit("runs", width);
+    case "run": {
+      const t = row.run;
+      if (row.details)
+        return fit("run details", width);
+      return aligned(`${RUN_MARKERS[t.status] ?? "\xB7"} ${t.id.slice(-4)} \xB7 ${t.status}${row.shown ? " (shown)" : ""}`, duration((t.end ?? now) - t.start), width);
+    }
+  }
+}
+var runKey = (id) => `run:${id}`;
+var agentKey = (session) => `agent:${session}`;
+var subKey = (session, name) => `sub:${session}:${name}`;
+function nextAgent(rows, key, dir) {
+  const from = rows.findIndex((r) => r.key === key);
+  let i = from < 0 ? dir > 0 ? -1 : rows.length : from;
+  for (i += dir;i >= 0 && i < rows.length; i += dir)
+    if (rows[i].kind === "agent")
+      return rows[i].key;
+  return;
+}
+
+// src/adapters/runview/layout.ts
+var STATUS_TONES = { running: "info", done: "success", failed: "error", cancelled: "warning" };
+var AGENT_TONES = { running: "info", waiting: "muted", done: "success", failed: "error", cancelled: "warning" };
+var GROUP_TONES = { upcoming: "muted", running: "info", done: "success", failed: "error", skipped: "muted", cancelled: "warning" };
+var STAGE_PHASES = new Set(["Implement", "Checks", "Review"]);
+function headerText(tree, now, focus, width = Number.POSITIVE_INFINITY) {
+  const { outline } = tree;
+  const elapsed = duration((tree.end ?? now) - tree.start);
+  const phase = tree.phase ?? "Starting";
+  let middle;
+  if (tree.status !== "running")
+    middle = [tree.status];
+  else if (outline?.kind === "plan")
+    middle = ["planning", phase];
+  else if (outline && outline.stages.length && (STAGE_PHASES.has(phase) || tree.running.length)) {
+    const total = outline.stages.length;
+    const k = tree.running.length > 1 ? undefined : focus ?? tree.running[0] ?? focusStage(tree);
+    middle = [tree.running.length > 1 ? `stages ${tree.running.join("+")}/${total}` : `stage ${k ?? 1}/${total}`, phase];
+  } else
+    middle = [phase];
+  const parts = (branch) => ["granny", ...branch && tree.branch ? [tree.branch] : [], ...middle, elapsed].join(" \xB7 ");
+  const full = parts(true);
+  if (full.length <= width)
+    return full;
+  return fit(parts(false), width);
+}
+var STEP_MARKS = { done: "\u2713", current: "\u25CF", failed: "\u2717", skipped: "\u2298", upcoming: "" };
+var STEP_TONES = { done: "success", current: "info", failed: "error", skipped: "muted", upcoming: "muted" };
+var SEPARATOR = { text: " \u203A ", tone: "muted" };
+var length = (cells) => cells.reduce((n, c) => n + c.text.length, 0);
+function stepperCells(steps, width) {
+  if (!steps.length)
+    return [];
+  const cell = (s, bare = false) => ({ text: bare ? STEP_MARKS[s.state] : `${s.title}${STEP_MARKS[s.state] ? ` ${STEP_MARKS[s.state]}` : ""}`, tone: STEP_TONES[s.state] });
+  const join = (cells) => cells.flatMap((c, i) => i ? [SEPARATOR, c] : [c]);
+  const full = join(steps.map((s) => cell(s)));
+  if (length(full) <= width)
+    return full;
+  const lastDone = steps.map((s) => s.state).lastIndexOf("done");
+  const bare = join(steps.map((s, i) => cell(s, s.state === "done" && i < lastDone)));
+  if (length(bare) <= width)
+    return bare;
+  let at = steps.findIndex((s) => s.state === "current" || s.state === "failed");
+  if (at < 0)
+    at = lastDone >= 0 ? lastDone : 0;
+  const s = steps[at];
+  const one = `${s.title}${STEP_MARKS[s.state] ? ` ${STEP_MARKS[s.state]}` : ""} (${at + 1}/${steps.length})`;
+  return [{ text: fit(one, width), tone: STEP_TONES[s.state] }];
+}
+function rowTone(row) {
+  switch (row.kind) {
+    case "group":
+      return GROUP_TONES[row.group.state];
+    case "agent":
+    case "sub":
+      return AGENT_TONES[row.agent.state];
+    case "checks": {
+      const c = row.group.checks;
+      return !c ? "muted" : c.state === "running" ? "info" : c.state === "passed" ? "success" : "error";
+    }
+    case "label":
+      return "muted";
+    case "run":
+      return row.details ? "muted" : STATUS_TONES[row.run.status] ?? "base";
+  }
+}
+function treeCells(rows, selectedKey, now, width, height, top) {
+  const at = rows.findIndex((r) => r.key === selectedKey);
+  let first = top;
+  if (at >= 0) {
+    if (at < first)
+      first = at;
+    if (at >= first + height)
+      first = at - height + 1;
+  }
+  first = Math.max(0, Math.min(first, Math.max(0, rows.length - height)));
+  const cells = rows.slice(first, first + Math.max(0, height)).map((row) => {
+    const chosen = row.key === selectedKey;
+    return { text: pad(`${chosen ? "\u203A" : " "} ${rowText2(row, now, width - 2)}`, width), tone: rowTone(row), ...chosen ? { selected: true } : {} };
+  });
+  while (cells.length < height)
+    cells.push({ text: pad("", width), tone: "base" });
+  return { cells, top: first };
+}
+function wrap(text, width) {
+  if (width < 1)
+    return [];
+  const out = [];
+  let line = "";
+  for (const word of text.split(" ")) {
+    const next = line ? `${line} ${word}` : word;
+    if (next.length <= width)
+      line = next;
+    else {
+      if (line)
+        out.push(line);
+      line = word.length > width ? fit(word, width) : word;
+    }
+  }
+  if (line || !out.length)
+    out.push(line);
+  return out;
+}
+var took = (start, end, now) => start === undefined ? "" : duration((end ?? now) - start);
+var checksText = (c) => c.state === "running" ? "checks running" : c.state === "passed" ? "checks \u2713" : `checks \u2717${c.failed.length ? ` ${c.failed.join(", ")}` : ""}`;
+var checksTone = (c) => c.state === "running" ? "info" : c.state === "passed" ? "success" : "error";
+function groupDetail(tree, group, now, width) {
+  const total = tree.outline?.stages.length;
+  const name = group.number !== undefined ? `stage ${group.number}${total ? `/${total}` : ""} \xB7 ${group.title}` : group.title;
+  const out = wrap(name, width).map((text) => ({ text, tone: "base" }));
+  out.push({ text: [group.state, took(group.start, group.end, now), group.outcome, group.note].filter(Boolean).join(" \xB7 "), tone: GROUP_TONES[group.state] });
+  if (group.checks)
+    out.push({ text: checksText(group.checks), tone: checksTone(group.checks) });
+  if (group.lines.length)
+    out.push({ text: "", tone: "base" }, ...group.lines.map((text) => ({ text, tone: "base" })));
+  return out;
+}
+function checksDetail(group) {
+  const head = { text: `checks \xB7 ${group.number !== undefined ? `stage ${group.number} \xB7 ` : ""}${group.title}`, tone: "base" };
+  const c = group.checks;
+  if (!c)
+    return [head, { text: "no checks result yet", tone: "muted" }];
+  return [head, { text: checksText(c), tone: checksTone(c) }, ...c.lines.map((text) => ({ text, tone: "base" }))];
+}
+function runDetail(tree, facts = {}) {
+  const out = [
+    { text: `run ${tree.id}`, tone: "base" },
+    { text: `status   ${tree.status}`, tone: STATUS_TONES[tree.status] ?? "base" }
+  ];
+  if (facts.repo)
+    out.push({ text: `repo     ${facts.repo}`, tone: "muted" });
+  if (tree.branch)
+    out.push({ text: `branch   ${tree.branch}`, tone: "muted" });
+  out.push({ text: `started  ${stamp2(tree.start) ?? "?"}`, tone: "muted" });
+  if (tree.status === "running")
+    out.push({ text: `phase    ${tree.phase ?? "Starting"}`, tone: "muted" });
+  else
+    out.push({ text: `ended    ${stamp2(tree.end) ?? "?"}`, tone: "muted" });
+  if (facts.dir)
+    out.push({ text: `result   ${facts.dir.replace(/\/+$/, "")}/result.json`, tone: "muted" });
+  if (facts.error)
+    out.push({ text: `error: ${facts.error.split(`
+`)[0]}`, tone: "error" });
+  if (facts.reply)
+    out.push({ text: "", tone: "base" }, ...facts.reply.split(`
+`).map((text) => ({ text, tone: "base" })));
+  return out;
+}
+var OUTCOME_MARKS = { done: "\u2713", failed: "\u2717", cancelled: "\u2298" };
+function agentHead(agent, now, live = {}) {
+  const mark = OUTCOME_MARKS[agent.state];
+  const time = `${mark ? `${mark} ` : ""}${duration((agent.end ?? now) - agent.start)}`;
+  const out = [{ text: `${agent.role} \xB7 ${shortModel(agent.model, agent.effort)} \xB7 ${time}`, tone: "base" }];
+  if (agent.state === "failed" && agent.error)
+    out.push({ text: `! ${agent.error.split(`
+`)[0]}`, tone: "error" });
+  if ((live.linked ?? agent.linked) === false)
+    out.push({ text: "! not linked to the parent session - it is in the session list", tone: "warning" });
+  return out;
+}
+function agentEnd(agent) {
+  if (agent.state === "running" || agent.state === "waiting")
+    return;
+  return { state: agent.state, start: agent.start, ...agent.end !== undefined ? { end: agent.end } : {}, ...agent.error ? { error: agent.error } : {} };
+}
+var LABEL = 6;
+var SAID3 = "LAST SAID  ";
+function summaryCells(summary, width, height) {
+  const indent = " ".repeat(LABEL);
+  const top = [];
+  if (summary.now) {
+    top.push({ text: fit(`${"NOW".padEnd(LABEL)}${summary.now.text}`, width), tone: summary.now.tone });
+    if (summary.now.detail)
+      top.push({ text: fit(`${indent}${summary.now.detail}`, width), tone: "base" });
+    if (summary.now.heading)
+      top.push({ text: fit(`${indent}\xBB ${summary.now.heading}`, width), tone: "muted" });
+  }
+  if (summary.todo?.length) {
+    if (top.length)
+      top.push({ text: "", tone: "base" });
+    top.push({ text: fit(`${"TODO".padEnd(LABEL)}${todoText(summary.todo)}`, width), tone: "base" });
+  }
+  const bottom = [];
+  if (summary.lastSaid) {
+    const room = Math.max(1, width - SAID3.length);
+    const quoted = `"${summary.lastSaid}"`;
+    const [first = "", second, ...more] = wrap(quoted, room);
+    bottom.push({ text: "", tone: "base" }, { text: fit(`${SAID3}${first}`, width), tone: "base" });
+    if (second !== undefined) {
+      const last = more.length ? `${fit(`${second} ${more.join(" ")}`, Math.max(1, room - 1))}"` : second;
+      bottom.push({ text: fit(`${" ".repeat(SAID3.length)}${last}`, width), tone: "base" });
+    }
+  }
+  const recent = summary.recent.map((r) => ({ text: fit(` ${clock(r.t)}  ${r.tool ? `${r.tool.padEnd(LABEL)} ` : ""}${r.text}`, width), tone: r.tone }));
+  const head = recent.length ? [...top.length ? [{ text: "", tone: "base" }] : [], { text: "RECENT", tone: "muted" }] : [];
+  if (height === undefined)
+    return [...top, ...head, ...recent, ...bottom];
+  const room = Math.max(0, height - top.length - bottom.length - head.length);
+  const shown = room > 0 ? [...head, ...recent.slice(0, room)] : [];
+  return [...top, ...shown, ...bottom].slice(0, Math.max(0, height));
+}
+var WIDE = 100;
+var RULES_FROM = 16;
+var PANE_SEPARATOR = " \u2502 ";
+var clamp = (n, lo, hi) => Math.max(lo, Math.min(hi, n));
+function paneSizes(width, height, split = 0, right = true) {
+  const w = Math.max(1, Math.floor(width));
+  const h = Math.max(3, Math.floor(height));
+  const rules = h >= RULES_FROM;
+  const body = Math.max(0, h - 3 - (rules ? 2 : 0));
+  if (right && w >= WIDE) {
+    const tree = clamp(Math.round(w * 0.38), 36, 60);
+    return { two: true, rules, body, left: { width: tree, height: body }, right: { width: w - tree - PANE_SEPARATOR.length, height: body } };
+  }
+  const lower = right ? Math.min(Math.max(0, split), Math.max(0, body - 1)) : 0;
+  return { two: false, rules, body, left: { width: w, height: body - lower }, right: { width: w, height: lower } };
+}
+function fitRow(cells, width) {
+  const out = [];
+  let used = 0;
+  for (const c of cells) {
+    if (used >= width)
+      break;
+    const text = fit(c.text, width - used);
+    out.push({ ...c, text });
+    used += text.length;
+  }
+  const last = out.at(-1);
+  if (used < width) {
+    if (last)
+      last.text = last.text.padEnd(last.text.length + width - used);
+    else
+      out.push({ text: " ".repeat(width), tone: "base" });
+  }
+  return out;
+}
+function frame(input) {
+  const w = Math.max(1, Math.floor(input.width));
+  const sizes = paneSizes(w, input.height, input.split, input.right !== undefined);
+  const paneRows = (cells, width, height) => Array.from({ length: height }, (_, i) => {
+    const c = cells?.[i];
+    return c ? { ...c, text: pad(c.text, width) } : { text: " ".repeat(width), tone: "base" };
+  });
+  const rule = (joint) => [{ text: sizes.two ? `${"\u2500".repeat(sizes.left.width)}\u2500${joint}\u2500${"\u2500".repeat(sizes.right.width)}` : "\u2500".repeat(w), tone: "muted" }];
+  const rows = [fitRow(input.header, w), fitRow(input.stepper, w)];
+  if (sizes.rules)
+    rows.push(rule("\u252C"));
+  if (sizes.two) {
+    const left = paneRows(input.left, sizes.left.width, sizes.body);
+    const right = paneRows(input.right, sizes.right.width, sizes.body);
+    for (let i = 0;i < sizes.body; i++)
+      rows.push([left[i], { text: PANE_SEPARATOR, tone: "muted" }, right[i]]);
+  } else {
+    for (const c of paneRows(input.left, w, sizes.left.height))
+      rows.push([c]);
+    for (const c of paneRows(input.right, w, sizes.right.height))
+      rows.push([c]);
+  }
+  if (sizes.rules)
+    rows.push(rule("\u2534"));
+  rows.push(fitRow(input.help, w));
+  return rows;
+}
+
+// src/adapters/runview/tail.ts
+import { closeSync, openSync, readSync, statSync } from "fs";
+var MB = 1024 * 1024;
+var NEWLINE = 10;
+
+class TailReader {
+  path;
+  position = 0;
+  read = 0;
+  started = false;
+  dropping = false;
+  inode;
+  pending = Buffer.alloc(0);
+  firstWindowBytes;
+  maxReadBytes;
+  constructor(path, { firstWindowBytes = 8 * MB, maxReadBytes = 4 * MB } = {}) {
+    this.path = path;
+    this.firstWindowBytes = firstWindowBytes;
+    this.maxReadBytes = Math.max(1, maxReadBytes);
+  }
+  get offset() {
+    return this.position;
+  }
+  get bytesRead() {
+    return this.read;
+  }
+  poll() {
+    const out = { lines: [], reset: false, skippedBytes: 0 };
+    let size;
+    let inode;
+    try {
+      const st = statSync(this.path);
+      if (!st.isFile())
+        return out;
+      size = st.size;
+      inode = st.ino;
+    } catch {
+      return out;
+    }
+    if (this.started && (size < this.position || this.inode !== undefined && inode !== this.inode)) {
+      this.position = 0;
+      this.pending = Buffer.alloc(0);
+      this.started = false;
+      this.dropping = false;
+      out.reset = true;
+    }
+    this.inode = inode;
+    if (!this.started) {
+      this.started = true;
+      if (size > this.firstWindowBytes) {
+        this.position = size - this.firstWindowBytes;
+        this.dropping = true;
+        out.skippedBytes = this.position;
+      }
+    }
+    if (size === this.position)
+      return out;
+    const length = Math.min(size - this.position, this.maxReadBytes);
+    const chunk = Buffer.alloc(length);
+    let got = 0;
+    let fd;
+    try {
+      fd = openSync(this.path, "r");
+      got = readSync(fd, chunk, 0, length, this.position);
+    } catch {
+      return out;
+    } finally {
+      if (fd !== undefined) {
+        try {
+          closeSync(fd);
+        } catch {}
+      }
+    }
+    if (got <= 0)
+      return out;
+    this.position += got;
+    this.read += got;
+    let data = chunk.subarray(0, got);
+    if (this.dropping) {
+      const nl = data.indexOf(NEWLINE);
+      if (nl < 0) {
+        out.skippedBytes += got;
+        return out;
+      }
+      out.skippedBytes += nl + 1;
+      data = data.subarray(nl + 1);
+      this.dropping = false;
+    }
+    const all = this.pending.length ? Buffer.concat([this.pending, data]) : data;
+    const last = all.lastIndexOf(NEWLINE);
+    if (last < 0) {
+      this.pending = Buffer.from(all);
+      return out;
+    }
+    this.pending = Buffer.from(all.subarray(last + 1));
+    out.lines = all.subarray(0, last).toString("utf8").split(`
+`);
+    return out;
+  }
+}
+
+// src/adapters/omp/activity.ts
+var text = (value) => typeof value === "string" && value.trim() ? value : undefined;
+var TODO_STATES2 = new Set(["done", "active", "pending"]);
+function eventItem(entry) {
+  if (!entry || typeof entry !== "object")
+    return;
+  const e = entry;
+  const parsed = typeof e.t === "string" ? Date.parse(e.t) : Number.NaN;
+  const t = Number.isNaN(parsed) ? {} : { t: parsed };
+  const id = text(e.id) ? { id: e.id } : {};
+  const name = text(e.name) ?? "tool";
+  switch (e.type) {
+    case "state": {
+      const state = text(e.state);
+      return state && !state.startsWith("running ") ? { ...t, kind: "state", text: state } : undefined;
+    }
+    case "heading":
+      return text(e.text) ? { ...t, kind: "heading", text: e.text } : undefined;
+    case "tool":
+      return { ...t, kind: "tool", name, ...id, ...text(e.intent) ? { intent: e.intent } : {}, ...text(e.arg) ? { arg: e.arg } : {} };
+    case "tool-end":
+      return { ...t, kind: "tool-end", name, ...id, ...e.error === true ? { failed: true } : {} };
+    case "text":
+      return text(e.text) ? { ...t, kind: "text", text: e.text } : undefined;
+    case "subagents":
+      return { ...t, kind: "subagents", names: Array.isArray(e.agents) ? e.agents.filter((a) => typeof a === "string") : [] };
+    case "todo": {
+      const todos = Array.isArray(e.todos) ? e.todos.filter((x) => typeof x?.text === "string" && TODO_STATES2.has(x.state)) : [];
+      return todos.length ? { ...t, kind: "todo", todos } : undefined;
+    }
+    case "exit":
+      return { ...t, kind: "exit", ...typeof e.code === "number" ? { code: e.code } : {} };
+  }
+  return;
+}
+function eventLine(line) {
+  if (!line.trim())
+    return;
+  try {
+    return eventItem(JSON.parse(line));
+  } catch {
+    return;
+  }
+}
+
+// src/adapters/omp/subagents.ts
+import { readdirSync as readdirSync2 } from "fs";
+import { join as join2 } from "path";
+function subagentFiles(session) {
+  const out = new Map;
+  try {
+    for (const dir of readdirSync2(session, { withFileTypes: true })) {
+      if (!dir.isDirectory())
+        continue;
+      try {
+        for (const file of readdirSync2(join2(session, dir.name), { withFileTypes: true })) {
+          if (file.isFile() && file.name.endsWith(".jsonl"))
+            out.set(file.name.slice(0, -".jsonl".length), join2(session, dir.name, file.name));
+        }
+      } catch {}
+    }
+  } catch {}
+  return new Map([...out].sort(([a], [b]) => a.localeCompare(b)));
+}
+// src/adapters/omp/transcript.ts
+var MAX_ENTRY_CHARS = 2 * 1024 * 1024;
+var PROMPT_LINES = 12;
+var THINKING_LINES = 3;
+var RESULT_LINES = 8;
+var ARGS_CHARS = 300;
+var PAD2 = " ".repeat(10);
+var split2 = (text) => clean(text).split(`
+`);
+var cut = (text, max) => text.length > max ? `${text.slice(0, max - 1)}\u2026` : text;
+function head(lines, max, indent, tail = "") {
+  const out = lines.slice(0, max).map((l) => `${indent}${l}`);
+  if (lines.length > max)
+    out.push(`${indent}\u2026 ${lines.length - max} more lines${tail}`);
+  return out;
+}
+function textOf(content) {
+  if (typeof content === "string")
+    return content;
+  if (!Array.isArray(content))
+    return "";
+  return content.filter((p) => p?.type === "text" && typeof p.text === "string").map((p) => p.text).join(`
+`);
+}
+function toolCall(part) {
+  const args = part?.arguments && typeof part.arguments === "object" ? { ...part.arguments } : {};
+  const intent = typeof part?.intent === "string" && part.intent.trim() ? part.intent : typeof args.i === "string" && args.i.trim() ? args.i : undefined;
+  delete args.i;
+  delete args.intent;
+  let json;
+  try {
+    json = JSON.stringify(args) ?? "";
+  } catch {
+    json = "";
+  }
+  const name = clean(String(part?.name ?? "tool"));
+  return [`\u25B8 ${name}${intent ? `: ${clean(intent).replace(/\s+/g, " ").trim()}` : ""}`, `  ${cut(clean(json), ARGS_CHARS)}`];
+}
+function assistant(message) {
+  const out = [];
+  const parts = Array.isArray(message?.content) ? message.content : [];
+  for (const part of parts) {
+    if (part?.type === "thinking" && typeof part.thinking === "string" && part.thinking.trim()) {
+      const lines = split2(part.thinking.trim());
+      if (part.summary === true) {
+        const [first, ...rest] = lines.map((l) => l.replace(/\*\*/g, ""));
+        out.push(`\xBB ${first}`, ...rest.map((l) => `  ${l}`));
+      } else
+        out.push("\u2234 thinking", ...head(lines, THINKING_LINES, "  "));
+    } else if (part?.type === "text" && typeof part.text === "string" && part.text.trim()) {
+      const [first, ...rest] = split2(part.text.trim());
+      out.push(`\u270E ${first}`, ...rest.map((l) => `  ${l}`));
+    } else if (part?.type === "toolCall")
+      out.push(...toolCall(part));
+  }
+  if (message?.stopReason === "error")
+    out.push(`\u2717 error: ${clean(String(message.errorMessage ?? "unknown error"))}`);
+  return out;
+}
+function toolResult(message) {
+  const out = [`  \u2190 ${clean(String(message?.toolName ?? "tool"))} ${message?.isError === true ? "\u2717" : "\u2713"}`];
+  const parts = Array.isArray(message?.content) ? message.content : [];
+  const text = textOf(parts);
+  if (text)
+    out.push(...head(split2(text), RESULT_LINES, "    ", ` (${text.length} chars)`));
+  for (const part of parts)
+    if (part?.type === "image")
+      out.push("    [image]");
+  return out;
+}
+function messageLines(message) {
+  switch (message?.role) {
+    case "user":
+      return ["\u25B6 prompt", ...head(split2(textOf(message.content).trim()), PROMPT_LINES, "  ")];
+    case "assistant":
+      return assistant(message);
+    case "toolResult":
+      return toolResult(message);
+  }
+  return [];
+}
+function sessionEntryLines(line) {
+  if (line.length > MAX_ENTRY_CHARS)
+    return [`(entry of ${Math.round(line.length / 1024)} KB not shown)`];
+  if (!line.trim())
+    return [];
+  let entry;
+  try {
+    entry = JSON.parse(line);
+  } catch {
+    return [];
+  }
+  switch (entry?.type) {
+    case "session":
+      return [`\u2500\u2500 session ${clean(String(entry.id ?? "?"))} \xB7 ${clean(String(entry.cwd ?? ""))}`];
+    case "model_change":
+      return [`\xB7 model ${clean(String(entry.model ?? "?"))}`];
+    case "thinking_level_change":
+      return [`\xB7 thinking ${clean(String(entry.thinkingLevel ?? "?"))}`];
+    case "message": {
+      const lines = messageLines(entry.message);
+      return lines.map((l, i) => i === 0 ? `${clock(entry.timestamp)}  ${l}` : `${PAD2}${l}`);
+    }
+  }
+  return [];
+}
+
+class LineBuffer {
+  max;
+  dropped = 0;
+  version = 0;
+  kept = [];
+  view;
+  constructor(max = 5000) {
+    this.max = max;
+  }
+  push(lines) {
+    if (!lines.length)
+      return;
+    for (const line of lines)
+      this.kept.push(line);
+    if (this.kept.length > this.max) {
+      const over = this.kept.length - this.max;
+      this.kept.splice(0, over);
+      this.dropped += over;
+    }
+    this.view = undefined;
+    this.version++;
+  }
+  lines() {
+    this.view ??= this.dropped ? [`\u2026 ${this.dropped} earlier lines not kept`, ...this.kept] : this.kept.slice();
+    return this.view;
+  }
+}
+
+// src/adapters/omp/navigator.ts
+var NAMED = [
+  ["tui.select.up", "up"],
+  ["tui.select.down", "down"],
+  ["tui.select.pageUp", "pageUp"],
+  ["tui.select.pageDown", "pageDown"],
+  ["tui.editor.cursorLineStart", "home"],
+  ["tui.editor.cursorLineEnd", "end"],
+  ["tui.select.confirm", "enter"],
+  ["tui.select.cancel", "escape"],
+  ["tui.editor.cursorLeft", "left"],
+  ["tui.editor.cursorRight", "right"],
+  ["tui.input.tab", "tab"]
+];
+var RAW = {
+  "\x1B[A": "up",
+  "\x1BOA": "up",
+  k: "up",
+  "\x1B[B": "down",
+  "\x1BOB": "down",
+  j: "down",
+  "\x1B[C": "right",
+  "\x1BOC": "right",
+  "\x1B[D": "left",
+  "\x1BOD": "left",
+  "\x1B[5~": "pageUp",
+  "\x1B[6~": "pageDown",
+  "\x1B[H": "home",
+  "\x1BOH": "home",
+  "\x1B[1~": "home",
+  "\x1B[7~": "home",
+  "\x1B[F": "end",
+  "\x1BOF": "end",
+  "\x1B[4~": "end",
+  "\x1B[8~": "end",
+  "\r": "enter",
+  "\n": "enter",
+  "\x1B": "escape",
+  "\t": "tab",
+  "\x1B[Z": "backtab",
+  " ": "space",
+  "]": "next",
+  "[": "prev",
+  f: "follow",
+  t: "toggle",
+  v: "verbose",
+  q: "quit"
+};
+var TREE_HELP = "\u2191\u2193 move \xB7 Enter/\u2192 open \xB7 Tab/] next agent \xB7 [ prev \xB7 Space fold \xB7 Esc close";
+var SOURCES = 8;
+var MAX_ITEMS = 5000;
+var MB2 = 1024 * 1024;
+var TONE_STYLES = { base: "text", muted: "muted", success: "success", error: "error", warning: "warning", info: "accent" };
+var clamp2 = (n, lo, hi) => Math.max(lo, Math.min(hi, n));
+var isLive = (row) => row.agent?.state === "running" || row.agent?.state === "waiting";
+function wrap2(lines, width) {
+  const out = [];
+  const w = Math.max(1, width);
+  for (const raw of lines) {
+    const line = raw.replace(/\t/g, "  ");
+    if (line.length <= w)
+      out.push(line);
+    else
+      for (let i = 0;i < line.length; i += w)
+        out.push(line.slice(i, i + w));
+  }
+  return out;
+}
+function home() {
+  try {
+    return homedir2();
+  } catch {
+    return;
+  }
+}
+
+class Navigator {
+  deps;
+  focus = "tree";
+  shown;
+  folded = new Set;
+  opened = new Set;
+  selected = "";
+  trees = [];
+  rows = [];
+  parents = new Map;
+  caches = new Map;
+  sources = new Map;
+  modes = new Map;
+  home = home();
+  source;
+  version = 0;
+  memo;
+  wrapped;
+  verbose;
+  bodyHeight = 10;
+  bodyLength = 0;
+  treeTop = 0;
+  closed = false;
+  finished = false;
+  timer;
+  soon;
+  constructor(deps) {
+    this.deps = deps;
+    this.shown = deps.runId;
+    try {
+      this.refresh();
+      this.selected = this.firstSelection();
+      this.relayout();
+      this.pollSource();
+    } catch {}
+    this.timer = setInterval(() => this.tick(), Math.max(10, deps.tickMs));
+    this.timer.unref?.();
+  }
+  get disposed() {
+    return this.closed;
+  }
+  get bytesRead() {
+    return this.source?.read ?? 0;
+  }
+  tick() {
+    if (this.closed)
+      return;
+    try {
+      this.refresh();
+      this.pollSource();
+    } catch {}
+    this.version++;
+    this.redraw();
+  }
+  dispose() {
+    this.closed = true;
+    clearInterval(this.timer);
+    if (this.soon)
+      clearTimeout(this.soon);
+  }
+  invalidate() {
+    this.memo = undefined;
+    this.wrapped = undefined;
+  }
+  capturesInput(data) {
+    try {
+      return this.keyOf(data) !== undefined;
+    } catch {
+      return false;
+    }
+  }
+  handleInput(data) {
+    if (this.closed)
+      return;
+    try {
+      const key = this.keyOf(data);
+      if (!key)
+        return;
+      if (this.focus === "tree")
+        this.treeKey(key);
+      else
+        this.detailKey(key);
+    } catch {}
+    if (this.closed)
+      return;
+    this.version++;
+    this.redraw();
+  }
+  render(width) {
+    const height = this.height();
+    const key = `${width}:${height}:${this.version}`;
+    if (this.memo?.key === key)
+      return this.memo.lines;
+    let lines;
+    try {
+      lines = this.draw(width, height);
+    } catch {
+      lines = [fit("granny: the navigator could not draw this view", width)];
+    }
+    this.memo = { key, lines };
+    return lines;
+  }
+  close() {
+    if (this.finished)
+      return;
+    this.finished = true;
+    this.dispose();
+    try {
+      this.deps.done();
+    } catch {}
+  }
+  redraw() {
+    try {
+      this.deps.tui.requestRender();
+    } catch {
+      this.close();
+    }
+  }
+  keyOf(data) {
+    const matches = this.deps.keys?.matches;
+    if (typeof matches === "function") {
+      for (const [name, key] of NAMED) {
+        try {
+          if (matches.call(this.deps.keys, data, name))
+            return key;
+        } catch {}
+      }
+    }
+    return Object.hasOwn(RAW, data) ? RAW[data] : undefined;
+  }
+  height() {
+    try {
+      const rows = this.deps.tui.terminal?.rows ?? process.stdout.rows ?? 30;
+      return Math.max(5, Number.isFinite(rows) ? rows : 30);
+    } catch {
+      return 30;
+    }
+  }
+  cacheOf(run) {
+    let cache = this.caches.get(run.id);
+    if (!cache) {
+      cache = { reader: new TailReader(join3(run.dir, "journal.jsonl")), entries: [], files: new Map, read: false };
+      this.caches.set(run.id, cache);
+    }
+    return cache;
+  }
+  pollJournal(cache) {
+    const { lines, reset } = cache.reader.poll();
+    if (reset)
+      cache.entries = [];
+    for (const line of lines) {
+      if (!line.trim())
+        continue;
+      try {
+        cache.entries.push(JSON.parse(line));
+      } catch {}
+    }
+    cache.read = true;
+  }
+  runList() {
+    try {
+      return this.deps.runs();
+    } catch {
+      return [];
+    }
+  }
+  liveRole(runId, session) {
+    return this.runList().find((r) => r.id === runId)?.live.roles.find((r) => r.info.session === session);
+  }
+  refresh() {
+    const now = this.deps.now();
+    const runs = this.runList();
+    this.trees = runs.map((run) => {
+      const cache = this.cacheOf(run);
+      const shown = run.id === this.shown;
+      if (shown || !cache.read && run.status !== "running")
+        this.pollJournal(cache);
+      const live = new Map;
+      for (const role of run.live.roles)
+        live.set(role.info.session, role);
+      const info = { id: run.id, status: run.status, startedAt: run.live.startedAt, ...run.reply !== undefined ? { reply: run.reply } : {}, ...run.branch ? { branch: run.branch } : {} };
+      const build = () => buildRunTree(info, cache.entries, live, now, cache.files, run.outline);
+      if (this.selected === runKey(run.id) && cache.status?.for !== run.status) {
+        try {
+          cache.status = { for: run.status, data: JSON.parse(readFileSync2(join3(run.dir, "status.json"), "utf8")) };
+        } catch {}
+      }
+      const tree = build();
+      if (!shown)
+        return tree;
+      let found = false;
+      for (const agent of tree.agents) {
+        if (!agent.subagents.length)
+          continue;
+        const files = subagentFiles(agent.session);
+        if ([...files.values()].join(`
+`) !== [...cache.files.get(agent.session)?.values() ?? []].join(`
+`))
+          found = true;
+        cache.files.set(agent.session, files);
+      }
+      return found ? build() : tree;
+    });
+    this.relayout();
+  }
+  shownTree() {
+    return this.trees.find((t) => t.id === this.shown);
+  }
+  firstSelection() {
+    const tree = this.shownTree();
+    const agent = tree && ([...tree.agents].reverse().find((a) => a.state === "running") ?? tree.agents.at(-1));
+    if (agent && tree) {
+      this.relayout();
+      for (const key of [agentKey(agent.session), groupKey(tree.id, agent.group)])
+        if (this.rows.some((r) => r.key === key))
+          return key;
+    }
+    return runKey(this.shown);
+  }
+  relayout() {
+    const tree = this.shownTree();
+    const focus = tree && focusStage(tree);
+    const layout = () => visibleRows(this.trees, { run: this.shown, folded: this.folded, opened: this.opened, ...focus !== undefined ? { focus } : {}, runs: this.trees.length > 1 ? "list" : "one" });
+    this.rows = layout();
+    const hidden = this.hiddenGroup();
+    if (hidden) {
+      this.opened.add(hidden);
+      this.rows = layout();
+    }
+    for (const row of this.rows)
+      if (row.parent)
+        this.parents.set(row.key, row.parent);
+    let key = this.selected;
+    while (key && !this.rows.some((r) => r.key === key && r.selectable))
+      key = this.parents.get(key);
+    this.selected = key ?? this.rows.find((r) => r.selectable)?.key ?? "";
+    this.choose();
+  }
+  hiddenGroup() {
+    if (!this.selected || this.rows.some((r) => r.key === this.selected))
+      return;
+    for (let key = this.parents.get(this.selected);key; key = this.parents.get(key)) {
+      const row = this.rows.find((r) => r.key === key);
+      if (row)
+        return row.kind === "group" && row.folded && !this.folded.has(key) ? key : undefined;
+    }
+    return;
+  }
+  selectedRow() {
+    return this.rows.find((r) => r.key === this.selected);
+  }
+  modeOf(row) {
+    return this.modes.get(row.key) ?? "summary";
+  }
+  choose() {
+    const row = this.selectedRow();
+    if (!row)
+      return void (this.source = undefined);
+    let spec;
+    if (row.kind === "agent") {
+      const agent = row.agent;
+      const live = isLive(row);
+      spec = this.modeOf(row) === "transcript" ? { kind: "transcript", dir: agent.session, relist: live, follow: live } : { kind: "events", file: join3(agent.session, "events.jsonl"), relist: false, follow: live };
+    } else if (row.kind === "sub")
+      spec = { kind: "transcript", ...row.sub.path ? { file: row.sub.path } : {}, relist: false, follow: false };
+    else
+      spec = { kind: "static", relist: false, follow: false };
+    const key = `${row.key}|${spec.kind}|${spec.file ?? spec.dir ?? ""}`;
+    let source = this.sources.get(key);
+    if (!source) {
+      source = { key, readers: new Map, buffer: new LineBuffer, items: [], itemsVersion: 0, skippedMb: 0, read: 0, polled: false, ...spec };
+      this.sources.set(key, source);
+      if (this.sources.size > SOURCES)
+        this.sources.delete(this.sources.keys().next().value);
+      if (source.file || source.dir)
+        this.later();
+    } else if (source.dir)
+      source.relist = spec.relist;
+    if (row.kind === "run")
+      this.later();
+    this.source = source;
+  }
+  later() {
+    if (this.soon || this.closed)
+      return;
+    this.soon = setTimeout(() => {
+      this.soon = undefined;
+      this.tick();
+    }, 0);
+    this.soon.unref?.();
+  }
+  pollSource() {
+    const source = this.source;
+    if (!source || !source.file && !source.dir)
+      return;
+    if (source.dir && (source.relist || !source.readers.size)) {
+      let names = [];
+      try {
+        names = readdirSync3(source.dir).filter((n) => n.endsWith(".jsonl") && n !== "events.jsonl").sort();
+      } catch {}
+      for (const name of names) {
+        const path = join3(source.dir, name);
+        if (!source.readers.has(path))
+          source.readers.set(path, new TailReader(path));
+      }
+    } else if (source.file && !source.readers.size)
+      source.readers.set(source.file, new TailReader(source.file));
+    source.polled = true;
+    for (const reader of source.readers.values()) {
+      const before = reader.bytesRead;
+      const { lines, reset, skippedBytes } = reader.poll();
+      source.read += reader.bytesRead - before;
+      if (reset) {
+        source.readers.clear();
+        source.buffer = new LineBuffer;
+        source.items = [];
+        source.itemsVersion++;
+        source.skippedMb = 0;
+        source.top = undefined;
+        return this.pollSource();
+      }
+      const skipped = skippedBytes ? Math.max(1, Math.round(skippedBytes / MB2)) : 0;
+      if (source.kind === "events") {
+        source.skippedMb += skipped;
+        const items = lines.map(eventLine).filter((i) => i !== undefined);
+        if (items.length) {
+          source.items.push(...items);
+          if (source.items.length > MAX_ITEMS)
+            source.items.splice(0, source.items.length - MAX_ITEMS);
+          source.itemsVersion++;
+        }
+      } else {
+        if (skipped)
+          source.buffer.push([`\u2026 first ${skipped} MB skipped`]);
+        if (lines.length)
+          source.buffer.push(lines.flatMap(sessionEntryLines));
+      }
+    }
+  }
+  select(key) {
+    if (!key || key === this.selected)
+      return;
+    this.selected = key;
+    this.choose();
+  }
+  selectable() {
+    return this.rows.filter((r) => r.selectable);
+  }
+  moveBy(delta) {
+    const rows = this.selectable();
+    const at = rows.findIndex((r) => r.key === this.selected);
+    this.select(rows[clamp2(at + delta, 0, rows.length - 1)]?.key);
+  }
+  agentStep(dir) {
+    this.select(nextAgent(this.rows, this.selected, dir));
+  }
+  treeKey(key) {
+    const page = Math.max(1, this.height() - 3);
+    switch (key) {
+      case "up":
+        return this.moveBy(-1);
+      case "down":
+        return this.moveBy(1);
+      case "pageUp":
+        return this.moveBy(-page);
+      case "pageDown":
+        return this.moveBy(page);
+      case "home":
+        return this.select(this.selectable()[0]?.key);
+      case "end":
+        return this.select(this.selectable().at(-1)?.key);
+      case "enter":
+      case "right": {
+        const row = this.selectedRow();
+        if (row?.kind === "run" && !row.shown && key === "enter")
+          return this.switchRun(row.run.id);
+        this.focus = "detail";
+        return;
+      }
+      case "space": {
+        const row = this.selectedRow();
+        if (row?.kind === "run" && !row.shown)
+          return this.switchRun(row.run.id);
+        return this.fold();
+      }
+      case "tab":
+      case "next":
+        return this.agentStep(1);
+      case "backtab":
+      case "prev":
+        return this.agentStep(-1);
+      case "left":
+        return this.select(this.selectedRow()?.parent);
+      case "escape":
+      case "quit":
+        return this.close();
+    }
+  }
+  switchRun(id) {
+    this.shown = id;
+    this.later();
+    this.relayout();
+  }
+  fold() {
+    const row = this.selectedRow();
+    if (row?.kind !== "group" || row.folded === undefined)
+      return;
+    if (row.folded) {
+      this.folded.delete(row.key);
+      this.opened.add(row.key);
+    } else {
+      this.opened.delete(row.key);
+      this.folded.add(row.key);
+    }
+    this.relayout();
+  }
+  detailKey(key) {
+    const source = this.source;
+    switch (key) {
+      case "up":
+        return this.scroll(-1);
+      case "down":
+        return this.scroll(1);
+      case "pageUp":
+        return this.scroll(-Math.max(1, this.bodyHeight - 1));
+      case "pageDown":
+        return this.scroll(Math.max(1, this.bodyHeight - 1));
+      case "home":
+        if (source && this.scrolls()) {
+          source.follow = false;
+          source.top = 0;
+        }
+        return;
+      case "end":
+        if (source && this.scrolls()) {
+          source.follow = true;
+          source.top = undefined;
+        }
+        return;
+      case "follow":
+        if (source && this.scrolls()) {
+          source.follow = !source.follow;
+          if (source.follow)
+            source.top = undefined;
+          else
+            this.scroll(0);
+        }
+        return;
+      case "toggle":
+        return this.switchMode("transcript");
+      case "verbose":
+        return this.switchMode("verbose");
+      case "tab":
+      case "next":
+        return this.agentStep(1);
+      case "backtab":
+      case "prev":
+        return this.agentStep(-1);
+      case "left":
+      case "escape":
+        this.focus = "tree";
+        return;
+      case "quit":
+        return this.close();
+    }
+  }
+  switchMode(mode) {
+    const row = this.selectedRow();
+    if (row?.kind !== "agent")
+      return;
+    this.modes.set(row.key, this.modeOf(row) === mode ? "summary" : mode);
+    this.choose();
+  }
+  scrolls() {
+    const row = this.selectedRow();
+    return row?.kind !== "agent" || this.modeOf(row) !== "summary";
+  }
+  scroll(delta) {
+    const source = this.source;
+    if (!source || !this.scrolls())
+      return;
+    const max = Math.max(0, this.bodyLength - this.bodyHeight);
+    const current = source.follow || source.top === undefined ? max : source.top;
+    source.top = clamp2(current + delta, 0, max);
+    if (delta < 0)
+      source.follow = false;
+  }
+  paint(style, text) {
+    const theme = this.deps.theme;
+    if (typeof theme?.fg !== "function")
+      return text;
+    try {
+      const out = theme.fg(style, text);
+      return typeof out === "string" ? out : text;
+    } catch {
+      return text;
+    }
+  }
+  highlight(text) {
+    const theme = this.deps.theme;
+    try {
+      if (typeof theme?.bg === "function") {
+        const out = theme.bg("selectedBg", text);
+        if (typeof out === "string")
+          return out;
+      }
+    } catch {}
+    try {
+      if (typeof theme?.inverse === "function") {
+        const out = theme.inverse(text);
+        if (typeof out === "string")
+          return out;
+      }
+    } catch {}
+    return text;
+  }
+  draw(width, height) {
+    const tree = this.shownTree() ?? this.trees[0];
+    const now = this.deps.now();
+    const help = [{ text: this.help(), tone: "muted" }];
+    if (!tree)
+      return frame({ header: [{ text: "granny \xB7 no run", tone: "base" }], stepper: [], left: [], help, width, height }).map((r) => this.paintRow(r));
+    const focus = focusStage(tree, this.selected);
+    const sizes = paneSizes(width, height, 0, true);
+    let left;
+    let right;
+    if (sizes.two) {
+      left = this.treePane(sizes.left.width, sizes.left.height, now);
+      right = this.detailPane(sizes.right.width, sizes.right.height, now);
+    } else
+      left = this.focus === "tree" ? this.treePane(sizes.left.width, sizes.left.height, now) : this.detailPane(sizes.left.width, sizes.left.height, now);
+    const rows = frame({
+      header: [{ text: headerText(tree, now, focus, width), tone: "base" }],
+      stepper: stepperCells(stepsFor(tree, focus), width),
+      left,
+      ...right ? { right } : {},
+      help,
+      width,
+      height
+    });
+    return rows.map((r) => this.paintRow(r));
+  }
+  paintRow(cells) {
+    return cells.map((c) => c.selected ? this.highlight(c.text) : this.paint(TONE_STYLES[c.tone], c.text)).join("");
+  }
+  help() {
+    if (this.focus === "tree")
+      return TREE_HELP;
+    const row = this.selectedRow();
+    const mode = row?.kind === "agent" ? this.modeOf(row) : undefined;
+    const parts = [];
+    if (mode !== "summary")
+      parts.push("\u2191\u2193 PgUp/PgDn Home/End scroll", `f follow (${this.source?.follow ? "on" : "off"})`);
+    if (mode)
+      parts.push(`v ${mode === "verbose" ? "summary" : "details"}`, `t ${mode === "transcript" ? "summary" : "transcript"}`);
+    parts.push("Tab/] [ agent", "\u2190/Esc back", "q close");
+    return parts.join(" \xB7 ");
+  }
+  treePane(width, height, now) {
+    const { cells, top } = treeCells(this.rows, this.selected, now, width, height, this.treeTop);
+    this.treeTop = top;
+    return cells;
+  }
+  detailPane(width, height, now) {
+    const row = this.selectedRow();
+    if (!row || height < 1)
+      return [];
+    const head = this.headOf(row, width, now);
+    if (row.kind === "agent" && this.modeOf(row) === "summary")
+      return [...head, ...this.summary(row, width, height - head.length, now)].slice(0, height);
+    const shown = head.slice(0, Math.max(1, height - 1));
+    const bodyHeight = Math.max(1, height - shown.length);
+    const body = this.bodyOf(row);
+    const key = `${body.key}:${width}`;
+    if (this.wrapped?.key !== key)
+      this.wrapped = { key, lines: wrap2(body.lines.length || this.source?.kind === "static" ? body.lines : [emptyText(this.source)], width) };
+    const lines = this.wrapped.lines;
+    this.bodyHeight = bodyHeight;
+    this.bodyLength = lines.length;
+    const max = Math.max(0, lines.length - bodyHeight);
+    const source = this.source;
+    const top = source?.follow ? max : clamp2(source?.top ?? max, 0, max);
+    return [...shown, ...lines.slice(top, top + bodyHeight).map((text) => ({ text, tone: "base" }))];
+  }
+  headOf(row, width, now) {
+    const tree = row.run;
+    let cells;
+    switch (row.kind) {
+      case "agent":
+        cells = agentHead(row.agent, now);
+        break;
+      case "sub":
+        cells = [{ text: `${row.sub.name} \xB7 subagent of ${row.agent.action}`, tone: "base" }];
+        break;
+      case "group": {
+        const all = groupDetail(tree, row.group, now, width);
+        const n = row.group.lines.length;
+        cells = all.slice(0, all.length - n);
+        break;
+      }
+      case "checks":
+        cells = checksDetail(row.group).slice(0, 2);
+        break;
+      case "run":
+        cells = runDetail(tree, this.factsOf(tree));
+        break;
+      default:
+        cells = [];
+    }
+    return cells.map((c) => ({ ...c, text: fit(c.text, width) }));
+  }
+  factsOf(tree) {
+    const run = this.runList().find((r) => r.id === tree.id);
+    const status = this.caches.get(tree.id)?.status?.data ?? {};
+    return {
+      ...typeof status.repo === "string" ? { repo: clean(status.repo) } : {},
+      ...run ? { dir: run.dir } : {},
+      ...tree.status === "failed" && typeof status.error === "string" ? { error: clean(status.error) } : {}
+    };
+  }
+  bodyOf(row) {
+    const source = this.source;
+    switch (row.kind) {
+      case "agent":
+      case "sub": {
+        if (source?.kind !== "events")
+          return { key: `${source?.key}:${source?.buffer.version}:${source?.polled}`, lines: source?.buffer.lines() ?? [] };
+        const lines = this.verboseLines(row);
+        return { key: `${this.verbose.key}:${source.polled}`, lines };
+      }
+      case "group":
+        return this.staticBody(row, row.group.lines);
+      case "checks":
+        return this.staticBody(row, row.group.checks?.lines ?? []);
+      case "run": {
+        const reply = this.runList().find((r) => r.id === row.run.id)?.reply;
+        return this.staticBody(row, reply === undefined ? [] : ["", ...clean(reply).split(`
+`)]);
+      }
+      default:
+        return { key: row.key, lines: [] };
+    }
+  }
+  staticBody(row, lines) {
+    return { key: `${row.key}:${lines.length}:${lines.at(-1) ?? ""}`, lines };
+  }
+  itemsOf(row) {
+    const items = this.source?.kind === "events" ? this.source.items : [];
+    const notes = row.agent.notes;
+    if (!notes.length)
+      return items;
+    return [...items, ...notes.map((n) => ({ t: n.t, kind: "note", text: n.text }))].sort((a, b) => (a.t ?? 0) - (b.t ?? 0));
+  }
+  verboseLines(row) {
+    const source = this.source;
+    const key = `${source.key}:${source.itemsVersion}:${row.agent.notes.length}`;
+    if (this.verbose?.key !== key) {
+      const lines = activityLines(this.itemsOf(row), row.agent.cwd, this.home);
+      this.verbose = { key, lines: source.skippedMb ? [`\u2026 first ${source.skippedMb} MB skipped`, ...lines] : lines };
+    }
+    return this.verbose.lines;
+  }
+  summary(row, width, height, now) {
+    if (height < 1)
+      return [];
+    const agent = row.agent;
+    const source = this.source;
+    const end = agentEnd(agent);
+    const live = agent.state === "running" ? this.liveRole(row.run.id, agent.session)?.now() : undefined;
+    const summary = summarise(this.itemsOf(row), now, { ...agent.cwd ? { cwd: agent.cwd } : {}, ...this.home ? { home: this.home } : {}, ...live ? { live } : {}, ...end ? { end } : {}, max: height });
+    const blank = { text: "", tone: "base" };
+    const cells = summaryCells(summary, width, height - 1);
+    if (!source?.polled && (source?.file || source?.dir))
+      cells.push({ text: "(reading \u2026)", tone: "muted" });
+    else if (!cells.length)
+      cells.push({ text: "(no events yet)", tone: "muted" });
+    return [blank, ...cells];
+  }
+}
+function emptyText(source) {
+  if (!source)
+    return "";
+  if ((source.file || source.dir) && !source.polled)
+    return "(reading \u2026)";
+  if (source.kind === "events")
+    return "(no events yet)";
+  return source.file || source.dir ? "(no transcript yet)" : "(no transcript yet - the subagent has not written one)";
+}
+
+// src/adapters/runview/outline.ts
+function runOutline(input, config) {
+  const kind = input.goal !== undefined ? "plan" : "implement";
+  const fromStage = input.fromStage ?? 1;
+  const stages = (input.stages ?? []).map((st, i) => ({
+    number: i + 1,
+    name: clean(st.name || `stage ${i + 1}`),
+    implement: st.implement !== false,
+    review: st.review !== false,
+    checks: (st.checks === undefined ? config.checks.length : st.checks.length) > 0
+  }));
+  return {
+    kind,
+    branch: clean(input.branch),
+    worktree: config.worktree,
+    planReview: config.planReview && (kind === "plan" || input.plan !== undefined && fromStage === 1),
+    finalReview: config.finalReview && stages.length > 1,
+    reviewers: config.reviewers.map((r) => clean(r.name)),
+    fromStage,
+    stages
+  };
+}
+
+// src/adapters/omp/watch.ts
+import { appendFileSync as appendFileSync2 } from "fs";
+
+class EventLog {
+  path;
+  now;
+  onError;
+  failed = false;
+  constructor(path, now, onError) {
+    this.path = path;
+    this.now = now;
+    this.onError = onError;
+  }
+  write(entry) {
+    if (this.failed)
+      return;
+    try {
+      appendFileSync2(this.path, JSON.stringify({ t: new Date(this.now()).toISOString(), ...entry }) + `
+`);
+    } catch (e) {
+      this.failed = true;
+      try {
+        this.onError(e);
+      } catch {}
+    }
+  }
+}
+
 // src/adapters/omp/extension.ts
 var SHARED = Symbol.for("granny-workflow.omp.state");
 var shared = globalThis[SHARED] ??= { runs: new Map };
 var { runs } = shared;
-var text = (t) => ({ content: [{ type: "text", text: t }] });
+var text2 = (t) => ({ content: [{ type: "text", text: t }] });
+var WAIT_DEFAULT_SECONDS = 1800;
+var WAIT_MAX_SECONDS = 7200;
+function waitSeconds(value) {
+  const n = typeof value === "string" && value.trim() ? Number(value) : value;
+  return typeof n === "number" && Number.isFinite(n) ? Math.min(WAIT_MAX_SECONDS, Math.max(1, Math.round(n))) : WAIT_DEFAULT_SECONDS;
+}
 var READ_ONLY_TOOLS = new Set(["read", "grep", "glob", "find", "ast_grep", "lsp", "bash", "web_search", "todo", "think", "wait", "yield"]);
 var KEYWORDS = new Set(["{", "}", "!", "if", "then", "else", "elif", "do", "while", "until", "nohup"]);
 var PREFIX_OPTIONS_WITH_VALUE = new Map([
@@ -2593,7 +5596,7 @@ var PREFIX_OPTIONS_WITH_VALUE = new Map([
   ["xargs", new Set(["-I", "-L", "-n", "-P", "-s", "-d", "-E", "-a"])],
   ["timeout", new Set(["-s", "-k", "--signal", "--kill-after"])]
 ]);
-var SHELLS = new Set(["bash", "sh", "zsh", "dash", "ksh"]);
+var SHELLS2 = new Set(["bash", "sh", "zsh", "dash", "ksh"]);
 var SHELL_OPTIONS_WITH_VALUE = new Set(["-o", "+o", "-O", "+O", "--rcfile", "--init-file"]);
 var GITHUB_DENIED_OPS = new Set(["pr_create", "pr_push", "pr_checkout"]);
 var GIT_OPTIONS_WITH_VALUE = new Set(["-C", "-c", "--git-dir", "--work-tree", "--namespace", "--config-env"]);
@@ -2720,7 +5723,7 @@ function commandBlock(words, access) {
   }
   const program = basename(words[i] ?? "");
   const rest = words.slice(i + 1);
-  const shellCommand = SHELLS.has(program) ? shellCommandString(rest) : undefined;
+  const shellCommand = SHELLS2.has(program) ? shellCommandString(rest) : undefined;
   if (shellCommand !== undefined)
     return bashBlock(shellCommand, access);
   if (program === "eval")
@@ -2767,10 +5770,18 @@ function blockReason(toolName, input, access, submitTool) {
   const reason = bashBlock(String(input?.command ?? ""), access);
   return reason ? `granny: ${reason}` : undefined;
 }
+var CLAUDE_ALIAS = /^(default|sonnet|opus|haiku|opusplan)(\[1m\])?$/i;
+var ompModelProblem = (model, keyed) => !keyed && CLAUDE_ALIAS.test(model) ? `"${model}" is a Claude Code model alias, not an omp model` : undefined;
 var TRANSIENT = /\b(429|502|503|504|529)\b|rate.?limit|too many requests|overloaded|quota|timed? ?out|timeout|ETIMEDOUT|ECONNRESET|ECONNREFUSED|EPIPE|socket hang up|connection|other side closed|network|fetch failed/i;
 function isTransient(message) {
   return TRANSIENT.test(message);
 }
+var STATUS_KEEP_MS = 60000;
+var WATCH_HELP = "granny-workflow: watch granny runs - /granny (or alt+w) opens the run navigator: a stepper of the run's steps, its stage groups with their agents, and what the selected agent is doing now (or its transcript); /granny <runId> opens it on that run; /granny off|on hides or shows the run panel in this session";
+var NAVIGATOR_HINT = "/granny or alt+w: agents";
+var NAVIGATOR_SENTENCE = `
+Tell the user: /granny or alt+w opens the run navigator (stages, agents, live activity).`;
+var OVERLAY = { width: "100%", maxHeight: "100%", margin: 0, fullscreen: true, mouseTracking: false };
 function turnError(turn) {
   if (turn.assistant?.stopReason === "error")
     return turn.assistant.errorMessage || "unknown provider error";
@@ -2782,12 +5793,13 @@ function readSubmission(path) {
   if (!existsSync2(path))
     return;
   try {
-    return JSON.parse(readFileSync2(path, "utf8"));
+    return JSON.parse(readFileSync3(path, "utf8"));
   } catch {
     return;
   }
 }
 var slug2 = (label) => label.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 60) || "agent";
+var SUBAGENT_SUBMIT = "granny: only the role's top-level agent submits the result - return your findings to the agent that spawned you.";
 function registerChild(pi, spec) {
   pi.registerTool({
     name: spec.tool,
@@ -2795,18 +5807,29 @@ function registerChild(pi, spec) {
     description: `granny-workflow: submit your final ${spec.kind} result. Call it exactly once, when your task is done.`,
     parameters: SCHEMAS[spec.kind],
     loadMode: "essential",
-    async execute(_id, params) {
+    async execute(_id, params, _signal, _onUpdate, ctx) {
+      if (ctx?.agent?.kind === "sub")
+        return text2(SUBAGENT_SUBMIT);
       mkdirSync2(dirname(spec.out), { recursive: true });
       writeFileSync(spec.out, JSON.stringify(params));
-      return text("Recorded. You are done - stop now.");
+      return text2("Recorded. You are done - stop now.");
     }
   });
   pi.on("tool_call", async (event) => {
     const reason = blockReason(event.toolName, event.input, spec.access, spec.tool);
     return reason ? { block: true, reason } : undefined;
   });
+  pi.on("session_start", async (_event, ctx) => {
+    if (ctx?.agent?.kind !== "sub")
+      return;
+    try {
+      const active = pi.getActiveTools?.();
+      if (active?.includes(spec.tool))
+        await pi.setActiveTools?.(active.filter((name) => name !== spec.tool));
+    } catch {}
+  });
 }
-var createGrannyExtension = ({ delays = DEFAULT_DELAYS, sleep = pause, killGraceMs = KILL_GRACE_MS } = {}) => (pi) => {
+var createGrannyExtension = ({ delays = DEFAULT_DELAYS, sleep = pause, killGraceMs = KILL_GRACE_MS, heartbeatMs = HEARTBEAT_MS, now = Date.now, renderEveryMs = 1000 } = {}) => (pi) => {
   const child = process.env.GRANNY_OMP_CHILD;
   if (child)
     return registerChild(pi, JSON.parse(child));
@@ -2816,12 +5839,17 @@ var createGrannyExtension = ({ delays = DEFAULT_DELAYS, sleep = pause, killGrace
       return `granny_run refused:
 - ${problems.join(`
 - `)}`;
-    const layers = [readJson(globalConfigPath()), readJson(join2(input.repo, "granny.config.json")), input.config];
+    const layers = [readJson(globalConfigPath()), readJson(join4(input.repo, "granny.config.json")), input.config];
     const config = resolveConfig(layers, "omp");
     const unknownChecks = stageCheckErrors(input.stages, config.checks);
     if (unknownChecks.length)
       return `granny_run refused:
 - ${unknownChecks.join(`
+- `)}`;
+    const badModels = hostModelErrors(config, layers, "omp", ompModelProblem, layerSources(input.repo));
+    if (badModels.length)
+      return `granny_run refused:
+- ${badModels.join(`
 - `)}`;
     const blockers = preflight(input.repo, input.branch, config.workDir, config.worktree);
     for (const repo of stageRepos(input))
@@ -2831,31 +5859,46 @@ var createGrannyExtension = ({ delays = DEFAULT_DELAYS, sleep = pause, killGrace
 - ${blockers.join(`
 - `)}`;
     const id = runId();
-    const dir = join2(input.repo, config.workDir, "runs", id);
+    const dir = join4(input.repo, config.workDir, "runs", id);
     mkdirSync2(dir, { recursive: true });
-    const run = { id, dir, status: "running", cancelled: false, abort: new AbortController, children: new Set, agents: 0 };
+    shared.clearStatus?.();
+    shared.clearStatus = undefined;
+    const { watch } = config;
+    const live = new LiveRun(id, watch !== "off" && ctx?.hasUI === true ? ctx.ui : undefined, { now, renderEveryMs, ...watch === "full" ? { hint: NAVIGATOR_HINT } : {} }, !shared.hidden);
+    const outline = runOutline(input, config);
+    const run = { id, dir, status: "running", cancelled: false, abort: new AbortController, children: new Set, agents: 0, waiters: new Set, live, watch, branch: input.branch, outline };
     runs.set(id, run);
-    const journal = (type, data) => appendFileSync2(join2(dir, "journal.jsonl"), JSON.stringify({ t: stamp(), type, ...data }) + `
+    const journal = (type, data) => appendFileSync3(join4(dir, "journal.jsonl"), JSON.stringify({ t: stamp(), type, ...data }) + `
 `);
-    const writeStatus = (extra = {}) => writeFileSync(join2(dir, "status.json"), JSON.stringify({ id, status: run.status, repo: input.repo, branch: input.branch, ...extra }, null, 2));
-    writeFileSync(join2(dir, "input.json"), JSON.stringify({ ...input, config: layers }, null, 2));
+    const writeStatus = (extra = {}) => writeFileSync(join4(dir, "status.json"), JSON.stringify({ id, status: run.status, repo: input.repo, branch: input.branch, outline, ...extra }, null, 2));
+    writeFileSync(join4(dir, "input.json"), JSON.stringify({ ...input, config: layers }, null, 2));
     writeStatus({ startedAt: stamp() });
     const parentModel = ctx?.model?.provider && ctx?.model?.id ? `${ctx.model.provider}/${ctx.model.id}` : undefined;
     const bin = process.env.GRANNY_OMP_BIN ?? "omp";
     const extensionFile = process.env.GRANNY_OMP_EXTENSION ?? fileURLToPath(import.meta.url);
-    const omp = (args, prompt, cwd, spec) => new Promise((resolve, reject) => {
+    const omp = (args, prompt, cwd, spec, view) => new Promise((resolve, reject) => {
       if (run.cancelled)
-        return reject(new Error("cancelled"));
+        return reject(new GrannyCancelled);
       const proc = spawn2(bin, args, { cwd, env: { ...process.env, GRANNY_OMP_CHILD: JSON.stringify(spec) }, detached: true, stdio: ["pipe", "pipe", "pipe"] });
       run.children.add(proc);
+      live.start(view);
       let pending = "";
       let stderr = "";
       let assistant;
       const scan = (line) => {
         try {
+          const type = lineType(line);
+          if (type !== undefined && !PARSED_EVENTS.has(type)) {
+            view.stream(type, line, now());
+            return live.touch();
+          }
           const event = JSON.parse(line);
           if (event?.type === "message_end" && event.message?.role === "assistant")
             assistant = event.message;
+          const agents = view.event(event, now());
+          if (agents)
+            journal("subagent", { label: view.info.label, agents });
+          live.touch();
         } catch {}
       };
       proc.stdout.on("data", (d) => {
@@ -2871,17 +5914,20 @@ var createGrannyExtension = ({ delays = DEFAULT_DELAYS, sleep = pause, killGrace
       proc.stdin.on("error", () => {});
       proc.on("error", (e) => {
         run.children.delete(proc);
+        live.stop(view);
         reject(e.code === "ENOENT" ? new Error(`cannot run omp: "${bin}" was not found - install omp or set GRANNY_OMP_BIN to its path`) : e);
       });
       proc.on("close", (code) => {
         run.children.delete(proc);
         if (pending)
           scan(pending);
+        view.exit(code ?? 1);
+        live.stop(view);
         resolve({ code: code ?? 1, assistant, stderr });
       });
       proc.stdin.end(prompt);
     });
-    const converse = async (req, spec, args, session) => {
+    const converse = async (req, spec, args, session, view) => {
       const { tool } = spec;
       let prompt = `${req.prompt}
 
@@ -2891,10 +5937,10 @@ When done, call the \`${tool}\` tool exactly once with your result. That call is
       let resume = false;
       while (misses < 3) {
         rmSync(spec.out, { force: true });
-        const turn = await omp(resume ? [...args, "--continue"] : args, prompt, req.cwd, spec);
+        const turn = await omp(resume ? [...args, "--continue"] : args, prompt, req.cwd, spec, view);
         resume = true;
         if (run.cancelled)
-          throw new Error("cancelled");
+          throw new GrannyCancelled;
         const got = readSubmission(spec.out);
         if (got !== undefined) {
           const errors = checkShape(req.schema, got);
@@ -2914,7 +5960,7 @@ When done, call the \`${tool}\` tool exactly once with your result. That call is
             backoffs++;
             await sleep(backoffMs, run.abort.signal);
             if (run.cancelled)
-              throw new Error("cancelled");
+              throw new GrannyCancelled;
             prompt = `Your previous turn ended on a provider error (${error.slice(0, 300)}). Continue the task where it stopped; when you are done, call \`${tool}\` exactly once with your result.`;
             continue;
           }
@@ -2929,14 +5975,14 @@ When done, call the \`${tool}\` tool exactly once with your result. That call is
       name: "omp",
       async agent(req) {
         if (run.cancelled)
-          throw new Error("cancelled");
+          throw new GrannyCancelled;
         const tool = SUBMIT[req.kind];
         if (!tool)
           throw new Error(`no submit tool for result kind "${req.kind}"`);
         const model = req.model ?? parentModel;
-        const session = join2(dir, "sessions", `${++run.agents}-${slug2(req.label)}`);
+        const session = join4(dir, "sessions", `${++run.agents}-${slug2(req.label)}`);
         mkdirSync2(session, { recursive: true });
-        const spec = { tool, kind: req.kind, out: join2(session, "submission.json"), access: req.access };
+        const spec = { tool, kind: req.kind, out: join4(session, "submission.json"), access: req.access };
         const args = [
           "--mode",
           "json",
@@ -2951,43 +5997,93 @@ When done, call the \`${tool}\` tool exactly once with your result. That call is
           ...model ? ["--model", model] : [],
           ...req.effort ? ["--thinking", req.effort] : []
         ];
-        journal("agent", { label: req.label, role: req.role, session, model: model ?? null, ...req.effort ? { effort: req.effort } : {} });
-        return converse(req, spec, args, session);
+        journal("agent", { label: req.label, role: req.role, phase: req.phase, session, model: model ?? null, ...req.effort ? { effort: req.effort } : {}, cwd: req.cwd });
+        const path = join4(session, "events.jsonl");
+        const log = watch === "full" ? new EventLog(path, now, (e) => journal("event-log-failed", { label: req.label, path, error: String(e?.message ?? e) })) : undefined;
+        const view = live.role({ label: req.label, role: req.role, model, effort: req.effort, session, phase: req.phase, cwd: req.cwd, ...log ? { log: path } : {} }, log && ((entry) => log.write(entry)));
+        const end = (outcome, error) => {
+          view.outcome = outcome;
+          if (error !== undefined)
+            view.error = error;
+          try {
+            journal("agent-end", { label: req.label, session, outcome, ...error !== undefined ? { error } : {} });
+          } catch {}
+        };
+        try {
+          const result = await converse(req, spec, args, session, view);
+          end(result === null ? "failed" : "done");
+          return result;
+        } catch (e) {
+          if (isCancelled(e))
+            end("cancelled");
+          else
+            end("failed", String(e?.message ?? e));
+          throw e;
+        }
       },
+      cancelled: () => run.cancelled,
       async run(command, cwd) {
         if (run.cancelled)
           return { code: 130, output: "cancelled" };
         journal("command", { command });
-        return runCommand(command, cwd, run.abort.signal, killGraceMs);
+        return withHeartbeat(() => runCommand(command, cwd, run.abort.signal, killGraceMs), () => journal("heartbeat", { command }), heartbeatMs);
       },
       log: (message) => journal("log", { message }),
-      phase: (title) => journal("phase", { title })
+      phase: (title) => {
+        journal("phase", { title });
+        live.setPhase(title);
+      },
+      stage: ({ number, name, event, outcome }) => journal("stage", { number, name, event, ...outcome ? { outcome } : {} })
     };
     const notify = (content) => {
       try {
-        pi.sendMessage({ customType: "granny-workflow", content, display: true }, { triggerTurn: true, deliverAs: "followUp" });
+        pi.sendMessage({ customType: "granny-workflow", content, display: true }, { deliverAs: "aside" });
       } catch (e) {
         journal("notify-failed", { error: String(e?.message ?? e) });
       }
     };
+    const writeResult = (result) => writeFileSync(join4(dir, "result.json"), JSON.stringify(result, null, 2));
+    const settle = (reply, notice) => {
+      run.reply = reply;
+      const clear = live.close(run.status);
+      shared.clearStatus = clear;
+      setTimeout(clear, STATUS_KEEP_MS).unref();
+      const waiting = [...run.waiters];
+      run.waiters.clear();
+      for (const deliver of waiting)
+        deliver(reply);
+      if (waiting.length)
+        journal("notified-via-wait", { waits: waiting.length });
+      else if (notice)
+        notify(notice);
+    };
     runGranny(host, { ...input, config: layers }).then((result) => {
       run.status = "done";
-      writeFileSync(join2(dir, "result.json"), JSON.stringify(result, null, 2));
       writeStatus({ finishedAt: stamp() });
-      notify(`[granny] Run ${id} finished.
+      writeResult(result);
+      const reply = `[granny] Run ${id} finished.
 ${summarize(result, config.worktree)}
-Call granny_status with runId "${id}" for the full result, verify load-bearing claims yourself, report to the user and wait. Do not push.`);
+Call granny_status with runId "${id}" for the full result, verify load-bearing claims yourself, report to the user and wait. Do not push.`;
+      settle(reply, reply);
     }).catch((error) => {
+      if (run.reply !== undefined)
+        return;
       run.status = run.cancelled ? "cancelled" : "failed";
-      writeStatus({ finishedAt: stamp(), error: String(error?.stack ?? error) });
-      journal("error", { error: String(error?.message ?? error) });
-      if (!run.cancelled)
-        notify(`[granny] Run ${id} failed: ${String(error?.message ?? error)}
-Call granny_status with runId "${id}" and report to the user.`);
+      const finishedAt = stamp();
+      const message = String(error?.message ?? error);
+      const reply = run.cancelled ? `Run ${id} was cancelled.` : `[granny] Run ${id} failed: ${message}
+Call granny_status with runId "${id}" and report to the user.`;
+      try {
+        writeStatus({ finishedAt, error: statusError(error, run.cancelled) });
+        journal("error", { error: message });
+        writeResult({ id, status: run.status, finishedAt, error: message });
+      } finally {
+        settle(reply, run.cancelled ? undefined : reply);
+      }
     }).catch(() => {});
     return `granny run ${id} started on ${input.repo} (${input.branch}), ${input.goal !== undefined ? "planning only" : `${input.stages?.length ?? 0} stage(s)${config.parallel ? `, up to ${config.maxParallel} in parallel` : ""}`}, threshold ${config.threshold}, maxRounds ${config.maxRounds}.
-Journal: ${join2(dir, "journal.jsonl")}
-You will receive a message when it finishes. Use granny_status { runId: "${id}" } to check progress and granny_cancel to stop it. Do not poll in a loop.`;
+Journal: ${join4(dir, "journal.jsonl")}
+To wait in this turn, call granny_wait { runId: "${id}" }; otherwise end your turn - the finish message starts a new one. Never write your own watcher, sleep or poll loop on the run files. Use granny_status { runId: "${id}" } for progress and granny_cancel to stop it.${planReviewNotice(input, config)}${watch === "full" ? NAVIGATOR_SENTENCE : ""}${overridesNotice(layers, "omp")}`;
   };
   pi.registerTool({
     name: "granny_run",
@@ -2997,9 +6093,9 @@ You will receive a message when it finishes. Use granny_status { runId: "${id}" 
     loadMode: "essential",
     async execute(_id, params, _signal, _onUpdate, ctx) {
       try {
-        return text(startRun(dropPlaceholders(params), ctx));
+        return text2(startRun(dropPlaceholders(params), ctx));
       } catch (e) {
-        return text(`granny_run failed to start: ${e.message}`);
+        return text2(`granny_run failed to start: ${e.message}`);
       }
     }
   });
@@ -3014,12 +6110,132 @@ You will receive a message when it finishes. Use granny_status { runId: "${id}" 
     loadMode: "essential",
     async execute(_id, params) {
       try {
-        return text(runStatus(runs, params.runId, params.repo));
+        const status = runStatus(runs, params.runId, params.repo);
+        const dir = runDir(runs, params.runId, params.repo);
+        const run = [...runs.values()].find((r) => r.dir === dir && r.status === "running");
+        return text2(run ? `${status}
+
+live (this omp process):
+${run.live.lines(Number.POSITIVE_INFINITY).join(`
+`)}` : status);
       } catch (e) {
-        return text(`granny_status failed: ${e.message}`);
+        return text2(`granny_status failed: ${e.message}`);
       }
     }
   });
+  pi.registerTool({
+    name: "granny_wait",
+    label: "granny wait",
+    description: `granny-workflow: wait in this turn until a granny run ends and return its result, or return when timeoutSeconds (default ${WAIT_DEFAULT_SECONDS}) pass - use it instead of your own watcher, sleep or poll loop on the run files.`,
+    parameters: {
+      type: "object",
+      properties: {
+        runId: { type: "string" },
+        timeoutSeconds: { type: "number", description: `Seconds to wait while the run is still going, 1 to ${WAIT_MAX_SECONDS}; default ${WAIT_DEFAULT_SECONDS}` }
+      },
+      required: ["runId"]
+    },
+    loadMode: "essential",
+    interruptible: true,
+    async execute(_id, params, signal) {
+      const run = runs.get(params.runId);
+      if (!run) {
+        return text2(`No granny run "${params.runId}" in this omp process. granny_wait waits only for a run started in this process - the run table is in memory; call granny_status({ repo }) to read a run's files.`);
+      }
+      if (run.reply !== undefined)
+        return text2(run.reply);
+      const stopped = `Stopped waiting; run ${run.id} is still running.`;
+      if (signal?.aborted)
+        return text2(stopped);
+      const seconds = waitSeconds(params.timeoutSeconds);
+      return new Promise((resolve) => {
+        const done = (reply) => {
+          clearTimeout(timer);
+          signal?.removeEventListener("abort", onAbort);
+          run.waiters.delete(done);
+          resolve(text2(reply));
+        };
+        const onAbort = () => done(stopped);
+        const timer = setTimeout(() => done(`Run ${run.id} is still running after ${seconds} s. Call granny_wait again to keep waiting, or end your turn - the finish message will start a new one.`), seconds * 1000);
+        run.waiters.add(done);
+        signal?.addEventListener("abort", onAbort, { once: true });
+      });
+    }
+  });
+  const say = (ctx, message) => {
+    try {
+      if (ctx?.hasUI === true)
+        ctx.ui.notify(message, "info");
+      else
+        pi.sendMessage({ customType: "granny-workflow", content: message, display: true }, { triggerTurn: false });
+    } catch {}
+  };
+  const watchRun = async (args, ctx) => {
+    const arg = args.trim();
+    if (arg === "off" || arg === "on") {
+      shared.hidden = arg === "off";
+      for (const run of runs.values())
+        if (run.status === "running")
+          run.live.setVisible(!shared.hidden);
+      return say(ctx, shared.hidden ? "granny: the run panel is hidden in this session - /granny on shows it again." : "granny: the run panel is shown in this session.");
+    }
+    const all = [...runs.values()];
+    const run = arg ? runs.get(arg) : all.filter((r) => r.status === "running").at(-1) ?? all.at(-1);
+    if (!run)
+      return say(ctx, arg ? `granny: no run "${arg}" in this omp process - /granny watches the runs started here.` : "granny: no granny run in this omp process yet.");
+    if (run.watch !== "full") {
+      return say(ctx, `granny: watching is off for run ${run.id} (watch: "${run.watch}") - set "watch": "full" in granny.config.json or the run's config to log each role and watch it with /granny.`);
+    }
+    const tui = ctx?.hasUI === true && typeof ctx.ui?.custom === "function" && (ctx.mode === undefined || ctx.mode === "tui");
+    if (!tui) {
+      const roles = run.live.roles;
+      if (!roles.length)
+        return say(ctx, `granny: run ${run.id} has started no role yet.`);
+      return say(ctx, [`granny run ${run.id} - event log per role:`, ...roles.map((r) => `  ${r.info.label} (${r.info.role}): ${r.info.log}`)].join(`
+`));
+    }
+    if (shared.navigating)
+      return;
+    shared.navigating = true;
+    let navigator;
+    try {
+      await ctx.ui.custom((tuiHost, theme, keys, done) => navigator = new Navigator({
+        runs: () => [...runs.values()].filter((r) => r.watch === "full"),
+        runId: run.id,
+        tui: tuiHost,
+        theme,
+        keys,
+        done: () => done(undefined),
+        now,
+        tickMs: renderEveryMs
+      }), { overlay: true, overlayOptions: OVERLAY });
+    } finally {
+      navigator?.dispose();
+      shared.navigating = false;
+    }
+  };
+  pi.registerCommand?.("granny", {
+    description: WATCH_HELP,
+    getArgumentCompletions: (prefix) => {
+      const items = ["off", "on", ...runs.keys()].filter((v) => v.startsWith(prefix)).map((value) => ({ value, label: value }));
+      return items.length ? items : null;
+    },
+    handler: async (args, ctx) => {
+      try {
+        await watchRun(args ?? "", ctx);
+      } catch (e) {
+        say(ctx, `granny: /granny failed: ${e?.message ?? e}`);
+      }
+    }
+  });
+  try {
+    pi.registerShortcut?.("alt+w", {
+      description: "granny-workflow: open the run navigator",
+      handler: (ctx) => {
+        watchRun("", ctx).catch(() => {});
+      }
+    });
+  } catch {}
   pi.registerTool({
     name: "granny_cancel",
     label: "granny cancel",
@@ -3029,14 +6245,14 @@ You will receive a message when it finishes. Use granny_status { runId: "${id}" 
     async execute(_id, params) {
       const run = runs.get(params.runId);
       if (!run || run.status !== "running")
-        return text(`No running granny run "${params.runId}".`);
+        return text2(`No running granny run "${params.runId}".`);
       run.cancelled = true;
       run.abort.abort();
       for (const proc of run.children) {
         signalGroup(proc, "SIGTERM");
         setTimeout(() => run.children.has(proc) && signalGroup(proc, "SIGKILL"), killGraceMs).unref();
       }
-      return text(`Cancelling ${params.runId}; every running step is interrupted and nothing further starts.`);
+      return text2(`Cancelling ${params.runId}; every running step is interrupted and nothing further starts.`);
     }
   });
 };
@@ -3045,5 +6261,6 @@ export {
   blockReason,
   createGrannyExtension,
   extension_default as default,
-  isTransient
+  isTransient,
+  waitSeconds
 };
