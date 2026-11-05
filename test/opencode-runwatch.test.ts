@@ -316,6 +316,51 @@ describe('RunWatch', () => {
   })
 })
 
+describe('a running run nothing writes to any more', () => {
+  it('turns stale after 10 minutes without a change to status.json or the journal and without a running role session', () => {
+    planRun()
+    let now = BASE + 33 * M
+    const watch = new RunWatch(dir, { now: () => now })
+    watch.poll(running())
+    expect(watch.snapshot.stale).toBeUndefined()
+    now += 10 * M - S
+    watch.poll(running())
+    expect(watch.snapshot.stale).toBeUndefined()
+    now += S
+    expect(watch.poll(running('ses_r'))).toBe(true)
+    expect(watch.snapshot.stale).toBeUndefined()
+    expect(watch.poll(running())).toBe(true)
+    expect(watch.snapshot.stale).toBe(true)
+    expect(watch.touched()).toBe(false)
+    journal(line(44 * M, 'log', { message: 'alive' }))
+    expect(watch.touched()).toBe(true)
+    watch.poll(running())
+    expect(watch.snapshot.stale).toBeUndefined()
+  })
+
+  it('never calls a finished run stale', () => {
+    planRun()
+    status({ status: 'done', finishedAt: new Date(BASE + 33 * M).toISOString() })
+    let now = BASE + 33 * M
+    const watch = new RunWatch(dir, { now: () => now })
+    watch.poll(running())
+    now += 60 * M
+    watch.poll(running())
+    expect(watch.snapshot.stale).toBeUndefined()
+  })
+
+  it('shows stale? in the sidebar header and the chip', () => {
+    planRun()
+    let now = BASE + 33 * M
+    const watch = new RunWatch(dir, { now: () => now })
+    watch.poll(running())
+    now += 10 * M
+    watch.poll(running())
+    expect(sidebarLines(watch.snapshot, now, 42)[0]).toEqual({ text: 'granny 523r · stale?', tone: 'warning', key: `run:${RUN}` })
+    expect(chipText(watch.snapshot, now)).toBe('granny · Plan review · stale?')
+  })
+})
+
 describe('sidebarLines / chipText / toastFor', () => {
   const now = BASE + 33 * M
   const snap = () => {

@@ -346,6 +346,38 @@ describe('opencode TUI plugin: sidebar, chip and toasts', () => {
     expect(texts(m.sidebar())[0]).toBe('granny 77xq · running')
   })
 
+  it('marks a running run whose files stop changing stale, lets the timer stop, and picks it up again when they change', () => {
+    planRun()
+    const m = mount({ running: [] })
+    const sidebar = m.sidebar()
+    const chip = m.chip()
+    m.timers.tick()
+    expect(texts(sidebar)[0]).toBe('granny 523r · running')
+    m.now += 10 * M
+    m.timers.tick()
+    expect(texts(sidebar)[0]).toBe('granny 523r · stale?')
+    expect(texts(chip)).toEqual(['granny · Plan review · stale?'])
+    for (let i = 0; i < 5 && m.timers.intervals; i++) m.timers.tick()
+    expect(m.timers.intervals).toBe(0)
+    journal(line(44 * M, 'phase', { title: 'Review' }))
+    m.fc.emit('session.updated', { sessionID: 'ses_r' })
+    m.timers.tick()
+    expect(texts(sidebar)[0]).toBe('granny 523r · running')
+    expect(texts(sidebar)[1]).toStartWith('Review · ')
+    expect(m.timers.intervals).toBe(1)
+  })
+
+  it('keeps a run whose files stopped changing live while one of its role sessions runs', () => {
+    planRun()
+    const m = mount({ running: ['ses_r'] })
+    m.timers.tick()
+    m.now += 30 * M
+    m.timers.tick()
+    expect(texts(m.sidebar())[0]).toBe('granny 523r · running')
+    for (let i = 0; i < 5; i++) m.timers.tick()
+    expect(m.timers.intervals).toBe(1)
+  })
+
   it('wakes its timer when a session is created', () => {
     const m = mount({ sessions: [{ id: 'parent' }], running: [] })
     m.timers.tick()

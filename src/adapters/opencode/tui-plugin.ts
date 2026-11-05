@@ -235,6 +235,7 @@ export class Hub {
       try {
         changed = this.discover()
       } catch {}
+      this.revive()
       const toasts: Toast[] = []
       for (const run of this.liveRuns()) {
         try {
@@ -262,8 +263,16 @@ export class Hub {
     if (TERMINAL.has(run.watch.snapshot.status)) {
       run.ended = true
       this.expire(run)
-    }
+    } else if (run.watch.snapshot.stale) run.ended = true
     return changed
+  }
+
+  /** A stale run is watched again once its files change or one of its role sessions runs. */
+  private revive() {
+    for (const run of this.runs.values()) {
+      if (!run.ended || !run.watch.snapshot.stale) continue
+      if (attempt(() => run.watch.touched()) || [...this.liveOf(run).values()].some(v => v.active)) run.ended = false
+    }
   }
 
   /** Redraws once the finished run's line in the sidebar and chip is due to go. */

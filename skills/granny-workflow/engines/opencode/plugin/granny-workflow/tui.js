@@ -431,6 +431,7 @@ var META_KEY = "granny-workflow";
 var MAX_ENTRIES = 5000;
 var MAX_AGENT_LINES = 8;
 var FRESH_MS = 60000;
+var STALE_MS = 10 * 60000;
 var TERMINAL = new Set(["done", "failed", "cancelled"]);
 var MODES = ["full", "panel", "off"];
 var nodeFs = {
@@ -489,6 +490,9 @@ class RunWatch {
   journalPath;
   status;
   statusStamp;
+  statusSeen = "";
+  filesSeen = "";
+  changedAt;
   startedAt;
   entries = [];
   primed = false;
@@ -502,6 +506,7 @@ class RunWatch {
     this.statusPath = join(dir, "status.json");
     this.journalPath = join(dir, "journal.jsonl");
     this.journal = new TailReader(this.journalPath, opts.tail);
+    this.changedAt = opts.now();
     this.snapshot = this.build(new Map, opts.now(), false);
   }
   get entryCount() {
@@ -512,9 +517,17 @@ class RunWatch {
     const before = this.snapshot;
     const statusOk = this.readStatus();
     let journalSize;
+    let journalSeen = "";
     try {
-      journalSize = this.fs.stat(this.journalPath).size;
+      const st = this.fs.stat(this.journalPath);
+      journalSize = st.size;
+      journalSeen = `${st.size}:${st.mtimeMs}`;
     } catch {}
+    const files = `${this.statusSeen}|${journalSeen}`;
+    if (files !== this.filesSeen) {
+      this.filesSeen = files;
+      this.changedAt = now;
+    }
     const { lines, reset } = this.journal.poll();
     const primed = this.primed && !reset;
     if (reset)
@@ -535,6 +548,8 @@ class RunWatch {
       this.entries.splice(0, this.entries.length - MAX_ENTRIES);
     const caughtUp = journalSize !== undefined && this.journal.offset >= journalSize;
     this.snapshot = this.build(live, now, statusOk && journalSize !== undefined);
+    if (this.isStale(live, now))
+      this.snapshot.stale = true;
     if (primed)
       this.collect(before, fresh);
     this.primed = caughtUp;
@@ -543,14 +558,35 @@ class RunWatch {
     this.key = key;
     return changed;
   }
+  touched() {
+    return `${this.seen(this.statusPath)}|${this.seen(this.journalPath)}` !== this.filesSeen;
+  }
+  seen(path) {
+    try {
+      const st = this.fs.stat(path);
+      return `${st.size}:${st.mtimeMs}`;
+    } catch {
+      return "";
+    }
+  }
+  isStale(live, now) {
+    if (this.snapshot.status !== "running" || now - this.changedAt < (this.opts.staleMs ?? STALE_MS))
+      return false;
+    for (const view of live.values())
+      if (view.active)
+        return false;
+    return true;
+  }
   readStatus() {
     let stamp;
     try {
       const st = this.fs.stat(this.statusPath);
       stamp = `${st.size}:${st.mtimeMs}`;
     } catch {
+      this.statusSeen = "";
       return false;
     }
+    this.statusSeen = stamp;
     if (stamp === this.statusStamp && this.status)
       return true;
     try {
@@ -626,7 +662,7 @@ class RunWatch {
     const over = TERMINAL.has(s.status);
     const clock = over ? String(s.end !== undefined && now - s.end < FRESH_MS) : String(Math.floor((now - s.start) / 1000));
     const agents = s.tree.agents.map((a) => `${a.session}:${a.state}:${a.activity ?? ""}`).join(",");
-    return [s.status, s.watch, s.readable, s.phase ?? "", this.entries.length, clock, agents].join("|");
+    return [s.status, s.stale ?? "", s.watch, s.readable, s.phase ?? "", this.entries.length, clock, agents].join("|");
   }
 }
 var shortId = (id) => id.slice(-4);
@@ -662,7 +698,7 @@ function sidebarLines(s, now, width) {
       return [];
     return [{ text: fit(`granny ${short} \xB7 ${s.status} \xB7 ${elapsed2(s, now)}`, width), tone: STATUS_TONES[s.status] ?? "base", key: runKey(s.id) }];
   }
-  const lines = [{ text: fit(`granny ${short} \xB7 ${s.status}`, width), tone: "base", key: runKey(s.id) }];
+  const lines = [{ text: fit(`granny ${short} \xB7 ${s.stale ? "stale?" : s.status}`, width), tone: s.stale ? "warning" : "base", key: runKey(s.id) }];
   if (!s.readable)
     lines.push({ text: fit("run files not readable", width), tone: "muted" });
   const phase = s.tree.phases.at(-1);
@@ -683,6 +719,8 @@ function chipText(s, now) {
     return "";
   if (terminal(s))
     return fresh(s, now) ? `granny \xB7 ${s.status}` : "";
+  if (s.stale)
+    return `granny \xB7 ${s.phase ?? "Starting"} \xB7 stale?`;
   const running = s.tree.agents.filter((a) => a.state === "running").length;
   return `granny \xB7 ${s.phase ?? "Starting"} \xB7 ${running} running \xB7 ${elapsed2(s, now)}`;
 }
@@ -1279,6 +1317,7 @@ class Hub {
       try {
         changed = this.discover();
       } catch {}
+      this.revive();
       const toasts = [];
       for (const run of this.liveRuns()) {
         try {
@@ -1309,8 +1348,17 @@ class Hub {
     if (TERMINAL2.has(run.watch.snapshot.status)) {
       run.ended = true;
       this.expire(run);
-    }
+    } else if (run.watch.snapshot.stale)
+      run.ended = true;
     return changed;
+  }
+  revive() {
+    for (const run of this.runs.values()) {
+      if (!run.ended || !run.watch.snapshot.stale)
+        continue;
+      if (attempt(() => run.watch.touched()) || [...this.liveOf(run).values()].some((v) => v.active))
+        run.ended = false;
+    }
   }
   expire(run) {
     const end = run.watch.snapshot.end;

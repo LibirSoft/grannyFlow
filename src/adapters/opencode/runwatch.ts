@@ -55,6 +55,8 @@ export interface RunSnapshot {
   branch?: string
   tree: RunTree
   readable: boolean
+  /** Running, but its files have not changed for a while and none of its role sessions runs. */
+  stale?: true
 }
 
 export type Tone = 'base' | 'muted' | 'success' | 'error' | 'warning' | 'info'
@@ -76,6 +78,7 @@ const META_KEY = 'granny-workflow'
 const MAX_ENTRIES = 5000
 const MAX_AGENT_LINES = 8
 const FRESH_MS = 60_000
+const STALE_MS = 10 * 60_000
 const TERMINAL = new Set(['done', 'failed', 'cancelled'])
 const MODES: readonly WatchMode[] = ['full', 'panel', 'off']
 
@@ -141,6 +144,7 @@ export interface RunWatchOptions {
   read?: FsLike
   roles?: RoleSession[]
   tail?: TailOptions
+  staleMs?: number
 }
 
 export class RunWatch {
@@ -155,6 +159,9 @@ export class RunWatch {
   private readonly journalPath: string
   private status?: StatusFile
   private statusStamp?: string
+  private statusSeen = ''
+  private filesSeen = ''
+  private changedAt: number
   private startedAt?: number
   private entries: JournalEntry[] = []
   private primed = false
@@ -170,6 +177,7 @@ export class RunWatch {
     this.statusPath = join(dir, 'status.json')
     this.journalPath = join(dir, 'journal.jsonl')
     this.journal = new TailReader(this.journalPath, opts.tail)
+    this.changedAt = opts.now()
     this.snapshot = this.build(new Map(), opts.now(), false)
   }
 
@@ -183,9 +191,17 @@ export class RunWatch {
     const before = this.snapshot
     const statusOk = this.readStatus()
     let journalSize: number | undefined
+    let journalSeen = ''
     try {
-      journalSize = this.fs.stat(this.journalPath).size
+      const st = this.fs.stat(this.journalPath)
+      journalSize = st.size
+      journalSeen = `${st.size}:${st.mtimeMs}`
     } catch {}
+    const files = `${this.statusSeen}|${journalSeen}`
+    if (files !== this.filesSeen) {
+      this.filesSeen = files
+      this.changedAt = now
+    }
     const { lines, reset } = this.journal.poll()
     const primed = this.primed && !reset
     if (reset) this.entries = []
@@ -202,6 +218,7 @@ export class RunWatch {
     const caughtUp = journalSize !== undefined && this.journal.offset >= journalSize
 
     this.snapshot = this.build(live, now, statusOk && journalSize !== undefined)
+    if (this.isStale(live, now)) this.snapshot.stale = true
     if (primed) this.collect(before, fresh)
     this.primed = caughtUp
     const key = this.keyOf(this.snapshot, now)
@@ -210,14 +227,36 @@ export class RunWatch {
     return changed
   }
 
+  /** Whether status.json or the journal changed since the last poll; two stats, nothing read. */
+  touched(): boolean {
+    return `${this.seen(this.statusPath)}|${this.seen(this.journalPath)}` !== this.filesSeen
+  }
+
+  private seen(path: string): string {
+    try {
+      const st = this.fs.stat(path)
+      return `${st.size}:${st.mtimeMs}`
+    } catch {
+      return ''
+    }
+  }
+
+  private isStale(live: ReadonlyMap<string, LiveView>, now: number): boolean {
+    if (this.snapshot.status !== 'running' || now - this.changedAt < (this.opts.staleMs ?? STALE_MS)) return false
+    for (const view of live.values()) if (view.active) return false
+    return true
+  }
+
   private readStatus(): boolean {
     let stamp: string
     try {
       const st = this.fs.stat(this.statusPath)
       stamp = `${st.size}:${st.mtimeMs}`
     } catch {
+      this.statusSeen = ''
       return false
     }
+    this.statusSeen = stamp
     if (stamp === this.statusStamp && this.status) return true
     try {
       const raw = JSON.parse(this.fs.readText(this.statusPath))
@@ -291,7 +330,7 @@ export class RunWatch {
     const over = TERMINAL.has(s.status)
     const clock = over ? String(s.end !== undefined && now - s.end < FRESH_MS) : String(Math.floor((now - s.start) / 1000))
     const agents = s.tree.agents.map(a => `${a.session}:${a.state}:${a.activity ?? ''}`).join(',')
-    return [s.status, s.watch, s.readable, s.phase ?? '', this.entries.length, clock, agents].join('|')
+    return [s.status, s.stale ?? '', s.watch, s.readable, s.phase ?? '', this.entries.length, clock, agents].join('|')
   }
 }
 
@@ -328,7 +367,7 @@ export function sidebarLines(s: RunSnapshot, now: number, width: number): Line[]
     if (!fresh(s, now)) return []
     return [{ text: fit(`granny ${short} · ${s.status} · ${elapsed(s, now)}`, width), tone: STATUS_TONES[s.status] ?? 'base', key: runKey(s.id) }]
   }
-  const lines: Line[] = [{ text: fit(`granny ${short} · ${s.status}`, width), tone: 'base', key: runKey(s.id) }]
+  const lines: Line[] = [{ text: fit(`granny ${short} · ${s.stale ? 'stale?' : s.status}`, width), tone: s.stale ? 'warning' : 'base', key: runKey(s.id) }]
   if (!s.readable) lines.push({ text: fit('run files not readable', width), tone: 'muted' })
   const phase = s.tree.phases.at(-1)
   lines.push({
@@ -346,6 +385,7 @@ export function sidebarLines(s: RunSnapshot, now: number, width: number): Line[]
 export function chipText(s: RunSnapshot, now: number): string {
   if (s.watch === 'off') return ''
   if (terminal(s)) return fresh(s, now) ? `granny · ${s.status}` : ''
+  if (s.stale) return `granny · ${s.phase ?? 'Starting'} · stale?`
   const running = s.tree.agents.filter(a => a.state === 'running').length
   return `granny · ${s.phase ?? 'Starting'} · ${running} running · ${elapsed(s, now)}`
 }
