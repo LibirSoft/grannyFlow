@@ -1,9 +1,7 @@
 // The run navigator's tree: phases, round/stage groups, agents and their task subagents, built from a
 // run's journal entries with the live state of its role processes laid over them.
-import { readdirSync } from 'node:fs'
-import { join } from 'node:path'
-import { clock } from './format'
-import { duration, type RoleActivity } from './panel'
+import { clock, duration } from './format'
+import type { RoleActivity } from '../omp/panel'
 
 export interface JournalEntry {
   t?: string
@@ -361,20 +359,4 @@ export function rowText(row: Row, now: number, width = Number.POSITIVE_INFINITY)
     case 'sub':
       return `${indent}└ ${row.sub!.name}${row.sub!.path ? '' : ' (no transcript yet)'}`
   }
-}
-
-/** `<Name>.jsonl` files one directory level under a role's session directory, by name. */
-export function subagentFiles(session: string): Map<string, string> {
-  const out = new Map<string, string>()
-  try {
-    for (const dir of readdirSync(session, { withFileTypes: true })) {
-      if (!dir.isDirectory()) continue
-      try {
-        for (const file of readdirSync(join(session, dir.name), { withFileTypes: true })) {
-          if (file.isFile() && file.name.endsWith('.jsonl')) out.set(file.name.slice(0, -'.jsonl'.length), join(session, dir.name, file.name))
-        }
-      } catch {}
-    }
-  } catch {}
-  return new Map([...out].sort(([a], [b]) => a.localeCompare(b)))
 }

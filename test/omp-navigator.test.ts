@@ -3,11 +3,12 @@ import { appendFileSync, mkdirSync, mkdtempSync, renameSync, rmSync, truncateSyn
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { clean, clock, stamp } from '../src/adapters/omp/format'
-import { TailReader } from '../src/adapters/omp/tail'
+import { TailReader } from '../src/adapters/runview/tail'
 import { LineBuffer, sessionEntryLines } from '../src/adapters/omp/transcript'
 import { LiveRun, RoleActivity } from '../src/adapters/omp/panel'
 import { Navigator, type NavRun } from '../src/adapters/omp/navigator'
-import { buildRunTree, groupOf, type JournalEntry, nextAgent, rowText, subagentFiles, visibleRows } from '../src/adapters/omp/tree'
+import { buildRunTree, groupOf, type JournalEntry, nextAgent, rowText, visibleRows } from '../src/adapters/runview/tree'
+import { subagentFiles } from '../src/adapters/omp/subagents'
 
 let tmp: string
 beforeEach(() => {
