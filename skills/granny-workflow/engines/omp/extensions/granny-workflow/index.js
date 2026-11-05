@@ -2970,19 +2970,23 @@ When done, call the \`${tool}\` tool exactly once with your result. That call is
         journal("notify-failed", { error: String(e?.message ?? e) });
       }
     };
+    const writeResult = (result) => writeFileSync(join2(dir, "result.json"), JSON.stringify(result, null, 2));
     runGranny(host, { ...input, config: layers }).then((result) => {
       run.status = "done";
-      writeFileSync(join2(dir, "result.json"), JSON.stringify(result, null, 2));
       writeStatus({ finishedAt: stamp() });
+      writeResult(result);
       notify(`[granny] Run ${id} finished.
 ${summarize(result, config.worktree)}
 Call granny_status with runId "${id}" for the full result, verify load-bearing claims yourself, report to the user and wait. Do not push.`);
     }).catch((error) => {
       run.status = run.cancelled ? "cancelled" : "failed";
-      writeStatus({ finishedAt: stamp(), error: String(error?.stack ?? error) });
-      journal("error", { error: String(error?.message ?? error) });
+      const finishedAt = stamp();
+      const message = String(error?.message ?? error);
+      writeStatus({ finishedAt, error: String(error?.stack ?? error) });
+      journal("error", { error: message });
+      writeResult({ id, status: run.status, finishedAt, error: message });
       if (!run.cancelled)
-        notify(`[granny] Run ${id} failed: ${String(error?.message ?? error)}
+        notify(`[granny] Run ${id} failed: ${message}
 Call granny_status with runId "${id}" and report to the user.`);
     }).catch(() => {});
     return `granny run ${id} started on ${input.repo} (${input.branch}), ${input.goal !== undefined ? "planning only" : `${input.stages?.length ?? 0} stage(s)${config.parallel ? `, up to ${config.maxParallel} in parallel` : ""}`}, threshold ${config.threshold}, maxRounds ${config.maxRounds}.

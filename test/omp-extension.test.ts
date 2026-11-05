@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, spyOn } from 'bun:test'
 import { spawnSync } from 'node:child_process'
+import * as fs from 'node:fs'
 import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -548,6 +549,49 @@ describe('omp extension in the user session (parent mode)', () => {
     expect(f.sent[0]!.message.content).toContain(`[granny] Run ${id} failed: `)
     expect(f.sent[0]!.message.content).toContain('GRANNY_OMP_BIN')
     expect(f.sent[0]!.options).toEqual({ triggerTurn: true, deliverAs: 'followUp' })
+  })
+
+  it('writes result.json last on success, when status.json is already terminal', async () => {
+    behave({})
+    const f = fakePi()
+    await extension(f.pi as any)
+    const statusAtResult: unknown[] = []
+    const real = fs.writeFileSync
+    const spy = spyOn(fs, 'writeFileSync').mockImplementation(((path: any, data: any, options?: any) => {
+      if (String(path).endsWith('result.json')) statusAtResult.push(JSON.parse(readRun(String(path).slice(0, -'/result.json'.length), 'status.json')))
+      return real(path, data, options)
+    }) as typeof fs.writeFileSync)
+    try {
+      const { dir } = await start(f)
+      await finished(dir)
+    } finally {
+      spy.mockRestore()
+    }
+    expect(statusAtResult).toEqual([expect.objectContaining({ status: 'done', finishedAt: expect.any(String) })])
+  })
+
+  it('writes result.json with the error when a run fails', async () => {
+    process.env.GRANNY_OMP_BIN = join(fake, 'no-such-omp')
+    const f = fakePi()
+    await extension(f.pi as any)
+    const { id, dir } = await start(f)
+    const result = await finished(dir)
+    expect(result).toEqual({ id, status: 'failed', finishedAt: expect.any(String), error: expect.stringContaining('GRANNY_OMP_BIN') })
+    expect(result.error).not.toContain('\n    at ')
+    expect(JSON.parse(readRun(dir, 'status.json'))).toMatchObject({ status: 'failed', finishedAt: result.finishedAt })
+  })
+
+  it('writes result.json when a run is cancelled, and sends no message', async () => {
+    behave({ wait: ['implement-one'] })
+    const f = fakePi()
+    await createGrannyExtension({ killGraceMs: 100 })(f.pi as any)
+    const { id, dir } = await start(f)
+    await waitFor(() => existsSync(join(fake, 'wait-implement-one.pid')))
+    await exec(f.tools.get('granny_cancel'), { runId: id })
+    const result = await finished(dir)
+    expect(result).toEqual({ id, status: 'cancelled', finishedAt: expect.any(String), error: 'cancelled' })
+    expect(JSON.parse(readRun(dir, 'status.json')).status).toBe('cancelled')
+    expect(f.sent).toEqual([])
   })
 
   it('keeps the run alive when posting the completion message throws', async () => {

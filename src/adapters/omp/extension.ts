@@ -430,18 +430,23 @@ export const createGrannyExtension =
         }
       }
 
+      const writeResult = (result: unknown) => writeFileSync(join(dir, 'result.json'), JSON.stringify(result, null, 2))
+
       void runGranny(host, { ...input, config: layers })
         .then(result => {
           run.status = 'done'
-          writeFileSync(join(dir, 'result.json'), JSON.stringify(result, null, 2))
           writeStatus({ finishedAt: stamp() })
+          writeResult(result)
           notify(`[granny] Run ${id} finished.\n${summarize(result, config.worktree)}\nCall granny_status with runId "${id}" for the full result, verify load-bearing claims yourself, report to the user and wait. Do not push.`)
         })
         .catch(error => {
           run.status = run.cancelled ? 'cancelled' : 'failed'
-          writeStatus({ finishedAt: stamp(), error: String(error?.stack ?? error) })
-          journal('error', { error: String(error?.message ?? error) })
-          if (!run.cancelled) notify(`[granny] Run ${id} failed: ${String(error?.message ?? error)}\nCall granny_status with runId "${id}" and report to the user.`)
+          const finishedAt = stamp()
+          const message = String(error?.message ?? error)
+          writeStatus({ finishedAt, error: String(error?.stack ?? error) })
+          journal('error', { error: message })
+          writeResult({ id, status: run.status, finishedAt, error: message })
+          if (!run.cancelled) notify(`[granny] Run ${id} failed: ${message}\nCall granny_status with runId "${id}" and report to the user.`)
         })
         .catch(() => {})
 

@@ -40,7 +40,7 @@ Independent stages run at the same time, up to `maxParallel` ([config.md](config
 - `granny_status({ runId })` - status, journal tail, result. `granny_status({ repo })` finds the latest run in that repo.
 - `granny_cancel({ runId })` - interrupts every running step; nothing further starts. Every role process and every review command runs in its own process group. Each group gets SIGTERM, then SIGKILL 5 s later when it is still running.
 
-Run files: `<repo>/.granny/runs/<id>/` - `input.json`, `status.json`, `journal.jsonl`, `result.json` - in the main checkout you passed as `repo`, also when the run works in another worktree. Each role process has its own directory there, `sessions/<n>-<label>/`, which holds its omp session and `submission.json`, the arguments of its submit call. The PR body and the review outputs are in the worktree's `.granny/`.
+Run files: `<repo>/.granny/runs/<id>/` - `input.json`, `status.json`, `journal.jsonl`, `result.json` - in the main checkout you passed as `repo`, also when the run works in another worktree. Every terminal state writes `result.json`, after `status.json`, so a `result.json` means the run has ended and `status.json` already says how: `done` writes the run's result, `failed` and `cancelled` write `{ id, status, finishedAt, error }` with the error message (the stack is in `status.json`). Each role process has its own directory there, `sessions/<n>-<label>/`, which holds its omp session and `submission.json`, the arguments of its submit call. The PR body and the review outputs are in the worktree's `.granny/`.
 
 ## Role processes
 
@@ -73,7 +73,7 @@ Review commands and checks run in your omp process's environment: the CLI of eve
 
 The run lives in your omp process; its role processes and review commands do not. Each is in its own process group, so when omp exits - you quit it, its terminal closes, or it crashes - nothing signals them. A review command runs to the end and writes `<workDir>/review-<stage>-r<n>-<reviewer>.md` and `.log`, but nobody reads them. A role process that was mid-turn is not stopped either and may keep editing and committing in the worktree. Find leftovers with `pgrep -af 'runs/<id>/sessions'` (every role process has its session dir on its command line) and stop them yourself.
 
-Everything else stops with omp: `status.json` keeps `"status": "running"` without `finishedAt`, there is no `result.json` and no message to your session. In a new omp process `granny_status({ repo })` still reads the run's files, but `granny_cancel` answers `No running granny run "<id>"`, because the run table is in memory. Call `granny_cancel` before you quit omp. After an unplanned exit, stop the leftovers and relaunch with the same arguments and `fromStage`; the next review round deletes and rewrites the orphaned review files.
+Everything else stops with omp: `status.json` keeps `"status": "running"` without `finishedAt`, and since the run never reaches a terminal state there is no `result.json` and no message to your session. In a new omp process `granny_status({ repo })` still reads the run's files, but `granny_cancel` answers `No running granny run "<id>"`, because the run table is in memory. Call `granny_cancel` before you quit omp. After an unplanned exit, stop the leftovers and relaunch with the same arguments and `fromStage`; the next review round deletes and rewrites the orphaned review files.
 
 A new session inside the same omp process still sees the run: `granny_status` and `granny_cancel` find it there.
 
