@@ -364,3 +364,15 @@ describe('the lines of a work group', () => {
     expect(tree.groups[0]!.lines.map(l => l.slice(10))).toEqual(['▸ implement started', 'one: first', 'second', '■ implement done 6s'])
   })
 })
+
+describe('a long journal', () => {
+  it('keeps the newest 200 lines of a group and the newest 50 check lines of a stage', () => {
+    const entries = [j(0, 'stage', { number: 1, name: 'one', event: 'start' }), ...Array.from({ length: 300 }, (_, i) => j(1 + i, 'log', { message: `one: check test failed (exit ${i}) - repair` }))]
+    const tree = buildRunTree(RUN, entries, new Map(), NOW, new Map(), outlineOf({ stages: [stageOutline('one', 1)] }))
+    const g = tree.groups[0]!
+    expect(g.lines).toHaveLength(200)
+    expect(g.lines.at(-1)).toEndWith('one: check test failed (exit 299) - repair')
+    expect(g.checks!.lines).toHaveLength(50)
+    expect(g.checks!.lines[0]).toEndWith('(exit 250) - repair')
+  })
+})

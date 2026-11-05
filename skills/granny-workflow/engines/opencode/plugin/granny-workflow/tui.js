@@ -340,6 +340,7 @@ var FIXED_GROUPS = { plan: "Plan", "plan-review": "Plan review", "final-review":
 var PHASE_GROUPS = { Plan: "plan", "Plan review": "plan-review", "Final review": "final-review", "PR ready": "pr-ready" };
 var DONE_OUTCOMES = new Set(["clean", "residual-only", "review-skipped"]);
 var MAX_GROUP_LINES = 200;
+var MAX_CHECK_LINES = 50;
 var BUSY = new Set(["running", "waiting"]);
 var rankOf = (key, number) => key === "plan" ? 0 : key === "plan-review" ? 1 : number !== undefined ? 2 + number / 1e6 : key === "final-review" ? 3 : key === "pr-ready" ? 4 : 5;
 var stageNumber = (key) => key.startsWith("stage:") ? Number(key.slice("stage:".length)) : undefined;
@@ -393,23 +394,24 @@ function workGroups(tree, entries, now) {
   const timed = new Map;
   const push = (g, t, text) => {
     const list = timed.get(g) ?? [];
-    list.push({ t: t ?? Number.POSITIVE_INFINITY, lines: at(t, text) });
-    if (list.length > MAX_GROUP_LINES)
-      list.shift();
+    list.push({ t: t ?? Number.POSITIVE_INFINITY, text });
     timed.set(g, list);
   };
+  const checkLines = new Map;
   const note = (agent, t, text) => {
     if (agent)
       agent.notes.push({ t, text: clean(text) });
   };
+  const named = [...stages].sort((a, b) => b.name.length - a.name.length);
   const logGroup = (message) => {
-    const named = [...stages].sort((a, b) => b.name.length - a.name.length);
     for (const st of named) {
-      if (message.startsWith(`${st.name}:`) || new RegExp(`^${escapeRe(st.name)} r\\d+\\b`).test(message)) {
-        const numbers = stages.filter((s) => s.name === st.name).map((s) => s.number);
-        const n = pick(numbers);
-        return { group: ensure(`stage:${n}`, n), rest: message.slice(st.name.length).replace(/^:\s*/, "") };
-      }
+      if (!message.startsWith(st.name))
+        continue;
+      const after = message.slice(st.name.length);
+      if (!after.startsWith(":") && !ROUND.test(after))
+        continue;
+      const n = pick(stages.filter((s) => s.name === st.name).map((s) => s.number));
+      return { group: ensure(`stage:${n}`, n), ...after.startsWith(":") ? { rest: after.slice(1).trimStart() } : {} };
     }
     if (message.startsWith("plan review"))
       return { group: ensure("plan-review"), rest: message };
@@ -504,18 +506,20 @@ function workGroups(tree, entries, now) {
         const found = logGroup(message);
         if (!found)
           break;
-        const { group: g } = found;
+        const { group: g, rest } = found;
         push(g, t, message);
-        if (g.number === undefined)
+        if (g.number === undefined || rest === undefined)
           break;
         const n = g.number;
-        const name = escapeRe(stages.find((s) => s.number === n)?.name ?? "");
-        const green = new RegExp(`^${name}: checks green`).test(message);
-        const failedCheck = new RegExp(`^${name}: check (.+?) failed \\(`).exec(message);
-        const gaveUp = new RegExp(`^${name}: checks-failed - `).test(message);
-        if (!green && !failedCheck && !gaveUp && !new RegExp(`^${name}: .*\\bcheck`).test(message))
+        const green = rest.startsWith("checks green");
+        const failedCheck = CHECK_FAILED.exec(rest);
+        const gaveUp = rest.startsWith("checks-failed - ");
+        if (!green && !failedCheck && !gaveUp && !/\bcheck/.test(rest))
           break;
-        const lines = [...g.checks?.lines ?? [], ...at(t, message)];
+        const raw = checkLines.get(g) ?? [];
+        raw.push({ t, text: message });
+        checkLines.set(g, raw);
+        const lines = [];
         if (green) {
           g.checks = { state: "passed", failed: [], lines, t };
           lastChecks.set(n, { kind: "other" });
@@ -526,10 +530,7 @@ function workGroups(tree, entries, now) {
         } else if (gaveUp) {
           g.checks = { state: "failed", failed: g.checks?.state === "failed" ? g.checks.failed : [], lines, t };
           lastChecks.set(n, { kind: "other" });
-        } else if (g.checks)
-          g.checks.lines = lines;
-        else
-          g.checks = undefined;
+        }
         break;
       }
     }
@@ -543,7 +544,9 @@ function workGroups(tree, entries, now) {
     for (const a of g.agents)
       if (a.state !== "running" && a.state !== "waiting")
         push(g, a.end, `\u25A0 ${a.action} ${a.state}${a.end === undefined ? "" : ` ${duration(a.end - a.start)}`}`);
-    g.lines = (timed.get(g) ?? []).sort((x, y) => x.t - y.t).flatMap((e) => e.lines);
+    g.lines = (timed.get(g) ?? []).sort((x, y) => x.t - y.t).slice(-MAX_GROUP_LINES).flatMap((e) => at(Number.isFinite(e.t) ? e.t : undefined, e.text));
+    if (g.checks)
+      g.checks.lines = (checkLines.get(g) ?? []).slice(-MAX_CHECK_LINES).flatMap((e) => at(e.t, e.text));
     const busy = g.agents.some((a) => BUSY.has(a.state));
     const starts = g.agents.map((a) => a.start);
     const ends = g.agents.map((a) => a.end).filter((e) => e !== undefined);
@@ -607,7 +610,8 @@ function workGroups(tree, entries, now) {
   tree.groups = list;
   tree.running = list.filter((g) => g.number !== undefined && g.state === "running").sort((a, b) => (a.start ?? now) - (b.start ?? now)).map((g) => g.number);
 }
-var escapeRe = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+var ROUND = /^ r\d+\b/;
+var CHECK_FAILED = /^check (.+?) failed \(/;
 function focusStage(tree, selectedKey) {
   if (selectedKey) {
     const groupKey = selectedKey.startsWith(`group:${tree.id}:`) ? selectedKey.slice(`group:${tree.id}:`.length) : undefined;

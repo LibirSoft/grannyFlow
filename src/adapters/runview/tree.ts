@@ -470,6 +470,7 @@ const FIXED_GROUPS: Record<string, string> = { plan: 'Plan', 'plan-review': 'Pla
 const PHASE_GROUPS: Record<string, string> = { Plan: 'plan', 'Plan review': 'plan-review', 'Final review': 'final-review', 'PR ready': 'pr-ready' }
 const DONE_OUTCOMES = new Set(['clean', 'residual-only', 'review-skipped'])
 const MAX_GROUP_LINES = 200
+const MAX_CHECK_LINES = 50
 const BUSY = new Set<AgentState>(['running', 'waiting'])
 
 const rankOf = (key: string, number?: number) =>
@@ -528,24 +529,24 @@ function workGroups(tree: RunTree, entries: readonly JournalEntry[], now: number
   const byLabel = (label: string) => lastOf(tree.agents, a => a.label === label)
   const runningNow = () => [...marks].filter(([, m]) => m.start !== undefined && m.end === undefined).map(([n]) => n)
   const pick = (numbers: number[]) => numbers.find(n => marks.get(n)?.end === undefined) ?? numbers[0]!
-  const timed = new Map<WorkGroup, Array<{ t: number; lines: string[] }>>()
+  const timed = new Map<WorkGroup, Array<{ t: number; text: string }>>()
   const push = (g: WorkGroup, t: number | undefined, text: string) => {
     const list = timed.get(g) ?? []
-    list.push({ t: t ?? Number.POSITIVE_INFINITY, lines: at(t, text) })
-    if (list.length > MAX_GROUP_LINES) list.shift()
+    list.push({ t: t ?? Number.POSITIVE_INFINITY, text })
     timed.set(g, list)
   }
+  const checkLines = new Map<WorkGroup, Array<{ t: number; text: string }>>()
   const note = (agent: AgentNode | undefined, t: number, text: string) => {
     if (agent) agent.notes.push({ t, text: clean(text) })
   }
-  const logGroup = (message: string): { group: WorkGroup; rest: string } | undefined => {
-    const named = [...stages].sort((a, b) => b.name.length - a.name.length)
+  const named = [...stages].sort((a, b) => b.name.length - a.name.length)
+  const logGroup = (message: string): { group: WorkGroup; rest?: string } | undefined => {
     for (const st of named) {
-      if (message.startsWith(`${st.name}:`) || new RegExp(`^${escapeRe(st.name)} r\\d+\\b`).test(message)) {
-        const numbers = stages.filter(s => s.name === st.name).map(s => s.number)
-        const n = pick(numbers)
-        return { group: ensure(`stage:${n}`, n), rest: message.slice(st.name.length).replace(/^:\s*/, '') }
-      }
+      if (!message.startsWith(st.name)) continue
+      const after = message.slice(st.name.length)
+      if (!after.startsWith(':') && !ROUND.test(after)) continue
+      const n = pick(stages.filter(s => s.name === st.name).map(s => s.number))
+      return { group: ensure(`stage:${n}`, n), ...(after.startsWith(':') ? { rest: after.slice(1).trimStart() } : {}) }
     }
     if (message.startsWith('plan review')) return { group: ensure('plan-review'), rest: message }
     if (message.startsWith('final review')) return { group: ensure('final-review'), rest: message }
@@ -626,16 +627,18 @@ function workGroups(tree: RunTree, entries: readonly JournalEntry[], now: number
         const message = clean(String(entry.message ?? ''))
         const found = logGroup(message)
         if (!found) break
-        const { group: g } = found
+        const { group: g, rest } = found
         push(g, t, message)
-        if (g.number === undefined) break
+        if (g.number === undefined || rest === undefined) break
         const n = g.number
-        const name = escapeRe(stages.find(s => s.number === n)?.name ?? '')
-        const green = new RegExp(`^${name}: checks green`).test(message)
-        const failedCheck = new RegExp(`^${name}: check (.+?) failed \\(`).exec(message)
-        const gaveUp = new RegExp(`^${name}: checks-failed - `).test(message)
-        if (!green && !failedCheck && !gaveUp && !new RegExp(`^${name}: .*\\bcheck`).test(message)) break
-        const lines = [...(g.checks?.lines ?? []), ...at(t, message)]
+        const green = rest.startsWith('checks green')
+        const failedCheck = CHECK_FAILED.exec(rest)
+        const gaveUp = rest.startsWith('checks-failed - ')
+        if (!green && !failedCheck && !gaveUp && !/\bcheck/.test(rest)) break
+        const raw = checkLines.get(g) ?? []
+        raw.push({ t, text: message })
+        checkLines.set(g, raw)
+        const lines: string[] = []
         if (green) {
           g.checks = { state: 'passed', failed: [], lines, t }
           lastChecks.set(n, { kind: 'other' })
@@ -646,8 +649,7 @@ function workGroups(tree: RunTree, entries: readonly JournalEntry[], now: number
         } else if (gaveUp) {
           g.checks = { state: 'failed', failed: g.checks?.state === 'failed' ? g.checks.failed : [], lines, t }
           lastChecks.set(n, { kind: 'other' })
-        } else if (g.checks) g.checks.lines = lines
-        else g.checks = undefined
+        }
         break
       }
     }
@@ -660,7 +662,11 @@ function workGroups(tree: RunTree, entries: readonly JournalEntry[], now: number
   const list = [...groups.values()].sort((a, b) => rankOf(a.key, a.number) - rankOf(b.key, b.number))
   for (const g of list) {
     for (const a of g.agents) if (a.state !== 'running' && a.state !== 'waiting') push(g, a.end, `■ ${a.action} ${a.state}${a.end === undefined ? '' : ` ${duration(a.end - a.start)}`}`)
-    g.lines = (timed.get(g) ?? []).sort((x, y) => x.t - y.t).flatMap(e => e.lines)
+    g.lines = (timed.get(g) ?? [])
+      .sort((x, y) => x.t - y.t)
+      .slice(-MAX_GROUP_LINES)
+      .flatMap(e => at(Number.isFinite(e.t) ? e.t : undefined, e.text))
+    if (g.checks) g.checks.lines = (checkLines.get(g) ?? []).slice(-MAX_CHECK_LINES).flatMap(e => at(e.t, e.text))
     const busy = g.agents.some(a => BUSY.has(a.state))
     const starts = g.agents.map(a => a.start)
     const ends = g.agents.map(a => a.end).filter((e): e is number => e !== undefined)
@@ -720,7 +726,8 @@ function workGroups(tree: RunTree, entries: readonly JournalEntry[], now: number
     .map(g => g.number!)
 }
 
-const escapeRe = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+const ROUND = /^ r\d+\b/
+const CHECK_FAILED = /^check (.+?) failed \(/
 
 // --- focus and stepper ----------------------------------------------------------------------------
 
