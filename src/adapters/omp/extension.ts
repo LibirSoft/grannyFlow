@@ -6,7 +6,7 @@ import { resolveConfig } from '../../core/config'
 import { checkInput, runGranny, stageCheckErrors, type RunInput } from '../../core/engine'
 import { checkShape, SCHEMAS } from '../../core/schemas'
 import type { AgentRequest, Host, ResultKind } from '../../core/types'
-import { DEFAULT_DELAYS, globalConfigPath, type HostOptions, KILL_GRACE_MS, pause, preflight, readJson, RUN_INPUT_SCHEMA, runCommand, runId, runStatus, signalGroup, stageRepos, stamp, SUBMIT, summarize } from '../common'
+import { DEFAULT_DELAYS, dropPlaceholders, globalConfigPath, type HostOptions, KILL_GRACE_MS, pause, preflight, readJson, RUN_INPUT_SCHEMA, RUN_TOOL_DESCRIPTION, runCommand, runId, runStatus, signalGroup, stageRepos, stamp, SUBMIT, summarize } from '../common'
 
 // The omp (oh-my-pi) host. One file, two modes: in the user's omp session it registers granny_run,
 // granny_status and granny_cancel and runs the loop; every role runs as its own `omp --mode json`
@@ -453,12 +453,12 @@ You will receive a message when it finishes. Use granny_status { runId: "${id}" 
     pi.registerTool({
       name: 'granny_run',
       label: 'granny run',
-      description: 'granny-workflow: start the implement → review → judge → fix loop in the background and return a run id. The granny-workflow skill, when installed, describes the inputs and the preflight.',
+      description: RUN_TOOL_DESCRIPTION,
       parameters: RUN_INPUT_SCHEMA,
       loadMode: 'essential',
       async execute(_id, params: RunInput, _signal, _onUpdate, ctx) {
         try {
-          return text(startRun(params, ctx))
+          return text(startRun(dropPlaceholders(params), ctx))
         } catch (e) {
           return text(`granny_run failed to start: ${(e as Error).message}`)
         }

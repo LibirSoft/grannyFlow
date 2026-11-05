@@ -4,7 +4,7 @@ import { resolveConfig } from '../../core/config'
 import { checkInput, runGranny, stageCheckErrors, type RunInput } from '../../core/engine'
 import { checkShape, SCHEMAS } from '../../core/schemas'
 import type { AgentRequest, Host, ResultKind } from '../../core/types'
-import { DEFAULT_DELAYS, globalConfigPath, type HostOptions, KILL_GRACE_MS, pause, preflight, readJson, RUN_INPUT_SCHEMA, runCommand, runId, runStatus, stageRepos, stamp, SUBMIT, summarize } from '../common'
+import { DEFAULT_DELAYS, dropPlaceholders, globalConfigPath, type HostOptions, KILL_GRACE_MS, pause, preflight, readJson, RUN_INPUT_SCHEMA, RUN_TOOL_DESCRIPTION, runCommand, runId, runStatus, stageRepos, stamp, SUBMIT, summarize } from '../common'
 
 export { globalConfigPath, pause, preflight, stageRepos, summarize } from '../common'
 export type { RetryPolicy } from '../common'
@@ -241,11 +241,11 @@ You will receive a message when it finishes. Use granny_status { runId: "${id}" 
       }
       editor.add({
         name: 'granny_run',
-        description: 'granny-workflow: start the implement → review → judge → fix loop in the background and return a run id. The granny-workflow skill, when installed, describes the inputs and the preflight.',
+        description: RUN_TOOL_DESCRIPTION,
         input: RUN_INPUT_SCHEMA,
         execute: async (value: RunInput, context: any) => {
           try {
-            return { content: await startRun(value, context.sessionID) }
+            return { content: await startRun(dropPlaceholders(value), context.sessionID) }
           } catch (e) {
             return { content: `granny_run failed to start: ${(e as Error).message}` }
           }

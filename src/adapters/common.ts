@@ -118,6 +118,33 @@ export function summarize(result: RunResult, worktree: boolean): string {
   return lines.join('\n')
 }
 
+export const RUN_TOOL_DESCRIPTION =
+  'granny-workflow: start the implement → review → judge → fix loop in the background and return a run id. The granny-workflow skill, when installed, describes the inputs and the preflight. Send only the fields you set: leave an optional field out instead of sending "", [], {} or a default - an empty value is not a missing one (stages[].checks [] runs no checks, stages[].after [] starts the stage at once).'
+
+const isEmpty = (v: unknown) => v === '' || (Array.isArray(v) && !v.length) || (!!v && typeof v === 'object' && !Array.isArray(v) && !Object.keys(v).length)
+
+/**
+ * Models that fill every optional tool field (seen with GPT models on omp) send "", [] and {} for the
+ * fields they do not mean to set, and checkInput then refuses the run - a "" goal is not a missing goal.
+ * Drops those placeholders where empty has no meaning of its own; stages[].checks and stages[].after keep
+ * theirs, since [] there means "no checks" and "start at once".
+ */
+export function dropPlaceholders(input: RunInput): RunInput {
+  if (!input || typeof input !== 'object') return input
+  const out: Record<string, unknown> = { ...input }
+  for (const key of ['base', 'goal', 'context', 'plan', 'repos', 'config']) if (isEmpty(out[key])) delete out[key]
+  if (out.fromStage === 0) delete out.fromStage
+  if (Array.isArray(out.stages)) {
+    out.stages = out.stages.map(stage => {
+      if (!stage || typeof stage !== 'object') return stage
+      const st: Record<string, unknown> = { ...stage }
+      for (const key of ['name', 'task', 'repo']) if (st[key] === '') delete st[key]
+      return st
+    })
+  }
+  return out as unknown as RunInput
+}
+
 export const RUN_INPUT_SCHEMA = {
   type: 'object',
   properties: {
@@ -170,8 +197,8 @@ export const RUN_INPUT_SCHEMA = {
         },
       },
     },
-    fromStage: { type: 'number', description: '1-based stage to resume from; earlier stages are skipped' },
-    config: { type: 'object', description: 'Per-run overrides of granny.config.json (same shape)' },
+    fromStage: { type: 'number', description: 'Only to resume an interrupted run: 1-based stage to resume from; earlier stages are skipped. Leave it out on a new run' },
+    config: { type: 'object', additionalProperties: true, description: 'Per-run overrides of granny.config.json (same shape)' },
   },
   required: ['repo', 'branch'],
 }

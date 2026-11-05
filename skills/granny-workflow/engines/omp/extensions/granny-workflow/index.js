@@ -2410,6 +2410,30 @@ function summarize(result, worktree) {
   return lines.join(`
 `);
 }
+var RUN_TOOL_DESCRIPTION = 'granny-workflow: start the implement \u2192 review \u2192 judge \u2192 fix loop in the background and return a run id. The granny-workflow skill, when installed, describes the inputs and the preflight. Send only the fields you set: leave an optional field out instead of sending "", [], {} or a default - an empty value is not a missing one (stages[].checks [] runs no checks, stages[].after [] starts the stage at once).';
+var isEmpty = (v) => v === "" || Array.isArray(v) && !v.length || !!v && typeof v === "object" && !Array.isArray(v) && !Object.keys(v).length;
+function dropPlaceholders(input) {
+  if (!input || typeof input !== "object")
+    return input;
+  const out = { ...input };
+  for (const key of ["base", "goal", "context", "plan", "repos", "config"])
+    if (isEmpty(out[key]))
+      delete out[key];
+  if (out.fromStage === 0)
+    delete out.fromStage;
+  if (Array.isArray(out.stages)) {
+    out.stages = out.stages.map((stage) => {
+      if (!stage || typeof stage !== "object")
+        return stage;
+      const st = { ...stage };
+      for (const key of ["name", "task", "repo"])
+        if (st[key] === "")
+          delete st[key];
+      return st;
+    });
+  }
+  return out;
+}
 var RUN_INPUT_SCHEMA = {
   type: "object",
   properties: {
@@ -2462,8 +2486,8 @@ var RUN_INPUT_SCHEMA = {
         }
       }
     },
-    fromStage: { type: "number", description: "1-based stage to resume from; earlier stages are skipped" },
-    config: { type: "object", description: "Per-run overrides of granny.config.json (same shape)" }
+    fromStage: { type: "number", description: "Only to resume an interrupted run: 1-based stage to resume from; earlier stages are skipped. Leave it out on a new run" },
+    config: { type: "object", additionalProperties: true, description: "Per-run overrides of granny.config.json (same shape)" }
   },
   required: ["repo", "branch"]
 };
@@ -2965,12 +2989,12 @@ You will receive a message when it finishes. Use granny_status { runId: "${id}" 
   pi.registerTool({
     name: "granny_run",
     label: "granny run",
-    description: "granny-workflow: start the implement \u2192 review \u2192 judge \u2192 fix loop in the background and return a run id. The granny-workflow skill, when installed, describes the inputs and the preflight.",
+    description: RUN_TOOL_DESCRIPTION,
     parameters: RUN_INPUT_SCHEMA,
     loadMode: "essential",
     async execute(_id, params, _signal, _onUpdate, ctx) {
       try {
-        return text(startRun(params, ctx));
+        return text(startRun(dropPlaceholders(params), ctx));
       } catch (e) {
         return text(`granny_run failed to start: ${e.message}`);
       }
