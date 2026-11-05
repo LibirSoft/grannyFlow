@@ -194,7 +194,7 @@ FINDINGS (P0/P1, or sent by the judge's classification; decision names the rule)
 <accepted findings as JSON>
 ```
 
-## Granny - a check command, the helper agent on Claude Code (on opencode granny runs it itself; a check with timeout runs as `timeout <s> bash -c '<run>'`, or `gtimeout` where only that is on PATH; for a check without a metric the parenthesis reads `if very long, the last 3000 characters are enough`)
+## Granny - a check command, the helper agent on Claude Code (on opencode and omp granny runs it itself; a check with timeout runs as `timeout <s> bash -c '<run>'`, or `gtimeout` where only that is on PATH; for a check without a metric the parenthesis reads `if very long, the last 3000 characters are enough`)
 
 ```text
 Run one check command for the "check <stage name> <check name>" step and return its output. Run nothing else; edit, stage or commit nothing.
@@ -310,7 +310,7 @@ Report clean-code and design problems (duplication, unclear naming, needless abs
 Return findings with id (F1, F2, ...), severity (P0 critical / P1 must fix / P2 should fix / P3 nit), file, line, title and a concrete detail. Zero findings means the stage is clean.
 ```
 
-## Granny - a review command, start: the helper agent on Claude Code for a Codex or command reviewer, in the diff review and the plan review (on opencode granny runs the review script itself and waits for it)
+## Granny - a review command, start: the helper agent on Claude Code for a Codex or command reviewer, in the diff review and the plan review (on opencode and omp granny runs the review script itself and waits for it)
 
 ```text
 Run one shell command for a code review (it starts the review detached and returns at once) and return its output. Run nothing else; edit, stage or commit nothing.

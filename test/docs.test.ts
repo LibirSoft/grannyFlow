@@ -2,12 +2,15 @@ import { describe, expect, it } from 'bun:test'
 import { readdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { renderPrompts } from '../scripts/build'
+import { blockReason } from '../src/adapters/omp/extension'
 import { DEFAULT_CONFIG, resolveConfig } from '../src/core/config'
+import { HOSTS } from '../src/core/types'
 
 const root = join(import.meta.dir, '..')
 const skill = join(root, 'skills/granny-workflow')
 const read = (p: string) => readFileSync(join(skill, p), 'utf8')
 const readRoot = (p: string) => readFileSync(join(root, p), 'utf8')
+const OMP_INSTALL = 'cp -r <skill-dir>/engines/omp/extensions/granny-workflow ~/.omp/agent/extensions/'
 const jsonBlocks = (md: string) => [...md.matchAll(/^[ \t]*```json\s*\n([\s\S]*?)^[ \t]*```/gm)].map(m => m[1]!)
 
 describe('skill docs', () => {
@@ -15,13 +18,13 @@ describe('skill docs', () => {
     expect(read('references/prompts.md')).toBe(renderPrompts())
   })
 
-  it('has only JSON examples that resolveConfig accepts on both hosts', () => {
+  it('has only JSON examples that resolveConfig accepts on every host', () => {
     const docs: Record<string, string> = { 'README.md': readRoot('README.md'), 'SKILL.md': read('SKILL.md') }
     for (const f of readdirSync(join(skill, 'references'))) docs[`references/${f}`] = read(`references/${f}`)
     const examples = Object.entries(docs).flatMap(([file, md]) => jsonBlocks(md).map(block => ({ file, block })))
     expect(examples.length).toBeGreaterThanOrEqual(10)
     for (const { file, block } of examples) {
-      for (const host of ['claude-code', 'opencode'] as const) {
+      for (const host of HOSTS) {
         let problem: string | undefined
         try {
           resolveConfig([JSON.parse(block)], host)
@@ -61,7 +64,7 @@ describe('skill docs', () => {
   it('has a SKILL.md with the frontmatter every host reads', () => {
     const md = read('SKILL.md')
     expect(md).toMatch(/^---\nname: granny-workflow\ndescription: .{50,1024}\n---\n/)
-    for (const ref of ['references/claude-code.md', 'references/opencode.md', 'references/cursor.md', 'references/config.md', 'references/setup.md']) {
+    for (const ref of ['references/claude-code.md', 'references/opencode.md', 'references/omp.md', 'references/cursor.md', 'references/config.md', 'references/setup.md']) {
       expect(md).toContain(`(${ref}`)
       expect(() => read(ref)).not.toThrow()
     }
@@ -103,6 +106,7 @@ describe('skill docs', () => {
     expect(skill).toContain('plan review ─►')
     expect(read('references/claude-code.md')).toContain('repo, branch, base, context, plan, stages')
     expect(read('references/opencode.md')).toContain('granny_run({ repo, branch, base, context, plan?, stages')
+    expect(read('references/omp.md')).toContain('granny_run({ repo, branch, base, context, plan?, stages')
     expect(read('references/cursor.md')).toContain('## The plan review')
     expect(readRoot('README.md')).toMatch(/^\| `planReview` \| `false` \|/m)
   })
@@ -128,6 +132,29 @@ describe('skill docs', () => {
     const triage = cursor.slice(cursor.indexOf('5. **Triage**'), cursor.indexOf('take the first rule that matches'))
     expect(triage.indexOf('apply [the ratchet]')).toBeGreaterThan(-1)
     expect(triage.indexOf('apply [the ratchet]')).toBeLessThan(triage.indexOf('compute the priority'))
+  })
+
+  it('routes omp sessions to omp.md, which installs the committed extension bundle', () => {
+    const md = read('SKILL.md')
+    expect(md).toContain('[references/omp.md](references/omp.md)')
+    expect(md).toContain('[references/omp.md](references/omp.md#install)')
+    expect(read('references/omp.md')).toContain(OMP_INSTALL)
+    expect(() => read('engines/omp/extensions/granny-workflow/index.js')).not.toThrow()
+  })
+
+  it('lists in omp.md exactly the built-in omp tools a read-only role may call', () => {
+    const omp = read('references/omp.md')
+    const start = omp.indexOf('may call only')
+    const sentence = omp.slice(start, omp.indexOf('and their submit tool', start))
+    expect(start).toBeGreaterThan(-1)
+    const documented = [...sentence.matchAll(/`([a-z_]+)`/g)].map(m => m[1]!).sort()
+    const builtins = ['read', 'security_scan', 'bash', 'edit', 'ast_grep', 'ast_edit', 'ask', 'debug', 'ida', 'eval', 'github', 'glob', 'grep', 'find', 'lsp', 'checkpoint', 'rewind', 'context_notes', 'new_context', 'task', 'wait', 'todo', 'web_search', 'write', 'memory_edit', 'retain', 'recall', 'reflect', 'learn', 'manage_skill', 'think', 'yield', 'goal']
+    const allowed = builtins.filter(t => blockReason(t, t === 'bash' ? { command: 'git diff' } : {}, 'read-only', 'granny_submit_findings') === undefined).sort()
+    expect(documented).toEqual(allowed)
+    for (const op of ['pr_create', 'pr_push', 'pr_checkout']) {
+      expect(omp).toContain(`\`${op}\``)
+      expect(blockReason('github', { op }, 'write', 'granny_submit_implementation')).toBeDefined()
+    }
   })
 
   it('releases 1.5.0 with a CHANGELOG entry for the package version', () => {
