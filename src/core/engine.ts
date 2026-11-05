@@ -1,5 +1,5 @@
 import { GrannyCancelled, isCancelled } from './cancel'
-import { resolveConfig, resolveModel, type CheckConfig, type GrannyConfig, type ReviewerConfig, type RoleConfig } from './config'
+import { planReviewWarning, resolveConfig, resolveModel, type CheckConfig, type GrannyConfig, type ReviewerConfig, type RoleConfig } from './config'
 import {
   agentPlanReviewPrompt,
   agentReviewPrompt,
@@ -777,6 +777,7 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
     if (fromStage > 1) return skipped('skipped', `plan review skipped - the run resumes from stage ${fromStage}`)
 
     host.phase(PLAN_PHASE)
+    host.log(planReviewWarning(config.maxRounds))
     const name = 'plan review'
     const able = config.reviewers.filter(rv => rv.engine !== 'command' || rv.command?.includes('{prompt}'))
     const unable = config.reviewers.filter(rv => !able.includes(rv))

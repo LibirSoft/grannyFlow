@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import plugin, { createGrannyPlugin, isTransient, modelRef, pause, permissions, preflight, providerError, summarize } from '../src/adapters/opencode/plugin'
 import { brokerCompanion, records, sessionEndHook } from './fake-companion'
+import { planReviewWarning } from '../src/core/config'
 
 const git = (cwd: string, ...args: string[]) => {
   const r = spawnSync('git', args, { cwd, encoding: 'utf8' })
@@ -387,12 +388,13 @@ describe('opencode plugin', () => {
       const started = await f.tools.get('granny_run').execute({ repo, branch: 'feat/x', plan: [plan], stages: [{ name: 'one', task: 'Do it.' }] }, { sessionID: 'parent' })
       const id = /granny run (\S+) started/.exec(started.content)?.[1]
       expect(id).toBeDefined()
-      return { id: id!, dir: join(repo, '.granny/runs', id!), plan }
+      return { id: id!, dir: join(repo, '.granny/runs', id!), plan, started: started.content as string }
     }
 
     it('reviews the plan, has a plan-fix session submit through granny_submit_plan_fix, then implements', async () => {
       const f = fakeContext()
-      const { id, dir, plan } = await runWithPlan(f, { planReview: true, reviewers: [planReviewer(false)] })
+      const { id, dir, plan, started } = await runWithPlan(f, { planReview: true, reviewers: [planReviewer(false)] })
+      expect(started).toContain(`${planReviewWarning(4)} Tell the user this in your next message.`)
       const result = await finished(dir)
       delete process.env.PLAN_FILE
       expect(result.plan).toMatchObject({ outcome: 'clean', rounds: 2 })
@@ -411,6 +413,15 @@ describe('opencode plugin', () => {
       expect(done).toContain(`[granny] Run ${id} finished.`)
       expect(done).toContain('- plan review: clean, 2 review round(s)\n- one: clean')
       expect(done).toContain('- final review: skipped, 0 review round(s) - one stage and no lane merge, so its stage review already covered the whole branch\n- final: gates green')
+    })
+
+    it('says nothing about a plan review in its start reply when planReview is off', async () => {
+      const f = fakeContext()
+      const { dir, started } = await runWithPlan(f, { reviewers: [planReviewer(false)] })
+      expect(started).not.toContain('Plan review is on')
+      expect(started).not.toContain('tokens')
+      await finished(dir)
+      delete process.env.PLAN_FILE
     })
 
     it('stops before stage 1 when the plan review hits the round cap, and says so', async () => {

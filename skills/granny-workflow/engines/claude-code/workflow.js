@@ -59,6 +59,9 @@ var DEFAULT_CONFIG = {
   readOnlyAgent: false,
   watch: "full"
 };
+function planReviewWarning(maxRounds) {
+  return `Plan review is on: before any code is written, every reviewer, the judge and the implementer go over the plan for up to ${maxRounds} round(s). Each round is a full review + judge + fix, so it uses many more tokens and can add a lot of time (tens of minutes per round on high-effort models).`;
+}
 var ROLES = ["granny", "helper", "planner", "implementer", "judge"];
 var TOP_KEYS = new Set(["$schema", "roles", "worktreeDir", ...Object.keys(DEFAULT_CONFIG).filter((k) => k !== "roles")]);
 var ROLE_KEYS = new Set(["model", "effort"]);
@@ -1865,6 +1868,7 @@ ${judgeRetryNote(problems)}`, "read-only", config.roles.judge, lane.cwd);
     if (fromStage > 1)
       return skipped("skipped", `plan review skipped - the run resumes from stage ${fromStage}`);
     host.phase(PLAN_PHASE);
+    host.log(planReviewWarning(config.maxRounds));
     const name = "plan review";
     const able = config.reviewers.filter((rv) => rv.engine !== "command" || rv.command?.includes("{prompt}"));
     const unable = config.reviewers.filter((rv) => !able.includes(rv));

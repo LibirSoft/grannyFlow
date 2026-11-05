@@ -46,6 +46,9 @@ var DEFAULT_CONFIG = {
   readOnlyAgent: false,
   watch: "full"
 };
+function planReviewWarning(maxRounds) {
+  return `Plan review is on: before any code is written, every reviewer, the judge and the implementer go over the plan for up to ${maxRounds} round(s). Each round is a full review + judge + fix, so it uses many more tokens and can add a lot of time (tens of minutes per round on high-effort models).`;
+}
 var ROLES = ["granny", "helper", "planner", "implementer", "judge"];
 var TOP_KEYS = new Set(["$schema", "roles", "worktreeDir", ...Object.keys(DEFAULT_CONFIG).filter((k) => k !== "roles")]);
 var ROLE_KEYS = new Set(["model", "effort"]);
@@ -1892,6 +1895,7 @@ ${judgeRetryNote(problems)}`, "read-only", config.roles.judge, lane.cwd);
     if (fromStage > 1)
       return skipped("skipped", `plan review skipped - the run resumes from stage ${fromStage}`);
     host.phase(PLAN_PHASE);
+    host.log(planReviewWarning(config.maxRounds));
     const name = "plan review";
     const able = config.reviewers.filter((rv) => rv.engine !== "command" || rv.command?.includes("{prompt}"));
     const unable = config.reviewers.filter((rv) => !able.includes(rv));
@@ -2446,7 +2450,12 @@ function summarize(result, worktree) {
   return lines.join(`
 `);
 }
-var RUN_TOOL_DESCRIPTION = 'granny-workflow: start the implement \u2192 review \u2192 judge \u2192 fix loop in the background and return a run id. The granny-workflow skill, when installed, describes the inputs and the preflight. Send only the fields you set: leave an optional field out instead of sending "", [], {} or a default - an empty value is not a missing one (stages[].checks [] runs no checks, stages[].after [] starts the stage at once).';
+function planReviewNotice(input, config) {
+  const reviewsPlan = config.planReview && (input.plan !== undefined || input.goal !== undefined) && !((input.fromStage ?? 1) > 1);
+  return reviewsPlan ? `
+${planReviewWarning(config.maxRounds)} Tell the user this in your next message.` : "";
+}
+var RUN_TOOL_DESCRIPTION = 'granny-workflow: start the implement \u2192 review \u2192 judge \u2192 fix loop in the background and return a run id. The granny-workflow skill, when installed, describes the inputs and the preflight. Send only the fields you set: leave an optional field out instead of sending "", [], {} or a default - an empty value is not a missing one (stages[].checks [] runs no checks, stages[].after [] starts the stage at once). Set config planReview only when the user asked for a plan review in this request - it costs many tokens and much time.';
 var isEmpty = (v) => v === "" || Array.isArray(v) && !v.length || !!v && typeof v === "object" && !Array.isArray(v) && !Object.keys(v).length;
 function dropPlaceholders(input) {
   if (!input || typeof input !== "object")
@@ -2496,7 +2505,7 @@ var RUN_INPUT_SCHEMA = {
     plan: {
       type: "array",
       items: { type: "string" },
-      description: "Absolute paths of the plan files (with goal: where the planner writes the plan). Every agent reads them; with config planReview on (off by default) the reviewers review them before stage 1 and the implementer fixes them in place, uncommitted"
+      description: "Absolute paths of the plan files (with goal: where the planner writes the plan). Every agent reads them; with config planReview on the reviewers review them before stage 1 and the implementer fixes them in place, uncommitted. planReview is off by default: set it only when the user explicitly asked for a plan review in this request - every round is a review + judge + fix and costs many tokens and much time"
     },
     stages: {
       type: "array",
@@ -2523,7 +2532,7 @@ var RUN_INPUT_SCHEMA = {
       }
     },
     fromStage: { type: "number", description: "Only to resume an interrupted run: 1-based stage to resume from; earlier stages are skipped. Leave it out on a new run" },
-    config: { type: "object", additionalProperties: true, description: "Per-run overrides of granny.config.json (same shape)" }
+    config: { type: "object", additionalProperties: true, description: "Per-run overrides of granny.config.json (same shape). planReview is off by default: set it only when the user explicitly asked for a plan review in this request - it costs many tokens and much time" }
   },
   required: ["repo", "branch"]
 };
@@ -4768,7 +4777,7 @@ Call granny_status with runId "${id}" and report to the user.`;
     }).catch(() => {});
     return `granny run ${id} started on ${input.repo} (${input.branch}), ${input.goal !== undefined ? "planning only" : `${input.stages?.length ?? 0} stage(s)${config.parallel ? `, up to ${config.maxParallel} in parallel` : ""}`}, threshold ${config.threshold}, maxRounds ${config.maxRounds}.
 Journal: ${join4(dir, "journal.jsonl")}
-To wait in this turn, call granny_wait { runId: "${id}" }; otherwise end your turn - the finish message starts a new one. Never write your own watcher, sleep or poll loop on the run files. Use granny_status { runId: "${id}" } for progress and granny_cancel to stop it.`;
+To wait in this turn, call granny_wait { runId: "${id}" }; otherwise end your turn - the finish message starts a new one. Never write your own watcher, sleep or poll loop on the run files. Use granny_status { runId: "${id}" } for progress and granny_cancel to stop it.${planReviewNotice(input, config)}`;
   };
   pi.registerTool({
     name: "granny_run",

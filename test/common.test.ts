@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test'
-import { dropPlaceholders } from '../src/adapters/common'
+import { dropPlaceholders, planReviewWarning, RUN_INPUT_SCHEMA, RUN_TOOL_DESCRIPTION } from '../src/adapters/common'
 import { checkInput, type RunInput } from '../src/core/engine'
 
 // The granny_run arguments gpt-5.6-luna sent through omp for a plain one-stage run: every optional
@@ -43,5 +43,23 @@ describe('dropPlaceholders', () => {
   it('drops fromStage 0 and leaves non-object input alone', () => {
     expect(dropPlaceholders({ repo: '/r', branch: 'b', stages: [{ task: 't' }], fromStage: 0 } as RunInput)).not.toHaveProperty('fromStage')
     expect(dropPlaceholders(undefined as unknown as RunInput)).toBeUndefined()
+  })
+})
+
+describe('the plan review warning', () => {
+  it('names the round cap, the tokens and the time', () => {
+    const text = planReviewWarning(3)
+    expect(text).toContain('up to 3 round(s)')
+    expect(text).toContain('tokens')
+    expect(text).toContain('time')
+    expect(planReviewWarning(1)).toContain('up to 1 round(s)')
+  })
+
+  it('tells the agent in the tool schema to turn plan review on only when the user asked', () => {
+    const props = RUN_INPUT_SCHEMA.properties as Record<string, { description: string }>
+    for (const text of [props.config!.description, props.plan!.description, RUN_TOOL_DESCRIPTION]) {
+      expect(text).toContain('only when the user')
+      expect(text).toContain('tokens')
+    }
   })
 })

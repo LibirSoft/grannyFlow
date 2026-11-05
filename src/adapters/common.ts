@@ -2,7 +2,8 @@ import { spawn, spawnSync, type ChildProcess } from 'node:child_process'
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { isAbsolute, join } from 'node:path'
-import { resolveConfig } from '../core/config'
+import { planReviewWarning, resolveConfig } from '../core/config'
+export { planReviewWarning } from '../core/config'
 import type { RunInput } from '../core/engine'
 import type { CommandResult, PlanResult, Recheck, ResultKind, RunResult } from '../core/types'
 
@@ -118,8 +119,14 @@ export function summarize(result: RunResult, worktree: boolean): string {
   return lines.join('\n')
 }
 
+/** The start reply's plan review warning, for a run that will review a plan; empty otherwise. */
+export function planReviewNotice(input: RunInput, config: { planReview: boolean; maxRounds: number }): string {
+  const reviewsPlan = config.planReview && (input.plan !== undefined || input.goal !== undefined) && !((input.fromStage ?? 1) > 1)
+  return reviewsPlan ? `\n${planReviewWarning(config.maxRounds)} Tell the user this in your next message.` : ''
+}
+
 export const RUN_TOOL_DESCRIPTION =
-  'granny-workflow: start the implement → review → judge → fix loop in the background and return a run id. The granny-workflow skill, when installed, describes the inputs and the preflight. Send only the fields you set: leave an optional field out instead of sending "", [], {} or a default - an empty value is not a missing one (stages[].checks [] runs no checks, stages[].after [] starts the stage at once).'
+  'granny-workflow: start the implement → review → judge → fix loop in the background and return a run id. The granny-workflow skill, when installed, describes the inputs and the preflight. Send only the fields you set: leave an optional field out instead of sending "", [], {} or a default - an empty value is not a missing one (stages[].checks [] runs no checks, stages[].after [] starts the stage at once). Set config planReview only when the user asked for a plan review in this request - it costs many tokens and much time.'
 
 const isEmpty = (v: unknown) => v === '' || (Array.isArray(v) && !v.length) || (!!v && typeof v === 'object' && !Array.isArray(v) && !Object.keys(v).length)
 
@@ -171,7 +178,7 @@ export const RUN_INPUT_SCHEMA = {
     plan: {
       type: 'array',
       items: { type: 'string' },
-      description: 'Absolute paths of the plan files (with goal: where the planner writes the plan). Every agent reads them; with config planReview on (off by default) the reviewers review them before stage 1 and the implementer fixes them in place, uncommitted',
+      description: 'Absolute paths of the plan files (with goal: where the planner writes the plan). Every agent reads them; with config planReview on the reviewers review them before stage 1 and the implementer fixes them in place, uncommitted. planReview is off by default: set it only when the user explicitly asked for a plan review in this request - every round is a review + judge + fix and costs many tokens and much time',
     },
     stages: {
       type: 'array',
@@ -198,7 +205,7 @@ export const RUN_INPUT_SCHEMA = {
       },
     },
     fromStage: { type: 'number', description: 'Only to resume an interrupted run: 1-based stage to resume from; earlier stages are skipped. Leave it out on a new run' },
-    config: { type: 'object', additionalProperties: true, description: 'Per-run overrides of granny.config.json (same shape)' },
+    config: { type: 'object', additionalProperties: true, description: 'Per-run overrides of granny.config.json (same shape). planReview is off by default: set it only when the user explicitly asked for a plan review in this request - it costs many tokens and much time' },
   },
   required: ['repo', 'branch'],
 }

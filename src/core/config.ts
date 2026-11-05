@@ -90,6 +90,11 @@ export const DEFAULT_CONFIG: GrannyConfig = {
   watch: 'full',
 }
 
+/** What turning planReview on costs, said to the user at launch and logged when the plan review starts. */
+export function planReviewWarning(maxRounds: number): string {
+  return `Plan review is on: before any code is written, every reviewer, the judge and the implementer go over the plan for up to ${maxRounds} round(s). Each round is a full review + judge + fix, so it uses many more tokens and can add a lot of time (tens of minutes per round on high-effort models).`
+}
+
 const ROLES: ConfigRole[] = ['granny', 'helper', 'planner', 'implementer', 'judge']
 const TOP_KEYS = new Set(['$schema', 'roles', 'worktreeDir', ...Object.keys(DEFAULT_CONFIG).filter(k => k !== 'roles')])
 const ROLE_KEYS = new Set(['model', 'effort'])

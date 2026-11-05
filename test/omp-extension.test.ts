@@ -1,12 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, spyOn } from 'bun:test'
 import { spawnSync } from 'node:child_process'
 import * as fs from 'node:fs'
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import extension, { blockReason, createGrannyExtension, isTransient, waitSeconds } from '../src/adapters/omp/extension'
 import { lineType, LiveRun, type LogEntry, PARSED_EVENTS, type RoleActivity } from '../src/adapters/omp/panel'
 import { EventLog } from '../src/adapters/omp/watch'
+import { planReviewWarning } from '../src/core/config'
 import { SCHEMAS } from '../src/core/schemas'
 import type { FakeOmpBehaviour } from './fake-omp'
 
@@ -629,14 +630,14 @@ describe('omp extension in the user session (parent mode)', () => {
   const callsTo = (slug: string) => calls().filter(c => c.slug === slug)
   const flag = (argv: string[], name: string) => (argv.includes(name) ? argv[argv.indexOf(name) + 1] : undefined)
 
-  async function start(f: ReturnType<typeof fakePi>, config: Record<string, unknown> = {}, ctx: unknown = CTX) {
+  async function start(f: ReturnType<typeof fakePi>, config: Record<string, unknown> = {}, ctx: unknown = CTX, extra: Record<string, unknown> = {}) {
     writeFileSync(join(repo, 'granny.config.json'), JSON.stringify(config))
     git(repo, 'add', 'granny.config.json')
     git(repo, 'commit', '-qm', 'cfg')
-    const started = textOf(await exec(f.tools.get('granny_run'), { repo, branch: 'feat/x', stages: [{ name: 'one', task: 'Do it.' }] }, ctx))
+    const started = textOf(await exec(f.tools.get('granny_run'), { repo, branch: 'feat/x', stages: [{ name: 'one', task: 'Do it.' }], ...extra }, ctx))
     const id = /granny run (\S+) started/.exec(started)?.[1]
     if (!id) throw new Error(started)
-    return { id, dir: join(repo, '.granny/runs', id) }
+    return { id, dir: join(repo, '.granny/runs', id), started }
   }
 
   it('registers granny_run, granny_status, granny_wait and granny_cancel as essential tools, and no submit tool', async () => {
@@ -656,6 +657,24 @@ describe('omp extension in the user session (parent mode)', () => {
     expect([...f.shortcuts.keys()]).toEqual(['alt+w'])
     expect(f.commands.get('granny').description).toContain('alt+w')
     expect(f.commands.get('granny').getArgumentCompletions('o').map((i: any) => i.value)).toEqual(['off', 'on'])
+  })
+
+  it('warns in its start reply what a plan review costs, only when the run reviews a plan', async () => {
+    behave({ wait: ['implement-one'] })
+    const f = fakePi()
+    await createGrannyExtension({ killGraceMs: 100 })(f.pi as any)
+    const plan = join(repo, '.granny/plans/v1.md')
+    mkdirSync(join(repo, '.granny/plans'), { recursive: true })
+    writeFileSync(plan, '# plan\n')
+    const on = await start(f, {}, CTX, { plan: [plan], config: { planReview: true, maxRounds: 2 } })
+    expect(on.started).toContain(planReviewWarning(2))
+    expect(on.started).toContain('Tell the user this in your next message')
+    await exec(f.tools.get('granny_cancel'), { runId: on.id })
+    await finished(on.dir)
+    const off = await start(f, { maxRounds: 3 }, CTX, { plan: [plan] })
+    expect(off.started).not.toContain('Plan review is on')
+    await exec(f.tools.get('granny_cancel'), { runId: off.id })
+    await finished(off.dir)
   })
 
   it('refuses a Codex reviewer, which granny does not run on omp, without starting a run', async () => {
