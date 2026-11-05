@@ -2743,6 +2743,12 @@ function duration(ms) {
 var ANSI = /\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[@-Z\\-_])/g;
 var CONTROL = /[\x00-\x08\x0b-\x1f\x7f]/g;
 var clean = (text) => text.replace(/\t/g, "  ").replace(ANSI, "").replace(CONTROL, "");
+function fit(text, width) {
+  const flat = text.replace(/\t/g, "  ");
+  if (width < 1)
+    return "";
+  return flat.length > width ? `${flat.slice(0, width - 1)}\u2026` : flat;
+}
 var dateOf = (value) => new Date(typeof value === "number" || typeof value === "string" ? value : Number.NaN);
 function stamp2(value) {
   const d = dateOf(value);
@@ -3705,12 +3711,6 @@ function entryLines(e) {
       return [`${at}  \u25A0 process exited ${e.code}`];
   }
   return [];
-}
-function fit(line, width) {
-  const flat = line.replace(/\t/g, "  ");
-  if (width <= 0)
-    return "";
-  return flat.length > width ? `${flat.slice(0, Math.max(0, width - 1))}\u2026` : flat;
 }
 
 // src/adapters/omp/navigator.ts

@@ -21,6 +21,13 @@ function duration(ms) {
 var ANSI = /\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[@-Z\\-_])/g;
 var CONTROL = /[\x00-\x08\x0b-\x1f\x7f]/g;
 var clean = (text) => text.replace(/\t/g, "  ").replace(ANSI, "").replace(CONTROL, "");
+function fit(text, width) {
+  const flat = text.replace(/\t/g, "  ");
+  if (width < 1)
+    return "";
+  return flat.length > width ? `${flat.slice(0, width - 1)}\u2026` : flat;
+}
+var pad = (text, width) => fit(text, width).padEnd(Math.max(0, width));
 var dateOf = (value) => new Date(typeof value === "number" || typeof value === "string" ? value : Number.NaN);
 function stamp(value) {
   const d = dateOf(value);
@@ -671,11 +678,6 @@ var fresh = (s, now) => s.end !== undefined && now - s.end < FRESH_MS;
 var elapsed2 = (s, now) => duration((s.end ?? now) - s.start);
 var STATUS_TONES = { running: "info", done: "success", failed: "error", cancelled: "warning" };
 var AGENT_TONES = { running: "info", waiting: "muted", done: "success", failed: "error", cancelled: "warning" };
-function fit(text, width) {
-  if (text.length <= width)
-    return text;
-  return width < 1 ? "" : `${text.slice(0, width - 1)}\u2026`;
-}
 function agentLine(a, now, width) {
   const marker = `${AGENT_MARKERS[a.state]} `;
   const tail = ` \xB7 ${a.activity ?? `${a.state} ${duration((a.end ?? now) - a.start)}`}`;
@@ -840,12 +842,6 @@ var AGENT_LINES = 40;
 var PHASE_LINES = 200;
 var UNREADABLE = "run files not readable from this TUI - showing the role sessions only";
 var clamp = (n, lo, hi) => Math.max(lo, Math.min(hi, n));
-function fit2(text, width) {
-  if (width < 1)
-    return "";
-  return text.length <= width ? text : `${text.slice(0, width - 1)}\u2026`;
-}
-var pad = (text, width) => fit2(text, width).padEnd(Math.max(0, width));
 
 class NavModel {
   deps;

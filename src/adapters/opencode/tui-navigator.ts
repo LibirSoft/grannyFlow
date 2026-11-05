@@ -2,7 +2,7 @@
 // subagent sessions, a selection, and the detail of the selected node, laid out as rows of cells.
 // It reads only the hub's cached snapshots and opencode's in-memory session store.
 import { join } from 'node:path'
-import { clean, duration, stamp } from '../runview/format'
+import { clean, duration, pad, stamp } from '../runview/format'
 import { type AgentNode, AGENT_MARKERS, agentKey, nextAgent, type PhaseNode, type Row, rowText, runKey, type RunTree, visibleRows } from '../runview/tree'
 import { AGENT_TONES, type RunSnapshot, STATUS_TONES, type Tone } from './runwatch'
 import { attempt, type Cell } from './tui-view'
@@ -40,13 +40,6 @@ const PHASE_LINES = 200
 const UNREADABLE = 'run files not readable from this TUI - showing the role sessions only'
 
 const clamp = (n: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, n))
-
-function fit(text: string, width: number): string {
-  if (width < 1) return ''
-  return text.length <= width ? text : `${text.slice(0, width - 1)}…`
-}
-
-const pad = (text: string, width: number) => fit(text, width).padEnd(Math.max(0, width))
 
 interface Detail {
   head: Cell[]

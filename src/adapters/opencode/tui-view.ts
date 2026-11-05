@@ -1,6 +1,9 @@
 // Builds the TUI plugin's nodes with the universal-renderer functions of @opentui/solid, injected so
 // that bun test can run the views against a fake. Every accessor is guarded: a failing one shows nothing.
-import type { Line, Tone } from './runwatch'
+import type { Cell, Tone } from '../runview/layout'
+import type { Line } from './runwatch'
+
+export type { Cell } from '../runview/layout'
 
 export interface UiRuntime {
   createElement(tag: string): any
@@ -19,12 +22,6 @@ export interface SolidRuntime {
 export interface TuiRuntime {
   ui: UiRuntime
   solid: SolidRuntime
-}
-
-export interface Cell {
-  text: string
-  tone: Tone
-  selected?: boolean
 }
 
 /** `fn()`, or undefined when it throws. */

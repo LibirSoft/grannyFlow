@@ -4,7 +4,8 @@
 import { readFileSync, statSync } from 'node:fs'
 import { basename, join } from 'node:path'
 import type { WatchMode } from '../../core/config'
-import { clean, duration } from '../runview/format'
+import { clean, duration, fit } from '../runview/format'
+import type { Tone } from '../runview/layout'
 import { TailReader, type TailOptions } from '../runview/tail'
 import { AGENT_MARKERS, type AgentNode, agentKey, type AgentState, buildRunTree, type JournalEntry, type LiveView, phaseKey, runKey, type RunTree } from '../runview/tree'
 
@@ -59,7 +60,7 @@ export interface RunSnapshot {
   stale?: true
 }
 
-export type Tone = 'base' | 'muted' | 'success' | 'error' | 'warning' | 'info'
+export type { Tone } from '../runview/layout'
 
 export interface Line {
   text: string
@@ -341,11 +342,6 @@ const elapsed = (s: RunSnapshot, now: number) => duration((s.end ?? now) - s.sta
 
 export const STATUS_TONES: Record<string, Tone> = { running: 'info', done: 'success', failed: 'error', cancelled: 'warning' }
 export const AGENT_TONES: Record<AgentState, Tone> = { running: 'info', waiting: 'muted', done: 'success', failed: 'error', cancelled: 'warning' }
-
-function fit(text: string, width: number): string {
-  if (text.length <= width) return text
-  return width < 1 ? '' : `${text.slice(0, width - 1)}…`
-}
 
 function agentLine(a: AgentNode, now: number, width: number): string {
   const marker = `${AGENT_MARKERS[a.state]} `

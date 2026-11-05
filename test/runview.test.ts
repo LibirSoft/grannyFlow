@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test'
-import { clock } from '../src/adapters/runview/format'
+import { clock, fit, pad, shortArg, shortModel } from '../src/adapters/runview/format'
 import { readOutline, runOutline } from '../src/adapters/runview/outline'
 import { resolveConfig } from '../src/core/config'
 import type { RunInput } from '../src/core/engine'
@@ -149,5 +149,48 @@ describe('readOutline', () => {
 
   it('cleans the text it reads', () => {
     expect(readOutline({ ...good, branch: 'a\x07b', stages: [{ ...good.stages[0], name: 'o\x1b[0mne' }] })).toMatchObject({ branch: 'ab', stages: [{ name: 'one' }] })
+  })
+})
+
+describe('fit and pad', () => {
+  it('cuts with … to the width and pads to it', () => {
+    expect(fit('abcdef', 4)).toBe('abc…')
+    expect(fit('abc', 4)).toBe('abc')
+    expect(fit('a\tb', 10)).toBe('a  b')
+    expect(fit('abc', 0)).toBe('')
+    expect(pad('abcdef', 4)).toBe('abc…')
+    expect(pad('ab', 4)).toBe('ab  ')
+  })
+})
+
+describe('shortModel', () => {
+  it('drops the provider and #default, shows another variant and the effort', () => {
+    expect(shortModel('kimi-code-plan-global/k3.1-pro#default')).toBe('k3.1-pro')
+    expect(shortModel('openai-codex/gpt-6.1-sol', 'xhigh')).toBe('gpt-6.1-sol/xhigh')
+    expect(shortModel('a/b#high')).toBe('b/high')
+    expect(shortModel('sonnet')).toBe('sonnet')
+    expect(shortModel(undefined)).toBe('default model')
+    expect(shortModel(undefined, 'high')).toBe('default model/high')
+  })
+})
+
+describe('shortArg', () => {
+  it('drops a leading cd into a directory, the work directory and runs of whitespace', () => {
+    expect(shortArg("cd '/w t' && bun test x", '/w t')).toBe('bun test x')
+    expect(shortArg('cd /w && git   status\n  --short', '/w')).toBe('git status --short')
+    expect(shortArg('/w/src/a.ts', '/w')).toBe('src/a.ts')
+    expect(shortArg('/w/src/a.ts', '/w/')).toBe('src/a.ts')
+    expect(shortArg('/w', '/w')).toBe('.')
+    expect(shortArg('/wx/a.ts', '/w')).toBe('/wx/a.ts')
+    expect(shortArg('grep -n x /w/src /w/test', '/w')).toBe('grep -n x src test')
+  })
+
+  it('writes a path under the home directory as ~/…, and never cuts', () => {
+    expect(shortArg('/home/u/notes/a.md', '/w', '/home/u')).toBe('~/notes/a.md')
+    expect(shortArg('x'.repeat(300))).toHaveLength(300)
+  })
+
+  it('drops control characters', () => {
+    expect(shortArg('\x1b[31mred\x1b[0m\r')).toBe('red')
   })
 })

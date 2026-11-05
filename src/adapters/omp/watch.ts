@@ -2,6 +2,8 @@
 // role process streams, and their readable form for the run navigator.
 import { appendFileSync } from 'node:fs'
 import { clock } from './format'
+
+export { fit } from '../runview/format'
 import type { LogEntry } from './panel'
 
 const TEXT_LINES = 12
@@ -55,10 +57,4 @@ export function entryLines(e: Logged): string[] {
       return [`${at}  ■ process exited ${e.code}`]
   }
   return []
-}
-
-export function fit(line: string, width: number): string {
-  const flat = line.replace(/\t/g, '  ')
-  if (width <= 0) return ''
-  return flat.length > width ? `${flat.slice(0, Math.max(0, width - 1))}…` : flat
 }
