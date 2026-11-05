@@ -1,4 +1,4 @@
-import { IMPACTS, type HostName, type Impact } from './types'
+import { HOSTS, IMPACTS, type HostName, type Impact } from './types'
 
 export type ModelSpec = string | Partial<Record<HostName, string>>
 
@@ -162,7 +162,7 @@ function modelErrors(path: string, spec: unknown): string[] {
   if (typeof spec === 'string') return []
   const errors: string[] = []
   for (const [host, m] of Object.entries(spec)) {
-    if (host !== 'claude-code' && host !== 'opencode') errors.push(`${path}: unknown host "${host}"`)
+    if (!(HOSTS as readonly string[]).includes(host)) errors.push(`${path}: unknown host "${host}"`)
     if (typeof m !== 'string' || !m) errors.push(`${path}.${host} must be a non-empty string`)
   }
   return errors
@@ -211,8 +211,8 @@ function reviewers(list: unknown, errors: string[], host?: HostName): ReviewerCo
     } else if (entry.command !== undefined) {
       errors.push(`${at}.command needs "engine": "command"; engine "${engine}" runs its own reviewer`)
     }
-    if (host === 'opencode' && adversarial && engine === 'auto') {
-      errors.push(`${at}.mode "adversarial-review" needs the Codex plugin, and on opencode engine "auto" means the Codex CLI - set ${at}.engine to "codex-plugin"`)
+    if (host && host !== 'claude-code' && adversarial && engine === 'auto') {
+      errors.push(`${at}.mode "adversarial-review" needs the Codex plugin, and on ${host} engine "auto" means the Codex CLI - set ${at}.engine to "codex-plugin"`)
     }
     return { ...entry, name, engine }
   })
