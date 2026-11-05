@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'bun:test'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { buildClaudeCode, buildOpencode, buildReadOnlyGuard } from '../scripts/build'
+import { buildClaudeCode, buildOmp, buildOpencode, buildReadOnlyGuard } from '../scripts/build'
 import { CODEX_REVIEWER, finding, review } from './fake-host'
 
 const root = join(import.meta.dir, '..')
@@ -149,5 +149,33 @@ describe('opencode plugin bundle', () => {
     const mod = await import(join(root, 'skills/granny-workflow/engines/opencode/plugin/granny-workflow/index.js'))
     expect(mod.default.id).toBe('granny-workflow')
     expect(typeof mod.default.setup).toBe('function')
+  })
+})
+
+describe('omp extension bundle', () => {
+  const bundle = join(root, 'skills/granny-workflow/engines/omp/extensions/granny-workflow/index.js')
+
+  it('is committed in sync with src/', async () => {
+    const built = await buildOmp()
+    expect(readFileSync(bundle, 'utf8')).toBe(built)
+  })
+
+  it('default-exports the extension factory and passes its own path to the role processes', async () => {
+    const mod = await import(bundle)
+    expect(typeof mod.default).toBe('function')
+    expect(readFileSync(bundle, 'utf8')).toContain('fileURLToPath(import.meta.url)')
+  })
+
+  it('registers only the submit tool and the guard when loaded as a role process', async () => {
+    const tools: string[] = []
+    const events: string[] = []
+    process.env.GRANNY_OMP_CHILD = JSON.stringify({ tool: 'granny_submit_findings', kind: 'findings', out: '/nonexistent/out.json', access: 'read-only' })
+    try {
+      ;(await import(bundle)).default({ registerTool: (t: any) => tools.push(t.name), on: (e: string) => events.push(e), sendMessage: () => {} })
+    } finally {
+      delete process.env.GRANNY_OMP_CHILD
+    }
+    expect(tools).toEqual(['granny_submit_findings'])
+    expect(events).toEqual(['tool_call'])
   })
 })

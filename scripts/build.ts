@@ -71,6 +71,10 @@ export async function buildOpencode(): Promise<string> {
   return BANNER + (await bundle('src/adapters/opencode/plugin.ts', 'bun'))
 }
 
+export async function buildOmp(): Promise<string> {
+  return BANNER + (await bundle('src/adapters/omp/extension.ts', 'bun'))
+}
+
 export function renderPrompts(): string {
   const p = {
     repo: '<repo>',
@@ -180,5 +184,6 @@ if (import.meta.main) {
   write(join(engines, 'claude-code/workflow.js'), await buildClaudeCode())
   write(join(engines, 'claude-code/hooks/granny-readonly-guard.mjs'), await buildReadOnlyGuard())
   write(join(engines, 'opencode/plugin/granny-workflow/index.js'), await buildOpencode())
+  write(join(engines, 'omp/extensions/granny-workflow/index.js'), await buildOmp())
   write(join(skill, 'references/prompts.md'), renderPrompts())
 }
