@@ -998,6 +998,7 @@ var P_HEADINGS = ["P0", "P1", "P2", "P3"];
 var ORDER = [...P_HEADINGS, "dismissed"];
 var NOTE_LENGTH = 300;
 var oneLine = (text) => String(text ?? "").replace(/\s+/g, " ").trim();
+var noteLine = (note) => oneLine(note).slice(0, NOTE_LENGTH);
 function severityOf(f) {
   const n = /^\s*p([0-3])\b/i.exec(String(f.severity ?? ""))?.[1];
   return n === undefined ? "P2" : P_HEADINGS[Number(n)];
@@ -1059,7 +1060,7 @@ function renderReport(meta, findings) {
     `- Reviewers: ${meta.reviewers.map(reviewer).join(", ")} \xB7 Judge: ${meta.judge ?? "none"}`,
     `- Totals: P0 ${c.P0}, P1 ${c.P1}, P2 ${c.P2}, P3 ${c.P3}, dismissed ${c.dismissed}`,
     ...meta.uncommitted.length ? [`- Not reviewed: ${meta.uncommitted.join(", ")}`] : [],
-    ...meta.failed.map((r) => `- Did not run: ${r.name}: ${oneLine(r.note).slice(0, NOTE_LENGTH)}`),
+    ...meta.failed.map((r) => `- Did not run: ${r.name}: ${noteLine(r.note)}`),
     ...unjudged ? [`- Not judged: the judge left ${unjudged} finding(s) unclassified; they stay under the reviewer's severity`] : []
   ];
   return [
@@ -2823,11 +2824,10 @@ function summarize(result, worktree) {
   return lines.join(`
 `);
 }
-var oneLine2 = (text) => text.replace(/\s+/g, " ").trim();
 function summarizeJudge(result) {
-  const didNotRun = result.failedReviewers.map((r) => `- did not run: ${r.name}: ${oneLine2(r.note).slice(0, 300)}`);
+  const didNotRun = result.failedReviewers.map((r) => `- did not run: ${r.name}: ${noteLine(r.note)}`);
   if (result.outcome !== "reviewed") {
-    const why = result.outcome === "no-changes" ? oneLine2(result.note ?? "nothing to review") : "no reviewer ran, also on a retry";
+    const why = result.outcome === "no-changes" ? oneLine(result.note ?? "nothing to review") : "no reviewer ran, also on a retry";
     return [`- no report: ${why}`, ...didNotRun, "Nothing was fixed or committed. Tell the user; do not fix anything unless they ask."].join(`
 `);
   }
@@ -3229,13 +3229,13 @@ var BURST_MS = 5000;
 var BURST_NAMES = 10;
 var MAX_ROWS = 200;
 var SHELLS = new Set(["bash", "shell", "sh"]);
-var oneLine3 = (text) => clean(text).replace(/\s+/g, " ").trim();
+var oneLine2 = (text) => clean(text).replace(/\s+/g, " ").trim();
 function argOf(input) {
   if (!input || typeof input !== "object")
     return;
   const args = input;
   const key = ARG_KEYS.find((k) => typeof args[k] === "string" && args[k].trim());
-  return key ? oneLine3(args[key]).slice(0, ARG_CHARS) : undefined;
+  return key ? oneLine2(args[key]).slice(0, ARG_CHARS) : undefined;
 }
 var KINDS = {
   thinking: "thinking",
@@ -3255,7 +3255,7 @@ var shortOf = (name, arg, cwd, home) => {
 var firstLine = (text) => clean(text).split(`
 `).map((l) => l.trim()).find(Boolean) ?? "";
 var TODO_MARKS = { done: "\u2713", active: "\u25CF", pending: "\xB7" };
-var todoText = (todos) => todos.map((t) => `${TODO_MARKS[t.state]} ${oneLine3(t.text)}`).join("  ");
+var todoText = (todos) => todos.map((t) => `${TODO_MARKS[t.state]} ${oneLine2(t.text)}`).join("  ");
 function activityLines(items, cwd, home) {
   const out = [];
   let last = "";
@@ -3269,15 +3269,15 @@ function activityLines(items, cwd, home) {
   return out;
 }
 function lineOf(item, cwd, home) {
-  const name = oneLine3(item.name ?? "tool");
+  const name = oneLine2(item.name ?? "tool");
   switch (item.kind) {
     case "state":
-      return item.text ? `\xB7 ${oneLine3(item.text)}` : undefined;
+      return item.text ? `\xB7 ${oneLine2(item.text)}` : undefined;
     case "heading":
-      return item.text ? `\xBB ${oneLine3(item.text)}` : undefined;
+      return item.text ? `\xBB ${oneLine2(item.text)}` : undefined;
     case "tool": {
       const arg = item.arg ? shortArg(item.arg, cwd, home) : "";
-      const what = item.intent ? `${oneLine3(item.intent)}${arg ? ` \xB7 ${arg}` : ""}` : arg;
+      const what = item.intent ? `${oneLine2(item.intent)}${arg ? ` \xB7 ${arg}` : ""}` : arg;
       return `\u25B8 ${name.padEnd(6)} ${what}`.trimEnd();
     }
     case "tool-end":
@@ -3285,7 +3285,7 @@ function lineOf(item, cwd, home) {
     case "error":
       return `\u2717 ${name} failed${item.text ? `: ${firstLine(item.text)}` : ""}`;
     case "subagents":
-      return `\u2514 task: ${(item.names ?? []).map(oneLine3).join(", ")}`;
+      return `\u2514 task: ${(item.names ?? []).map(oneLine2).join(", ")}`;
     case "text": {
       const said = firstLine(item.text ?? "");
       return said ? `\u270E "${fit(said, TEXT_CHARS)}"` : undefined;
@@ -3293,7 +3293,7 @@ function lineOf(item, cwd, home) {
     case "todo":
       return `\u25B8 ${"todo".padEnd(6)} ${todoText(item.todos ?? [])}`;
     case "note":
-      return item.text ? oneLine3(item.text) : undefined;
+      return item.text ? oneLine2(item.text) : undefined;
     case "exit":
       return `\u25A0 process exited ${item.code ?? "?"}`;
   }
@@ -3336,18 +3336,18 @@ function summarise(items, at, opts = {}) {
     const t = item.t ?? at;
     switch (item.kind) {
       case "state": {
-        const kind = KINDS[oneLine3(item.text ?? "")];
+        const kind = KINDS[oneLine2(item.text ?? "")];
         if (kind)
           state = { state: kind, since: t };
         break;
       }
       case "heading":
         if (item.text)
-          heading = oneLine3(item.text);
+          heading = oneLine2(item.text);
         break;
       case "tool": {
-        const tool = oneLine3(item.name ?? "tool");
-        const intent = item.intent ? oneLine3(item.intent) : undefined;
+        const tool = oneLine2(item.name ?? "tool");
+        const intent = item.intent ? oneLine2(item.intent) : undefined;
         const arg = isRef(item.arg ?? "") ? item.arg : shortOf(tool, item.arg, cwd, home);
         state = { state: "running", tool, ...item.arg ? { arg: item.arg } : {}, ...intent ? { intent } : {}, since: t };
         const prev = rows.at(-1);
@@ -3369,7 +3369,7 @@ function summarise(items, at, opts = {}) {
       }
       case "subagents": {
         const row = openRow("task", undefined);
-        const names = (item.names ?? []).map(oneLine3);
+        const names = (item.names ?? []).map(oneLine2);
         if (row)
           row.names = names;
         else
@@ -3402,7 +3402,7 @@ function summarise(items, at, opts = {}) {
         break;
       }
       case "todo":
-        todo = (item.todos ?? []).map((x) => ({ text: oneLine3(x.text), state: x.state }));
+        todo = (item.todos ?? []).map((x) => ({ text: oneLine2(x.text), state: x.state }));
         break;
       case "text": {
         const lines = clean(item.text ?? "").split(`
@@ -3415,7 +3415,7 @@ function summarise(items, at, opts = {}) {
       }
       case "note":
         if (item.text)
-          rows.push({ t, tool: "", args: [], count: 1, note: oneLine3(item.text), tone: "warning", open: false });
+          rows.push({ t, tool: "", args: [], count: 1, note: oneLine2(item.text), tone: "warning", open: false });
         break;
       case "exit":
         state = undefined;
@@ -3452,7 +3452,7 @@ function nowBlock(end, state, heading, at, cwd, home) {
   const extra = heading ? { heading } : {};
   switch (state.state) {
     case "running": {
-      const detail = state.intent ? oneLine3(state.intent) : shortOf(state.tool, state.arg, cwd, home);
+      const detail = state.intent ? oneLine2(state.intent) : shortOf(state.tool, state.arg, cwd, home);
       return { text: `\u25CF ${state.tool ?? "tool"} \xB7 ${took}`, tone: "info", ...detail ? { detail } : {}, ...extra };
     }
     case "thinking":
@@ -3507,19 +3507,19 @@ function deltaOf(line) {
   }
   return "";
 }
-function oneLine4(value, max = 60) {
+function oneLine3(value, max = 60) {
   const flat = value.replace(/\s+/g, " ").trim();
   return flat.length > max ? `${flat.slice(0, max - 1)}\u2026` : flat;
 }
 function subagents(args) {
   const items = Array.isArray(args?.tasks) ? args.tasks : [args];
-  return items.map((t) => oneLine4(String(t?.name || t?.agent || "task"), 40));
+  return items.map((t) => oneLine3(String(t?.name || t?.agent || "task"), 40));
 }
 var callId = (event) => event?.toolCallId === undefined ? {} : { id: String(event.toolCallId) };
 function toolEntry(event) {
-  const intent = typeof event?.intent === "string" && event.intent.trim() ? oneLine4(event.intent, LOG_ARG) : undefined;
+  const intent = typeof event?.intent === "string" && event.intent.trim() ? oneLine3(event.intent, LOG_ARG) : undefined;
   const raw = argOf(event?.args);
-  const arg = raw ? oneLine4(raw, LOG_ARG) : undefined;
+  const arg = raw ? oneLine3(raw, LOG_ARG) : undefined;
   return { type: "tool", ...callId(event), name: String(event?.toolName ?? "tool"), ...intent ? { intent } : {}, ...arg ? { arg } : {} };
 }
 var TODO_STATES = { completed: "done", in_progress: "active", pending: "pending", blocked: "pending" };
@@ -3532,7 +3532,7 @@ function todosOf(result) {
     for (const task of Array.isArray(phase?.tasks) ? phase.tasks : []) {
       const state = TODO_STATES[task?.status];
       if (state && typeof task.content === "string" && task.content.trim())
-        out.push({ text: oneLine4(task.content, LOG_ARG), state });
+        out.push({ text: oneLine3(task.content, LOG_ARG), state });
     }
   }
   return out.length ? out : undefined;
@@ -3545,11 +3545,11 @@ function finalText(message) {
 function describe(event, cwd) {
   const name = String(event?.toolName ?? "tool");
   if (typeof event?.intent === "string" && event.intent.trim())
-    return { name, detail: oneLine4(event.intent), intent: true };
+    return { name, detail: oneLine3(event.intent), intent: true };
   if (name === "task")
-    return { name, detail: oneLine4(subagents(event?.args).join(", ")) };
+    return { name, detail: oneLine3(subagents(event?.args).join(", ")) };
   const arg = argOf(event?.args);
-  return { name, detail: arg ? oneLine4(shortArg(arg, cwd), 60) : undefined };
+  return { name, detail: arg ? oneLine3(shortArg(arg, cwd), 60) : undefined };
 }
 var NOW_KINDS = { starting: "starting", "waiting for model": "waiting", thinking: "thinking", writing: "writing", "preparing a tool call": "preparing" };
 var HEADING = /(?:^|\n)[ \t]*\*\*([^*\n]+)\*\*/g;
@@ -3696,7 +3696,7 @@ class RoleActivity {
       let heading;
       for (const m of this.thinking.matchAll(HEADING))
         heading = m[1];
-      const text = heading?.trim() ? oneLine4(heading) : undefined;
+      const text = heading?.trim() ? oneLine3(heading) : undefined;
       if (text && text !== this.heading) {
         this.heading = text;
         this.log?.({ type: "heading", text });

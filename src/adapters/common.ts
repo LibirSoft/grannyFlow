@@ -6,6 +6,7 @@ import { isCancelled } from '../core/cancel'
 import { type ConfigRole, type GrannyConfig, judgeConfigGaps, type ModelSpec, planReviewWarning, resolveConfig, resolveModel } from '../core/config'
 export { planReviewWarning } from '../core/config'
 import { checkJudgeInput, type JudgeInput, type RunInput } from '../core/engine'
+import { noteLine, oneLine } from '../core/report'
 import type { RunOutline } from './runview/outline'
 import type { CommandResult, Host, HostName, JudgeResult, PlanResult, Recheck, ResultKind, RunResult } from '../core/types'
 
@@ -126,11 +127,9 @@ export function summarize(result: RunResult, worktree: boolean): string {
   return lines.join('\n')
 }
 
-const oneLine = (text: string) => text.replace(/\s+/g, ' ').trim()
-
 /** The finish message of a judge run: the report path first, and what to do with it last. */
 export function summarizeJudge(result: JudgeResult): string {
-  const didNotRun = result.failedReviewers.map(r => `- did not run: ${r.name}: ${oneLine(r.note).slice(0, 300)}`)
+  const didNotRun = result.failedReviewers.map(r => `- did not run: ${r.name}: ${noteLine(r.note)}`)
   if (result.outcome !== 'reviewed') {
     const why = result.outcome === 'no-changes' ? oneLine(result.note ?? 'nothing to review') : 'no reviewer ran, also on a retry'
     return [`- no report: ${why}`, ...didNotRun, 'Nothing was fixed or committed. Tell the user; do not fix anything unless they ask.'].join('\n')

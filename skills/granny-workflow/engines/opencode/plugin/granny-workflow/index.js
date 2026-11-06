@@ -996,6 +996,7 @@ var P_HEADINGS = ["P0", "P1", "P2", "P3"];
 var ORDER = [...P_HEADINGS, "dismissed"];
 var NOTE_LENGTH = 300;
 var oneLine = (text) => String(text ?? "").replace(/\s+/g, " ").trim();
+var noteLine = (note) => oneLine(note).slice(0, NOTE_LENGTH);
 function severityOf(f) {
   const n = /^\s*p([0-3])\b/i.exec(String(f.severity ?? ""))?.[1];
   return n === undefined ? "P2" : P_HEADINGS[Number(n)];
@@ -1057,7 +1058,7 @@ function renderReport(meta, findings) {
     `- Reviewers: ${meta.reviewers.map(reviewer).join(", ")} \xB7 Judge: ${meta.judge ?? "none"}`,
     `- Totals: P0 ${c.P0}, P1 ${c.P1}, P2 ${c.P2}, P3 ${c.P3}, dismissed ${c.dismissed}`,
     ...meta.uncommitted.length ? [`- Not reviewed: ${meta.uncommitted.join(", ")}`] : [],
-    ...meta.failed.map((r) => `- Did not run: ${r.name}: ${oneLine(r.note).slice(0, NOTE_LENGTH)}`),
+    ...meta.failed.map((r) => `- Did not run: ${r.name}: ${noteLine(r.note)}`),
     ...unjudged ? [`- Not judged: the judge left ${unjudged} finding(s) unclassified; they stay under the reviewer's severity`] : []
   ];
   return [
@@ -2821,11 +2822,10 @@ function summarize(result, worktree) {
   return lines.join(`
 `);
 }
-var oneLine2 = (text) => text.replace(/\s+/g, " ").trim();
 function summarizeJudge(result) {
-  const didNotRun = result.failedReviewers.map((r) => `- did not run: ${r.name}: ${oneLine2(r.note).slice(0, 300)}`);
+  const didNotRun = result.failedReviewers.map((r) => `- did not run: ${r.name}: ${noteLine(r.note)}`);
   if (result.outcome !== "reviewed") {
-    const why = result.outcome === "no-changes" ? oneLine2(result.note ?? "nothing to review") : "no reviewer ran, also on a retry";
+    const why = result.outcome === "no-changes" ? oneLine(result.note ?? "nothing to review") : "no reviewer ran, also on a retry";
     return [`- no report: ${why}`, ...didNotRun, "Nothing was fixed or committed. Tell the user; do not fix anything unless they ask."].join(`
 `);
   }

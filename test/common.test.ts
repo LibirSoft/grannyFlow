@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import { dropPlaceholders, HEARTBEAT_MS, hostModelErrors, JUDGE_INPUT_SCHEMA, JUDGE_ROLES, JUDGE_TOOL_DESCRIPTION, overridesNotice, planReviewWarning, RUN_INPUT_SCHEMA, RUN_TOOL_DESCRIPTION, runStatus, SAME_MODEL_HINT, sameModelNotice, summarizeJudge, withHeartbeat } from '../src/adapters/common'
 import { resolveConfig } from '../src/core/config'
 import { checkInput, type JudgeInput, type RunInput } from '../src/core/engine'
+import { noteLine, renderReport } from '../src/core/report'
 import type { JudgeResult } from '../src/core/types'
 
 // The granny_run arguments gpt-5.6-luna sent through omp for a plain one-stage run: every optional
@@ -285,6 +286,16 @@ describe('summarizeJudge', () => {
     expect(text).toContain('- did not run: codex: exit 1 long')
     expect(text).toContain('- not judged, under the reviewer\'s severity: kimi-F1')
     expect(text.split('\n').at(-1)).toBe(END)
+  })
+
+  it('words a reviewer that did not run the same as the report does', () => {
+    const note = `exit 1\n\n  ${'x'.repeat(400)}`
+    const line = noteLine(note)
+    expect(line).toBe(`exit 1 ${'x'.repeat(293)}`)
+    const failed = [{ name: 'codex', note }]
+    expect(summarizeJudge({ ...result, failedReviewers: failed })).toContain(`- did not run: codex: ${line}\n`)
+    const report = renderReport({ branch: 'feat/x', base: 'main', head: 'abcd1234', commits: 1, repo: '/r', when: 'now', reviewers: [], uncommitted: [], failed }, [])
+    expect(report).toContain(`- Did not run: codex: ${line}\n`)
   })
 
   it('says where the report is when it could not be written', () => {

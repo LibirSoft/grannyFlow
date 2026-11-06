@@ -5,7 +5,10 @@ const P_HEADINGS = ['P0', 'P1', 'P2', 'P3'] as const
 const ORDER: ReportBucket[] = [...P_HEADINGS, 'dismissed']
 const NOTE_LENGTH = 300
 
-const oneLine = (text: unknown) => String(text ?? '').replace(/\s+/g, ' ').trim()
+export const oneLine = (text: unknown) => String(text ?? '').replace(/\s+/g, ' ').trim()
+
+/** A reviewer's failure note as one bounded line, in the report and in a host's finish message. */
+export const noteLine = (note: unknown) => oneLine(note).slice(0, NOTE_LENGTH)
 
 /** The reviewer's own heading: its P number, and P2 for a severity without one. */
 export function severityOf(f: Pick<Finding, 'severity'>): (typeof P_HEADINGS)[number] {
@@ -92,7 +95,7 @@ export function renderReport(meta: ReportMeta, findings: Finding[]): string {
     `- Reviewers: ${meta.reviewers.map(reviewer).join(', ')} · Judge: ${meta.judge ?? 'none'}`,
     `- Totals: P0 ${c.P0}, P1 ${c.P1}, P2 ${c.P2}, P3 ${c.P3}, dismissed ${c.dismissed}`,
     ...(meta.uncommitted.length ? [`- Not reviewed: ${meta.uncommitted.join(', ')}`] : []),
-    ...meta.failed.map(r => `- Did not run: ${r.name}: ${oneLine(r.note).slice(0, NOTE_LENGTH)}`),
+    ...meta.failed.map(r => `- Did not run: ${r.name}: ${noteLine(r.note)}`),
     ...(unjudged ? [`- Not judged: the judge left ${unjudged} finding(s) unclassified; they stay under the reviewer's severity`] : []),
   ]
   return [
