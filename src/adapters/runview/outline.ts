@@ -13,7 +13,7 @@ export interface StageOutline {
 }
 
 export interface RunOutline {
-  kind: 'plan' | 'implement'
+  kind: 'plan' | 'implement' | 'judge'
   branch: string
   worktree: boolean
   planReview: boolean
@@ -21,6 +21,8 @@ export interface RunOutline {
   reviewers: string[]
   fromStage: number
   stages: StageOutline[]
+  /** The round cap of a review loop; a run from before it has none. */
+  maxRounds?: number
 }
 
 export function runOutline(input: RunInput, config: GrannyConfig): RunOutline {
@@ -44,7 +46,13 @@ export function runOutline(input: RunInput, config: GrannyConfig): RunOutline {
     reviewers: config.reviewers.map(r => clean(r.name)),
     fromStage,
     stages,
+    maxRounds: config.maxRounds,
   }
+}
+
+/** A review-only run: no stages and no worktree, on what the checkout has checked out. */
+export function judgeOutline(branch: string, config: GrannyConfig): RunOutline {
+  return { kind: 'judge', branch: clean(branch), worktree: false, planReview: false, finalReview: false, reviewers: config.reviewers.map(r => clean(r.name)), fromStage: 1, stages: [] }
 }
 
 const isRecord = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v)
@@ -59,11 +67,11 @@ function readStage(v: unknown): StageOutline | undefined {
 /** The outline from status.json, or undefined when anything in it is malformed. */
 export function readOutline(value: unknown): RunOutline | undefined {
   if (!isRecord(value)) return undefined
-  const { kind, branch, worktree, planReview, finalReview, reviewers, fromStage, stages } = value
-  if (kind !== 'plan' && kind !== 'implement') return undefined
+  const { kind, branch, worktree, planReview, finalReview, reviewers, fromStage, stages, maxRounds } = value
+  if (kind !== 'plan' && kind !== 'implement' && kind !== 'judge') return undefined
   if (typeof branch !== 'string' || typeof worktree !== 'boolean' || typeof planReview !== 'boolean' || typeof finalReview !== 'boolean') return undefined
   if (!Array.isArray(reviewers) || !reviewers.every(r => typeof r === 'string') || !isCount(fromStage) || !Array.isArray(stages)) return undefined
   const read = stages.map(readStage)
   if (read.some(s => s === undefined)) return undefined
-  return { kind, branch: clean(branch), worktree, planReview, finalReview, reviewers: reviewers.map(r => clean(r as string)), fromStage, stages: read as StageOutline[] }
+  return { kind, branch: clean(branch), worktree, planReview, finalReview, reviewers: reviewers.map(r => clean(r as string)), fromStage, stages: read as StageOutline[], ...(isCount(maxRounds) ? { maxRounds } : {}) }
 }

@@ -123,6 +123,14 @@ function resolveConfig(layers, host) {
 - `)}`);
   return config;
 }
+function judgeConfigGaps(layers, host) {
+  const reviewersSet = layers.some((layer) => isObject(layer) && layer.reviewers !== undefined);
+  const config = resolveConfig(layers, host);
+  return [
+    ...reviewersSet ? config.reviewers.flatMap((rv, i) => rv.engine === "agent" && !resolveModel(rv.model, host) ? [`reviewers[${i}] (${rv.name}): no model for ${host}`] : []) : ["reviewers: no config sets who reviews"],
+    ...resolveModel(config.roles.judge.model, host) ? [] : [`roles.judge.model: no model for ${host}`]
+  ];
+}
 function modelErrors(path, spec) {
   if (spec === undefined)
     return [];
@@ -597,6 +605,14 @@ function declinedOf(value, sent) {
 function shellQuote(value) {
   return /^[\w@%+=:,./-]+$/.test(value) ? value : `'${value.replaceAll("'", `'\\''`)}'`;
 }
+function heredocWriteScript(path, text) {
+  let end = "GRANNY_REPORT_END";
+  while (text.includes(end))
+    end += "_";
+  return `mkdir -p ${shellQuote(path.slice(0, path.lastIndexOf("/")) || "/")} && cat > ${shellQuote(path)} <<'${end}'
+${text}${end}
+`;
+}
 
 // src/core/prompts.ts
 var roundLabel = (round, f, loop) => `${loop ? `${loop.id}/` : ""}r${round}/${f.id}`;
@@ -779,6 +795,13 @@ function worktreeCommandPrompt(repo, branch, script) {
 function gitCommandPrompt(repo, step, script) {
   return oneCommand(`git command for the "${step}" step`, `Repo ${repo}.`, "Run exactly this:", script);
 }
+var ONE_SHOT_NOTE = "This is a one-shot review: nobody fixes anything in this run, so report every problem you can confirm in the code.";
+function judgeStepPrompt(repo, step, script) {
+  return oneCommand(`shell command for the "${step}" step of a review-only run`, `Repo ${repo}.`, "Run exactly this:", script);
+}
+function reportWritePrompt(repo, step, script) {
+  return oneCommand(`shell command for the "${step}" step of a review-only run, which saves the review report (the one file this run writes),`, `Repo ${repo}.`, "Run exactly this, as one command with its line breaks and every character kept, down to its last line:", script);
+}
 function timeoutProbePrompt(repo, step, script) {
   return oneCommand(`shell command for the "${step}" step: it prints the name of the timeout command the checks run in, or nothing`, `Install nothing. Repo ${repo}.`, "Run exactly this:", script);
 }
@@ -896,6 +919,18 @@ ${judgeHistory(earlier)}
 REVIEW:
 ${JSON.stringify(findings)}`;
 }
+function tagPrompt(p, reviewBase, findings) {
+  return `You are the JUDGE tagging the findings of a one-shot code review. Repo ${p.repo}, branch ${p.branch}, diff \`${shellQuote(reviewBase)}...HEAD\`. Do not edit anything.
+${p.context ? `Design context:
+` + p.context + `
+` : ""}
+Nobody fixes anything in this run. Your classification decides under which heading of the user's report each finding goes, so classify every finding on its merits: the reviewer's severity does not bind you, in either direction.
+For each finding, open the cited code and check that it is real and correctly described. Use scope in-scope or pre-existing only. ${JUDGE_DUPES}
+${rubric("what the change set out to do")}
+
+REVIEW:
+${JSON.stringify(findings)}`;
+}
 var RETRY_ASK = "Answer again for every finding, every field set to an allowed value and the evidence filled in";
 function judgeRetryNote(problems) {
   return problems ? `RETRY: your last answer left these findings unclassified. ${RETRY_ASK}:
@@ -924,11 +959,29 @@ Fix every finding below. If you believe a finding is wrong, leave the plan as is
 ${overruledSection(overruled)}
 ${findingsList(accepted)}`;
 }
-function finalPrompt(p, plans = []) {
+function outcomeLine(name, r) {
+  const listed = (kind, findings) => findings.length ? `; ${kind}: ${findings.map((f) => `${f.id} ${f.title.replace(/\s+/g, " ").trim()}`).join(", ")}` : "";
+  const note = r.note?.split(`
+`)[0];
+  return `- ${name}: ${r.outcome}, ${r.rounds} review round(s)${listed("residual", r.residual)}${listed("unresolved", r.unresolved)}${note ? ` - ${note}` : ""}`;
+}
+function outcomesList(o) {
+  return [
+    ...o.plan ? [outcomeLine("plan review", o.plan)] : [],
+    ...o.stages.length ? o.stages.map((s) => outcomeLine(`stage "${s.stage}"`, s)) : ["- no stage of this run worked in this repo"],
+    ...o.finalReview ? [outcomeLine("final review", o.finalReview)] : []
+  ].join(`
+`);
+}
+function finalPrompt(p, plans, outcomes) {
   const attribution = p.config.aiAttribution ? "" : ` \`git log ${shellQuote(p.base)}..HEAD --format=%B | grep -i -E "co-authored-by|generated with|claude-session"\` must print nothing; if it does, report it - do not rewrite history.`;
   return `${common(p)}
 
-You are GRANNY doing the FINAL CHECK. Run every gate and record exact numbers. \`git status --short\` must be clean${plans.length ? ` except for the plan files ${plans.join(", ")}, which stay uncommitted: never stage or commit them` : ""}.${attribution} Make ${prBodyPath(p.config)} complete and accurate against the actual commits${p.config.parallel ? `; fold in the notes of stages that ran in their own worktree (${p.config.workDir}/PR-BODY-*.md, if any) and delete those files` : ""}. Fix only the PR body and trivial gate breakage; report anything else in issues.`;
+You are GRANNY doing the FINAL CHECK. Run every gate and record exact numbers. \`git status --short\` must be clean${plans.length ? ` except for the plan files ${plans.join(", ")}, which stay uncommitted: never stage or commit them` : ""}.${attribution} Make ${prBodyPath(p.config)} complete and accurate against the actual commits${p.config.parallel ? `; fold in the notes of stages that ran in their own worktree (${p.config.workDir}/PR-BODY-*.md, if any) and delete those files` : ""}.
+The commits do not show how this run's reviews ended. They ended like this:
+${outcomesList(outcomes)}
+${outcomes.reviewOnly ? `This run only reviewed: every stage is review-only (implement: false), so any commit it made is a review fix. Say so in the PR body.
+` : ""}Rewrite the PR body's review and status section from this list, adding the section if there is none and replacing any claim of an earlier run on this branch. Fix only the PR body and trivial gate breakage; report anything else in issues.`;
 }
 function mergePrompt(p, name, lane, output) {
   return `${common(p)}
@@ -937,6 +990,111 @@ You are the IMPLEMENTER, finishing a merge. Stage "${name}" ran in parallel on b
 ${output.slice(-3000)}
 
 First read ${branchLog(p)} and \`git log --oneline HEAD..${shellQuote(lane)}\`. Resolve every conflict so both sides' intent survives, keep the gates green, and conclude with \`git commit --no-edit\`. Never abort the merge or reset. Return startSha = HEAD before the merge (\`git rev-parse HEAD\` before you commit).`;
+}
+
+// src/core/report.ts
+var HEADINGS = { critical: "P0", major: "P1", moderate: "P2", minor: "P3" };
+var P_HEADINGS = ["P0", "P1", "P2", "P3"];
+var ORDER = [...P_HEADINGS, "dismissed"];
+var NOTE_LENGTH = 300;
+var oneLine = (text) => String(text ?? "").replace(/\s+/g, " ").trim();
+var noteLine = (note) => oneLine(note).slice(0, NOTE_LENGTH);
+var SEVERITY_WORDS = { critical: "P0", high: "P1", medium: "P2", low: "P3" };
+function severityOf(f) {
+  const said = /^\s*(p[0-3]|critical|high|medium|low)\b/i.exec(String(f.severity ?? ""))?.[1]?.toLowerCase();
+  if (said === undefined)
+    return "P2";
+  return SEVERITY_WORDS[said] ?? P_HEADINGS[Number(said[1])];
+}
+var isJudged = (f) => f.impact !== undefined;
+function bucketOf(f) {
+  if (f.impact === undefined)
+    return severityOf(f);
+  return f.verdict === "refuted" || f.impact === "none" ? "dismissed" : HEADINGS[f.impact];
+}
+var isDemoted = (f) => ORDER.indexOf(bucketOf(f)) > ORDER.indexOf(severityOf(f));
+function countsOf(findings) {
+  const counts = { P0: 0, P1: 0, P2: 0, P3: 0, dismissed: 0 };
+  for (const f of findings)
+    counts[bucketOf(f)]++;
+  return counts;
+}
+function utf8Length(text) {
+  let bytes = 0;
+  for (const ch of text) {
+    const c = ch.codePointAt(0);
+    bytes += c < 128 ? 1 : c < 2048 ? 2 : c < 65536 ? 3 : 4;
+  }
+  return bytes;
+}
+var code = (text) => `\`${text}\``;
+function tags(f) {
+  const reviewer = `${code(`reviewer: ${severityOf(f)}`)}${isDemoted(f) ? ` ${code("demoted")}` : ""}`;
+  const place = f.file ? [code(f.line === undefined ? f.file : `${f.file}:${f.line}`)] : [];
+  const judged = isJudged(f) ? [[f.verdict, f.impact, f.likelihood, f.fixCost, f.scope].map(code).join(" "), `priority ${f.priority}`] : [code("not judged")];
+  const from = `from ${[f.id, ...f.duplicates ?? []].map(code).join(", ")}`;
+  return [...place, ...judged, reviewer, from].join(" \xB7 ");
+}
+function body(text) {
+  let open = "";
+  const lines = text.split(`
+`).map((line) => {
+    const [, marker = "", rest = ""] = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(line) ?? [];
+    if (open) {
+      if (marker[0] === open[0] && marker.length >= open.length && !rest.trim())
+        open = "";
+      return line;
+    }
+    if (marker && !(marker[0] === "`" && rest.includes("`"))) {
+      open = marker;
+      return line;
+    }
+    return /^ {0,3}(#{1,6}(\s|$)|=+\s*$|-+\s*$)/.test(line) ? `\\${line.trimStart()}` : line;
+  });
+  return (open ? [...lines, open] : lines).join(`
+`);
+}
+function section(f) {
+  return [
+    `### ${oneLine(f.title) || "(no title)"}`,
+    tags(f),
+    ...String(f.detail ?? "").trim() ? [body(String(f.detail).trim())] : [],
+    ...f.evidence ? [`**Evidence:** ${body(f.evidence)}`] : [],
+    ...f.reason?.trim() ? [`**Judge:** ${body(f.reason.trim())}`] : []
+  ].join(`
+
+`);
+}
+var byPriority = (a, b) => (b.priority ?? -1) - (a.priority ?? -1) || (a.file === b.file ? 0 : a.file < b.file ? -1 : 1) || (a.line ?? 0) - (b.line ?? 0);
+function heading(title, findings) {
+  return [`## ${title}`, ...findings.length ? [...findings].sort(byPriority).map(section) : ["None."]].join(`
+
+`);
+}
+function renderReport(meta, findings) {
+  const of = (bucket) => findings.filter((f) => bucketOf(f) === bucket);
+  const c = countsOf(findings);
+  const unjudged = findings.filter((f) => !isJudged(f)).length;
+  const reviewer = (r) => `${r.name} (${r.engine}${r.model ? `, ${r.model}` : ""})`;
+  const header = [
+    `- Reviewed: ${code(`${meta.base}...HEAD`)} at ${meta.head}, ${meta.commits} commit(s), in ${meta.repo}`,
+    `- When: ${meta.when}`,
+    `- Reviewers: ${meta.reviewers.map(reviewer).join(", ")} \xB7 Judge: ${meta.judge ?? "none"}`,
+    `- Totals: P0 ${c.P0}, P1 ${c.P1}, P2 ${c.P2}, P3 ${c.P3}, dismissed ${c.dismissed}`,
+    ...meta.uncommitted.length ? [`- Not reviewed: ${meta.uncommitted.join(", ")}`] : [],
+    ...meta.failed.map((r) => `- Did not run: ${r.name}: ${noteLine(r.note)}`),
+    ...unjudged ? [`- Not judged: the judge left ${unjudged} finding(s) unclassified; they stay under the reviewer's severity`] : []
+  ];
+  return [
+    `# Granny judge - ${meta.branch}`,
+    header.join(`
+`),
+    ...P_HEADINGS.map((p) => heading(p, of(p))),
+    ...c.dismissed ? [heading("Dismissed by the judge", of("dismissed"))] : []
+  ].join(`
+
+`) + `
+`;
 }
 
 // src/core/reviewer.ts
@@ -1199,15 +1357,17 @@ function worktreePath(repo, branch, worktreeDir, shared = false) {
   const prefix = shared && worktreeDir !== undefined ? `${name}-` : "";
   return normalize(`${dir}/${prefix}${branchSlug(branch)}`);
 }
-function worktreeScript(c, branch, base, path) {
+function excludeScript(c) {
   const entry = shellQuote(`/${c.workDir}/`);
+  return `ex="$(git rev-parse --git-common-dir)/info/exclude" && mkdir -p "\${ex%/*}" && { grep -qxF -e ${entry} "$ex" 2>/dev/null || { if [ -s "$ex" ] && [ -n "$(tail -c 1 "$ex")" ]; then echo >> "$ex"; fi; printf '%s\\n' ${entry} >> "$ex"; }; }`;
+}
+function worktreeScript(c, branch, base, path) {
   const b = shellQuote(branch);
-  const exclude = `ex="$(git rev-parse --git-common-dir)/info/exclude" && mkdir -p "\${ex%/*}" && { grep -qxF -e ${entry} "$ex" 2>/dev/null || { if [ -s "$ex" ] && [ -n "$(tail -c 1 "$ex")" ]; then echo >> "$ex"; fi; printf '%s\\n' ${entry} >> "$ex"; }; }`;
   const find = `wt=$(git worktree list --porcelain | while IFS= read -r l; do case "$l" in "worktree "*) p=\${l#worktree };; "branch refs/heads/"*) if [ "\${l#branch refs/heads/}" = ${b} ]; then printf '%s\\n' "$p"; break; fi;; esac; done)`;
   const reuse = `changes=$(git -C "$wt" status --porcelain) || exit 1; if [ -n "$changes" ]; then printf '[granny] worktree failed: %s has %s checked out with uncommitted changes - commit or discard them, then run again:\\n' "$wt" ${b}; git -C "$wt" status --short; exit 1; fi`;
   const add = `wt=${shellQuote(path)}; git worktree add "$wt" ${b} || exit 1`;
   const create = `wt=${shellQuote(path)}; git worktree add -b ${b} "$wt" ${shellQuote(base)} || exit 1`;
-  return `${exclude} && ${find} && if [ -n "$wt" ]; then ${reuse}; elif git show-ref --verify --quiet ${shellQuote(`refs/heads/${branch}`)}; then ${add}; else ${create}; fi && printf '%s%s\\n' ${shellQuote(SAID2)} "$wt"`;
+  return `${excludeScript(c)} && ${find} && if [ -n "$wt" ]; then ${reuse}; elif git show-ref --verify --quiet ${shellQuote(`refs/heads/${branch}`)}; then ${add}; else ${create}; fi && printf '%s%s\\n' ${shellQuote(SAID2)} "$wt"`;
 }
 function reportedWorktree(output) {
   return REPORTED.exec(output)?.[1];
@@ -1218,6 +1378,9 @@ var PLAN_PHASE = "Plan review";
 var DRAFT_PHASE = "Plan";
 var FINAL_REVIEW_PHASE = "Final review";
 var CHECKS_PHASE = "Checks";
+var REVIEW_PHASE = "Review";
+var JUDGE_PHASE = "Judge";
+var REPORT_PHASE = "Report";
 var TIMEOUT_PROBE = "if command -v timeout >/dev/null; then echo timeout; elif command -v gtimeout >/dev/null; then echo gtimeout; else exit 1; fi";
 var TIMEOUT_MISSING = /(^|[\s:])g?timeout: (command )?not found|command not found: g?timeout$/m;
 var EXIT_MARK = /\[granny\] exit=(\d+)[ \t]*(?:\r?\n|$)/g;
@@ -1230,6 +1393,24 @@ function exitMarked(output) {
 }
 var saidSomething = (d) => typeof d === "string" && d.trim() && !/^\s*(none|n\/a|-|no deviations)?\.?\s*$/i.test(d) ? d : undefined;
 var slug = (s) => s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "stage";
+var ROUND_DETAIL = 2000;
+function roundFinding(f, sent) {
+  return {
+    id: f.id,
+    sent,
+    ...f.severity ? { severity: f.severity } : {},
+    ...f.title ? { title: f.title } : {},
+    ...f.file ? { file: f.file } : {},
+    ...f.line !== undefined ? { line: f.line } : {},
+    ...f.reviewer ? { reviewer: f.reviewer } : {},
+    ...f.detail ? { detail: String(f.detail).slice(0, ROUND_DETAIL) } : {},
+    ...f.verdict ? { verdict: f.verdict } : {},
+    ...f.impact ? { impact: f.impact } : {},
+    ...f.priority !== undefined ? { priority: f.priority } : {},
+    ...f.reason ? { reason: String(f.reason).slice(0, ROUND_DETAIL) } : {},
+    ...f.decision?.why ? { why: f.decision.why } : {}
+  };
+}
 var trimPath = (s) => s.replace(/\/+$/, "") || "/";
 var repoPathOf = (r) => typeof r === "string" ? r : r && typeof r === "object" ? r.repo : undefined;
 var baseName = (path) => path.slice(path.lastIndexOf("/") + 1);
@@ -1240,6 +1421,9 @@ var COUNT = /^\d+$/;
 var short = (sha) => sha.slice(0, 8);
 var STATUS_LINE = /^\s*[MADRCUT?!]{1,2}\s+\S/;
 var listed = (status) => status.map((l) => l.trim()).join(", ");
+var entriesOf = (answer) => Array.isArray(answer?.perFinding) ? answer.perFinding.filter((x) => x && typeof x === "object" && typeof x.id === "string") : [];
+var workOf = (c) => c.workDir.replace(/\/+$/, "");
+var phaseOf = (subject) => subject.kind === "plan" ? PLAN_PHASE : subject.note === WHOLE_BRANCH_NOTE ? FINAL_REVIEW_PHASE : REVIEW_PHASE;
 function checkInput(input) {
   const errors = [];
   if (!input || typeof input !== "object")
@@ -1315,30 +1499,7 @@ function stageCheckErrors(stages, checks) {
 }
 var planFiles = (input) => input.plan === undefined ? [] : Array.isArray(input.plan) ? input.plan : [input.plan];
 var configLayers = (input) => Array.isArray(input.config) ? input.config : [input.config];
-async function runGranny(host, input) {
-  const inputErrors = checkInput(input);
-  if (inputErrors.length)
-    throw new Error(`Invalid granny input:
-- ${inputErrors.join(`
-- `)}`);
-  const config = resolveConfig(configLayers(input), host.name);
-  const base = input.base ?? config.base;
-  const fromStage = input.fromStage ?? 1;
-  const primary = trimPath(input.repo);
-  const extra = (input.repos ?? []).map((r) => typeof r === "string" ? { repo: trimPath(r), base: config.base } : { repo: trimPath(r.repo), base: r.base ?? config.base });
-  const baseOf = (repo) => repo === primary ? base : extra.find((r) => r.repo === repo).base;
-  const specs = input.stages ?? [];
-  const repoOf = (st) => st.repo === undefined ? primary : trimPath(st.repo);
-  const unknownChecks = stageCheckErrors(specs, config.checks);
-  if (unknownChecks.length)
-    throw new Error(`Invalid granny input:
-- ${unknownChecks.join(`
-- `)}`);
-  const checksOf = (st) => st.checks === undefined ? config.checks : config.checks.filter((c) => st.checks.includes(c.name));
-  const finalChecksOf = (repo) => {
-    const theirs = specs.filter((st) => repoOf(st) === repo).map(checksOf);
-    return config.checks.filter((c) => theirs.some((list) => list.includes(c)));
-  };
+function engineParts(host, config) {
   const stopIfCancelled = () => {
     if (host.cancelled?.())
       throw new GrannyCancelled;
@@ -1394,9 +1555,9 @@ ${note}` : ""}` : missing };
     const sha = r.ran ? lineShaped(r.output, SHA) : undefined;
     return { sha, code: r.code, output: r.output };
   };
-  const work = config.workDir.replace(/\/+$/, "");
-  const uncommitted = async (label, phase, cwd) => {
-    const keep = plansIn(cwd).map((f) => shellQuote(`:(exclude,literal)${f.slice(trimPath(cwd).length + 1)}`));
+  const work = workOf(config);
+  const uncommitted = async (label, phase, cwd, plans = []) => {
+    const keep = plans.map((f) => shellQuote(`:(exclude,literal)${f.slice(trimPath(cwd).length + 1)}`));
     const read = () => shell(label, phase, `git status --porcelain${keep.length ? ` -- ':(top)' ${keep.join(" ")}` : ""}`, cwd);
     let r = await read();
     if (!r.ran) {
@@ -1410,6 +1571,164 @@ ${note}` : ""}` : missing };
     }
     return r.output.split(`
 `).filter((l) => STATUS_LINE.test(l) && !`${l.trim().replace(/^\S+\s+/, "")}/`.startsWith(`${work}/`));
+  };
+  const attribute = (rv, findings) => findings.map((f, i) => ({ ...f, id: `${rv.name}-F${i + 1}`, reviewer: rv.name }));
+  const review = async (lane, rv, name, subject, round, attempt) => {
+    const { p, cwd } = lane;
+    const tag = `${name} r${round} ${rv.name}${attempt > 1 ? ` #${attempt}` : ""}`;
+    const phase = phaseOf(subject);
+    if (rv.engine === "agent") {
+      const prompt = subject.kind === "plan" ? agentPlanReviewPrompt(p, subject.files) : agentReviewPrompt(p, name, subject.base, subject.stage, subject.note);
+      const r = await call("reviewer", "findings", `review ${tag}`, phase, prompt, "read-only", rv, cwd);
+      if (!r)
+        return { ran: false, findings: [], note: "reviewer agent returned nothing" };
+      return { ran: true, findings: Array.isArray(r.findings) ? r.findings : [] };
+    }
+    const stem = reviewStem(config, slug(name), round, rv);
+    const plan = subject.kind === "plan" ? planReviewScript(rv, config, host.name, lane.base, stem, planReviewPrompt(p, subject.files)) : reviewPlan(rv, config, host.name, subject.base, stem, commandReviewPrompt(p, name, subject.base, subject.stage, subject.note));
+    if (!plan)
+      return { ran: false, findings: [], note: "this reviewer has no command for a plan review" };
+    let ran;
+    let output;
+    let note;
+    if (host.run) {
+      const r = await run(plan.script, cwd);
+      ran = r.code === 0;
+      output = r.output;
+      if (!ran)
+        note = `review command exited ${r.code}: ${r.output.slice(-2000)}`;
+    } else {
+      const job = detachedReview(plan, config, stem, cwd);
+      const step = async (label, prompt) => {
+        const r = await call("helper", "command", label, phase, prompt, "read-only", config.roles.helper, cwd);
+        return r ? reported(r) : undefined;
+      };
+      const started = await step(`review ${tag}`, reviewStartPrompt(p, name, rv.name, markExit(job.start)));
+      if (!started?.ran) {
+        return { ran: false, findings: [], note: started ? `review command did not start (exit ${started.code})${started.note ? ` (${started.note})` : ""}: ${started.output.slice(-2000)}` : "review runner returned nothing" };
+      }
+      let done = false;
+      for (let n = 1;n <= MAX_WAITS && !done; n++) {
+        const w = await step(`review ${tag} wait ${n}`, reviewWaitPrompt(p, name, rv.name, n, MAX_WAITS, WAIT_SECONDS / 60, markExit(job.wait)));
+        done = lineShaped(w?.output ?? "", /^done$/) !== undefined;
+      }
+      if (!done) {
+        await step(`review ${tag} stop`, reviewStopPrompt(p, name, rv.name, markExit(job.stop)));
+        const limit = `${MAX_WAITS} waits of up to ${WAIT_SECONDS / 60} minutes (${MAX_WAITS * WAIT_SECONDS / 60} minutes)`;
+        return { ran: false, findings: [], note: `review command still running after ${limit} - stopped it` };
+      }
+      const r = await step(`review ${tag} read`, reviewReadPrompt(p, name, rv.name, markExit(job.read)));
+      ran = Boolean(r?.ran);
+      output = r?.output ?? "";
+      if (!ran)
+        note = r ? `review command exited ${r.code}${r.note ? ` (${r.note})` : ""}: ${output.slice(-2000)}` : "review runner returned nothing";
+    }
+    host.log(`${tag}: reviewer: ${plan.backend ?? reportedBackend(output) ?? "not reported"}`);
+    if (!ran)
+      return { ran, findings: [], note };
+    const failure = reviewFailure(output);
+    if (failure)
+      return { ran: false, findings: [], note: `reviewer returned no usable result (${failure}): ${output.slice(-2000)}` };
+    const parsed = parseCodexReview(output, subject.kind === "plan" ? undefined : cwd);
+    const extractions = async (label, prompt) => call("granny", "findings", label, phase, prompt, "read-only", config.roles.granny, cwd);
+    const extract = async (label, prompt) => {
+      const r = await extractions(label, prompt);
+      return Array.isArray(r?.findings) ? r.findings : [];
+    };
+    if (parsed.markers === 0 && !saysNoFindings(output)) {
+      host.log(`${tag}: no finding in the expected form and not just "No findings." - asking an agent to extract findings`);
+      const r = await extractions(`extract ${tag}`, extractPrompt(name, output, "unmarked"));
+      const found = Array.isArray(r?.findings) ? r.findings : [];
+      if (found.length || r?.clean === true)
+        return { ran, findings: found };
+      return { ran: false, findings: [], note: `reviewer output had no findings in the expected form and was not just No findings, and an extraction found none in it: ${output.slice(-2000)}` };
+    }
+    if (parsed.markers <= parsed.findings.length)
+      return { ran, findings: parsed.findings };
+    host.log(`${tag}: parser read ${parsed.findings.length}/${parsed.markers} findings - asking an agent to extract them`);
+    const first = await extract(`extract ${tag}`, extractPrompt(name, output));
+    if (first.length >= parsed.markers)
+      return { ran, findings: first };
+    host.log(`${tag}: extraction recovered ${first.length}/${parsed.markers} findings - asking once more with the expected count`);
+    const second = await extract(`extract ${tag} retry`, extractPrompt(name, output, { markers: parsed.markers, got: first.length }));
+    if (second.length >= parsed.markers)
+      return { ran, findings: second };
+    return {
+      ran: false,
+      findings: [],
+      note: `review reported ${parsed.markers} finding marker(s), parser read ${parsed.findings.length}; extraction recovered ${first.length}, then ${second.length} on a retry that named the count: ${output.slice(-2000)}`
+    };
+  };
+  const attempt = async (lane, rv, name, subject, round, n) => {
+    try {
+      return await review(lane, rv, name, subject, round, n);
+    } catch (e) {
+      if (isCancelled(e))
+        throw e;
+      return { ran: false, findings: [], note: `reviewer call failed: ${String(e?.message ?? e)}` };
+    }
+  };
+  const reviewAll = (lane, reviewers, name, subject, round) => Promise.all(reviewers.map(async (reviewer) => {
+    let r = await attempt(lane, reviewer, name, subject, round, 1);
+    if (!r.ran) {
+      host.log(`${name} r${round} ${reviewer.name}: did not run - retrying once. ${r.note ?? ""}`);
+      r = await attempt(lane, reviewer, name, subject, round, 2);
+    }
+    return { reviewer, ...r, findings: attribute(reviewer, r.findings) };
+  }));
+  const judgeAnswers = async (o) => {
+    const unjudged = (decided) => decided.filter((f) => o.ids.has(f.id) && f.decision.rule === 2);
+    const named = (fs) => fs.map((f) => `${f.id} (${f.decision.why})`).join(", ");
+    const scored = await o.ask(o.label, o.prompt);
+    let per = entriesOf(scored);
+    let decided = o.apply(per);
+    let left = unjudged(decided);
+    if (left.length) {
+      host.log(`${o.at}: ${scored ? `judge left ${left.length} finding(s) unclassified - retrying once: ${named(left)}` : "judge returned nothing - retrying once"}`);
+      const problems = scored ? left.map((f) => ({ id: f.id, why: f.decision.why === "not judged" ? "no classification in your answer" : f.decision.why })) : null;
+      const retried = await o.ask(`${o.label} retry`, `${o.prompt}
+
+${judgeRetryNote(problems)}`);
+      const again = new Set(left.map((f) => f.id));
+      const fresh = entriesOf(retried).filter((x) => again.has(x.id));
+      per = [...per.filter((x) => !again.has(x.id) || !fresh.some((y) => y.id === x.id)), ...fresh];
+      decided = o.apply(per);
+      left = unjudged(decided);
+      if (!scored && !retried)
+        host.log(`${o.at}: judge returned nothing, also on a retry - all ${o.ids.size} finding(s) go ${o.leftTo}`);
+      else if (left.length)
+        host.log(`${o.at}: judge left ${left.length} finding(s) unclassified, also on a retry - ${o.leftTo}: ${named(left)}`);
+    }
+    return { per, decided };
+  };
+  return { call, shell, readHead, uncommitted, reviewAll, judgeAnswers };
+}
+async function runGranny(host, input) {
+  const inputErrors = checkInput(input);
+  if (inputErrors.length)
+    throw new Error(`Invalid granny input:
+- ${inputErrors.join(`
+- `)}`);
+  const config = resolveConfig(configLayers(input), host.name);
+  const { call, shell, readHead, uncommitted: statusOf, reviewAll, judgeAnswers } = engineParts(host, config);
+  const work = workOf(config);
+  const uncommitted = (label, phase, cwd) => statusOf(label, phase, cwd, plansIn(cwd));
+  const base = input.base ?? config.base;
+  const fromStage = input.fromStage ?? 1;
+  const primary = trimPath(input.repo);
+  const extra = (input.repos ?? []).map((r) => typeof r === "string" ? { repo: trimPath(r), base: config.base } : { repo: trimPath(r.repo), base: r.base ?? config.base });
+  const baseOf = (repo) => repo === primary ? base : extra.find((r) => r.repo === repo).base;
+  const specs = input.stages ?? [];
+  const repoOf = (st) => st.repo === undefined ? primary : trimPath(st.repo);
+  const unknownChecks = stageCheckErrors(specs, config.checks);
+  if (unknownChecks.length)
+    throw new Error(`Invalid granny input:
+- ${unknownChecks.join(`
+- `)}`);
+  const checksOf = (st) => st.checks === undefined ? config.checks : config.checks.filter((c) => st.checks.includes(c.name));
+  const finalChecksOf = (repo) => {
+    const theirs = specs.filter((st) => repoOf(st) === repo).map(checksOf);
+    return config.checks.filter((c) => theirs.some((list) => list.includes(c)));
   };
   const setUpWorktree = async (repo, branch, from, label, shared) => {
     const script = worktreeScript(config, branch, from, worktreePath(repo, branch, config.worktreeDir, shared));
@@ -1619,7 +1938,6 @@ the last repair's deviations: ${deviations}` : ""}`;
       deviations = await step(`repair ${name} ${at} #${repairs + 1}`, "the last repair", repairPrompt(lane.p, name, at, repairs + 1, sent, stage));
     }
   };
-  const attribute = (rv, findings) => findings.map((f, i) => ({ ...f, id: `${rv.name}-F${i + 1}`, reviewer: rv.name }));
   const fixPlan = async (label, prompt) => {
     const r = await call("implementer", "planFix", label, PLAN_PHASE, prompt, "write", config.roles.implementer, worktree);
     if (!r)
@@ -1627,110 +1945,6 @@ the last repair's deviations: ${deviations}` : ""}`;
     host.log(`${label}: plan edited - ${Array.isArray(r.files) && r.files.length ? r.files.join(", ") : "no file reported"}`);
     return r;
   };
-  const phaseOf = (subject) => subject.kind === "plan" ? PLAN_PHASE : subject.note ? FINAL_REVIEW_PHASE : "Review";
-  const review = async (lane, rv, name, subject, round, attempt) => {
-    const { p, cwd } = lane;
-    const tag = `${name} r${round} ${rv.name}${attempt > 1 ? ` #${attempt}` : ""}`;
-    const phase = phaseOf(subject);
-    if (rv.engine === "agent") {
-      const prompt = subject.kind === "plan" ? agentPlanReviewPrompt(p, subject.files) : agentReviewPrompt(p, name, subject.base, subject.stage, subject.note);
-      const r = await call("reviewer", "findings", `review ${tag}`, phase, prompt, "read-only", rv, cwd);
-      if (!r)
-        return { ran: false, findings: [], note: "reviewer agent returned nothing" };
-      return { ran: true, findings: Array.isArray(r.findings) ? r.findings : [] };
-    }
-    const stem = reviewStem(config, slug(name), round, rv);
-    const plan = subject.kind === "plan" ? planReviewScript(rv, config, host.name, lane.base, stem, planReviewPrompt(p, subject.files)) : reviewPlan(rv, config, host.name, subject.base, stem, commandReviewPrompt(p, name, subject.base, subject.stage, subject.note));
-    if (!plan)
-      return { ran: false, findings: [], note: "this reviewer has no command for a plan review" };
-    let ran;
-    let output;
-    let note;
-    if (host.run) {
-      const r = await run(plan.script, cwd);
-      ran = r.code === 0;
-      output = r.output;
-      if (!ran)
-        note = `review command exited ${r.code}: ${r.output.slice(-2000)}`;
-    } else {
-      const job = detachedReview(plan, config, stem, cwd);
-      const step = async (label, prompt) => {
-        const r = await call("helper", "command", label, phase, prompt, "read-only", config.roles.helper, cwd);
-        return r ? reported(r) : undefined;
-      };
-      const started = await step(`review ${tag}`, reviewStartPrompt(p, name, rv.name, markExit(job.start)));
-      if (!started?.ran) {
-        return { ran: false, findings: [], note: started ? `review command did not start (exit ${started.code})${started.note ? ` (${started.note})` : ""}: ${started.output.slice(-2000)}` : "review runner returned nothing" };
-      }
-      let done = false;
-      for (let n = 1;n <= MAX_WAITS && !done; n++) {
-        const w = await step(`review ${tag} wait ${n}`, reviewWaitPrompt(p, name, rv.name, n, MAX_WAITS, WAIT_SECONDS / 60, markExit(job.wait)));
-        done = lineShaped(w?.output ?? "", /^done$/) !== undefined;
-      }
-      if (!done) {
-        await step(`review ${tag} stop`, reviewStopPrompt(p, name, rv.name, markExit(job.stop)));
-        const limit = `${MAX_WAITS} waits of up to ${WAIT_SECONDS / 60} minutes (${MAX_WAITS * WAIT_SECONDS / 60} minutes)`;
-        return { ran: false, findings: [], note: `review command still running after ${limit} - stopped it` };
-      }
-      const r = await step(`review ${tag} read`, reviewReadPrompt(p, name, rv.name, markExit(job.read)));
-      ran = Boolean(r?.ran);
-      output = r?.output ?? "";
-      if (!ran)
-        note = r ? `review command exited ${r.code}${r.note ? ` (${r.note})` : ""}: ${output.slice(-2000)}` : "review runner returned nothing";
-    }
-    host.log(`${tag}: reviewer: ${plan.backend ?? reportedBackend(output) ?? "not reported"}`);
-    if (!ran)
-      return { ran, findings: [], note };
-    const failure = reviewFailure(output);
-    if (failure)
-      return { ran: false, findings: [], note: `reviewer returned no usable result (${failure}): ${output.slice(-2000)}` };
-    const parsed = parseCodexReview(output, subject.kind === "plan" ? undefined : cwd);
-    const extractions = async (label, prompt) => call("granny", "findings", label, phase, prompt, "read-only", config.roles.granny, cwd);
-    const extract = async (label, prompt) => {
-      const r = await extractions(label, prompt);
-      return Array.isArray(r?.findings) ? r.findings : [];
-    };
-    if (parsed.markers === 0 && !saysNoFindings(output)) {
-      host.log(`${tag}: no finding in the expected form and not just "No findings." - asking an agent to extract findings`);
-      const r = await extractions(`extract ${tag}`, extractPrompt(name, output, "unmarked"));
-      const found = Array.isArray(r?.findings) ? r.findings : [];
-      if (found.length || r?.clean === true)
-        return { ran, findings: found };
-      return { ran: false, findings: [], note: `reviewer output had no findings in the expected form and was not just No findings, and an extraction found none in it: ${output.slice(-2000)}` };
-    }
-    if (parsed.markers <= parsed.findings.length)
-      return { ran, findings: parsed.findings };
-    host.log(`${tag}: parser read ${parsed.findings.length}/${parsed.markers} findings - asking an agent to extract them`);
-    const first = await extract(`extract ${tag}`, extractPrompt(name, output));
-    if (first.length >= parsed.markers)
-      return { ran, findings: first };
-    host.log(`${tag}: extraction recovered ${first.length}/${parsed.markers} findings - asking once more with the expected count`);
-    const second = await extract(`extract ${tag} retry`, extractPrompt(name, output, { markers: parsed.markers, got: first.length }));
-    if (second.length >= parsed.markers)
-      return { ran, findings: second };
-    return {
-      ran: false,
-      findings: [],
-      note: `review reported ${parsed.markers} finding marker(s), parser read ${parsed.findings.length}; extraction recovered ${first.length}, then ${second.length} on a retry that named the count: ${output.slice(-2000)}`
-    };
-  };
-  const attempt = async (lane, rv, name, subject, round, n) => {
-    try {
-      return await review(lane, rv, name, subject, round, n);
-    } catch (e) {
-      if (isCancelled(e))
-        throw e;
-      return { ran: false, findings: [], note: `reviewer call failed: ${String(e?.message ?? e)}` };
-    }
-  };
-  const reviewAll = (lane, reviewers, name, subject, round) => Promise.all(reviewers.map(async (reviewer) => {
-    let r = await attempt(lane, reviewer, name, subject, round, 1);
-    if (!r.ran) {
-      host.log(`${name} r${round} ${reviewer.name}: did not run - retrying once. ${r.note ?? ""}`);
-      r = await attempt(lane, reviewer, name, subject, round, 2);
-    }
-    return { reviewer, ...r, findings: attribute(reviewer, r.findings) };
-  }));
   const reviewLoop = async (lane, name, subject, reviewers = config.reviewers, opts = {}) => {
     const { gates, checks = [], runs = [], notes = [], prior = [], record } = opts;
     const { p } = lane;
@@ -1755,6 +1969,7 @@ the last repair's deviations: ${deviations}` : ""}`;
       }
       if (!found.length) {
         host.log(`${name} r${round}: clean`);
+        host.round?.({ subject: name, round, findings: [] });
         return { outcome: "clean", rounds: round, residual: kept(), unresolved: [], history };
       }
       const declined = new Map(earlier.flatMap((e) => (e.declined ?? []).map((d) => [roundLabel(e.round, d, e.loop), d.reason])));
@@ -1776,35 +1991,20 @@ the last repair's deviations: ${deviations}` : ""}`;
         const label = `judge ${name} r${round}`;
         const judgedIds = new Set(judged.map((f) => f.id));
         const blockerIds = new Set(blockers.map((f) => f.id));
-        const entriesOf = (answer) => Array.isArray(answer?.perFinding) ? answer.perFinding.filter((x) => x && typeof x === "object" && typeof x.id === "string") : [];
         const decideAll = (per) => found.map((f) => {
           const s = judgedIds.has(f.id) ? per.find((x) => x.id === f.id) : undefined;
           const repeat = typeof s?.repeatOf === "string" && ledger.has(s.repeatOf) ? { repeatOf: s.repeatOf } : {};
           return decide({ ...f, ...repeat }, s, policy, declinedBefore, earlierOf);
         });
-        const unjudged = (decided) => decided.filter((f) => judgedIds.has(f.id) && f.decision.rule === 2);
-        const listed = (fs) => fs.map((f) => `${f.id} (${f.decision.why})`).join(", ");
-        const scored = await call("judge", "judge", label, phase, prompt, "read-only", config.roles.judge, lane.cwd);
-        let per = entriesOf(scored);
-        let withScores = decideAll(per);
-        let left = unjudged(withScores);
-        let retried;
-        if (left.length) {
-          host.log(`${name} r${round}: ${scored ? `judge left ${left.length} finding(s) unclassified - retrying once: ${listed(left)}` : "judge returned nothing - retrying once"}`);
-          const problems = scored ? left.map((f) => ({ id: f.id, why: f.decision.why === "not judged" ? "no classification in your answer" : f.decision.why })) : null;
-          retried = await call("judge", "judge", `${label} retry`, phase, `${prompt}
-
-${judgeRetryNote(problems)}`, "read-only", config.roles.judge, lane.cwd);
-          const again = new Set(left.map((f) => f.id));
-          const fresh = entriesOf(retried).filter((x) => again.has(x.id));
-          per = [...per.filter((x) => !again.has(x.id) || !fresh.some((y) => y.id === x.id)), ...fresh];
-          withScores = decideAll(per);
-          left = unjudged(withScores);
-          if (!scored && !retried)
-            host.log(`${name} r${round}: judge returned nothing, also on a retry - all ${judged.length} finding(s) go to the implementer unjudged (rule 2)`);
-          else if (left.length)
-            host.log(`${name} r${round}: judge left ${left.length} finding(s) unclassified, also on a retry - to the implementer unjudged (rule 2): ${listed(left)}`);
-        }
+        const { per, decided: withScores } = await judgeAnswers({
+          at: `${name} r${round}`,
+          label,
+          prompt,
+          ids: judgedIds,
+          ask: (l, text) => call("judge", "judge", l, phase, text, "read-only", config.roles.judge, lane.cwd),
+          apply: decideAll,
+          leftTo: "to the implementer unjudged (rule 2)"
+        });
         const duplicateOf = new Map(per.filter((x) => judgedIds.has(x.id) && typeof x.duplicateOf === "string" && judgedIds.has(x.duplicateOf)).filter((x) => !blockerIds.has(x.id) || blockerIds.has(x.duplicateOf)).map((x) => [x.id, x.duplicateOf]));
         const merge = mergeDuplicates(withScores, duplicateOf);
         for (const m of merge.merged)
@@ -1815,6 +2015,7 @@ ${judgeRetryNote(problems)}`, "read-only", config.roles.judge, lane.cwd);
       history.push({ round, findings });
       host.log(`${name} r${round}: ${findings.length} finding(s)`);
       const { accepted, residual } = triage(findings);
+      host.round?.({ subject: name, round, findings: findings.map((f) => roundFinding(f, accepted.includes(f))) });
       const entry = { round, sent: accepted, ...residual.length ? { residual } : {} };
       const recorded = record ? { ...entry, loop: record.loop } : undefined;
       if (recorded)
@@ -2311,9 +2512,20 @@ ${note}` : note } : result;
     host.log(`${label}: the checks left uncommitted changes after the pr-ready check - the branch is not PR-ready: ${listed(left)}`);
     return { passed: false, note: `uncommitted changes after the checks at pr-ready: ${listed(left)}` };
   };
+  const outcomesOf = (s) => {
+    const own = specs.flatMap((st, i) => repoOf(st) === s.lane.repo ? [i] : []);
+    const resumed = "it ran in an earlier run, which this run resumes: keep what the PR body says about it";
+    const review = reviews.get(s);
+    return {
+      stages: own.map((i) => i < fromStage - 1 ? { ...results[i], note: resumed } : results[i]),
+      ...review ? { finalReview: review } : {},
+      ...planResult && s.lane.repo === primary ? { plan: fromStage > 1 && planResult.outcome === "skipped" ? { ...planResult, note: resumed } : planResult } : {},
+      reviewOnly: own.length > 0 && own.every((i) => specs[i].implement === false)
+    };
+  };
   const check = async (s) => {
     const label = s.lane.repo === primary ? "pr-ready check" : `pr-ready check ${baseName(s.lane.repo)}`;
-    const final = await call("granny", "final", label, "PR ready", finalPrompt(s.lane.p, plansIn(s.lane.cwd)), "write", config.roles.granny, s.lane.cwd);
+    const final = await call("granny", "final", label, "PR ready", finalPrompt(s.lane.p, plansIn(s.lane.cwd), outcomesOf(s)), "write", config.roles.granny, s.lane.cwd);
     if (!final)
       host.log(s.lane.repo === primary ? "final check returned nothing" : `${label} returned nothing`);
     const review = reviews.get(s);
@@ -2344,6 +2556,190 @@ ${note}` : note } : result;
     final,
     ...finals.length > 1 ? { repos: finals } : {}
   };
+}
+function checkJudgeInput(input) {
+  if (!input || typeof input !== "object")
+    return ["input must be an object"];
+  const errors = [];
+  if (typeof input.repo !== "string" || !input.repo.startsWith("/"))
+    errors.push("repo must be an absolute path");
+  if (input.base !== undefined && (typeof input.base !== "string" || !input.base))
+    errors.push("base must be a non-empty string");
+  if (input.context !== undefined && typeof input.context !== "string")
+    errors.push("context must be a string");
+  return errors;
+}
+var TAG_POLICY = { threshold: 100, alwaysFix: [] };
+var DATE_STAMP = /^\d{8}-\d{6}$/;
+var BRANCH_LINE = /^\S+$/;
+async function runJudge(host, input) {
+  const inputErrors = checkJudgeInput(input);
+  if (inputErrors.length)
+    throw new Error(`Invalid granny judge input:
+- ${inputErrors.join(`
+- `)}`);
+  const layers = configLayers(input);
+  const gaps = judgeConfigGaps(layers, host.name);
+  if (gaps.length)
+    throw new Error(`granny judge needs models: ${gaps.join("; ")}`);
+  const config = resolveConfig(layers, host.name);
+  const { call, shell, readHead, uncommitted, reviewAll, judgeAnswers } = engineParts(host, config);
+  const repo = trimPath(input.repo);
+  const base = input.base ?? config.base;
+  host.phase(REVIEW_PHASE);
+  const excluded = await shell("exclude", REVIEW_PHASE, excludeScript(config), repo, judgeStepPrompt);
+  if (!excluded.ran)
+    host.log(`could not add ${config.workDir}/ to the git excludes, so the report may show as untracked (exit ${excluded.code}): ${excluded.output.slice(-300)}`);
+  const needed = async (label, script, ask) => {
+    const r = await shell(label, REVIEW_PHASE, script, repo, ask);
+    if (!r.ran)
+      throw new Error(`granny judge could not read the ${label} in ${repo} (exit ${r.code}): ${r.output.slice(-500)}`);
+    return r.output;
+  };
+  const date = lineShaped(await needed("date", "date +%Y%m%d-%H%M%S", judgeStepPrompt), DATE_STAMP);
+  if (!date)
+    throw new Error("granny judge could not read the date");
+  const current = lineShaped(await needed("branch", "git branch --show-current"), BRANCH_LINE);
+  const read = await readHead("head", REVIEW_PHASE, repo);
+  if (!read.sha)
+    throw new Error(`granny judge could not read HEAD in ${repo} (exit ${read.code}): ${read.output.slice(-500)}`);
+  const head = read.sha;
+  const branch = current ?? short(head);
+  const count = await shell("commits", REVIEW_PHASE, `git rev-list --count ${shellQuote(base)}..HEAD`, repo);
+  const commits = count.ran ? lineShaped(count.output, COUNT) : undefined;
+  if (commits === undefined) {
+    throw new Error(`granny judge could not count the commits in ${base}..HEAD in ${repo} (exit ${count.code}): ${count.output.slice(-500)} - ${base} may not be this repo's base; it may use another one such as master, so pass base`);
+  }
+  const dirty = await uncommitted("status", REVIEW_PHASE, repo);
+  const notReviewed = Array.isArray(dirty) ? dirty.map((l) => l.trim().replace(/^\S+\s+/, "")) : [`the working tree status could not be read (${dirty.unreadable.replace(/\s+/g, " ")})`];
+  const finish = (outcome, rest = {}) => ({
+    repo,
+    branch,
+    base,
+    head,
+    outcome,
+    counts: countsOf([]),
+    demoted: [],
+    findings: [],
+    failedReviewers: [],
+    notJudged: [],
+    uncommitted: notReviewed,
+    written: false,
+    ...rest
+  });
+  if (Number(commits) === 0) {
+    const note = `${base}..HEAD has no commits, so there was nothing to review${notReviewed.length ? `; uncommitted files are not reviewed: ${notReviewed.join(", ")}` : ""}`;
+    host.log(`no-changes - ${note}`);
+    return finish("no-changes", { note });
+  }
+  const p = { repo, branch, base, config, ...input.context ? { context: input.context } : {} };
+  const lane = { repo, base, branch, cwd: repo, p };
+  const note = `${ONE_SHOT_NOTE}${current ? "" : ` HEAD is detached at ${branch}, so that is the "branch" named here.`}`;
+  const results = await reviewAll(lane, config.reviewers, branch, { kind: "diff", base, note }, 1);
+  const failedReviewers = results.filter((r) => !r.ran).map((r) => ({ name: r.reviewer.name, note: r.note ?? "no output" }));
+  if (failedReviewers.length === results.length) {
+    const notes = failedReviewers.map((r) => `${r.name}: ${r.note}`).join(`
+`);
+    host.log(`review-failed - no reviewer ran, also on a retry, so there is no report:
+${notes}`);
+    return finish("review-failed", { failedReviewers, note: notes });
+  }
+  for (const r of failedReviewers)
+    host.log(`${r.name} did not run, also on a retry - going on without it: ${r.note}`);
+  const found = results.filter((r) => r.ran).flatMap((r) => r.findings);
+  const tag = async () => {
+    host.phase(JUDGE_PHASE);
+    const ids = new Set(found.map((f) => f.id));
+    const label = `tag ${branch}`;
+    const { per, decided } = await judgeAnswers({
+      at: label,
+      label,
+      prompt: tagPrompt(p, base, found),
+      ids,
+      ask: async (l, text) => {
+        try {
+          return await call("judge", "judge", l, JUDGE_PHASE, text, "read-only", config.roles.judge, repo);
+        } catch (e) {
+          if (isCancelled(e))
+            throw e;
+          host.log(`${l}: the judge call failed: ${String(e?.message ?? e)}`);
+          return null;
+        }
+      },
+      apply: (per) => found.map((f) => decide(f, per.find((x) => x.id === f.id), TAG_POLICY, () => true)),
+      leftTo: "under the reviewer's severity, not judged"
+    });
+    const duplicateOf = new Map(per.filter((x) => ids.has(x.id) && typeof x.duplicateOf === "string" && ids.has(x.duplicateOf)).map((x) => [x.id, x.duplicateOf]));
+    const placed = decided.map((f) => ({ ...f, decision: { ...f.decision, action: isJudged(f) && bucketOf(f) !== "dismissed" ? "fix" : "residual" } }));
+    const { findings, merged } = mergeDuplicates(placed, duplicateOf);
+    for (const m of merged)
+      host.log(`${label}: judge merged ${m.id} into ${m.into} (duplicate)`);
+    const severity = new Map(found.map((f) => [f.id, f.severity]));
+    return findings.map(({ decision: _decision, ...f }) => ({
+      ...f,
+      severity: (f.duplicates ?? []).map((id) => severity.get(id)).reduce((worst, s) => severityOf({ severity: s }) < severityOf({ severity: worst }) ? s : worst, f.severity)
+    }));
+  };
+  const findings = found.length ? await tag() : [];
+  const counts = countsOf(findings);
+  const demoted = findings.filter((f) => isDemoted(f) && (severityOf(f) === "P0" || severityOf(f) === "P1")).map((f) => f.id);
+  const notJudged = findings.filter((f) => !isJudged(f)).map((f) => f.id);
+  if (demoted.length)
+    host.log(`the judge placed ${demoted.length} reviewer P0/P1 finding(s) lower: ${demoted.join(", ")}`);
+  host.phase(REPORT_PHASE);
+  const meta = {
+    branch,
+    base,
+    head: short(head),
+    commits: Number(commits),
+    repo,
+    when: date,
+    reviewers: config.reviewers.map((rv) => {
+      const model = resolveModel(rv.model, host.name);
+      return { name: rv.name, engine: rv.engine, ...model ? { model } : {} };
+    }),
+    judge: resolveModel(config.roles.judge.model, host.name),
+    uncommitted: notReviewed,
+    failed: failedReviewers
+  };
+  const report = renderReport(meta, findings);
+  const reportPath = `${repo}/${workOf(config)}/reviews/${date}-${branchSlug(branch)}.md`;
+  const save = async () => {
+    const want = utf8Length(report);
+    for (let n = 1;n <= 2; n++) {
+      const w = await shell(n === 1 ? "write report" : "write report retry", REPORT_PHASE, heredocWriteScript(reportPath, report), repo, reportWritePrompt);
+      if (!w.ran) {
+        host.log(`writing the report failed (exit ${w.code}): ${w.output.slice(-300)}`);
+        return false;
+      }
+      const size = await shell("report size", REPORT_PHASE, `wc -c < ${shellQuote(reportPath)}`, repo, judgeStepPrompt);
+      const got = size.ran ? lineShaped(size.output, COUNT) : undefined;
+      if (got !== undefined && Number(got) === want)
+        return true;
+      host.log(`${reportPath} holds ${got ?? "an unknown number of"} bytes, not ${want}${n === 1 ? " - writing it once more" : ""}`);
+    }
+    return false;
+  };
+  let written = false;
+  try {
+    written = await save();
+  } catch (e) {
+    if (isCancelled(e))
+      throw e;
+    host.log(`writing the report failed: ${String(e?.message ?? e)}`);
+  }
+  host.log(written ? `report written: ${reportPath}` : `report not written: ${reportPath} - the result holds its text`);
+  return finish("reviewed", {
+    counts,
+    demoted,
+    findings,
+    failedReviewers,
+    notJudged,
+    reportPath,
+    written,
+    report,
+    ...written ? {} : { note: `the report could not be written to ${reportPath}; it is in this result` }
+  });
 }
 
 // src/adapters/common.ts
@@ -2444,7 +2840,10 @@ function summarize(result, worktree) {
     lines.push(`- plan written: ${result.draft.files.join(", ")} - ${result.draft.stages.length} proposed stage(s)${result.draft.questions ? ", open questions for the user" : ""}`);
     if (result.plan)
       lines.push(line(result.plan, "plan review"));
-    lines.push("- stopped after planning, nothing was implemented: show the user the plan, the stages and the questions, and wait for their approval");
+    if (result.draft.questions)
+      lines.push(`- open questions: ask the user these with your question tool (\`ask\` on omp, \`question\` on opencode), do not just write them out; without such a tool, ask in one numbered message:
+${result.draft.questions.trim()}`);
+    lines.push("- stopped after planning, nothing was implemented: show the user the plan and the stages, and wait for their approval");
   } else if (result.plan) {
     const stopped = result.plan.outcome === "round-cap" || result.plan.outcome === "review-failed";
     lines.unshift(`${line(result.plan, "plan review")}${stopped ? " - stopped before stage 1, nothing was implemented" : ""}`);
@@ -2470,15 +2869,45 @@ function summarize(result, worktree) {
   return lines.join(`
 `);
 }
+function summarizeJudge(result) {
+  const didNotRun = result.failedReviewers.map((r) => `- did not run: ${r.name}: ${noteLine(r.note)}`);
+  if (result.outcome !== "reviewed") {
+    const why = result.outcome === "no-changes" ? oneLine(result.note ?? "nothing to review") : "no reviewer ran, also on a retry";
+    return [`- no report: ${why}`, ...didNotRun, "Nothing was fixed or committed. Tell the user; do not fix anything unless they ask."].join(`
+`);
+  }
+  const { P0, P1, P2, P3, dismissed } = result.counts;
+  return [
+    result.written ? `- report: ${result.reportPath}` : `- report NOT written to ${result.reportPath}: its text is in the run's result.json (granny_status), under report`,
+    `- counts: P0 ${P0}, P1 ${P1}, P2 ${P2}, P3 ${P3}, dismissed ${dismissed}`,
+    `- reviewer P0/P1 findings the judge placed lower: ${result.demoted.length}${result.demoted.length ? ` (${result.demoted.join(", ")})` : ""}`,
+    ...result.uncommitted.length ? [`- not reviewed, uncommitted: ${result.uncommitted.join(", ")}`] : [],
+    ...didNotRun,
+    ...result.notJudged.length ? [`- not judged, under the reviewer's severity: ${result.notJudged.join(", ")}`] : [],
+    "Nothing was fixed or committed. Give the user the report path and the counts; do not fix anything unless they ask."
+  ].join(`
+`);
+}
 function planReviewNotice(input, config) {
   const reviewsPlan = config.planReview && (input.plan !== undefined || input.goal !== undefined) && !((input.fromStage ?? 1) > 1);
   return reviewsPlan ? `
 ${planReviewWarning(config.maxRounds)} Tell the user this in your next message.` : "";
 }
+var SAME_MODEL_HINT = "reviewers share the implementer's model; a different model may catch more";
+function sameModelNotice(input, config, host) {
+  if (input.goal !== undefined)
+    return "";
+  const modelOf = (spec) => resolveModel(spec, host)?.split("#")[0];
+  const implementer = modelOf(config.roles.implementer.model);
+  const shared = config.reviewers.every((rv) => rv.engine === "agent" && modelOf(rv.model) === implementer);
+  return shared ? `
+${SAME_MODEL_HINT}. Mention this to the user in your next message; do not change a model unless the user asks.` : "";
+}
 var layerSources = (repo) => [globalConfigPath(), join(repo, "granny.config.json"), "the run's config"];
 var AGENT_ROLES = ["granny", "helper", "planner", "implementer", "judge"];
+var JUDGE_ROLES = ["granny", "judge"];
 var isObject2 = (v) => !!v && typeof v === "object" && !Array.isArray(v);
-function hostModelErrors(config, layers, host, problem, sources) {
+function hostModelErrors(config, layers, host, problem, sources, checked = AGENT_ROLES) {
   const from = (set) => {
     for (let i = layers.length - 1;i >= 0; i--) {
       const layer = layers[i];
@@ -2495,7 +2924,7 @@ function hostModelErrors(config, layers, host, problem, sources) {
     const claude = typeof spec === "string" ? spec : spec?.["claude-code"] ?? model;
     return [`${what} "${model}"${where} - ${wrong}; give a host-keyed model, e.g. { "claude-code": "${claude}", "${host}": "<provider/model>" }`];
   };
-  const roles = AGENT_ROLES.flatMap((role) => check(`roles.${role}.model:`, config.roles[role].model, from((l) => isObject2(l.roles) && isObject2(l.roles[role]) && l.roles[role].model !== undefined)));
+  const roles = checked.flatMap((role) => check(`roles.${role}.model:`, config.roles[role].model, from((l) => isObject2(l.roles) && isObject2(l.roles[role]) && l.roles[role].model !== undefined)));
   const reviewers = config.reviewers.flatMap((rv, i) => rv.engine === "agent" ? check(`reviewers[${i}] "${rv.name}": model`, rv.model, from((l) => Array.isArray(l.reviewers))) : []);
   return [...roles, ...reviewers];
 }
@@ -2625,6 +3054,49 @@ var RUN_INPUT_SCHEMA = {
   },
   required: ["repo", "branch"]
 };
+var JUDGE_TOOL_DESCRIPTION = `granny-workflow: a review-only run ("granny judge"), in the background. One review of the checkout's <base>...HEAD and one tagging of its findings by another agent, saved as a markdown report under <workDir>/reviews/ (default .granny/reviews/). It changes nothing else: no fix, commit, push, branch or worktree. The reviewers and the judge model must be in the user's config files; when they are not, it refuses, and you ask the user as the skill's references/judge.md says - never choose a model yourself. Send only the fields you set. ${USER_SETTINGS}`;
+var JUDGE_INPUT_SCHEMA = {
+  type: "object",
+  properties: {
+    repo: { type: "string", description: "Absolute path of the checkout to review, on the branch to review; the run files and the report go to <repo>/<workDir>/" },
+    base: { type: "string", description: "The branch to diff against; defaults to config.base" },
+    context: { type: "string", description: "What the user wants looked at, or a plan to check against" },
+    config: {
+      type: "object",
+      additionalProperties: true,
+      description: `Per-run overrides of granny.config.json (same shape). They do not answer a refusal: what is missing goes to the config files, from the user. ${USER_SETTINGS}`
+    }
+  },
+  required: ["repo"]
+};
+var ASK_FOR_MODELS = "Ask the user for these per the skill's references/judge.md and write them to the config. Do not choose a model yourself.";
+function prepareJudge(input, host, problem) {
+  const refused = (problems, end = "") => ({ refused: `granny_judge refused:
+- ${problems.join(`
+- `)}${end}` });
+  const problems = checkJudgeInput(input);
+  if (problems.length)
+    return refused(problems);
+  const files = [readJson(globalConfigPath()), readJson(join(input.repo, "granny.config.json"))];
+  const layers = [...files, input.config];
+  const gaps = [...new Set([...judgeConfigGaps(files, host), ...judgeConfigGaps(layers, host)])];
+  if (gaps.length)
+    return refused(gaps, `
+${ASK_FOR_MODELS}`);
+  const config = resolveConfig(layers, host);
+  const badModels = hostModelErrors(config, layers, host, problem, layerSources(input.repo), JUDGE_ROLES);
+  if (badModels.length)
+    return refused(badModels);
+  try {
+    return { layers, config, branch: git(input.repo, ["branch", "--show-current"]) || git(input.repo, ["rev-parse", "HEAD"]).slice(0, 8) };
+  } catch (e) {
+    return refused([e.message]);
+  }
+}
+function judgeStartLine(id, input, branch, config, host) {
+  const reviews = `${input.base ?? config.base}...HEAD by ${reviewersText(config.reviewers, host)}, tagged by ${resolveModel(config.roles.judge.model, host)}`;
+  return `granny judge run ${id} started on ${input.repo} (${branch}): one review of ${reviews}. Nothing will be changed: no fix, commit, push, branch or worktree, only a report under ${config.workDir.replace(/\/+$/, "")}/reviews/. Uncommitted files are not reviewed.`;
+}
 var HEARTBEAT_MS = 60000;
 var intervals = {
   setInterval: (fn, ms) => setInterval(fn, ms),
@@ -2705,18 +3177,37 @@ function runDir(runs, runIdArg, repo) {
   const pick = runIdArg ?? ids.at(-1);
   return pick && ids.includes(pick) ? join(root, pick) : undefined;
 }
+var isHeartbeat = (line) => {
+  try {
+    return JSON.parse(line)?.type === "heartbeat";
+  } catch {
+    return false;
+  }
+};
+function journalTail(journal, count) {
+  const tail = [];
+  let end = journal.trimEnd().length;
+  while (end > 0 && tail.length < count) {
+    const start = journal.lastIndexOf(`
+`, end - 1);
+    const line = journal.slice(start + 1, end);
+    if (!isHeartbeat(line))
+      tail.push(line);
+    end = Math.max(start, 0);
+  }
+  return tail.reverse().join(`
+`);
+}
 function runStatus(runs, runIdArg, repo) {
   const dir = runDir(runs, runIdArg, repo);
   if (!dir)
     return "No such granny run. Pass runId, or repo to see the latest run in that repo.";
   const read = (f) => existsSync(join(dir, f)) ? readFileSync(join(dir, f), "utf8") : "";
-  const tail = read("journal.jsonl").trim().split(`
-`).slice(-40).join(`
-`);
+  const tail = journalTail(read("journal.jsonl"), 40);
   const result = read("result.json");
   return [
     `status: ${read("status.json")}`,
-    `journal (last 40 lines):
+    `journal (last 40 lines, without heartbeats):
 ${tail}`,
     result ? `result (${join(dir, "result.json")}):
 ${result.length > 30000 ? result.slice(0, 30000) + `
@@ -2787,13 +3278,13 @@ var BURST_MS = 5000;
 var BURST_NAMES = 10;
 var MAX_ROWS = 200;
 var SHELLS = new Set(["bash", "shell", "sh"]);
-var oneLine = (text) => clean(text).replace(/\s+/g, " ").trim();
+var oneLine2 = (text) => clean(text).replace(/\s+/g, " ").trim();
 function argOf(input) {
   if (!input || typeof input !== "object")
     return;
   const args = input;
   const key = ARG_KEYS.find((k) => typeof args[k] === "string" && args[k].trim());
-  return key ? oneLine(args[key]).slice(0, ARG_CHARS) : undefined;
+  return key ? oneLine2(args[key]).slice(0, ARG_CHARS) : undefined;
 }
 var KINDS = {
   thinking: "thinking",
@@ -2812,8 +3303,27 @@ var shortOf = (name, arg, cwd, home) => {
 };
 var firstLine = (text) => clean(text).split(`
 `).map((l) => l.trim()).find(Boolean) ?? "";
+function nowLine(now, at, cwd) {
+  const took = duration(at - now.since);
+  switch (now.state) {
+    case "thinking":
+      return `\u25CF thinking ${took}${now.heading ? ` \xB7 "${oneLine2(now.heading)}"` : ""}`;
+    case "writing":
+      return `\u25CF writing ${took}`;
+    case "running": {
+      const what = now.intent ? oneLine2(now.intent) : now.arg ? shortArg(now.arg, cwd) : "";
+      return `\u25CF running ${now.tool ?? "a tool"}${what ? `: ${what}` : ""} ${took}`;
+    }
+    case "preparing":
+      return `\u25CF preparing a tool call ${took}`;
+    case "waiting":
+      return `\u2026 waiting for model ${took}`;
+    case "starting":
+      return `\u2026 starting ${took}`;
+  }
+}
 var TODO_MARKS = { done: "\u2713", active: "\u25CF", pending: "\xB7" };
-var todoText = (todos) => todos.map((t) => `${TODO_MARKS[t.state]} ${oneLine(t.text)}`).join("  ");
+var todoText = (todos) => todos.map((t) => `${TODO_MARKS[t.state]} ${oneLine2(t.text)}`).join("  ");
 function activityLines(items, cwd, home) {
   const out = [];
   let last = "";
@@ -2827,15 +3337,15 @@ function activityLines(items, cwd, home) {
   return out;
 }
 function lineOf(item, cwd, home) {
-  const name = oneLine(item.name ?? "tool");
+  const name = oneLine2(item.name ?? "tool");
   switch (item.kind) {
     case "state":
-      return item.text ? `\xB7 ${oneLine(item.text)}` : undefined;
+      return item.text ? `\xB7 ${oneLine2(item.text)}` : undefined;
     case "heading":
-      return item.text ? `\xBB ${oneLine(item.text)}` : undefined;
+      return item.text ? `\xBB ${oneLine2(item.text)}` : undefined;
     case "tool": {
       const arg = item.arg ? shortArg(item.arg, cwd, home) : "";
-      const what = item.intent ? `${oneLine(item.intent)}${arg ? ` \xB7 ${arg}` : ""}` : arg;
+      const what = item.intent ? `${oneLine2(item.intent)}${arg ? ` \xB7 ${arg}` : ""}` : arg;
       return `\u25B8 ${name.padEnd(6)} ${what}`.trimEnd();
     }
     case "tool-end":
@@ -2843,7 +3353,7 @@ function lineOf(item, cwd, home) {
     case "error":
       return `\u2717 ${name} failed${item.text ? `: ${firstLine(item.text)}` : ""}`;
     case "subagents":
-      return `\u2514 task: ${(item.names ?? []).map(oneLine).join(", ")}`;
+      return `\u2514 task: ${(item.names ?? []).map(oneLine2).join(", ")}`;
     case "text": {
       const said = firstLine(item.text ?? "");
       return said ? `\u270E "${fit(said, TEXT_CHARS)}"` : undefined;
@@ -2851,7 +3361,7 @@ function lineOf(item, cwd, home) {
     case "todo":
       return `\u25B8 ${"todo".padEnd(6)} ${todoText(item.todos ?? [])}`;
     case "note":
-      return item.text ? oneLine(item.text) : undefined;
+      return item.text ? oneLine2(item.text) : undefined;
     case "exit":
       return `\u25A0 process exited ${item.code ?? "?"}`;
   }
@@ -2894,18 +3404,18 @@ function summarise(items, at, opts = {}) {
     const t = item.t ?? at;
     switch (item.kind) {
       case "state": {
-        const kind = KINDS[oneLine(item.text ?? "")];
+        const kind = KINDS[oneLine2(item.text ?? "")];
         if (kind)
           state = { state: kind, since: t };
         break;
       }
       case "heading":
         if (item.text)
-          heading = oneLine(item.text);
+          heading = oneLine2(item.text);
         break;
       case "tool": {
-        const tool = oneLine(item.name ?? "tool");
-        const intent = item.intent ? oneLine(item.intent) : undefined;
+        const tool = oneLine2(item.name ?? "tool");
+        const intent = item.intent ? oneLine2(item.intent) : undefined;
         const arg = isRef(item.arg ?? "") ? item.arg : shortOf(tool, item.arg, cwd, home);
         state = { state: "running", tool, ...item.arg ? { arg: item.arg } : {}, ...intent ? { intent } : {}, since: t };
         const prev = rows.at(-1);
@@ -2927,7 +3437,7 @@ function summarise(items, at, opts = {}) {
       }
       case "subagents": {
         const row = openRow("task", undefined);
-        const names = (item.names ?? []).map(oneLine);
+        const names = (item.names ?? []).map(oneLine2);
         if (row)
           row.names = names;
         else
@@ -2960,7 +3470,7 @@ function summarise(items, at, opts = {}) {
         break;
       }
       case "todo":
-        todo = (item.todos ?? []).map((x) => ({ text: oneLine(x.text), state: x.state }));
+        todo = (item.todos ?? []).map((x) => ({ text: oneLine2(x.text), state: x.state }));
         break;
       case "text": {
         const lines = clean(item.text ?? "").split(`
@@ -2973,7 +3483,7 @@ function summarise(items, at, opts = {}) {
       }
       case "note":
         if (item.text)
-          rows.push({ t, tool: "", args: [], count: 1, note: oneLine(item.text), tone: "warning", open: false });
+          rows.push({ t, tool: "", args: [], count: 1, note: oneLine2(item.text), tone: "warning", open: false });
         break;
       case "exit":
         state = undefined;
@@ -3010,7 +3520,7 @@ function nowBlock(end, state, heading, at, cwd, home) {
   const extra = heading ? { heading } : {};
   switch (state.state) {
     case "running": {
-      const detail = state.intent ? oneLine(state.intent) : shortOf(state.tool, state.arg, cwd, home);
+      const detail = state.intent ? oneLine2(state.intent) : shortOf(state.tool, state.arg, cwd, home);
       return { text: `\u25CF ${state.tool ?? "tool"} \xB7 ${took}`, tone: "info", ...detail ? { detail } : {}, ...extra };
     }
     case "thinking":
@@ -3065,19 +3575,19 @@ function deltaOf(line) {
   }
   return "";
 }
-function oneLine2(value, max = 60) {
+function oneLine3(value, max = 60) {
   const flat = value.replace(/\s+/g, " ").trim();
   return flat.length > max ? `${flat.slice(0, max - 1)}\u2026` : flat;
 }
 function subagents(args) {
   const items = Array.isArray(args?.tasks) ? args.tasks : [args];
-  return items.map((t) => oneLine2(String(t?.name || t?.agent || "task"), 40));
+  return items.map((t) => oneLine3(String(t?.name || t?.agent || "task"), 40));
 }
 var callId = (event) => event?.toolCallId === undefined ? {} : { id: String(event.toolCallId) };
 function toolEntry(event) {
-  const intent = typeof event?.intent === "string" && event.intent.trim() ? oneLine2(event.intent, LOG_ARG) : undefined;
+  const intent = typeof event?.intent === "string" && event.intent.trim() ? oneLine3(event.intent, LOG_ARG) : undefined;
   const raw = argOf(event?.args);
-  const arg = raw ? oneLine2(raw, LOG_ARG) : undefined;
+  const arg = raw ? oneLine3(raw, LOG_ARG) : undefined;
   return { type: "tool", ...callId(event), name: String(event?.toolName ?? "tool"), ...intent ? { intent } : {}, ...arg ? { arg } : {} };
 }
 var TODO_STATES = { completed: "done", in_progress: "active", pending: "pending", blocked: "pending" };
@@ -3090,7 +3600,7 @@ function todosOf(result) {
     for (const task of Array.isArray(phase?.tasks) ? phase.tasks : []) {
       const state = TODO_STATES[task?.status];
       if (state && typeof task.content === "string" && task.content.trim())
-        out.push({ text: oneLine2(task.content, LOG_ARG), state });
+        out.push({ text: oneLine3(task.content, LOG_ARG), state });
     }
   }
   return out.length ? out : undefined;
@@ -3103,11 +3613,11 @@ function finalText(message) {
 function describe(event, cwd) {
   const name = String(event?.toolName ?? "tool");
   if (typeof event?.intent === "string" && event.intent.trim())
-    return { name, detail: oneLine2(event.intent), intent: true };
+    return { name, detail: oneLine3(event.intent), intent: true };
   if (name === "task")
-    return { name, detail: oneLine2(subagents(event?.args).join(", ")) };
+    return { name, detail: oneLine3(subagents(event?.args).join(", ")) };
   const arg = argOf(event?.args);
-  return { name, detail: arg ? oneLine2(shortArg(arg, cwd), 60) : undefined };
+  return { name, detail: arg ? oneLine3(shortArg(arg, cwd), 60) : undefined };
 }
 var NOW_KINDS = { starting: "starting", "waiting for model": "waiting", thinking: "thinking", writing: "writing", "preparing a tool call": "preparing" };
 var HEADING = /(?:^|\n)[ \t]*\*\*([^*\n]+)\*\*/g;
@@ -3254,7 +3764,7 @@ class RoleActivity {
       let heading;
       for (const m of this.thinking.matchAll(HEADING))
         heading = m[1];
-      const text = heading?.trim() ? oneLine2(heading) : undefined;
+      const text = heading?.trim() ? oneLine3(heading) : undefined;
       if (text && text !== this.heading) {
         this.heading = text;
         this.log?.({ type: "heading", text });
@@ -3408,6 +3918,147 @@ class LiveRun {
 import { readdirSync as readdirSync3, readFileSync as readFileSync2 } from "fs";
 import { homedir as homedir2 } from "os";
 import { join as join3 } from "path";
+
+// src/adapters/runview/layout.ts
+var STATUS_TONES = { running: "info", done: "success", failed: "error", cancelled: "warning" };
+var AGENT_TONES = { running: "info", waiting: "muted", done: "success", failed: "error", cancelled: "warning" };
+var GROUP_TONES = { upcoming: "muted", running: "info", done: "success", failed: "error", skipped: "muted", cancelled: "warning" };
+function wrap(text, width) {
+  if (width < 1)
+    return [];
+  const out = [];
+  let line = "";
+  for (const word of text.split(" ")) {
+    const next = line ? `${line} ${word}` : word;
+    if (next.length <= width)
+      line = next;
+    else {
+      if (line)
+        out.push(line);
+      line = word.length > width ? fit(word, width) : word;
+    }
+  }
+  if (line || !out.length)
+    out.push(line);
+  return out;
+}
+var took = (start, end, now) => start === undefined ? "" : duration((end ?? now) - start);
+var checksText = (c) => c.state === "running" ? "checks running" : c.state === "passed" ? "checks \u2713" : `checks \u2717${c.failed.length ? ` ${c.failed.join(", ")}` : ""}`;
+var checksTone = (c) => c.state === "running" ? "info" : c.state === "passed" ? "success" : "error";
+function groupDetail(tree, group, now, width) {
+  const total = tree.outline?.stages.length;
+  const name = group.number !== undefined ? `stage ${group.number}${total ? `/${total}` : ""} \xB7 ${group.title}` : group.title;
+  const out = wrap(name, width).map((text) => ({ text, tone: "base" }));
+  out.push({ text: [group.state, took(group.start, group.end, now), group.outcome, group.note].filter(Boolean).join(" \xB7 "), tone: GROUP_TONES[group.state] });
+  if (group.checks)
+    out.push({ text: checksText(group.checks), tone: checksTone(group.checks) });
+  if (group.lines.length)
+    out.push({ text: "", tone: "base" }, ...group.lines.map((text) => ({ text, tone: "base" })));
+  return out;
+}
+function checksDetail(group) {
+  const head = { text: `checks \xB7 ${group.number !== undefined ? `stage ${group.number} \xB7 ` : ""}${group.title}`, tone: "base" };
+  const c = group.checks;
+  if (!c)
+    return [head, { text: "no checks result yet", tone: "muted" }];
+  return [head, { text: checksText(c), tone: checksTone(c) }, ...c.lines.map((text) => ({ text, tone: "base" }))];
+}
+function runDetail(tree, facts = {}) {
+  const out = [
+    { text: `run ${tree.id}`, tone: "base" },
+    { text: `status   ${tree.status}`, tone: STATUS_TONES[tree.status] ?? "base" }
+  ];
+  if (facts.repo)
+    out.push({ text: `repo     ${facts.repo}`, tone: "muted" });
+  if (tree.branch)
+    out.push({ text: `branch   ${tree.branch}`, tone: "muted" });
+  out.push({ text: `started  ${stamp2(tree.start) ?? "?"}`, tone: "muted" });
+  if (tree.status === "running")
+    out.push({ text: `phase    ${tree.phase ?? "Starting"}`, tone: "muted" });
+  else
+    out.push({ text: `ended    ${stamp2(tree.end) ?? "?"}`, tone: "muted" });
+  if (facts.dir)
+    out.push({ text: `result   ${facts.dir.replace(/\/+$/, "")}/result.json`, tone: "muted" });
+  if (facts.error)
+    out.push({ text: `error: ${facts.error.split(`
+`)[0]}`, tone: "error" });
+  if (facts.reply)
+    out.push({ text: "", tone: "base" }, ...facts.reply.split(`
+`).map((text) => ({ text, tone: "base" })));
+  return out;
+}
+var OUTCOME_MARKS = { done: "\u2713", failed: "\u2717", cancelled: "\u2298" };
+function agentHead(agent, now, live = {}) {
+  const mark = OUTCOME_MARKS[agent.state];
+  const time = `${mark ? `${mark} ` : ""}${duration((agent.end ?? now) - agent.start)}`;
+  const out = [{ text: `${agent.role} \xB7 ${shortModel(agent.model, agent.effort)} \xB7 ${time}`, tone: "base" }];
+  if (agent.state === "failed" && agent.error)
+    out.push({ text: `! ${agent.error.split(`
+`)[0]}`, tone: "error" });
+  if ((live.linked ?? agent.linked) === false)
+    out.push({ text: "! not linked to the parent session - it is in the session list", tone: "warning" });
+  return out;
+}
+function agentEnd(agent) {
+  if (agent.state === "running" || agent.state === "waiting")
+    return;
+  return { state: agent.state, start: agent.start, ...agent.end !== undefined ? { end: agent.end } : {}, ...agent.error ? { error: agent.error } : {} };
+}
+var LABEL = 6;
+var SAID3 = "LAST SAID  ";
+function summaryCells(summary, width, height) {
+  const indent = " ".repeat(LABEL);
+  const top = [];
+  if (summary.now) {
+    top.push({ text: fit(`${"NOW".padEnd(LABEL)}${summary.now.text}`, width), tone: summary.now.tone });
+    if (summary.now.detail)
+      top.push({ text: fit(`${indent}${summary.now.detail}`, width), tone: "base" });
+    if (summary.now.heading)
+      top.push({ text: fit(`${indent}\xBB ${summary.now.heading}`, width), tone: "muted" });
+  }
+  if (summary.todo?.length) {
+    if (top.length)
+      top.push({ text: "", tone: "base" });
+    top.push({ text: fit(`${"TODO".padEnd(LABEL)}${todoText(summary.todo)}`, width), tone: "base" });
+  }
+  const bottom = [];
+  if (summary.lastSaid) {
+    const room = Math.max(1, width - SAID3.length);
+    const quoted = `"${summary.lastSaid}"`;
+    const [first = "", second, ...more] = wrap(quoted, room);
+    bottom.push({ text: "", tone: "base" }, { text: fit(`${SAID3}${first}`, width), tone: "base" });
+    if (second !== undefined) {
+      const last = more.length ? `${fit(`${second} ${more.join(" ")}`, Math.max(1, room - 1))}"` : second;
+      bottom.push({ text: fit(`${" ".repeat(SAID3.length)}${last}`, width), tone: "base" });
+    }
+  }
+  const recent = summary.recent.map((r) => ({ text: fit(` ${clock(r.t)}  ${r.tool ? `${r.tool.padEnd(LABEL)} ` : ""}${r.text}`, width), tone: r.tone }));
+  const head = recent.length ? [...top.length ? [{ text: "", tone: "base" }] : [], { text: "RECENT", tone: "muted" }] : [];
+  if (height === undefined)
+    return [...top, ...head, ...recent, ...bottom];
+  const room = Math.max(0, height - top.length - bottom.length - head.length);
+  const shown = room > 0 ? [...head, ...recent.slice(0, room)] : [];
+  return [...top, ...shown, ...bottom].slice(0, Math.max(0, height));
+}
+function fitRow(cells, width) {
+  const out = [];
+  let used = 0;
+  for (const c of cells) {
+    if (used >= width)
+      break;
+    const text = fit(c.text, width - used);
+    out.push({ ...c, text });
+    used += text.length;
+  }
+  const last = out.at(-1);
+  if (used < width) {
+    if (last)
+      last.text = last.text.padEnd(last.text.length + width - used);
+    else
+      out.push({ text: " ".repeat(width), tone: "base" });
+  }
+  return out;
+}
 
 // src/adapters/runview/tree.ts
 var MAX_PHASE_ENTRIES = 200;
@@ -3638,11 +4289,9 @@ function buildRunTree(run, entries, live, now, files = new Map, outline) {
     phases: phases.map(({ entries: _e, byGroup: _g, agentNodes: _a, ...phase }) => phase),
     agents,
     groups: [],
-    steps: [],
     running: []
   };
   workGroups(tree, entries, now);
-  tree.steps = stepsFor(tree, focusStage(tree));
   return tree;
 }
 var VERBS = ["resolve merge", "implement", "commit", "repair", "review", "judge", "fix", "extract"];
@@ -3677,6 +4326,10 @@ function actionOf(verb, rest, reviewers) {
       return verb;
   }
 }
+function roundIn(rest) {
+  const n = /^(?:fix )?r(\d+)\b/.exec(rest)?.[1];
+  return n === undefined ? {} : { round: Number(n) };
+}
 var SUBJECTS = [
   ["plan review", "plan-review"],
   ["final review", "final-review"]
@@ -3699,25 +4352,29 @@ function placeOf(label, stages, reviewers, pick = (n) => n[0]) {
         continue;
       const rest = tail.slice(name.length + 1);
       if (typeof target === "string") {
-        const action = actionOf(verb, rest, reviewers) ?? (target === "final-review" ? actionOf(verb, rest.replace(/^\S+ /, ""), reviewers) : undefined);
+        const plain = actionOf(verb, rest, reviewers);
+        const inRepo = rest.replace(/^\S+ /, "");
+        const action = plain ?? (target === "final-review" ? actionOf(verb, inRepo, reviewers) : undefined);
         if (action)
-          return { group: target, action };
+          return { group: target, action, ...roundIn(plain ? rest : inRepo) };
         continue;
       }
       const action = actionOf(verb, rest, reviewers);
       if (action)
-        return { group: `stage:${pick(target)}`, action };
+        return { group: `stage:${pick(target)}`, action, ...roundIn(rest) };
     }
   }
   return;
 }
-var FIXED_GROUPS = { plan: "Plan", "plan-review": "Plan review", "final-review": "Final review", "pr-ready": "PR ready" };
+var FIXED_GROUPS = { plan: "Plan", "plan-review": "Plan review", "final-review": "Final review", "pr-ready": "PR ready", review: "Review", tag: "Tag", report: "Report" };
 var PHASE_GROUPS = { Plan: "plan", "Plan review": "plan-review", "Final review": "final-review", "PR ready": "pr-ready" };
+var JUDGE_PHASE_GROUPS = { Review: "review", Judge: "tag", Report: "report" };
+var JUDGE_RANKS = { review: 0, tag: 1, report: 2 };
 var DONE_OUTCOMES = new Set(["clean", "residual-only", "review-skipped"]);
 var MAX_GROUP_LINES = 200;
 var MAX_CHECK_LINES = 50;
 var BUSY = new Set(["running", "waiting"]);
-var rankOf = (key, number) => key === "plan" ? 0 : key === "plan-review" ? 1 : number !== undefined ? 2 + number / 1e6 : key === "final-review" ? 3 : key === "pr-ready" ? 4 : 5;
+var rankOf = (key, number) => JUDGE_RANKS[key] ?? (key === "plan" ? 0 : key === "plan-review" ? 1 : number !== undefined ? 2 + number / 1e6 : key === "final-review" ? 3 : key === "pr-ready" ? 4 : 5);
 var stageNumber = (key) => key.startsWith("stage:") ? Number(key.slice("stage:".length)) : undefined;
 function stageNames(entries, outline) {
   const names = new Map;
@@ -3735,6 +4392,14 @@ function stageNames(entries, outline) {
   }
   return [...names].map(([number, name]) => ({ number, name })).sort((a, b) => a.number - b.number);
 }
+function judgePlace(agent, reviewers) {
+  const tag = /^tag \S+( retry)?$/.exec(agent.label);
+  const review = /^(review|extract) \S+ (r\d+ .+)$/.exec(agent.label);
+  return {
+    group: JUDGE_PHASE_GROUPS[agent.phase] ?? `other:${agent.phase}`,
+    action: tag ? `tag${tag[1] ?? ""}` : review ? actionOf(review[1], review[2], reviewers) ?? agent.label : agent.label
+  };
+}
 function workGroups(tree, entries, now) {
   const { outline } = tree;
   const stages = stageNames(entries, outline);
@@ -3749,6 +4414,11 @@ function workGroups(tree, entries, now) {
     }
     return g;
   };
+  const judging = outline?.kind === "judge";
+  const phaseGroups = judging ? JUDGE_PHASE_GROUPS : PHASE_GROUPS;
+  if (judging)
+    for (const key of Object.values(JUDGE_PHASE_GROUPS))
+      ensure(key);
   if (outline?.kind === "plan")
     ensure("plan");
   if (outline?.planReview)
@@ -3789,7 +4459,7 @@ function workGroups(tree, entries, now) {
       return { group: ensure(`stage:${n}`, n), ...after.startsWith(":") ? { rest: after.slice(1).trimStart() } : {} };
     }
     if (message.startsWith("plan review"))
-      return { group: ensure("plan-review"), rest: message };
+      return outline && !outline.planReview ? undefined : { group: ensure("plan-review"), rest: message };
     if (message.startsWith("final review"))
       return { group: ensure("final-review"), rest: message };
     if (message.startsWith("plan:"))
@@ -3800,6 +4470,7 @@ function workGroups(tree, entries, now) {
   };
   let agentIndex = 0;
   let lastTime = tree.start;
+  let judgePhase;
   for (const entry of entries) {
     const t = (entry.t ? Date.parse(entry.t) : Number.NaN) || lastTime;
     lastTime = Math.max(lastTime, t);
@@ -3822,8 +4493,9 @@ function workGroups(tree, entries, now) {
       }
       case "phase": {
         const title = String(entry.title ?? "");
-        const key = PHASE_GROUPS[title];
+        const key = phaseGroups[title];
         if (key) {
+          judgePhase = key;
           reached.add(key);
           const g = ensure(key);
           g.start ??= t;
@@ -3843,11 +4515,13 @@ function workGroups(tree, entries, now) {
         const agent = tree.agents[agentIndex++];
         if (!agent)
           break;
-        const placed = placeOf(agent.label, stages, reviewers, pick);
+        const placed = judging ? judgePlace(agent, reviewers) : placeOf(agent.label, stages, reviewers, pick);
         const run = runningNow();
         const group = placed?.group ?? (run.length === 1 ? `stage:${run[0]}` : `other:${agent.phase}`);
         agent.group = group;
         agent.action = placed?.action ?? agent.label;
+        if (placed?.round !== undefined)
+          agent.round = placed.round;
         const g = ensure(group, stageNumber(group));
         if (g.number !== undefined && lastChecks.get(g.number)?.kind === "batch") {
           g.checks = { state: "running", failed: [], lines: g.checks?.lines ?? [], t: agent.start };
@@ -3858,6 +4532,20 @@ function workGroups(tree, entries, now) {
         for (const n of pendingLinks.get(agent.label) ?? [])
           agent.notes.push(n);
         pendingLinks.delete(agent.label);
+        break;
+      }
+      case "round": {
+        const round = Number(entry.round);
+        const found = Number.isInteger(round) ? logGroup(`${clean(String(entry.subject ?? ""))} r${round}`) : undefined;
+        if (!found)
+          break;
+        const results = found.group.rounds ??= [];
+        const result = { round, findings: findingViews(entry.findings) };
+        const at = results.findIndex((r) => r.round === round);
+        if (at >= 0)
+          results[at] = result;
+        else
+          results.push(result);
         break;
       }
       case "retry":
@@ -3882,7 +4570,7 @@ function workGroups(tree, entries, now) {
       }
       case "log": {
         const message = clean(String(entry.message ?? ""));
-        const found = logGroup(message);
+        const found = judging ? judgePhase ? { group: ensure(judgePhase) } : undefined : logGroup(message);
         if (!found)
           break;
         const { group: g, rest } = found;
@@ -3917,7 +4605,7 @@ function workGroups(tree, entries, now) {
   const { status } = tree;
   const ended = status === "failed" || status === "cancelled";
   const lastPhase = tree.phases.at(-1)?.title;
-  const currentKey = lastPhase ? PHASE_GROUPS[lastPhase] : undefined;
+  const currentKey = lastPhase ? phaseGroups[lastPhase] : undefined;
   const list = [...groups.values()].sort((a, b) => rankOf(a.key, a.number) - rankOf(b.key, b.number));
   for (const g of list) {
     for (const a of g.agents)
@@ -3936,6 +4624,8 @@ function workGroups(tree, entries, now) {
         g.note = `resumed from stage ${outline.fromStage}`;
       } else if (mark?.end !== undefined) {
         g.outcome = mark.outcome;
+        if (mark.outcome)
+          g.result = mark.outcome;
         g.state = mark.outcome === "skipped" ? "skipped" : DONE_OUTCOMES.has(mark.outcome ?? "clean") ? "done" : "failed";
         if (g.state === "done" || g.state === "skipped")
           delete g.outcome;
@@ -3953,7 +4643,7 @@ function workGroups(tree, entries, now) {
           g.end = Math.max(...ends);
       }
     } else {
-      const phases = tree.phases.filter((p) => PHASE_GROUPS[p.title] === g.key);
+      const phases = tree.phases.filter((p) => phaseGroups[p.title] === g.key);
       const was = reached.has(g.key) || g.agents.length > 0;
       if (was) {
         g.start = Math.min(...[...phases.map((p) => p.start), ...starts]);
@@ -3972,6 +4662,8 @@ function workGroups(tree, entries, now) {
       g.state = "done";
       g.end ??= tree.end;
     }
+    if (judging && g.state === "upcoming" && status !== "running")
+      g.state = "skipped";
     if (g.checks && g.checks.state === "running" && g.state !== "running")
       delete g.checks;
     if (g.checks) {
@@ -3989,105 +4681,40 @@ function workGroups(tree, entries, now) {
   tree.groups = list;
   tree.running = list.filter((g) => g.number !== undefined && g.state === "running").sort((a, b) => (a.start ?? now) - (b.start ?? now)).map((g) => g.number);
 }
-var ROUND = /^ r\d+\b/;
-var CHECK_FAILED = /^check (.+?) failed \(/;
-function focusStage(tree, selectedKey) {
-  if (selectedKey) {
-    const groupKey = selectedKey.startsWith(`group:${tree.id}:`) ? selectedKey.slice(`group:${tree.id}:`.length) : undefined;
-    const checks = selectedKey.startsWith(`checks:${tree.id}:`) ? Number(selectedKey.slice(`checks:${tree.id}:`.length)) : undefined;
-    const session = selectedKey.startsWith("agent:") ? selectedKey.slice("agent:".length) : selectedKey.startsWith("sub:") ? selectedKey.slice("sub:".length, selectedKey.lastIndexOf(":")) : undefined;
-    const agent = session !== undefined ? tree.agents.find((a) => a.session === session) : undefined;
-    const n = groupKey ? stageNumber(groupKey) : checks !== undefined && Number.isInteger(checks) ? checks : agent ? stageNumber(agent.group) : undefined;
-    if (n !== undefined && tree.groups.some((g) => g.number === n))
-      return n;
-  }
-  if (tree.running.length)
-    return tree.running.at(-1);
-  const started = tree.groups.filter((g) => g.number !== undefined && g.start !== undefined).sort((a, b) => a.start - b.start);
-  return started.at(-1)?.number;
-}
-var ORDER = { Worktree: 0, Plan: 1, "Plan review": 2, Implement: 3, Checks: 3, Review: 3, "Final review": 4, "PR ready": 5 };
-var REVIEWING = /^(review|judge|fix|extract) /;
-var IMPLEMENTING = /^implement$/;
-var FAILED_STEP = { "checks-failed": "Checks", "round-cap": "Review", "review-failed": "Review", "no-changes": "Implement", "gates-red": "Implement" };
-function stepsFor(tree, focus) {
-  const { outline, status } = tree;
-  const titles = tree.phases.map((p) => p.title);
-  const seen = new Set(titles);
-  if (!outline) {
-    const unique = [...new Set(titles)];
-    return unique.map((title, i) => ({
-      title,
-      state: i < unique.length - 1 ? "done" : status === "running" ? "current" : status === "failed" ? "failed" : status === "cancelled" ? "skipped" : "done"
-    }));
-  }
-  const firstStage = outline.stages.find((s) => s.number >= outline.fromStage) ?? outline.stages[0];
-  const stage = outline.stages.find((s) => s.number === focus) ?? firstStage;
-  const group = tree.groups.find((g) => g.number === (focus ?? -1));
-  const run = [];
-  if (outline.worktree || seen.has("Worktree"))
-    run.push("Worktree");
-  if (outline.kind === "plan") {
-    run.push("Plan");
-    if (outline.planReview || seen.has("Plan review"))
-      run.push("Plan review");
-  } else {
-    if (outline.planReview || seen.has("Plan review"))
-      run.push("Plan review");
-    if (stage?.implement !== false)
-      run.push("Implement");
-    if (stage?.checks || group?.checks)
-      run.push("Checks");
-    if (stage?.review !== false)
-      run.push("Review");
-    if (outline.finalReview || seen.has("Final review"))
-      run.push("Final review");
-    run.push("PR ready");
-  }
-  const latest = titles.length ? ORDER[titles.at(-1)] ?? -1 : -1;
-  const end = status === "failed" ? "failed" : status === "cancelled" ? "skipped" : status === "running" ? "current" : "done";
-  const stageSteps = run.filter((t) => ORDER[t] === 3);
-  const stageStates = stageStepStates(stageSteps, group, latest, end);
-  return run.map((title) => {
-    const o = ORDER[title];
-    if (o === 3)
-      return { title, state: stageStates.get(title) ?? "upcoming" };
-    return { title, state: o < latest ? "done" : o === latest ? end : "upcoming" };
+var text = (v) => typeof v === "string" && v ? { value: clean(v) } : undefined;
+function findingViews(value) {
+  if (!Array.isArray(value))
+    return [];
+  return value.flatMap((raw) => {
+    if (!raw || typeof raw !== "object")
+      return [];
+    const f = raw;
+    const id = text(f.id)?.value;
+    if (!id)
+      return [];
+    const copy = (key) => {
+      const v = text(f[key]);
+      return v ? { [key]: v.value } : {};
+    };
+    return [{
+      id,
+      sent: f.sent === true,
+      title: text(f.title)?.value ?? id,
+      ...copy("severity"),
+      ...copy("file"),
+      ...typeof f.line === "number" ? { line: f.line } : {},
+      ...copy("reviewer"),
+      ...copy("detail"),
+      ...copy("verdict"),
+      ...copy("impact"),
+      ...typeof f.priority === "number" ? { priority: f.priority } : {},
+      ...copy("reason"),
+      ...copy("why")
+    }];
   });
 }
-function stageStepStates(steps, group, latest, end) {
-  const out = new Map;
-  const all = (state) => steps.forEach((s) => out.set(s, state));
-  if (!group || group.state === "upcoming" || latest < 3) {
-    all(latest > 3 && group?.state !== "upcoming" ? "done" : "upcoming");
-    return out;
-  }
-  if (group.state === "skipped")
-    return all("skipped"), out;
-  if (group.state === "done")
-    return all("done"), out;
-  let at;
-  let state;
-  if (group.state === "failed" && group.outcome) {
-    at = FAILED_STEP[group.outcome] ?? steps.at(-1);
-    state = "failed";
-  } else {
-    const reviewing = group.agents.some((a) => REVIEWING.test(`${a.action} `));
-    const implemented = group.agents.some((a) => IMPLEMENTING.test(a.action) && a.end !== undefined);
-    at = reviewing ? "Review" : group.checks || implemented ? "Checks" : "Implement";
-    state = group.state === "running" ? "current" : group.state === "cancelled" ? "skipped" : group.state === "failed" ? "failed" : end;
-  }
-  const order = ["Implement", "Checks", "Review"];
-  let index = steps.indexOf(at);
-  if (index < 0) {
-    const want = order.indexOf(at);
-    index = steps.findIndex((s) => order.indexOf(s) > want);
-    if (index < 0)
-      index = steps.length - 1;
-  }
-  steps.forEach((s, i) => out.set(s, i < index ? "done" : i === index ? state : "upcoming"));
-  return out;
-}
+var ROUND = /^ r\d+\b/;
+var CHECK_FAILED = /^check (.+?) failed \(/;
 var groupKey = (runId, key) => `group:${runId}:${key}`;
 var checksKey = (runId, n) => `checks:${runId}:${n}`;
 function visibleRows(trees, view) {
@@ -4131,331 +4758,625 @@ function visibleRows(trees, view) {
   return rows;
 }
 var GROUP_MARKERS = { upcoming: "", running: "\u25CF", done: "\u2713", failed: "\u2717", skipped: "\u2298", cancelled: "\u2298" };
-var RUN_MARKERS = { running: "\u25CF", done: "\u2713", failed: "\u2717", cancelled: "\u2298" };
-var MIN_ELAPSED_WIDTH = 24;
-var MIN_NAME = 8;
-function aligned(left, right, width) {
-  if (!right || width < MIN_ELAPSED_WIDTH)
-    return fit(left, width);
-  if (!Number.isFinite(width))
-    return `${left}  ${right}`;
-  const room = width - right.length - 2;
-  return `${fit(left, room).padEnd(room)}  ${right}`;
-}
-var span = (start, end, now) => start === undefined ? undefined : duration((end ?? now) - start);
-function rowText2(row, now, width = Number.POSITIVE_INFINITY) {
-  const indent = "  ".repeat(row.depth);
-  switch (row.kind) {
-    case "group": {
-      const g = row.group;
-      const name = g.number !== undefined ? `${g.number} ${g.title}` : g.title;
-      if (g.state === "upcoming")
-        return fit(`    ${name}`, width);
-      const head = `${row.folded ? "\u25B8" : "\u25BE"} ${GROUP_MARKERS[g.state]} `;
-      const right = span(g.start, g.end, now);
-      const tail = g.state === "failed" && g.outcome ? ` ${g.outcome}` : "";
-      const full = `${head}${name}${tail}`;
-      const room = !Number.isFinite(width) ? Number.POSITIVE_INFINITY : width - (right && width >= MIN_ELAPSED_WIDTH ? right.length + 2 : 0);
-      if (!tail || full.length <= room || room - head.length - tail.length < MIN_NAME)
-        return aligned(tail && full.length > room ? `${head}${name}` : full, right, width);
-      return aligned(`${head}${fit(name, room - head.length - tail.length)}${tail}`, right, width);
-    }
-    case "agent": {
-      const a = row.agent;
-      return aligned(`${indent}${AGENT_MARKERS[a.state]} ${a.action}`, span(a.start, a.end, now), width);
-    }
-    case "checks": {
-      const c = row.group.checks;
-      const text = !c ? "checks" : c.state === "running" ? "checks \u2026" : c.state === "passed" ? "checks \u2713" : `checks \u2717${c.failed.length ? ` ${c.failed.join(", ")}` : ""}`;
-      return fit(`${indent}${text}`, width);
-    }
-    case "sub":
-      return fit(`${indent}\u2514 ${AGENT_MARKERS[row.agent.state]} ${row.sub.name}`, width);
-    case "label":
-      return fit("runs", width);
-    case "run": {
-      const t = row.run;
-      if (row.details)
-        return fit("run details", width);
-      return aligned(`${RUN_MARKERS[t.status] ?? "\xB7"} ${t.id.slice(-4)} \xB7 ${t.status}${row.shown ? " (shown)" : ""}`, duration((t.end ?? now) - t.start), width);
-    }
-  }
-}
 var runKey = (id) => `run:${id}`;
 var agentKey = (session) => `agent:${session}`;
 var subKey = (session, name) => `sub:${session}:${name}`;
-function nextAgent(rows, key, dir) {
-  const from = rows.findIndex((r) => r.key === key);
-  let i = from < 0 ? dir > 0 ? -1 : rows.length : from;
-  for (i += dir;i >= 0 && i < rows.length; i += dir)
-    if (rows[i].kind === "agent")
-      return rows[i].key;
-  return;
+
+// src/adapters/runview/levels.ts
+var REVIEWING = /^(review|extract)\b/;
+var JUDGING = /^judge\b/;
+var BUSY2 = new Set(["running", "waiting"]);
+var CARD_MIN = 28;
+var MAX_CARDS = 3;
+var CARD_ROWS = 4;
+var ROUND_TONES = { running: "info", done: "success", failed: "error" };
+var ROUND_MARKS = { running: "\u25CF", done: "\u2713", failed: "\u2717" };
+var GROUP_TONES2 = { upcoming: "muted", running: "info", done: "success", failed: "error", skipped: "muted", cancelled: "warning" };
+var count = (n, one) => `${n} ${one}${n === 1 ? "" : "s"}`;
+var span = (start, end, now) => start === undefined ? "" : duration((end ?? now) - start);
+var busy = (a) => BUSY2.has(a.state);
+var isLoop = (tree, group) => {
+  if (group.key === "plan-review" || group.key === "final-review")
+    return true;
+  if (group.number === undefined)
+    return false;
+  return tree.outline?.stages.find((s) => s.number === group.number)?.review !== false;
+};
+function flowOf(group) {
+  const build = group.agents.filter((a) => a.round === undefined);
+  const numbers = [...new Set([...group.agents.flatMap((a) => a.round === undefined ? [] : [a.round]), ...(group.rounds ?? []).map((r) => r.round)])].sort((a, b) => a - b);
+  const last = numbers.at(-1);
+  const rounds = numbers.map((number) => {
+    const agents = group.agents.filter((a) => a.round === number);
+    const later = number !== last;
+    const open = !later && (agents.some(busy) || group.state === "running");
+    const failed = !later && (group.state === "failed" || group.state === "cancelled");
+    const result = group.rounds?.find((r) => r.round === number);
+    const fix = agents.filter((a) => !REVIEWING.test(a.action) && !JUDGING.test(a.action));
+    const after = group.checks?.after;
+    const checks = later && fix.length ? "passed" : after && fix.includes(after) ? group.checks.state : undefined;
+    const ends = agents.map((a) => a.end).filter((e) => e !== undefined);
+    const start = agents.length ? Math.min(...agents.map((a) => a.start)) : undefined;
+    return {
+      number,
+      state: open ? "running" : failed ? "failed" : "done",
+      review: agents.filter((a) => REVIEWING.test(a.action)),
+      judge: agents.filter((a) => JUDGING.test(a.action)),
+      fix,
+      ...result ? { result } : {},
+      ...checks ? { checks } : {},
+      ...start !== undefined ? { start } : {},
+      ...!open && ends.length ? { end: Math.max(...ends) } : {}
+    };
+  });
+  return { build, rounds };
+}
+var routed = (result) => {
+  if (!result)
+    return;
+  const sent = result.findings.filter((f) => f.sent).length;
+  return `${sent} sent back, ${result.findings.length - sent} kept`;
+};
+var findingsText = (result) => {
+  if (!result)
+    return;
+  if (!result.findings.length)
+    return "no findings";
+  return `${count(result.findings.length, "finding")}: ${routed(result)}`;
+};
+var MARK = 4;
+var TIME = 8;
+function columns(cols, width, selected) {
+  const fixed = cols.reduce((n, c) => n + (c.width ?? 0), 0);
+  const flex = Math.max(0, width - fixed);
+  return cols.map((c) => {
+    const w = c.width ?? flex;
+    const body = fit(c.text, Math.max(0, w - (c.right ? 0 : 1)));
+    return { text: c.right ? body.padStart(w) : body.padEnd(w), tone: c.tone ?? "base", ...selected ? { selected: true } : {} };
+  });
+}
+var mark = (text, selected) => `${selected ? "\u203A" : " "} ${text}`;
+function tableRow(width, selected, marker, tone, name, middle, agents, time, nameTone = "base") {
+  const wide = width >= 96;
+  const mid = width >= 64;
+  const middleWidth = wide ? 38 : 28;
+  const cols = [
+    { text: mark(marker, selected), tone, width: MARK },
+    { text: name, tone: nameTone },
+    ...mid ? [{ text: middle, tone: "muted", width: middleWidth }] : [],
+    ...wide || width >= 56 && agents ? [{ text: agents, tone: "muted", width: wide ? 24 : 12 }] : [],
+    { text: time, tone: "muted", width: TIME, right: true }
+  ];
+  return columns(cols, width, selected);
+}
+var connector = (width) => [{ text: pad("  \u2502", width), tone: "muted" }];
+var blank = (width) => [{ text: " ".repeat(Math.max(0, width)), tone: "base" }];
+function groupMiddle(tree, group, rounds) {
+  const max = tree.outline?.maxRounds;
+  if (group.state === "upcoming")
+    return tree.status === "running" ? "waiting" : "not run";
+  if (group.state === "skipped")
+    return group.note ?? "skipped";
+  if (group.state === "running") {
+    if (rounds.length)
+      return `round ${rounds.at(-1).number}${max ? ` of ${max}` : ""}`;
+    if (group.checks?.state === "running")
+      return "checks";
+    const action = lastOf(group.agents, busy)?.action ?? group.agents.at(-1)?.action ?? "";
+    return group.number === undefined && action.toLowerCase() === group.title.toLowerCase() ? "" : action;
+  }
+  const last = rounds.at(-1)?.result;
+  const ended = last && !last.findings.some((f) => f.sent) ? last.findings.length ? "residual-only" : "clean" : undefined;
+  const result = group.outcome ?? group.result ?? ended;
+  const turns = rounds.length ? count(rounds.length, "round") : "";
+  return [result, turns].filter(Boolean).join(" \xB7 ");
+}
+function agentsText(agents, width) {
+  if (!agents.length)
+    return "";
+  const running = agents.filter((a) => a.state === "running").length;
+  if (width < 96)
+    return running ? `${running}/${agents.length} running` : count(agents.length, "agent");
+  return `${count(agents.length, "agent")}${running ? ` \xB7 ${running} running` : ""}`;
+}
+function runPage(view, selected) {
+  const { tree, trees, now, width, height } = view;
+  const rows = [];
+  const items = [];
+  const worktree = tree.phases.find((p) => p.title === "Worktree");
+  const entries = [];
+  if (worktree) {
+    const after = tree.groups.map((g) => g.start).filter((t) => t !== undefined);
+    const last = tree.phases.at(-1) === worktree && tree.status === "running" && !after.length;
+    entries.push(() => rows.push(tableRow(width, false, last ? "\u25CF" : "\u2713", last ? "info" : "success", "Worktree", "", "", span(worktree.start, worktree.end ?? (after.length ? Math.min(...after) : undefined), now), last ? "base" : "muted")));
+  }
+  for (const g of tree.groups) {
+    const key = groupKey(tree.id, g.key);
+    const { rounds } = flowOf(g);
+    const name = g.number !== undefined ? `${g.number} ${g.title}` : g.title;
+    entries.push(() => {
+      const chosen = key === selected;
+      const reached = g.state !== "upcoming" && g.state !== "skipped";
+      items.push({ key, row: rows.length, ...reached ? { open: g.agents.length ? { kind: "group", group: g.key } : { kind: "detail", key } } : {} });
+      const tone = GROUP_TONES2[g.state];
+      rows.push(tableRow(width, chosen, GROUP_MARKERS[g.state] || "\xB7", tone, name, groupMiddle(tree, g, rounds), agentsText(g.agents, width), span(g.start, g.end, now), g.state === "running" ? "base" : tone === "muted" ? "muted" : "base"));
+    });
+  }
+  const others = trees.length > 1 ? trees.length + 2 : 2;
+  const roomy = entries.length * 2 - 1 + others <= height;
+  entries.forEach((draw, i) => {
+    if (i && roomy)
+      rows.push(connector(width));
+    draw();
+  });
+  rows.push(blank(width));
+  if (trees.length > 1) {
+    rows.push([{ text: pad("  runs", width), tone: "muted" }]);
+    for (const t of trees) {
+      const key = runKey(t.id);
+      const chosen = key === selected;
+      items.push({ key, row: rows.length, ...t.id === tree.id ? { open: { kind: "detail", key } } : { run: t.id } });
+      rows.push(columns([{ text: mark(`${t.id.slice(-4)} \xB7 ${t.status}${t.id === tree.id ? " (shown)" : ""}`, chosen), tone: STATUS_TONES[t.status] ?? "base" }, { text: duration((t.end ?? now) - t.start), tone: "muted", width: TIME, right: true }], width, chosen));
+    }
+  } else {
+    const key = runKey(tree.id);
+    const chosen = key === selected;
+    items.push({ key, row: rows.length, open: { kind: "detail", key } });
+    rows.push(columns([{ text: mark("run details", chosen), tone: "muted" }], width, chosen));
+  }
+  const live = lastOf(tree.groups, (g) => g.state === "running") ?? lastOf(tree.groups, (g) => g.state !== "upcoming" && g.state !== "skipped") ?? tree.groups[0];
+  return {
+    crumbs: runCrumbs(tree, now),
+    rows,
+    items,
+    ...live ? { preferred: groupKey(tree.id, live.key) } : {},
+    help: ["\u2191\u2193 move", "Enter open", "Esc close"].join(" \xB7 ")
+  };
+}
+var roundKey = (group, n) => `round:${group}:${n}`;
+function groupPage(view, group, selected, chain) {
+  const { tree, now, width, height } = view;
+  const { build, rounds } = flowOf(group);
+  const rows = [];
+  const items = [];
+  const loop = isLoop(tree, group);
+  const stage = tree.outline?.stages.find((s) => s.number === group.number);
+  const checksRow = group.number !== undefined && (!!group.checks || stage?.checks === true) && (build.length > 0 || !!group.checks);
+  const steps = build.length + (checksRow ? 1 : 0);
+  const body = steps * 2 + (loop ? rounds.length + 4 : 0);
+  const roomy = body <= height;
+  const gap = () => {
+    if (roomy && rows.length)
+      rows.push(connector(width));
+  };
+  for (const a of build) {
+    gap();
+    const key = agentKey(a.session);
+    const chosen = key === selected;
+    items.push({ key, row: rows.length, open: { kind: "detail", key } });
+    rows.push(tableRow(width, chosen, AGENT_MARKERS[a.state], AGENT_TONES[a.state], capital(a.action), shortModel(a.model, a.effort), "1 agent", span(a.start, a.end, now)));
+  }
+  if (checksRow) {
+    gap();
+    const state = rounds.length ? "passed" : group.checks?.state;
+    const key = checksKey(tree.id, group.number);
+    const chosen = key === selected;
+    if (group.checks)
+      items.push({ key, row: rows.length, open: { kind: "detail", key } });
+    const text = state === "failed" && group.checks?.failed.length ? `failed: ${group.checks.failed.join(", ")}` : state ?? "after the implementer";
+    const tone = state === "passed" ? "success" : state === "failed" ? "error" : state === "running" ? "info" : "muted";
+    rows.push(tableRow(width, chosen, state === "passed" ? "\u2713" : state === "failed" ? "\u2717" : state === "running" ? "\u25CF" : "\xB7", tone, "Checks", text, "", "", state ? "base" : "muted"));
+  }
+  if (loop) {
+    gap();
+    const max = tree.outline?.maxRounds;
+    const inner = Math.max(1, width - 4);
+    const title = `\u250C \u21BA review loop${max ? ` \xB7 up to ${count(max, "round")}` : ""} `;
+    rows.push([{ text: `${fit(title, width - 1)}${"\u2500".repeat(Math.max(0, width - 1 - title.length))}${width > title.length ? "\u2510" : ""}`, tone: "muted" }]);
+    const boxed = (cells) => [{ text: "\u2502 ", tone: "muted" }, ...cells, { text: " \u2502", tone: "muted" }];
+    for (const r of rounds) {
+      const key = roundKey(group.key, r.number);
+      const chosen = key === selected;
+      items.push({ key, row: rows.length, open: { kind: "round", group: group.key, round: r.number } });
+      const agents = [...r.review, ...r.judge, ...r.fix];
+      const middle = findingsText(r.result) ?? (r.state === "running" ? r.fix.some(busy) ? "fixing" : r.judge.some(busy) ? "judging" : "reviewing" : "");
+      rows.push(boxed(tableRow(inner, chosen, ROUND_MARKS[r.state], ROUND_TONES[r.state], `Round ${r.number}`, middle, agentsText(agents, inner), span(r.start, r.end, now))));
+    }
+    const finished = group.state !== "running" && group.state !== "upcoming";
+    const lastRound = rounds.at(-1)?.number ?? 0;
+    if (!finished && max) {
+      const next = lastRound + 1;
+      const ahead = next < max ? [next, max] : next === max ? [max] : [];
+      for (const n of ahead) {
+        const text = n === max ? "the last one" : lastRound ? `only if round ${lastRound} sends findings back` : "after the implementer";
+        rows.push(boxed(tableRow(inner, false, "\xB7", "muted", `Round ${n}`, text, "", "", "muted")));
+      }
+    }
+    if (!rounds.length && (!max || finished))
+      rows.push(boxed([{ text: pad("no review round", inner), tone: "muted" }]));
+    rows.push([{ text: `\u2514${"\u2500".repeat(Math.max(0, width - 2))}\u2518`, tone: "muted" }]);
+  }
+  const after = tree.groups[tree.groups.indexOf(group) + 1];
+  if (after && !finishedRun(tree)) {
+    gap();
+    rows.push(tableRow(width, false, "\xB7", "muted", "Next", after.number !== undefined ? `${after.number} ${after.title}` : after.title, "", "", "muted"));
+  }
+  if (!rows.length)
+    rows.push([{ text: pad("  no agent ran here", width), tone: "muted" }]);
+  const preferred = lastOf(rounds, (r) => r.state === "running") ?? rounds.at(-1);
+  return {
+    crumbs: crumbs(view, chain),
+    rows,
+    items,
+    ...preferred ? { preferred: roundKey(group.key, preferred.number) } : items.length ? { preferred: (items.find((i) => build.some((a) => agentKey(a.session) === i.key && busy(a))) ?? items.at(-1)).key } : {},
+    help: ["\u2191\u2193 move", "Enter open", "l log", "Esc back"].join(" \xB7 ")
+  };
+}
+var finishedRun = (tree) => tree.status !== "running";
+var capital = (text) => text.charAt(0).toUpperCase() + text.slice(1);
+var cardName = (a, round) => {
+  const tail = a.label.slice(a.label.lastIndexOf(` r${round} `) + ` r${round} `.length);
+  if (a.label.lastIndexOf(` r${round} `) >= 0 && tail)
+    return a.action.startsWith("extract") ? `extract ${tail}` : tail;
+  return a.action;
+};
+var OUTCOME = /^[\u25CF\u2026]\s*/;
+function cardRows(view, agents, round, selected, items, base, indent) {
+  const { now, width } = view;
+  const room = Math.max(CARD_MIN, width - indent);
+  const across = Math.max(1, Math.min(MAX_CARDS, Math.floor((room + 2) / (CARD_MIN + 2)), agents.length));
+  const each = Math.max(8, Math.floor((room - 2 * (across - 1)) / across));
+  const out = [];
+  for (let i = 0;i < agents.length; i += across) {
+    const line = agents.slice(i, i + across);
+    const lines = Array.from({ length: CARD_ROWS }, () => [{ text: " ".repeat(indent), tone: "base" }]);
+    line.forEach((a, j) => {
+      const key = agentKey(a.session);
+      const chosen = key === selected;
+      items.push({ key, row: base + out.length + CARD_ROWS - 1, open: { kind: "detail", key } });
+      const found = round.result?.findings.filter((f) => f.reviewer !== undefined && a.label.endsWith(` ${f.reviewer}`)).length;
+      const said = view.activity?.(a)?.replace(OUTCOME, "") ?? a.activity;
+      const what = busy(a) ? said ?? shortModel(a.model, a.effort) : found !== undefined && round.result ? count(found, "finding") : shortModel(a.model, a.effort);
+      const subs = a.subagents.length ? ` \xB7 ${count(a.subagents.length, "subagent")}` : "";
+      const tone = AGENT_TONES[a.state];
+      const box = chosen ? "info" : "muted";
+      const inner = each - 4;
+      const cell = (text, t) => ({ text, tone: t, ...chosen ? { selected: true } : {} });
+      if (j)
+        for (const l of lines)
+          l.push({ text: "  ", tone: "base" });
+      lines[0].push(cell(`\u250C${"\u2500".repeat(each - 2)}\u2510`, box));
+      lines[1].push(cell("\u2502 ", box), cell(pad(`${AGENT_MARKERS[a.state]} ${cardName(a, round.number)}  ${span(a.start, a.end, now)}`, inner), tone), cell(" \u2502", box));
+      lines[2].push(cell("\u2502 ", box), cell(pad(`${what}${subs}`, inner), "base"), cell(" \u2502", box));
+      lines[3].push(cell(`\u2514${"\u2500".repeat(each - 2)}\u2518`, box));
+    });
+    out.push(...lines);
+  }
+  return out;
+}
+function stepAgents(view, agents, title, text, selected, items, rows) {
+  agents.forEach((a, i) => {
+    const key = agentKey(a.session);
+    const chosen = key === selected;
+    items.push({ key, row: rows.length, open: { kind: "detail", key } });
+    rows.push(tableRow(view.width, chosen, AGENT_MARKERS[a.state], AGENT_TONES[a.state], i ? a.action : title, (i ? undefined : text) ?? shortModel(a.model, a.effort), "", span(a.start, a.end, view.now)));
+  });
+}
+function roundPage(view, group, number, selected, chain) {
+  const { tree, width, height } = view;
+  const { rounds } = flowOf(group);
+  const round = rounds.find((r) => r.number === number);
+  const items = [];
+  const rows = [];
+  const max = tree.outline?.maxRounds;
+  if (!round)
+    return { crumbs: crumbs(view, chain), rows: [[{ text: pad("  no such round", width), tone: "muted" }]], items, help: "Esc back" };
+  const running = round.review.filter((a) => a.state === "running").length;
+  const heading = running > 1 ? `${running} agents at the same time` : findingsText(round.result)?.split(":")[0] ?? count(round.review.length, "agent");
+  const reviewTone = round.review.some(busy) ? "info" : round.review.some((a) => a.state === "failed") ? "error" : round.review.length ? "success" : "muted";
+  const reviewMark = round.review.some(busy) ? "\u25CF" : round.review.some((a) => a.state === "failed") ? "\u2717" : round.review.length ? "\u2713" : "\xB7";
+  rows.push(tableRow(width, false, reviewMark, reviewTone, "Review", heading, "", ""));
+  rows.push(...cardRows(view, round.review, round, selected, items, rows.length, MARK));
+  const closed = round.state !== "running";
+  const sentNothing = closed && round.fix.length === 0;
+  const planned = round.review.length ? 1 : 0;
+  const roomy = planned + rows.length + 8 <= height;
+  const gap = () => {
+    if (roomy)
+      rows.push(connector(width));
+  };
+  if (round.judge.length) {
+    gap();
+    stepAgents(view, round.judge, "Judge", routed(round.result), selected, items, rows);
+  } else if (!(sentNothing && round.result?.findings.length === 0)) {
+    gap();
+    rows.push(tableRow(width, false, "\xB7", "muted", "Judge", closed ? routed(round.result) ?? "not needed" : "after the reviewers", "", "", "muted"));
+  }
+  if (!sentNothing) {
+    gap();
+    if (round.fix.length)
+      stepAgents(view, round.fix, "Fix", undefined, selected, items, rows);
+    else
+      rows.push(tableRow(width, false, "\xB7", "muted", "Fix", "only if findings go back", "", "", "muted"));
+    if (round.checks || tree.outline?.stages.find((s) => s.number === group.number)?.checks) {
+      gap();
+      const state = round.checks;
+      if (state && group.number !== undefined) {
+        const key = checksKey(tree.id, group.number);
+        const chosen = key === selected;
+        items.push({ key, row: rows.length, open: { kind: "detail", key } });
+        rows.push(tableRow(width, chosen, state === "passed" ? "\u2713" : state === "failed" ? "\u2717" : "\u25CF", state === "passed" ? "success" : state === "failed" ? "error" : "info", "Checks", state, "", ""));
+      } else
+        rows.push(tableRow(width, false, "\xB7", "muted", "Checks", "after the fix", "", "", "muted"));
+    }
+  }
+  gap();
+  const later = rounds.some((r) => r.number > number);
+  const next = later ? `Round ${number + 1}` : closed ? group.outcome ?? group.result ?? "done" : max !== undefined && number >= max ? "the round cap: no more rounds" : `Round ${number + 1}, or the stage is done`;
+  rows.push(tableRow(width, false, later ? "\u21BA" : "\xB7", "muted", "Next", next, "", "", "muted"));
+  const live = [...round.review, ...round.judge, ...round.fix];
+  return {
+    crumbs: crumbs(view, chain),
+    rows,
+    items,
+    ...live.length ? { preferred: agentKey((live.find(busy) ?? live[0]).session) } : {},
+    help: ["\u2191\u2193\u2190\u2192 move", "Enter open agent", "[ ] other round", ...round.result?.findings.length ? ["f findings"] : [], "l log", "Esc back"].join(" \xB7 ")
+  };
+}
+var findingKey = (f) => `finding:${f.id}`;
+function findingsPage(view, group, number, selected, chain) {
+  const { width } = view;
+  const { rounds } = flowOf(group);
+  const round = rounds.find((r) => r.number === number);
+  const findings = round?.result?.findings ?? [];
+  const items = [];
+  const rows = [];
+  for (const f of findings) {
+    const key = findingKey(f);
+    const chosen = key === selected;
+    const reviewer = f.reviewer ? round.review.find((a) => a.label.endsWith(` ${f.reviewer}`)) : undefined;
+    items.push({ key, row: rows.length, ...reviewer ? { open: { kind: "detail", key: agentKey(reviewer.session) } } : {} });
+    rows.push(columns([
+      { text: mark(f.sent ? "\u21BA" : "\xB7", chosen), tone: f.sent ? "info" : "warning", width: MARK },
+      { text: f.title },
+      { text: f.sent ? "sent back" : "kept", tone: f.sent ? "info" : "warning", width: 10, right: true }
+    ], width, chosen));
+  }
+  const shown = findings.find((f) => findingKey(f) === selected) ?? findings[0];
+  if (shown) {
+    rows.push(blank(width));
+    const field = (label, text, max = 4) => {
+      if (!text)
+        return;
+      const room = Math.max(8, width - label.length - 2);
+      wrap(text.replace(/\s+/g, " "), room).slice(0, max).forEach((line, i) => rows.push([{ text: i ? "      " : `${label.padEnd(5)} `, tone: "muted" }, { text: pad(line, Math.max(0, width - 6)), tone: "base" }]));
+    };
+    field("WHERE", shown.file ? `${shown.file}${shown.line !== undefined ? `:${shown.line}` : ""}` : undefined, 1);
+    field("SAID", [shown.reviewer, shown.severity].filter(Boolean).join(" ") + (shown.detail ? `: ${shown.detail}` : ""));
+    field("JUDGE", [shown.verdict, shown.impact, shown.priority !== undefined ? `priority ${shown.priority}` : undefined].filter(Boolean).join(" \xB7 "), 1);
+    field("WHY", shown.why ?? shown.reason);
+  } else
+    rows.push([{ text: pad("  this round has no findings", width), tone: "muted" }]);
+  return { crumbs: crumbs(view, chain), rows, items, ...findings[0] ? { preferred: findingKey(findings[0]) } : {}, help: ["\u2191\u2193 move", "Enter open the agent that found it", "Esc back"].join(" \xB7 ") };
+}
+function runCrumbs(tree, now) {
+  return [
+    { text: "granny", tone: "base" },
+    ...tree.branch ? [{ text: `  ${tree.branch}`, tone: "base" }] : [],
+    { text: `  ${tree.status === "running" ? "\u25CF" : ""}${tree.status === "running" ? " " : ""}${tree.status}`, tone: STATUS_TONES[tree.status] ?? "base" },
+    { text: ` \xB7 ${duration((tree.end ?? now) - tree.start)}`, tone: "muted" }
+  ];
+}
+function screenName(view, screen) {
+  const { tree } = view;
+  const max = tree.outline?.maxRounds;
+  switch (screen.kind) {
+    case "run":
+      return "granny";
+    case "group": {
+      const g = tree.groups.find((x) => x.key === screen.group);
+      return g ? g.number !== undefined ? `${g.number} ${g.title}` : g.title : screen.group;
+    }
+    case "round":
+      return `Round ${screen.round}${max ? ` of ${max}` : ""}`;
+    case "findings":
+      return "Findings";
+    case "detail":
+      return detailName(tree, screen.key, view.subName);
+  }
+}
+function detailName(tree, key, subName = (name) => name) {
+  if (key.startsWith("agent:"))
+    return tree.agents.find((a) => agentKey(a.session) === key)?.action ?? "agent";
+  if (key.startsWith("sub:")) {
+    const agent = tree.agents.find((a) => a.subagents.some((s) => subKey(a.session, s.name) === key));
+    const sub = agent?.subagents.find((s) => subKey(agent.session, s.name) === key);
+    return sub ? subName(sub.name) : "subagent";
+  }
+  if (key.startsWith("checks:"))
+    return "Checks";
+  if (key.startsWith("group:"))
+    return "Log";
+  return "Run details";
+}
+function crumbs(view, chain) {
+  const names = chain.map((s) => screenName(view, s));
+  const parents = names.slice(0, -1).join(" \u203A ");
+  return [{ text: `${parents} \u203A `, tone: "muted" }, { text: names.at(-1) ?? "", tone: "base" }];
+}
+function detailSiblings(tree, key) {
+  const agent = tree.agents.find((a) => agentKey(a.session) === key || a.subagents.some((s) => subKey(a.session, s.name) === key));
+  if (!agent)
+    return [];
+  const group = tree.groups.find((g) => g.key === agent.group);
+  const peers = (group?.agents ?? [agent]).filter((a) => a.round === agent.round);
+  return peers.flatMap((a) => [agentKey(a.session), ...a.subagents.map((s) => subKey(a.session, s.name))]);
 }
 
-// src/adapters/runview/layout.ts
-var STATUS_TONES = { running: "info", done: "success", failed: "error", cancelled: "warning" };
-var AGENT_TONES = { running: "info", waiting: "muted", done: "success", failed: "error", cancelled: "warning" };
-var GROUP_TONES = { upcoming: "muted", running: "info", done: "success", failed: "error", skipped: "muted", cancelled: "warning" };
-var STAGE_PHASES = new Set(["Implement", "Checks", "Review"]);
-function headerText(tree, now, focus, width = Number.POSITIVE_INFINITY) {
-  const { outline } = tree;
-  const elapsed = duration((tree.end ?? now) - tree.start);
-  const phase = tree.phase ?? "Starting";
-  let middle;
-  if (tree.status !== "running")
-    middle = [tree.status];
-  else if (outline?.kind === "plan")
-    middle = ["planning", phase];
-  else if (outline && outline.stages.length && (STAGE_PHASES.has(phase) || tree.running.length)) {
-    const total = outline.stages.length;
-    const k = tree.running.length > 1 ? undefined : focus ?? tree.running[0] ?? focusStage(tree);
-    middle = [tree.running.length > 1 ? `stages ${tree.running.join("+")}/${total}` : `stage ${k ?? 1}/${total}`, phase];
-  } else
-    middle = [phase];
-  const parts = (branch) => ["granny", ...branch && tree.branch ? [tree.branch] : [], ...middle, elapsed].join(" \xB7 ");
-  const full = parts(true);
-  if (full.length <= width)
-    return full;
-  return fit(parts(false), width);
-}
-var STEP_MARKS = { done: "\u2713", current: "\u25CF", failed: "\u2717", skipped: "\u2298", upcoming: "" };
-var STEP_TONES = { done: "success", current: "info", failed: "error", skipped: "muted", upcoming: "muted" };
-var SEPARATOR = { text: " \u203A ", tone: "muted" };
-var length = (cells) => cells.reduce((n, c) => n + c.text.length, 0);
-function stepperCells(steps, width) {
-  if (!steps.length)
-    return [];
-  const cell = (s, bare = false) => ({ text: bare ? STEP_MARKS[s.state] : `${s.title}${STEP_MARKS[s.state] ? ` ${STEP_MARKS[s.state]}` : ""}`, tone: STEP_TONES[s.state] });
-  const join = (cells) => cells.flatMap((c, i) => i ? [SEPARATOR, c] : [c]);
-  const full = join(steps.map((s) => cell(s)));
-  if (length(full) <= width)
-    return full;
-  const lastDone = steps.map((s) => s.state).lastIndexOf("done");
-  const bare = join(steps.map((s, i) => cell(s, s.state === "done" && i < lastDone)));
-  if (length(bare) <= width)
-    return bare;
-  let at = steps.findIndex((s) => s.state === "current" || s.state === "failed");
-  if (at < 0)
-    at = lastDone >= 0 ? lastDone : 0;
-  const s = steps[at];
-  const one = `${s.title}${STEP_MARKS[s.state] ? ` ${STEP_MARKS[s.state]}` : ""} (${at + 1}/${steps.length})`;
-  return [{ text: fit(one, width), tone: STEP_TONES[s.state] }];
-}
-function rowTone(row) {
-  switch (row.kind) {
-    case "group":
-      return GROUP_TONES[row.group.state];
-    case "agent":
-    case "sub":
-      return AGENT_TONES[row.agent.state];
-    case "checks": {
-      const c = row.group.checks;
-      return !c ? "muted" : c.state === "running" ? "info" : c.state === "passed" ? "success" : "error";
+class LevelNav {
+  stack = [{ screen: { kind: "run" } }];
+  page;
+  get screen() {
+    return this.stack.at(-1).screen;
+  }
+  get detail() {
+    const s = this.screen;
+    return s.kind === "detail" ? s.key : undefined;
+  }
+  get selected() {
+    return this.detail ?? this.stack.at(-1).selected ?? "";
+  }
+  get atRoot() {
+    return this.stack.length === 1;
+  }
+  reset() {
+    this.stack = [{ screen: { kind: "run" } }];
+    this.page = undefined;
+  }
+  layout(view) {
+    const frame = this.stack.at(-1);
+    const build = () => this.build(view, frame);
+    let page = build();
+    if (frame.screen.kind !== "detail" && !page.items.some((i) => i.key === frame.selected)) {
+      const next = page.preferred ?? page.items[0]?.key;
+      if (next !== frame.selected) {
+        if (next === undefined)
+          delete frame.selected;
+        else
+          frame.selected = next;
+        page = build();
+      }
     }
-    case "label":
-      return "muted";
-    case "run":
-      return row.details ? "muted" : STATUS_TONES[row.run.status] ?? "base";
+    this.page = page;
+    return page;
   }
-}
-function treeCells(rows, selectedKey, now, width, height, top) {
-  const at = rows.findIndex((r) => r.key === selectedKey);
-  let first = top;
-  if (at >= 0) {
-    if (at < first)
-      first = at;
-    if (at >= first + height)
-      first = at - height + 1;
-  }
-  first = Math.max(0, Math.min(first, Math.max(0, rows.length - height)));
-  const cells = rows.slice(first, first + Math.max(0, height)).map((row) => {
-    const chosen = row.key === selectedKey;
-    return { text: pad(`${chosen ? "\u203A" : " "} ${rowText2(row, now, width - 2)}`, width), tone: rowTone(row), ...chosen ? { selected: true } : {} };
-  });
-  while (cells.length < height)
-    cells.push({ text: pad("", width), tone: "base" });
-  return { cells, top: first };
-}
-function wrap(text, width) {
-  if (width < 1)
-    return [];
-  const out = [];
-  let line = "";
-  for (const word of text.split(" ")) {
-    const next = line ? `${line} ${word}` : word;
-    if (next.length <= width)
-      line = next;
-    else {
-      if (line)
-        out.push(line);
-      line = word.length > width ? fit(word, width) : word;
+  build(view, frame) {
+    const { tree } = view;
+    const { screen } = frame;
+    const selected = frame.selected ?? "";
+    const chain = this.stack.map((f) => f.screen);
+    const missing = () => ({ crumbs: crumbs(view, chain), rows: [], items: [], help: "Esc back" });
+    switch (screen.kind) {
+      case "run":
+        return runPage(view, selected);
+      case "group": {
+        const g = tree.groups.find((x) => x.key === screen.group);
+        return g ? groupPage(view, g, selected, chain) : missing();
+      }
+      case "round": {
+        const g = tree.groups.find((x) => x.key === screen.group);
+        return g ? roundPage(view, g, screen.round, selected, chain) : missing();
+      }
+      case "findings": {
+        const g = tree.groups.find((x) => x.key === screen.group);
+        return g ? findingsPage(view, g, screen.round, selected, chain) : missing();
+      }
+      case "detail":
+        return { crumbs: crumbs(view, chain), rows: [], items: [], help: "" };
     }
   }
-  if (line || !out.length)
-    out.push(line);
-  return out;
-}
-var took = (start, end, now) => start === undefined ? "" : duration((end ?? now) - start);
-var checksText = (c) => c.state === "running" ? "checks running" : c.state === "passed" ? "checks \u2713" : `checks \u2717${c.failed.length ? ` ${c.failed.join(", ")}` : ""}`;
-var checksTone = (c) => c.state === "running" ? "info" : c.state === "passed" ? "success" : "error";
-function groupDetail(tree, group, now, width) {
-  const total = tree.outline?.stages.length;
-  const name = group.number !== undefined ? `stage ${group.number}${total ? `/${total}` : ""} \xB7 ${group.title}` : group.title;
-  const out = wrap(name, width).map((text) => ({ text, tone: "base" }));
-  out.push({ text: [group.state, took(group.start, group.end, now), group.outcome, group.note].filter(Boolean).join(" \xB7 "), tone: GROUP_TONES[group.state] });
-  if (group.checks)
-    out.push({ text: checksText(group.checks), tone: checksTone(group.checks) });
-  if (group.lines.length)
-    out.push({ text: "", tone: "base" }, ...group.lines.map((text) => ({ text, tone: "base" })));
-  return out;
-}
-function checksDetail(group) {
-  const head = { text: `checks \xB7 ${group.number !== undefined ? `stage ${group.number} \xB7 ` : ""}${group.title}`, tone: "base" };
-  const c = group.checks;
-  if (!c)
-    return [head, { text: "no checks result yet", tone: "muted" }];
-  return [head, { text: checksText(c), tone: checksTone(c) }, ...c.lines.map((text) => ({ text, tone: "base" }))];
-}
-function runDetail(tree, facts = {}) {
-  const out = [
-    { text: `run ${tree.id}`, tone: "base" },
-    { text: `status   ${tree.status}`, tone: STATUS_TONES[tree.status] ?? "base" }
-  ];
-  if (facts.repo)
-    out.push({ text: `repo     ${facts.repo}`, tone: "muted" });
-  if (tree.branch)
-    out.push({ text: `branch   ${tree.branch}`, tone: "muted" });
-  out.push({ text: `started  ${stamp2(tree.start) ?? "?"}`, tone: "muted" });
-  if (tree.status === "running")
-    out.push({ text: `phase    ${tree.phase ?? "Starting"}`, tone: "muted" });
-  else
-    out.push({ text: `ended    ${stamp2(tree.end) ?? "?"}`, tone: "muted" });
-  if (facts.dir)
-    out.push({ text: `result   ${facts.dir.replace(/\/+$/, "")}/result.json`, tone: "muted" });
-  if (facts.error)
-    out.push({ text: `error: ${facts.error.split(`
-`)[0]}`, tone: "error" });
-  if (facts.reply)
-    out.push({ text: "", tone: "base" }, ...facts.reply.split(`
-`).map((text) => ({ text, tone: "base" })));
-  return out;
-}
-var OUTCOME_MARKS = { done: "\u2713", failed: "\u2717", cancelled: "\u2298" };
-function agentHead(agent, now, live = {}) {
-  const mark = OUTCOME_MARKS[agent.state];
-  const time = `${mark ? `${mark} ` : ""}${duration((agent.end ?? now) - agent.start)}`;
-  const out = [{ text: `${agent.role} \xB7 ${shortModel(agent.model, agent.effort)} \xB7 ${time}`, tone: "base" }];
-  if (agent.state === "failed" && agent.error)
-    out.push({ text: `! ${agent.error.split(`
-`)[0]}`, tone: "error" });
-  if ((live.linked ?? agent.linked) === false)
-    out.push({ text: "! not linked to the parent session - it is in the session list", tone: "warning" });
-  return out;
-}
-function agentEnd(agent) {
-  if (agent.state === "running" || agent.state === "waiting")
-    return;
-  return { state: agent.state, start: agent.start, ...agent.end !== undefined ? { end: agent.end } : {}, ...agent.error ? { error: agent.error } : {} };
-}
-var LABEL = 6;
-var SAID3 = "LAST SAID  ";
-function summaryCells(summary, width, height) {
-  const indent = " ".repeat(LABEL);
-  const top = [];
-  if (summary.now) {
-    top.push({ text: fit(`${"NOW".padEnd(LABEL)}${summary.now.text}`, width), tone: summary.now.tone });
-    if (summary.now.detail)
-      top.push({ text: fit(`${indent}${summary.now.detail}`, width), tone: "base" });
-    if (summary.now.heading)
-      top.push({ text: fit(`${indent}\xBB ${summary.now.heading}`, width), tone: "muted" });
+  move(delta) {
+    const items = this.page?.items ?? [];
+    if (!items.length)
+      return;
+    const frame = this.stack.at(-1);
+    const at = items.findIndex((i) => i.key === frame.selected);
+    frame.selected = items[Math.max(0, Math.min(items.length - 1, at + delta))].key;
   }
-  if (summary.todo?.length) {
-    if (top.length)
-      top.push({ text: "", tone: "base" });
-    top.push({ text: fit(`${"TODO".padEnd(LABEL)}${todoText(summary.todo)}`, width), tone: "base" });
+  edge(last) {
+    const items = this.page?.items ?? [];
+    const item = last ? items.at(-1) : items[0];
+    if (item)
+      this.stack.at(-1).selected = item.key;
   }
-  const bottom = [];
-  if (summary.lastSaid) {
-    const room = Math.max(1, width - SAID3.length);
-    const quoted = `"${summary.lastSaid}"`;
-    const [first = "", second, ...more] = wrap(quoted, room);
-    bottom.push({ text: "", tone: "base" }, { text: fit(`${SAID3}${first}`, width), tone: "base" });
-    if (second !== undefined) {
-      const last = more.length ? `${fit(`${second} ${more.join(" ")}`, Math.max(1, room - 1))}"` : second;
-      bottom.push({ text: fit(`${" ".repeat(SAID3.length)}${last}`, width), tone: "base" });
-    }
+  enter() {
+    const item = this.page?.items.find((i) => i.key === this.stack.at(-1).selected);
+    if (!item)
+      return {};
+    if (item.run)
+      return { run: item.run };
+    if (item.open)
+      this.push(item.open);
+    return {};
   }
-  const recent = summary.recent.map((r) => ({ text: fit(` ${clock(r.t)}  ${r.tool ? `${r.tool.padEnd(LABEL)} ` : ""}${r.text}`, width), tone: r.tone }));
-  const head = recent.length ? [...top.length ? [{ text: "", tone: "base" }] : [], { text: "RECENT", tone: "muted" }] : [];
-  if (height === undefined)
-    return [...top, ...head, ...recent, ...bottom];
-  const room = Math.max(0, height - top.length - bottom.length - head.length);
-  const shown = room > 0 ? [...head, ...recent.slice(0, room)] : [];
-  return [...top, ...shown, ...bottom].slice(0, Math.max(0, height));
+  push(screen) {
+    this.stack.push({ screen });
+    this.page = undefined;
+  }
+  back() {
+    if (this.stack.length <= 1)
+      return false;
+    this.stack.pop();
+    this.page = undefined;
+    return true;
+  }
+  otherRound(tree, dir) {
+    const s = this.screen;
+    if (s.kind !== "round")
+      return;
+    const g = tree.groups.find((x) => x.key === s.group);
+    const numbers = g ? flowOf(g).rounds.map((r) => r.number) : [];
+    const next = numbers[numbers.indexOf(s.round) + dir];
+    if (next === undefined)
+      return;
+    this.stack[this.stack.length - 1] = { screen: { ...s, round: next } };
+    const parent = this.stack.at(-2);
+    if (parent)
+      parent.selected = roundKey(s.group, next);
+  }
+  findings(tree) {
+    const s = this.screen;
+    if (s.kind !== "round")
+      return;
+    const g = tree.groups.find((x) => x.key === s.group);
+    if (g?.rounds?.find((r) => r.round === s.round)?.findings.length)
+      this.push({ kind: "findings", group: s.group, round: s.round });
+  }
+  log(tree) {
+    const s = this.screen;
+    if (s.kind === "group" || s.kind === "round")
+      this.push({ kind: "detail", key: groupKey(tree.id, s.group) });
+  }
+  stepDetail(tree, dir) {
+    const key = this.detail;
+    if (!key)
+      return;
+    const peers = detailSiblings(tree, key);
+    const next = peers[peers.indexOf(key) + dir];
+    if (!next)
+      return;
+    this.stack[this.stack.length - 1] = { screen: { kind: "detail", key: next } };
+    const parent = this.stack.at(-2);
+    if (parent && next.startsWith("agent:"))
+      parent.selected = next;
+  }
+  openAt(tree, key) {
+    const agent = tree.agents.find((a) => agentKey(a.session) === key || a.subagents.some((s) => subKey(a.session, s.name) === key));
+    if (!agent)
+      return false;
+    this.stack = [{ screen: { kind: "run" }, selected: groupKey(tree.id, agent.group) }];
+    this.stack.push({ screen: { kind: "group", group: agent.group }, ...agent.round !== undefined ? { selected: roundKey(agent.group, agent.round) } : { selected: agentKey(agent.session) } });
+    if (agent.round !== undefined)
+      this.stack.push({ screen: { kind: "round", group: agent.group, round: agent.round }, selected: agentKey(agent.session) });
+    this.stack.push({ screen: { kind: "detail", key } });
+    this.page = undefined;
+    return true;
+  }
 }
-var WIDE = 100;
-var RULES_FROM = 16;
-var PANE_SEPARATOR = " \u2502 ";
-var clamp = (n, lo, hi) => Math.max(lo, Math.min(hi, n));
-function paneSizes(width, height, split = 0, right = true) {
+var HEAD2 = 2;
+function levelFrame(crumbsRow, body, help, width, height, selectedRow = 0) {
   const w = Math.max(1, Math.floor(width));
   const h = Math.max(3, Math.floor(height));
-  const rules = h >= RULES_FROM;
-  const body = Math.max(0, h - 3 - (rules ? 2 : 0));
-  if (right && w >= WIDE) {
-    const tree = clamp(Math.round(w * 0.38), 36, 60);
-    return { two: true, rules, body, left: { width: tree, height: body }, right: { width: w - tree - PANE_SEPARATOR.length, height: body } };
-  }
-  const lower = right ? Math.min(Math.max(0, split), Math.max(0, body - 1)) : 0;
-  return { two: false, rules, body, left: { width: w, height: body - lower }, right: { width: w, height: lower } };
-}
-function fitRow(cells, width) {
-  const out = [];
-  let used = 0;
-  for (const c of cells) {
-    if (used >= width)
-      break;
-    const text = fit(c.text, width - used);
-    out.push({ ...c, text });
-    used += text.length;
-  }
-  const last = out.at(-1);
-  if (used < width) {
-    if (last)
-      last.text = last.text.padEnd(last.text.length + width - used);
-    else
-      out.push({ text: " ".repeat(width), tone: "base" });
-  }
-  return out;
-}
-function frame(input) {
-  const w = Math.max(1, Math.floor(input.width));
-  const sizes = paneSizes(w, input.height, input.split, input.right !== undefined);
-  const paneRows = (cells, width, height) => Array.from({ length: height }, (_, i) => {
-    const c = cells?.[i];
-    return c ? { ...c, text: pad(c.text, width) } : { text: " ".repeat(width), tone: "base" };
-  });
-  const rule = (joint) => [{ text: sizes.two ? `${"\u2500".repeat(sizes.left.width)}\u2500${joint}\u2500${"\u2500".repeat(sizes.right.width)}` : "\u2500".repeat(w), tone: "muted" }];
-  const rows = [fitRow(input.header, w), fitRow(input.stepper, w)];
-  if (sizes.rules)
-    rows.push(rule("\u252C"));
-  if (sizes.two) {
-    const left = paneRows(input.left, sizes.left.width, sizes.body);
-    const right = paneRows(input.right, sizes.right.width, sizes.body);
-    for (let i = 0;i < sizes.body; i++)
-      rows.push([left[i], { text: PANE_SEPARATOR, tone: "muted" }, right[i]]);
-  } else {
-    for (const c of paneRows(input.left, w, sizes.left.height))
-      rows.push([c]);
-    for (const c of paneRows(input.right, w, sizes.right.height))
-      rows.push([c]);
-  }
-  if (sizes.rules)
-    rows.push(rule("\u2534"));
-  rows.push(fitRow(input.help, w));
+  const room = Math.max(0, h - HEAD2 - 1);
+  const first = Math.max(0, Math.min(selectedRow - room + 1, Math.max(0, body.length - room)));
+  const rows = [fitRow(crumbsRow, w), fitRow([], w)];
+  for (let i = 0;i < room; i++)
+    rows.push(fitRow(body[first + i] ?? [], w));
+  rows.push(fitRow([{ text: help, tone: "muted" }], w));
   return rows;
 }
+var levelBody = (height) => Math.max(0, Math.floor(height) - HEAD2 - 1);
+var selectedRow = (page, selected) => page.items.find((i) => i.key === selected)?.row ?? 0;
 
 // src/adapters/runview/tail.ts
 import { closeSync, openSync, readSync, statSync } from "fs";
@@ -4559,7 +5480,7 @@ class TailReader {
 }
 
 // src/adapters/omp/activity.ts
-var text = (value) => typeof value === "string" && value.trim() ? value : undefined;
+var text2 = (value) => typeof value === "string" && value.trim() ? value : undefined;
 var TODO_STATES2 = new Set(["done", "active", "pending"]);
 function eventItem(entry) {
   if (!entry || typeof entry !== "object")
@@ -4567,21 +5488,21 @@ function eventItem(entry) {
   const e = entry;
   const parsed = typeof e.t === "string" ? Date.parse(e.t) : Number.NaN;
   const t = Number.isNaN(parsed) ? {} : { t: parsed };
-  const id = text(e.id) ? { id: e.id } : {};
-  const name = text(e.name) ?? "tool";
+  const id = text2(e.id) ? { id: e.id } : {};
+  const name = text2(e.name) ?? "tool";
   switch (e.type) {
     case "state": {
-      const state = text(e.state);
+      const state = text2(e.state);
       return state && !state.startsWith("running ") ? { ...t, kind: "state", text: state } : undefined;
     }
     case "heading":
-      return text(e.text) ? { ...t, kind: "heading", text: e.text } : undefined;
+      return text2(e.text) ? { ...t, kind: "heading", text: e.text } : undefined;
     case "tool":
-      return { ...t, kind: "tool", name, ...id, ...text(e.intent) ? { intent: e.intent } : {}, ...text(e.arg) ? { arg: e.arg } : {} };
+      return { ...t, kind: "tool", name, ...id, ...text2(e.intent) ? { intent: e.intent } : {}, ...text2(e.arg) ? { arg: e.arg } : {} };
     case "tool-end":
       return { ...t, kind: "tool-end", name, ...id, ...e.error === true ? { failed: true } : {} };
     case "text":
-      return text(e.text) ? { ...t, kind: "text", text: e.text } : undefined;
+      return text2(e.text) ? { ...t, kind: "text", text: e.text } : undefined;
     case "subagents":
       return { ...t, kind: "subagents", names: Array.isArray(e.agents) ? e.agents.filter((a) => typeof a === "string") : [] };
     case "todo": {
@@ -4803,14 +5724,14 @@ var RAW = {
   f: "follow",
   t: "toggle",
   v: "verbose",
+  l: "log",
   q: "quit"
 };
-var TREE_HELP = "\u2191\u2193 move \xB7 Enter/\u2192 open \xB7 Tab/] next agent \xB7 [ prev \xB7 Space fold \xB7 Esc close";
 var SOURCES = 8;
 var MAX_ITEMS = 5000;
 var MB2 = 1024 * 1024;
 var TONE_STYLES = { base: "text", muted: "muted", success: "success", error: "error", warning: "warning", info: "accent" };
-var clamp2 = (n, lo, hi) => Math.max(lo, Math.min(hi, n));
+var clamp = (n, lo, hi) => Math.max(lo, Math.min(hi, n));
 var isLive = (row) => row.agent?.state === "running" || row.agent?.state === "waiting";
 function wrap2(lines, width) {
   const out = [];
@@ -4835,14 +5756,11 @@ function home() {
 
 class Navigator {
   deps;
-  focus = "tree";
+  nav = new LevelNav;
   shown;
-  folded = new Set;
-  opened = new Set;
-  selected = "";
   trees = [];
   rows = [];
-  parents = new Map;
+  lastWidth = 100;
   caches = new Map;
   sources = new Map;
   modes = new Map;
@@ -4854,7 +5772,6 @@ class Navigator {
   verbose;
   bodyHeight = 10;
   bodyLength = 0;
-  treeTop = 0;
   closed = false;
   finished = false;
   timer;
@@ -4864,8 +5781,7 @@ class Navigator {
     this.shown = deps.runId;
     try {
       this.refresh();
-      this.selected = this.firstSelection();
-      this.relayout();
+      this.levelPage();
       this.pollSource();
     } catch {}
     this.timer = setInterval(() => this.tick(), Math.max(10, deps.tickMs));
@@ -4911,10 +5827,10 @@ class Navigator {
       const key = this.keyOf(data);
       if (!key)
         return;
-      if (this.focus === "tree")
-        this.treeKey(key);
-      else
+      if (this.nav.detail)
         this.detailKey(key);
+      else
+        this.levelKey(key);
     } catch {}
     if (this.closed)
       return;
@@ -4987,7 +5903,9 @@ class Navigator {
       if (!line.trim())
         continue;
       try {
-        cache.entries.push(JSON.parse(line));
+        const entry = JSON.parse(line);
+        if (entry?.type !== "heartbeat")
+          cache.entries.push(entry);
       } catch {}
     }
     cache.read = true;
@@ -5041,45 +5959,34 @@ class Navigator {
   shownTree() {
     return this.trees.find((t) => t.id === this.shown);
   }
-  firstSelection() {
-    const tree = this.shownTree();
-    const agent = tree && ([...tree.agents].reverse().find((a) => a.state === "running") ?? tree.agents.at(-1));
-    if (agent && tree) {
-      this.relayout();
-      for (const key of [agentKey(agent.session), groupKey(tree.id, agent.group)])
-        if (this.rows.some((r) => r.key === key))
-          return key;
-    }
-    return runKey(this.shown);
+  get selected() {
+    return this.nav.detail ?? "";
   }
   relayout() {
     const tree = this.shownTree();
-    const focus = tree && focusStage(tree);
-    const layout = () => visibleRows(this.trees, { run: this.shown, folded: this.folded, opened: this.opened, ...focus !== undefined ? { focus } : {}, runs: this.trees.length > 1 ? "list" : "one" });
-    this.rows = layout();
-    const hidden = this.hiddenGroup();
-    if (hidden) {
-      this.opened.add(hidden);
-      this.rows = layout();
-    }
-    for (const row of this.rows)
-      if (row.parent)
-        this.parents.set(row.key, row.parent);
-    let key = this.selected;
-    while (key && !this.rows.some((r) => r.key === key && r.selectable))
-      key = this.parents.get(key);
-    this.selected = key ?? this.rows.find((r) => r.selectable)?.key ?? "";
+    const opened = new Set(tree?.groups.map((g) => groupKey(tree.id, g.key)) ?? []);
+    this.rows = visibleRows(this.trees, { run: this.shown, folded: new Set, opened, runs: this.trees.length > 1 ? "list" : "one" });
+    if (this.nav.detail && !this.selectedRow())
+      this.nav.back();
     this.choose();
   }
-  hiddenGroup() {
-    if (!this.selected || this.rows.some((r) => r.key === this.selected))
-      return;
-    for (let key = this.parents.get(this.selected);key; key = this.parents.get(key)) {
-      const row = this.rows.find((r) => r.key === key);
-      if (row)
-        return row.kind === "group" && row.folded && !this.folded.has(key) ? key : undefined;
-    }
-    return;
+  levelView(tree, width, height) {
+    const now = this.deps.now();
+    return {
+      tree,
+      trees: this.trees,
+      now,
+      width,
+      height,
+      activity: (agent) => {
+        const live = this.liveRole(tree.id, agent.session)?.now();
+        return live ? nowLine(live, now, agent.cwd) : undefined;
+      }
+    };
+  }
+  levelPage() {
+    const tree = this.shownTree();
+    return tree ? this.nav.layout(this.levelView(tree, this.lastWidth, levelBody(this.height()))) : undefined;
   }
   selectedRow() {
     return this.rows.find((r) => r.key === this.selected);
@@ -5172,81 +6079,91 @@ class Navigator {
       }
     }
   }
-  select(key) {
-    if (!key || key === this.selected)
+  levelKey(key) {
+    const tree = this.shownTree();
+    const { nav } = this;
+    if (!tree) {
+      if (key === "escape" || key === "quit")
+        this.close();
       return;
-    this.selected = key;
-    this.choose();
-  }
-  selectable() {
-    return this.rows.filter((r) => r.selectable);
-  }
-  moveBy(delta) {
-    const rows = this.selectable();
-    const at = rows.findIndex((r) => r.key === this.selected);
-    this.select(rows[clamp2(at + delta, 0, rows.length - 1)]?.key);
-  }
-  agentStep(dir) {
-    this.select(nextAgent(this.rows, this.selected, dir));
-  }
-  treeKey(key) {
-    const page = Math.max(1, this.height() - 3);
+    }
+    this.levelPage();
+    const inRound = nav.screen.kind === "round";
+    const page = Math.max(1, levelBody(this.height()));
     switch (key) {
       case "up":
-        return this.moveBy(-1);
-      case "down":
-        return this.moveBy(1);
-      case "pageUp":
-        return this.moveBy(-page);
-      case "pageDown":
-        return this.moveBy(page);
-      case "home":
-        return this.select(this.selectable()[0]?.key);
-      case "end":
-        return this.select(this.selectable().at(-1)?.key);
-      case "enter":
-      case "right": {
-        const row = this.selectedRow();
-        if (row?.kind === "run" && !row.shown && key === "enter")
-          return this.switchRun(row.run.id);
-        this.focus = "detail";
-        return;
-      }
-      case "space": {
-        const row = this.selectedRow();
-        if (row?.kind === "run" && !row.shown)
-          return this.switchRun(row.run.id);
-        return this.fold();
-      }
-      case "tab":
-      case "next":
-        return this.agentStep(1);
       case "backtab":
-      case "prev":
-        return this.agentStep(-1);
+        nav.move(-1);
+        break;
+      case "down":
+      case "tab":
+        nav.move(1);
+        break;
+      case "pageUp":
+        nav.move(-page);
+        break;
+      case "pageDown":
+        nav.move(page);
+        break;
+      case "home":
+        nav.edge(false);
+        break;
+      case "end":
+        nav.edge(true);
+        break;
       case "left":
-        return this.select(this.selectedRow()?.parent);
+        if (inRound)
+          nav.move(-1);
+        else
+          nav.back();
+        break;
+      case "right":
+        if (inRound)
+          nav.move(1);
+        else
+          this.enter();
+        break;
+      case "enter":
+      case "space":
+        this.enter();
+        break;
+      case "next":
+        if (inRound)
+          nav.otherRound(tree, 1);
+        else
+          nav.move(1);
+        break;
+      case "prev":
+        if (inRound)
+          nav.otherRound(tree, -1);
+        else
+          nav.move(-1);
+        break;
+      case "follow":
+        nav.findings(tree);
+        break;
+      case "log":
+        nav.log(tree);
+        break;
       case "escape":
+        if (!nav.back())
+          return this.close();
+        break;
       case "quit":
         return this.close();
     }
+    this.relayout();
+    this.levelPage();
+  }
+  enter() {
+    const { run } = this.nav.enter();
+    if (run)
+      this.switchRun(run);
   }
   switchRun(id) {
     this.shown = id;
+    this.nav.reset();
     this.later();
-    this.relayout();
-  }
-  fold() {
-    const row = this.selectedRow();
-    if (row?.kind !== "group" || row.folded === undefined)
-      return;
-    if (row.folded) {
-      this.folded.delete(row.key);
-      this.opened.add(row.key);
-    } else {
-      this.opened.delete(row.key);
-      this.folded.add(row.key);
-    }
     this.relayout();
   }
   detailKey(key) {
@@ -5287,17 +6204,26 @@ class Navigator {
         return this.switchMode("verbose");
       case "tab":
       case "next":
-        return this.agentStep(1);
+        return this.stepDetail(1);
       case "backtab":
       case "prev":
-        return this.agentStep(-1);
+        return this.stepDetail(-1);
       case "left":
       case "escape":
-        this.focus = "tree";
+        this.nav.back();
+        this.relayout();
+        this.levelPage();
         return;
       case "quit":
         return this.close();
     }
+  }
+  stepDetail(dir) {
+    const tree = this.shownTree();
+    if (!tree)
+      return;
+    this.nav.stepDetail(tree, dir);
+    this.relayout();
   }
   switchMode(mode) {
     const row = this.selectedRow();
@@ -5316,7 +6242,7 @@ class Navigator {
       return;
     const max = Math.max(0, this.bodyLength - this.bodyHeight);
     const current = source.follow || source.top === undefined ? max : source.top;
-    source.top = clamp2(current + delta, 0, max);
+    source.top = clamp(current + delta, 0, max);
     if (delta < 0)
       source.follow = false;
   }
@@ -5350,37 +6276,22 @@ class Navigator {
     return text;
   }
   draw(width, height) {
+    this.lastWidth = width;
     const tree = this.shownTree() ?? this.trees[0];
-    const now = this.deps.now();
-    const help = [{ text: this.help(), tone: "muted" }];
     if (!tree)
-      return frame({ header: [{ text: "granny \xB7 no run", tone: "base" }], stepper: [], left: [], help, width, height }).map((r) => this.paintRow(r));
-    const focus = focusStage(tree, this.selected);
-    const sizes = paneSizes(width, height, 0, true);
-    let left;
-    let right;
-    if (sizes.two) {
-      left = this.treePane(sizes.left.width, sizes.left.height, now);
-      right = this.detailPane(sizes.right.width, sizes.right.height, now);
-    } else
-      left = this.focus === "tree" ? this.treePane(sizes.left.width, sizes.left.height, now) : this.detailPane(sizes.left.width, sizes.left.height, now);
-    const rows = frame({
-      header: [{ text: headerText(tree, now, focus, width), tone: "base" }],
-      stepper: stepperCells(stepsFor(tree, focus), width),
-      left,
-      ...right ? { right } : {},
-      help,
-      width,
-      height
-    });
-    return rows.map((r) => this.paintRow(r));
+      return levelFrame([{ text: "granny \xB7 no run", tone: "base" }], [], "Esc close", width, height).map((r) => this.paintRow(r));
+    const now = this.deps.now();
+    const body = levelBody(height);
+    const page = this.nav.layout(this.levelView(tree, width, body));
+    if (!this.nav.detail)
+      return levelFrame(page.crumbs, page.rows, page.help, width, height, selectedRow(page, this.nav.selected)).map((r) => this.paintRow(r));
+    const rows = this.detailPane(width, body, now).map((c) => [c]);
+    return levelFrame(page.crumbs, rows, this.help(), width, height).map((r) => this.paintRow(r));
   }
   paintRow(cells) {
     return cells.map((c) => c.selected ? this.highlight(c.text) : this.paint(TONE_STYLES[c.tone], c.text)).join("");
   }
   help() {
-    if (this.focus === "tree")
-      return TREE_HELP;
     const row = this.selectedRow();
     const mode = row?.kind === "agent" ? this.modeOf(row) : undefined;
     const parts = [];
@@ -5388,13 +6299,10 @@ class Navigator {
       parts.push("\u2191\u2193 PgUp/PgDn Home/End scroll", `f follow (${this.source?.follow ? "on" : "off"})`);
     if (mode)
       parts.push(`v ${mode === "verbose" ? "summary" : "details"}`, `t ${mode === "transcript" ? "summary" : "transcript"}`);
-    parts.push("Tab/] [ agent", "\u2190/Esc back", "q close");
+    if (row?.kind === "agent" || row?.kind === "sub")
+      parts.push("Tab/] [ agent");
+    parts.push("\u2190/Esc back", "q close");
     return parts.join(" \xB7 ");
-  }
-  treePane(width, height, now) {
-    const { cells, top } = treeCells(this.rows, this.selected, now, width, height, this.treeTop);
-    this.treeTop = top;
-    return cells;
   }
   detailPane(width, height, now) {
     const row = this.selectedRow();
@@ -5414,7 +6322,7 @@ class Navigator {
     this.bodyLength = lines.length;
     const max = Math.max(0, lines.length - bodyHeight);
     const source = this.source;
-    const top = source?.follow ? max : clamp2(source?.top ?? max, 0, max);
+    const top = source?.follow ? max : clamp(source?.top ?? max, 0, max);
     return [...shown, ...lines.slice(top, top + bodyHeight).map((text) => ({ text, tone: "base" }))];
   }
   headOf(row, width, now) {
@@ -5541,8 +6449,12 @@ function runOutline(input, config) {
     finalReview: config.finalReview && stages.length > 1,
     reviewers: config.reviewers.map((r) => clean(r.name)),
     fromStage,
-    stages
+    stages,
+    maxRounds: config.maxRounds
   };
+}
+function judgeOutline(branch, config) {
+  return { kind: "judge", branch: clean(branch), worktree: false, planReview: false, finalReview: false, reviewers: config.reviewers.map((r) => clean(r.name)), fromStage: 1, stages: [] };
 }
 
 // src/adapters/omp/watch.ts
@@ -5577,7 +6489,7 @@ class EventLog {
 var SHARED = Symbol.for("granny-workflow.omp.state");
 var shared = globalThis[SHARED] ??= { runs: new Map };
 var { runs } = shared;
-var text2 = (t) => ({ content: [{ type: "text", text: t }] });
+var text3 = (t) => ({ content: [{ type: "text", text: t }] });
 var WAIT_DEFAULT_SECONDS = 1800;
 var WAIT_MAX_SECONDS = 7200;
 function waitSeconds(value) {
@@ -5777,8 +6689,34 @@ function isTransient(message) {
   return TRANSIENT.test(message);
 }
 var STATUS_KEEP_MS = 60000;
-var WATCH_HELP = "granny-workflow: watch granny runs - /granny (or alt+w) opens the run navigator: a stepper of the run's steps, its stage groups with their agents, and what the selected agent is doing now (or its transcript); /granny <runId> opens it on that run; /granny off|on hides or shows the run panel in this session";
+var WATCH_HELP = "granny-workflow: watch granny runs - /granny (or alt+w) opens the run navigator: the run's stages, a stage's review rounds, a round's agents side by side, and what an agent is doing now (or its transcript); /granny <runId> opens it on that run; /granny off|on hides or shows the run panel in this session";
 var NAVIGATOR_HINT = "/granny or alt+w: agents";
+var ESCAPE_GUARD_MS = 500;
+var ESCAPES = new Set(["\x1B", "\x1B[27u"]);
+function swallowStrayEscape(ctx) {
+  try {
+    let timer;
+    const off = ctx?.ui?.onTerminalInput?.((data) => {
+      if (!ESCAPES.has(data))
+        return;
+      hold();
+      return { consume: true };
+    });
+    if (typeof off !== "function")
+      return;
+    const hold = () => {
+      if (timer)
+        clearTimeout(timer);
+      timer = setTimeout(() => {
+        try {
+          off();
+        } catch {}
+      }, ESCAPE_GUARD_MS);
+      timer.unref?.();
+    };
+    hold();
+  } catch {}
+}
 var NAVIGATOR_SENTENCE = `
 Tell the user: /granny or alt+w opens the run navigator (stages, agents, live activity).`;
 var OVERLAY = { width: "100%", maxHeight: "100%", margin: 0, fullscreen: true, mouseTracking: false };
@@ -5809,10 +6747,10 @@ function registerChild(pi, spec) {
     loadMode: "essential",
     async execute(_id, params, _signal, _onUpdate, ctx) {
       if (ctx?.agent?.kind === "sub")
-        return text2(SUBAGENT_SUBMIT);
+        return text3(SUBAGENT_SUBMIT);
       mkdirSync2(dirname(spec.out), { recursive: true });
       writeFileSync(spec.out, JSON.stringify(params));
-      return text2("Recorded. You are done - stop now.");
+      return text3("Recorded. You are done - stop now.");
     }
   });
   pi.on("tool_call", async (event) => {
@@ -5833,31 +6771,7 @@ var createGrannyExtension = ({ delays = DEFAULT_DELAYS, sleep = pause, killGrace
   const child = process.env.GRANNY_OMP_CHILD;
   if (child)
     return registerChild(pi, JSON.parse(child));
-  const startRun = (input, ctx) => {
-    const problems = checkInput(input);
-    if (problems.length)
-      return `granny_run refused:
-- ${problems.join(`
-- `)}`;
-    const layers = [readJson(globalConfigPath()), readJson(join4(input.repo, "granny.config.json")), input.config];
-    const config = resolveConfig(layers, "omp");
-    const unknownChecks = stageCheckErrors(input.stages, config.checks);
-    if (unknownChecks.length)
-      return `granny_run refused:
-- ${unknownChecks.join(`
-- `)}`;
-    const badModels = hostModelErrors(config, layers, "omp", ompModelProblem, layerSources(input.repo));
-    if (badModels.length)
-      return `granny_run refused:
-- ${badModels.join(`
-- `)}`;
-    const blockers = preflight(input.repo, input.branch, config.workDir, config.worktree);
-    for (const repo of stageRepos(input))
-      blockers.push(...preflight(repo, input.branch, config.workDir, config.worktree).map((b) => `${repo}: ${b}`));
-    if (blockers.length)
-      return `granny_run refused:
-- ${blockers.join(`
-- `)}`;
+  const launch = ({ input, layers, config, branch, outline, engine, finished, started }, ctx) => {
     const id = runId();
     const dir = join4(input.repo, config.workDir, "runs", id);
     mkdirSync2(dir, { recursive: true });
@@ -5865,12 +6779,11 @@ var createGrannyExtension = ({ delays = DEFAULT_DELAYS, sleep = pause, killGrace
     shared.clearStatus = undefined;
     const { watch } = config;
     const live = new LiveRun(id, watch !== "off" && ctx?.hasUI === true ? ctx.ui : undefined, { now, renderEveryMs, ...watch === "full" ? { hint: NAVIGATOR_HINT } : {} }, !shared.hidden);
-    const outline = runOutline(input, config);
-    const run = { id, dir, status: "running", cancelled: false, abort: new AbortController, children: new Set, agents: 0, waiters: new Set, live, watch, branch: input.branch, outline };
+    const run = { id, dir, status: "running", cancelled: false, abort: new AbortController, children: new Set, agents: 0, waiters: new Set, live, watch, branch, outline };
     runs.set(id, run);
     const journal = (type, data) => appendFileSync3(join4(dir, "journal.jsonl"), JSON.stringify({ t: stamp(), type, ...data }) + `
 `);
-    const writeStatus = (extra = {}) => writeFileSync(join4(dir, "status.json"), JSON.stringify({ id, status: run.status, repo: input.repo, branch: input.branch, outline, ...extra }, null, 2));
+    const writeStatus = (extra = {}) => writeFileSync(join4(dir, "status.json"), JSON.stringify({ id, status: run.status, repo: input.repo, branch, outline, ...extra }, null, 2));
     writeFileSync(join4(dir, "input.json"), JSON.stringify({ ...input, config: layers }, null, 2));
     writeStatus({ startedAt: stamp() });
     const parentModel = ctx?.model?.provider && ctx?.model?.id ? `${ctx.model.provider}/${ctx.model.id}` : undefined;
@@ -6033,7 +6946,8 @@ When done, call the \`${tool}\` tool exactly once with your result. That call is
         journal("phase", { title });
         live.setPhase(title);
       },
-      stage: ({ number, name, event, outcome }) => journal("stage", { number, name, event, ...outcome ? { outcome } : {} })
+      stage: ({ number, name, event, outcome }) => journal("stage", { number, name, event, ...outcome ? { outcome } : {} }),
+      round: (event) => journal("round", { ...event })
     };
     const notify = (content) => {
       try {
@@ -6054,16 +6968,21 @@ When done, call the \`${tool}\` tool exactly once with your result. That call is
         deliver(reply);
       if (waiting.length)
         journal("notified-via-wait", { waits: waiting.length });
-      else if (notice)
+      else if (notice) {
         notify(notice);
+        if (run.waitStopped && ctx?.hasUI === true) {
+          try {
+            ctx.ui.notify(`granny: run ${id} finished. If omp does not go on by itself (it stays paused after Esc), send it a message.`, "info");
+          } catch {}
+        }
+      }
     };
-    runGranny(host, { ...input, config: layers }).then((result) => {
+    engine(host).then((result) => {
       run.status = "done";
       writeStatus({ finishedAt: stamp() });
       writeResult(result);
       const reply = `[granny] Run ${id} finished.
-${summarize(result, config.worktree)}
-Call granny_status with runId "${id}" for the full result, verify load-bearing claims yourself, report to the user and wait. Do not push.`;
+${finished(result, id)}`;
       settle(reply, reply);
     }).catch((error) => {
       if (run.reply !== undefined)
@@ -6081,9 +7000,65 @@ Call granny_status with runId "${id}" and report to the user.`;
         settle(reply, run.cancelled ? undefined : reply);
       }
     }).catch(() => {});
-    return `granny run ${id} started on ${input.repo} (${input.branch}), ${input.goal !== undefined ? "planning only" : `${input.stages?.length ?? 0} stage(s)${config.parallel ? `, up to ${config.maxParallel} in parallel` : ""}`}, threshold ${config.threshold}, maxRounds ${config.maxRounds}.
-Journal: ${join4(dir, "journal.jsonl")}
-To wait in this turn, call granny_wait { runId: "${id}" }; otherwise end your turn - the finish message starts a new one. Never write your own watcher, sleep or poll loop on the run files. Use granny_status { runId: "${id}" } for progress and granny_cancel to stop it.${planReviewNotice(input, config)}${watch === "full" ? NAVIGATOR_SENTENCE : ""}${overridesNotice(layers, "omp")}`;
+    return started(id, join4(dir, "journal.jsonl"));
+  };
+  const waitSentence = (id) => `To wait in this turn, call granny_wait { runId: "${id}" }; otherwise end your turn - the finish message starts a new one. Never write your own watcher, sleep or poll loop on the run files. Use granny_status { runId: "${id}" } for progress and granny_cancel to stop it.`;
+  const startRun = (input, ctx) => {
+    const problems = checkInput(input);
+    if (problems.length)
+      return `granny_run refused:
+- ${problems.join(`
+- `)}`;
+    const layers = [readJson(globalConfigPath()), readJson(join4(input.repo, "granny.config.json")), input.config];
+    const config = resolveConfig(layers, "omp");
+    const unknownChecks = stageCheckErrors(input.stages, config.checks);
+    if (unknownChecks.length)
+      return `granny_run refused:
+- ${unknownChecks.join(`
+- `)}`;
+    const badModels = hostModelErrors(config, layers, "omp", ompModelProblem, layerSources(input.repo));
+    if (badModels.length)
+      return `granny_run refused:
+- ${badModels.join(`
+- `)}`;
+    const blockers = preflight(input.repo, input.branch, config.workDir, config.worktree);
+    for (const repo of stageRepos(input))
+      blockers.push(...preflight(repo, input.branch, config.workDir, config.worktree).map((b) => `${repo}: ${b}`));
+    if (blockers.length)
+      return `granny_run refused:
+- ${blockers.join(`
+- `)}`;
+    return launch({
+      input,
+      layers,
+      config,
+      branch: input.branch,
+      outline: runOutline(input, config),
+      engine: (host) => runGranny(host, { ...input, config: layers }),
+      finished: (result, id) => `${summarize(result, config.worktree)}
+Call granny_status with runId "${id}" for the full result, verify load-bearing claims yourself, report to the user and wait. Do not push.`,
+      started: (id, journalPath) => `granny run ${id} started on ${input.repo} (${input.branch}), ${input.goal !== undefined ? "planning only" : `${input.stages?.length ?? 0} stage(s)${config.parallel ? `, up to ${config.maxParallel} in parallel` : ""}`}, threshold ${config.threshold}, maxRounds ${config.maxRounds}.
+Journal: ${journalPath}
+${waitSentence(id)}${planReviewNotice(input, config)}${sameModelNotice(input, config, "omp")}${config.watch === "full" ? NAVIGATOR_SENTENCE : ""}${overridesNotice(layers, "omp")}`
+    }, ctx);
+  };
+  const startJudge = (input, ctx) => {
+    const ready = prepareJudge(input, "omp", ompModelProblem);
+    if ("refused" in ready)
+      return ready.refused;
+    const { layers, config, branch } = ready;
+    return launch({
+      input,
+      layers,
+      config,
+      branch,
+      outline: judgeOutline(branch, config),
+      engine: (host) => runJudge(host, { ...input, config: layers }),
+      finished: (result) => summarizeJudge(result),
+      started: (id, journalPath) => `${judgeStartLine(id, input, branch, config, "omp")}
+Journal: ${journalPath}
+${waitSentence(id)}${config.watch === "full" ? NAVIGATOR_SENTENCE : ""}${overridesNotice(layers, "omp")}`
+    }, ctx);
   };
   pi.registerTool({
     name: "granny_run",
@@ -6093,9 +7068,23 @@ To wait in this turn, call granny_wait { runId: "${id}" }; otherwise end your tu
     loadMode: "essential",
     async execute(_id, params, _signal, _onUpdate, ctx) {
       try {
-        return text2(startRun(dropPlaceholders(params), ctx));
+        return text3(startRun(dropPlaceholders(params), ctx));
       } catch (e) {
-        return text2(`granny_run failed to start: ${e.message}`);
+        return text3(`granny_run failed to start: ${e.message}`);
+      }
+    }
+  });
+  pi.registerTool({
+    name: "granny_judge",
+    label: "granny judge",
+    description: JUDGE_TOOL_DESCRIPTION,
+    parameters: JUDGE_INPUT_SCHEMA,
+    loadMode: "essential",
+    async execute(_id, params, _signal, _onUpdate, ctx) {
+      try {
+        return text3(startJudge(dropPlaceholders(params), ctx));
+      } catch (e) {
+        return text3(`granny_judge failed to start: ${e.message}`);
       }
     }
   });
@@ -6113,13 +7102,13 @@ To wait in this turn, call granny_wait { runId: "${id}" }; otherwise end your tu
         const status = runStatus(runs, params.runId, params.repo);
         const dir = runDir(runs, params.runId, params.repo);
         const run = [...runs.values()].find((r) => r.dir === dir && r.status === "running");
-        return text2(run ? `${status}
+        return text3(run ? `${status}
 
 live (this omp process):
 ${run.live.lines(Number.POSITIVE_INFINITY).join(`
 `)}` : status);
       } catch (e) {
-        return text2(`granny_status failed: ${e.message}`);
+        return text3(`granny_status failed: ${e.message}`);
       }
     }
   });
@@ -6140,22 +7129,27 @@ ${run.live.lines(Number.POSITIVE_INFINITY).join(`
     async execute(_id, params, signal) {
       const run = runs.get(params.runId);
       if (!run) {
-        return text2(`No granny run "${params.runId}" in this omp process. granny_wait waits only for a run started in this process - the run table is in memory; call granny_status({ repo }) to read a run's files.`);
+        return text3(`No granny run "${params.runId}" in this omp process. granny_wait waits only for a run started in this process - the run table is in memory; call granny_status({ repo }) to read a run's files.`);
       }
       if (run.reply !== undefined)
-        return text2(run.reply);
+        return text3(run.reply);
       const stopped = `Stopped waiting; run ${run.id} is still running.`;
-      if (signal?.aborted)
-        return text2(stopped);
+      if (signal?.aborted) {
+        run.waitStopped = true;
+        return text3(stopped);
+      }
       const seconds = waitSeconds(params.timeoutSeconds);
       return new Promise((resolve) => {
         const done = (reply) => {
           clearTimeout(timer);
           signal?.removeEventListener("abort", onAbort);
           run.waiters.delete(done);
-          resolve(text2(reply));
+          resolve(text3(reply));
         };
-        const onAbort = () => done(stopped);
+        const onAbort = () => {
+          run.waitStopped = true;
+          done(stopped);
+        };
         const timer = setTimeout(() => done(`Run ${run.id} is still running after ${seconds} s. Call granny_wait again to keep waiting, or end your turn - the finish message will start a new one.`), seconds * 1000);
         run.waiters.add(done);
         signal?.addEventListener("abort", onAbort, { once: true });
@@ -6212,6 +7206,7 @@ ${run.live.lines(Number.POSITIVE_INFINITY).join(`
     } finally {
       navigator?.dispose();
       shared.navigating = false;
+      swallowStrayEscape(ctx);
     }
   };
   pi.registerCommand?.("granny", {
@@ -6245,14 +7240,14 @@ ${run.live.lines(Number.POSITIVE_INFINITY).join(`
     async execute(_id, params) {
       const run = runs.get(params.runId);
       if (!run || run.status !== "running")
-        return text2(`No running granny run "${params.runId}".`);
+        return text3(`No running granny run "${params.runId}".`);
       run.cancelled = true;
       run.abort.abort();
       for (const proc of run.children) {
         signalGroup(proc, "SIGTERM");
         setTimeout(() => run.children.has(proc) && signalGroup(proc, "SIGKILL"), killGraceMs).unref();
       }
-      return text2(`Cancelling ${params.runId}; every running step is interrupted and nothing further starts.`);
+      return text3(`Cancelling ${params.runId}; every running step is interrupted and nothing further starts.`);
     }
   });
 };

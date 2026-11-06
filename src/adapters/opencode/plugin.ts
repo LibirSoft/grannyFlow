@@ -2,12 +2,12 @@ import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { resolveConfig } from '../../core/config'
 import { GrannyCancelled, isCancelled } from '../../core/cancel'
-import { checkInput, runGranny, stageCheckErrors, type RunInput } from '../../core/engine'
+import { checkInput, type JudgeInput, runGranny, runJudge, stageCheckErrors, type RunInput } from '../../core/engine'
 import { checkShape, SCHEMAS } from '../../core/schemas'
 import type { AgentRequest, Host, ResultKind } from '../../core/types'
-import { DEFAULT_DELAYS, dropPlaceholders, globalConfigPath, HEARTBEAT_MS, hostModelErrors, type HostOptions, KILL_GRACE_MS, layerSources, overridesNotice, pause, planReviewNotice, preflight, readJson, RUN_INPUT_SCHEMA, RUN_TOOL_DESCRIPTION, runCommand, runDir, runId, runStatus, stageRepos, stamp, statusError, SUBMIT, summarize, withHeartbeat } from '../common'
+import { DEFAULT_DELAYS, dropPlaceholders, globalConfigPath, HEARTBEAT_MS, hostModelErrors, type HostOptions, JUDGE_INPUT_SCHEMA, JUDGE_TOOL_DESCRIPTION, judgeStartLine, KILL_GRACE_MS, layerSources, type Launch, overridesNotice, pause, planReviewNotice, preflight, prepareJudge, readJson, RUN_INPUT_SCHEMA, RUN_TOOL_DESCRIPTION, runCommand, runDir, runId, runStatus, sameModelNotice, stageRepos, stamp, statusError, SUBMIT, summarize, summarizeJudge, withHeartbeat } from '../common'
 import { duration } from '../runview/format'
-import { runOutline } from '../runview/outline'
+import { judgeOutline, runOutline } from '../runview/outline'
 
 export { globalConfigPath, pause, preflight, stageRepos, summarize } from '../common'
 export type { RetryPolicy } from '../common'
@@ -121,20 +121,7 @@ export type PluginOptions = HostOptions
 export const createGrannyPlugin = ({ delays = DEFAULT_DELAYS, sleep = pause, killGraceMs = KILL_GRACE_MS, heartbeatMs = HEARTBEAT_MS }: Partial<PluginOptions> = {}) => ({
   id: 'granny-workflow',
   async setup(ctx: any) {
-    const startRun = async (input: RunInput, parentSession: string): Promise<string> => {
-      const problems = checkInput(input)
-      if (problems.length) return `granny_run refused:\n- ${problems.join('\n- ')}`
-
-      const layers = [readJson(globalConfigPath()), readJson(join(input.repo, 'granny.config.json')), input.config]
-      const config = resolveConfig(layers, 'opencode')
-      const unknownChecks = stageCheckErrors(input.stages, config.checks)
-      if (unknownChecks.length) return `granny_run refused:\n- ${unknownChecks.join('\n- ')}`
-      const badModels = hostModelErrors(config, layers, 'opencode', opencodeModelProblem, layerSources(input.repo))
-      if (badModels.length) return `granny_run refused:\n- ${badModels.join('\n- ')}`
-      const blockers = preflight(input.repo, input.branch, config.workDir, config.worktree)
-      for (const repo of stageRepos(input)) blockers.push(...preflight(repo, input.branch, config.workDir, config.worktree).map(b => `${repo}: ${b}`))
-      if (blockers.length) return `granny_run refused:\n- ${blockers.join('\n- ')}`
-
+    const launch = async <R>({ input, layers, config, branch, outline, engine, finished, started }: Launch<R>, parentSession: string): Promise<string> => {
       const id = runId()
       const dir = join(input.repo, config.workDir, 'runs', id)
       mkdirSync(dir, { recursive: true })
@@ -153,9 +140,8 @@ export const createGrannyPlugin = ({ delays = DEFAULT_DELAYS, sleep = pause, kil
       runs.set(id, run)
       const journal = (type: string, data: Record<string, unknown>) =>
         appendFileSync(join(dir, 'journal.jsonl'), JSON.stringify({ t: stamp(), type, ...data }) + '\n')
-      const outline = runOutline(input, config)
       const writeStatus = (extra: Record<string, unknown> = {}) =>
-        writeFileSync(join(dir, 'status.json'), JSON.stringify({ id, status: run.status, repo: input.repo, branch: input.branch, parent: parentSession, watch: config.watch, outline, ...extra }, null, 2))
+        writeFileSync(join(dir, 'status.json'), JSON.stringify({ id, status: run.status, repo: input.repo, branch, parent: parentSession, watch: config.watch, outline, ...extra }, null, 2))
       writeFileSync(join(dir, 'input.json'), JSON.stringify({ ...input, config: layers }, null, 2))
       writeStatus({ startedAt: stamp() })
 
@@ -300,6 +286,7 @@ export const createGrannyPlugin = ({ delays = DEFAULT_DELAYS, sleep = pause, kil
         log: message => journal('log', { message }),
         phase: title => journal('phase', { title }),
         stage: ({ number, name, event, outcome }) => journal('stage', { number, name, event, ...(outcome ? { outcome } : {}) }),
+        round: event => journal('round', { ...event }),
       }
 
       const notify = async (text: string) => {
@@ -310,12 +297,12 @@ export const createGrannyPlugin = ({ delays = DEFAULT_DELAYS, sleep = pause, kil
         }
       }
 
-      void runGranny(host, { ...input, config: layers })
+      void engine(host)
         .then(async result => {
           run.status = 'done'
           writeFileSync(join(dir, 'result.json'), JSON.stringify(result, null, 2))
           writeStatus({ finishedAt: stamp() })
-          await notify(`[granny] Run ${id} finished.\n${summarize(result, config.worktree)}\nCall granny_status with runId "${id}" for the full result, verify load-bearing claims yourself, report to the user and wait. Do not push.`)
+          await notify(`[granny] Run ${id} finished.\n${finished(result, id)}`)
         })
         .catch(async error => {
           run.status = run.cancelled ? 'cancelled' : 'failed'
@@ -324,9 +311,61 @@ export const createGrannyPlugin = ({ delays = DEFAULT_DELAYS, sleep = pause, kil
           if (!run.cancelled) await notify(`[granny] Run ${id} failed: ${String(error?.message ?? error)}\nCall granny_status with runId "${id}" and report to the user.`)
         })
 
-      return `granny run ${id} started on ${input.repo} (${input.branch}), ${input.goal !== undefined ? 'planning only' : `${input.stages?.length ?? 0} stage(s)${config.parallel ? `, up to ${config.maxParallel} in parallel` : ''}`}, threshold ${config.threshold}, maxRounds ${config.maxRounds}.
-Journal: ${join(dir, 'journal.jsonl')}
-You will receive a message when it finishes. Use granny_status { runId: "${id}" } to check progress and granny_cancel to stop it. Do not poll in a loop.${config.watch === 'full' ? `\n${NAVIGATOR_HINT}` : ''}${planReviewNotice(input, config)}${overridesNotice(layers, 'opencode')}`
+      return started(id, join(dir, 'journal.jsonl'))
+    }
+
+    const notifySentence = (id: string) => `You will receive a message when it finishes. Use granny_status { runId: "${id}" } to check progress and granny_cancel to stop it. Do not poll in a loop.`
+
+    const startRun = async (input: RunInput, parentSession: string): Promise<string> => {
+      const problems = checkInput(input)
+      if (problems.length) return `granny_run refused:\n- ${problems.join('\n- ')}`
+
+      const layers = [readJson(globalConfigPath()), readJson(join(input.repo, 'granny.config.json')), input.config]
+      const config = resolveConfig(layers, 'opencode')
+      const unknownChecks = stageCheckErrors(input.stages, config.checks)
+      if (unknownChecks.length) return `granny_run refused:\n- ${unknownChecks.join('\n- ')}`
+      const badModels = hostModelErrors(config, layers, 'opencode', opencodeModelProblem, layerSources(input.repo))
+      if (badModels.length) return `granny_run refused:\n- ${badModels.join('\n- ')}`
+      const blockers = preflight(input.repo, input.branch, config.workDir, config.worktree)
+      for (const repo of stageRepos(input)) blockers.push(...preflight(repo, input.branch, config.workDir, config.worktree).map(b => `${repo}: ${b}`))
+      if (blockers.length) return `granny_run refused:\n- ${blockers.join('\n- ')}`
+
+      return launch(
+        {
+          input,
+          layers,
+          config,
+          branch: input.branch,
+          outline: runOutline(input, config),
+          engine: host => runGranny(host, { ...input, config: layers }),
+          finished: (result, id) => `${summarize(result, config.worktree)}\nCall granny_status with runId "${id}" for the full result, verify load-bearing claims yourself, report to the user and wait. Do not push.`,
+          started: (id, journalPath) => `granny run ${id} started on ${input.repo} (${input.branch}), ${input.goal !== undefined ? 'planning only' : `${input.stages?.length ?? 0} stage(s)${config.parallel ? `, up to ${config.maxParallel} in parallel` : ''}`}, threshold ${config.threshold}, maxRounds ${config.maxRounds}.
+Journal: ${journalPath}
+${notifySentence(id)}${config.watch === 'full' ? `\n${NAVIGATOR_HINT}` : ''}${planReviewNotice(input, config)}${sameModelNotice(input, config, 'opencode')}${overridesNotice(layers, 'opencode')}`,
+        },
+        parentSession,
+      )
+    }
+
+    const startJudge = async (input: JudgeInput, parentSession: string): Promise<string> => {
+      const ready = prepareJudge(input, 'opencode', opencodeModelProblem)
+      if ('refused' in ready) return ready.refused
+      const { layers, config, branch } = ready
+      return launch(
+        {
+          input,
+          layers,
+          config,
+          branch,
+          outline: judgeOutline(branch, config),
+          engine: host => runJudge(host, { ...input, config: layers }),
+          finished: result => summarizeJudge(result),
+          started: (id, journalPath) => `${judgeStartLine(id, input, branch, config, 'opencode')}
+Journal: ${journalPath}
+${notifySentence(id)}${config.watch === 'full' ? `\n${NAVIGATOR_HINT}` : ''}${overridesNotice(layers, 'opencode')}`,
+        },
+        parentSession,
+      )
     }
 
     await ctx.tool.transform((editor: any) => {
@@ -350,6 +389,18 @@ You will receive a message when it finishes. Use granny_status { runId: "${id}" 
             return { content: await startRun(dropPlaceholders(value), context.sessionID) }
           } catch (e) {
             return { content: `granny_run failed to start: ${(e as Error).message}` }
+          }
+        },
+      })
+      editor.add({
+        name: 'granny_judge',
+        description: JUDGE_TOOL_DESCRIPTION,
+        input: JUDGE_INPUT_SCHEMA,
+        execute: async (value: JudgeInput, context: any) => {
+          try {
+            return { content: await startJudge(dropPlaceholders(value), context.sessionID) }
+          } catch (e) {
+            return { content: `granny_judge failed to start: ${(e as Error).message}` }
           }
         },
       })

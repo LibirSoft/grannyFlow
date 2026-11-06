@@ -24,6 +24,21 @@ Workflow({
 
 4. Record the run id where the project tracks work (a STATUS file, a plan) and tell the user. Do not poll: a task notification arrives when the workflow ends.
 
+## Review only: `granny judge`
+
+The steps, with what to ask the user first, are in [judge.md](judge.md). The launch is the same script with other args:
+
+```
+Workflow({
+  script: <contents of workflow.js>,              // or scriptPath: <scratchpad copy of workflow.js>
+  args: { judge: true, repo, base, context, config: [<user config>, <project config>] }   // omit missing layers
+})
+```
+
+The agents run on the checkout in `repo`, read-only: phase "Review" (the helper reads the date, branch, HEAD, commit count and status), `review <branch> r1 <reviewer>`, phase "Judge" (`tag <branch>` on `roles.judge`), then phase "Report": a helper writes `<repo>/<workDir>/reviews/<date>-<branch>.md` (by default `.granny/reviews/`) and reads its size back, since a Workflow script has no shell. The helpers are the only agents with write access, and they run only the listed commands. The Workflow fails before any agent starts when the reviewers or the judge model are missing, naming each gap: go back to [judge.md](judge.md) and ask the user. Unlike omp and opencode, the engine gets the config files through `args.config` and cannot tell them from an override, so here that rule rests on the skill: pass the files as they are and never add models of your own.
+
+The result is `{ outcome, counts, demoted, findings, failedReviewers, notJudged, uncommitted, reportPath, written, report, note }`. With `written: false` the helper did not leave the exact report on disk: write `report` to `reportPath` with the Write tool yourself.
+
 ## Models
 
 `opus`, `sonnet`, `haiku`, or a model ID the session accepts. A role without a model inherits the session model; the judge defaults to `haiku` (it only classifies findings; set `"roles": { "judge": { "model": "sonnet" } }` to switch back - see [The judge's model](config.md#the-judges-model)); a judge answer that comes back empty or leaves findings unclassified gets one retry, `judge <stage> r<n> retry`, before those findings are sent unjudged ([config.md](config.md#the-decision-table)). `effort` is passed through (`low` … `max`). Workflow scripts have no shell, so every plain command - the worktree setup, the HEAD, commit-count and status reads, the timeout probe, the checks, a lane's merge and cleanup, and the steps of a review command - runs in a helper agent on `roles.helper` (default `haiku`, effort `low`); each runs one given command and reports its exit code and output, so these steps cost tokens and their results are relayed by a model, not read directly. This is a stopgap until Claude Code ships a deterministic `run(cmd)` Workflow primitive ([claude-code#98566](https://github.com/anthropics/claude-code/issues/98566)), when granny will run these commands through it and drop the helper agents. `roles.granny` covers the extraction fallback and the final check, so do not go below `sonnet` there.

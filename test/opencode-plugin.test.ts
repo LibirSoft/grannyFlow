@@ -1,8 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test'
 import { spawnSync } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { SAME_MODEL_HINT } from '../src/adapters/common'
 import plugin, { createGrannyPlugin, isTransient, modelRef, pause, permissions, preflight, providerError, summarize } from '../src/adapters/opencode/plugin'
 import { brokerCompanion, records, sessionEndHook } from './fake-companion'
 import { planReviewWarning } from '../src/core/config'
@@ -359,6 +360,7 @@ describe('opencode plugin', () => {
     await plugin.setup(f.ctx)
     expect([...f.tools.keys()].sort()).toEqual([
       'granny_cancel',
+      'granny_judge',
       'granny_run',
       'granny_status',
       'granny_submit_final',
@@ -368,6 +370,165 @@ describe('opencode plugin', () => {
       'granny_submit_plan',
       'granny_submit_plan_fix',
     ])
+  })
+
+  describe('granny_judge', () => {
+    const MODELS = { reviewers: [{ name: 'codex', engine: 'command', command: REVIEW_ONCE }], roles: { judge: { model: { opencode: 'prov/tag' } } } }
+    const ASK = "Ask the user for these per the skill's references/judge.md and write them to the config. Do not choose a model yourself."
+    const configure = (config: unknown) => {
+      writeFileSync(join(repo, 'granny.config.json'), JSON.stringify(config))
+      git(repo, 'add', 'granny.config.json')
+      git(repo, 'commit', '-qm', 'cfg')
+    }
+    const call = async (f: ReturnType<typeof fakeContext>, params: Record<string, unknown> = {}) => (await f.tools.get('granny_judge').execute({ repo, ...params }, { sessionID: 'parent' })).content as string
+    const tool = async (behaviour?: Parameters<typeof fakeContext>[0]) => {
+      const f = fakeContext(behaviour)
+      await plugin.setup(f.ctx)
+      return f
+    }
+    const launch = async (f: ReturnType<typeof fakeContext>, params: Record<string, unknown> = {}) => {
+      const started = await call(f, params)
+      const id = /granny judge run (\S+) started/.exec(started)?.[1]
+      if (!id) throw new Error(started)
+      return { id, started, dir: join(repo, '.granny/runs', id) }
+    }
+    const toParent = (f: ReturnType<typeof fakeContext>) => f.prompts.filter(p => p.sessionID === 'parent').map(p => p.text)
+
+    it('refuses without config, naming every gap and telling the agent to ask the user, before anything runs', async () => {
+      const f = await tool()
+      expect((await call(f)).split('\n')).toEqual(['granny_judge refused:', '- reviewers: no config sets who reviews', '- roles.judge.model: no model for opencode', ASK])
+      expect(f.creates).toEqual([])
+      expect(existsSync(join(repo, '.granny/runs'))).toBe(false)
+    })
+
+    it('refuses an agent reviewer with no model for opencode', async () => {
+      const f = await tool()
+      configure({ ...MODELS, reviewers: [{ name: 'kimi', engine: 'agent', model: { omp: 'a/b' } }] })
+      expect((await call(f)).split('\n')).toEqual(['granny_judge refused:', '- reviewers[0] (kimi): no model for opencode', ASK])
+    })
+
+    it('refuses no judge model for opencode', async () => {
+      const f = await tool()
+      configure({ reviewers: MODELS.reviewers })
+      expect((await call(f)).split('\n')).toEqual(['granny_judge refused:', '- roles.judge.model: no model for opencode', ASK])
+    })
+
+    it('does not let the run\'s own config answer the gate, so the agent cannot pick the models itself', async () => {
+      const f = await tool()
+      const reply = await call(f, { config: MODELS })
+      expect(reply).toStartWith('granny_judge refused:')
+      expect(reply).toEndWith(ASK)
+    })
+
+    it('refuses a model opencode cannot run', async () => {
+      const f = await tool()
+      configure({ reviewers: [{ name: 'r', engine: 'agent', model: 'sonnet' }], roles: { judge: { model: 'haiku' } } })
+      const reply = await call(f)
+      expect(reply).toStartWith('granny_judge refused:')
+      expect(reply).toContain('roles.judge.model: "haiku"')
+      expect(reply).toContain('reviewers[0] "r": model "sonnet"')
+      expect(reply).not.toContain(ASK)
+      expect(f.creates).toEqual([])
+    })
+
+    it('does not refuse a bad implementer model, which a judge run never uses', async () => {
+      const f = await tool()
+      configure({ ...MODELS, roles: { ...MODELS.roles, implementer: { model: 'sonnet' } } })
+      const { dir } = await launch(f)
+      expect((await finished(dir)).outcome).toBe('reviewed')
+    })
+
+    it('refuses a relative repo and a directory that is not a git repository', async () => {
+      const f = await tool()
+      expect(await call(f, { repo: 'relative/path' })).toBe('granny_judge refused:\n- repo must be an absolute path')
+      const plain = mkdtempSync(join(tmpdir(), 'granny-plain-'))
+      writeFileSync(join(plain, 'granny.config.json'), JSON.stringify(MODELS))
+      const reply = await call(f, { repo: plain })
+      rmSync(plain, { recursive: true, force: true })
+      expect(reply).toStartWith('granny_judge refused:')
+      expect(reply).toContain('not a git repository')
+    })
+
+    it('ends with the report on disk, the exact bytes, read-only agents, and the path and counts in the finish message', async () => {
+      const f = await tool()
+      configure(MODELS)
+      const head = git(repo, 'rev-parse', 'HEAD')
+      const { id, dir } = await launch(f)
+      const result = await finished(dir)
+      expect(result).toMatchObject({ outcome: 'reviewed', branch: 'feat/x', base: 'main', written: true, counts: { P0: 1, P1: 0, P2: 0, P3: 0, dismissed: 0 } })
+      expect(result.reportPath).toMatch(new RegExp(`^${repo}/\\.granny/reviews/\\d{8}-\\d{6}-feat-x\\.md$`))
+      expect(readFileSync(result.reportPath)).toEqual(Buffer.from(result.report))
+      await waitFor(() => toParent(f).length > 0)
+      expect(JSON.parse(readRun(dir, 'status.json'))).toMatchObject({ status: 'done', branch: 'feat/x', parent: 'parent', outline: { kind: 'judge', branch: 'feat/x', worktree: false, reviewers: ['codex'], stages: [] } })
+      expect(f.creates.map(c => c.title)).toEqual(['granny · tag feat/x'])
+      expect(f.creates[0].permissions).toContainEqual({ action: 'edit', resource: '*', effect: 'deny' })
+      expect(f.creates[0].model).toEqual({ providerID: 'prov', id: 'tag' })
+      expect(git(repo, 'rev-parse', 'HEAD')).toBe(head)
+      expect(git(repo, 'status', '--short')).toBe('')
+      expect(toParent(f)[0]).toStartWith(`[granny] Run ${id} finished.\n- report: ${result.reportPath}\n- counts: P0 1, P1 0, P2 0, P3 0, dismissed 0\n`)
+      expect(toParent(f)[0]).toEndWith('Nothing was fixed or committed. Give the user the report path and the counts; do not fix anything unless they ask.')
+    })
+
+    it('names the reviewers and the judge model in the start reply, says nothing will change, and keeps the notify sentence and the overrides', async () => {
+      const f = await tool({ hangUntilInterrupted: title => title === 'granny · tag feat/x' })
+      configure(MODELS)
+      const { id, dir, started } = await launch(f, { config: { language: 'Turkish' } })
+      expect(started).toContain(`granny judge run ${id} started on ${repo} (feat/x)`)
+      expect(started).toContain('main...HEAD by codex (command)')
+      expect(started).toContain('tagged by prov/tag')
+      expect(started).toContain('Nothing will be changed: no fix, commit, push, branch or worktree')
+      expect(started).toContain('You will receive a message when it finishes.')
+      expect(started).toContain('\noverrides: language Turkish')
+      expect(started).not.toContain('threshold')
+      await waitFor(() => f.creates.length > 0 && f.interrupted.length === 0)
+      await f.tools.get('granny_cancel').execute({ runId: id })
+      await waitFor(() => JSON.parse(readRun(dir, 'status.json')).status === 'cancelled')
+    })
+
+    it('starts on a dirty tree and lists what it did not review', async () => {
+      const f = await tool()
+      configure(MODELS)
+      writeFileSync(join(repo, 'dirty.txt'), 'x')
+      const { dir } = await launch(f)
+      const result = await finished(dir)
+      expect(result.uncommitted).toEqual(['dirty.txt'])
+      expect(result.report).toContain('- Not reviewed: dirty.txt')
+      await waitFor(() => toParent(f).length > 0)
+      expect(toParent(f)[0]).toContain('- not reviewed, uncommitted: dirty.txt')
+    })
+
+    it('granny_cancel stops it, with no report', async () => {
+      const f = await tool({ hangUntilInterrupted: title => title === 'granny · tag feat/x' })
+      configure(MODELS)
+      const { id, dir } = await launch(f)
+      await waitFor(() => f.creates.some(c => c.title === 'granny · tag feat/x'))
+      await Bun.sleep(30)
+      await f.tools.get('granny_cancel').execute({ runId: id })
+      await waitFor(() => JSON.parse(readRun(dir, 'status.json')).status === 'cancelled')
+      expect(existsSync(join(repo, '.granny/reviews'))).toBe(false)
+      expect(journalOf(dir).some(e => e.type === 'agent-end' && e.outcome === 'cancelled')).toBe(true)
+      expect(toParent(f)).toEqual([])
+    })
+
+    it('reports no-changes with no agent and no report', async () => {
+      process.env.GRANNY_CONFIG = join(repo, '.git', 'granny-config.json')
+      writeFileSync(process.env.GRANNY_CONFIG, JSON.stringify(MODELS))
+      git(repo, 'checkout', '-q', 'main')
+      const f = await tool()
+      const { dir } = await launch(f)
+      expect(await finished(dir)).toMatchObject({ outcome: 'no-changes', written: false })
+      expect(f.creates).toEqual([])
+      await waitFor(() => toParent(f).length > 0)
+      expect(toParent(f)[0]).toContain('- no report: main..HEAD has no commits')
+    })
+
+    it('tells the user how to watch it when watch is full', async () => {
+      const f = await tool()
+      configure({ ...MODELS, watch: 'full' })
+      const { dir, started } = await launch(f)
+      expect(started).toContain('/granny or <leader>j')
+      await finished(dir)
+    })
   })
 
   describe('with a plan', () => {
@@ -556,6 +717,7 @@ describe('opencode plugin', () => {
     expect(JSON.parse(readRun(dir, 'status.json'))).toMatchObject({ id, status: 'done', parent: 'parent', watch: 'full' })
     expect(JSON.parse(readRun(dir, 'status.json')).outline).toEqual({
       kind: 'implement',
+      maxRounds: 4,
       branch: 'feat/x',
       worktree: true,
       planReview: false,
@@ -584,6 +746,19 @@ describe('opencode plugin', () => {
     expect(git(repo, 'status', '--porcelain')).toBe('')
   })
 
+  it('leaves the heartbeats out of granny_status, so a long command does not push out the real entries', async () => {
+    const f = fakeContext({ hangUntilInterrupted: title => title === 'granny · implement one' })
+    await plugin.setup(f.ctx)
+    const run = await startRun(repo, f)
+    await waitFor(() => f.prompts.length > 0)
+    appendFileSync(join(run.dir, 'journal.jsonl'), Array.from({ length: 60 }, () => `${JSON.stringify({ t: 'now', type: 'heartbeat', command: 'bun test' })}\n`).join(''))
+    const status = (await f.tools.get('granny_status').execute({ runId: run.id })).content
+    expect(status).toContain('"type":"phase"')
+    expect(status).not.toContain('"type":"heartbeat"')
+    await f.tools.get('granny_cancel').execute({ runId: run.id })
+    await waitFor(() => readRun(run.dir, 'status.json').includes('"status": "cancelled"'))
+  })
+
   it('journals a heartbeat while a long command runs, and none after it ends', async () => {
     const f = fakeContext()
     await createGrannyPlugin({ heartbeatMs: 40 }).setup(f.ctx)
@@ -606,6 +781,21 @@ describe('opencode plugin', () => {
     const started = (await f.tools.get('granny_run').execute({ repo, branch: 'feat/x', stages: [{ name: 'one', task: 'Do it.' }], config }, { sessionID: 'parent' })).content
     expect(started).toContain('\noverrides: roles.implementer.model kimi-code/k3.1-pro (config: openai/gpt-x), threshold 50 (config: 70) - show this line to the user in your next message')
     await finished(join(repo, '.granny/runs', /granny run (\S+) started/.exec(started)![1]!))
+  })
+
+  it('hints in its start reply when the reviewers share the implementer model, and starts the run either way', async () => {
+    const agent = (model?: Record<string, string>) => ({ reviewers: [{ name: 'reviewer', engine: 'agent', ...(model ? { model } : {}) }] })
+    const f = fakeContext()
+    await plugin.setup(f.ctx)
+    const startWith = async (config: unknown) => {
+      const started = (await f.tools.get('granny_run').execute({ repo, branch: 'feat/x', stages: [{ name: 'one', task: 'Do it.' }], config }, { sessionID: 'parent' })).content as string
+      const id = /granny run (\S+) started/.exec(started)![1]!
+      await f.tools.get('granny_cancel').execute({ runId: id })
+      await waitFor(() => readRun(join(repo, '.granny/runs', id), 'status.json').includes('"status": "cancelled"'))
+      return started
+    }
+    expect(await startWith(agent())).toContain(SAME_MODEL_HINT)
+    expect(await startWith(agent({ opencode: 'openai/gpt-x' }))).not.toContain(SAME_MODEL_HINT)
   })
 
   it('tells the agent to point the user at the run navigator with watch full only', async () => {

@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'bun:test'
-import { type RunOutline } from '../src/adapters/runview/outline'
-import { buildRunTree, focusStage, type JournalEntry, placeOf, type Row, rowText, stepsFor, visibleRows } from '../src/adapters/runview/tree'
+import { judgeOutline, type RunOutline } from '../src/adapters/runview/outline'
+import { resolveConfig } from '../src/core/config'
+import { duration, fit } from '../src/adapters/runview/format'
+import { AGENT_MARKERS, buildRunTree, focusStage, GROUP_MARKERS, type JournalEntry, placeOf, type Row, visibleRows } from '../src/adapters/runview/tree'
 
 const BASE = Date.parse('2026-11-05T20:30:25.000Z')
 const S = 1000
@@ -72,6 +74,49 @@ function twoStages() {
 const NOW = BASE + 400 * S
 const RUN = { id: '20261105-203025-7i5w', status: 'running', startedAt: BASE, branch: 'feat/pause' }
 const view = (over: Partial<Parameters<typeof visibleRows>[1]> = {}) => ({ run: RUN.id, folded: new Set<string>(), opened: new Set<string>(), runs: 'one' as const, ...over })
+const span = (start: number | undefined, end: number | undefined, now: number) => (start === undefined ? undefined : duration((end ?? now) - start))
+
+/** `left` cut to leave room for `right`, right-aligned at `width`; `right` is dropped below 24 columns. */
+function aligned(left: string, right: string | undefined, width: number): string {
+  if (!right || width < 24) return fit(left, width)
+  const room = width - right.length - 2
+  return `${fit(left, room).padEnd(room)}  ${right}`
+}
+
+/** The row model as text, to read the tree's shape from. */
+function rowText(row: Row, now: number, width: number): string {
+  const indent = '  '.repeat(row.depth)
+  switch (row.kind) {
+    case 'group': {
+      const g = row.group!
+      const name = g.number !== undefined ? `${g.number} ${g.title}` : g.title
+      if (g.state === 'upcoming') return fit(`    ${name}`, width)
+      const head = `${row.folded ? '▸' : '▾'} ${GROUP_MARKERS[g.state]} `
+      const right = span(g.start, g.end, now)
+      const tail = g.state === 'failed' && g.outcome ? ` ${g.outcome}` : ''
+      const full = `${head}${name}${tail}`
+      const room = width - (right && width >= 24 ? right.length + 2 : 0)
+      if (!tail || full.length <= room || room - head.length - tail.length < 8) return aligned(tail && full.length > room ? `${head}${name}` : full, right, width)
+      return aligned(`${head}${fit(name, room - head.length - tail.length)}${tail}`, right, width)
+    }
+    case 'agent': {
+      const a = row.agent!
+      return aligned(`${indent}${AGENT_MARKERS[a.state]} ${a.action}`, span(a.start, a.end, now), width)
+    }
+    case 'checks': {
+      const c = row.group!.checks
+      const text = !c ? 'checks' : c.state === 'running' ? 'checks …' : c.state === 'passed' ? 'checks ✓' : `checks ✗${c.failed.length ? ` ${c.failed.join(', ')}` : ''}`
+      return fit(`${indent}${text}`, width)
+    }
+    case 'sub':
+      return fit(`${indent}└ ${AGENT_MARKERS[row.agent!.state]} ${row.sub!.name}`, width)
+    case 'label':
+      return fit('runs', width)
+    case 'run':
+      return row.details ? fit('run details', width) : aligned(`${row.run.status === 'running' ? '●' : '✓'} ${row.run.id.slice(-4)} · ${row.run.status}${row.shown ? ' (shown)' : ''}`, duration((row.run.end ?? now) - row.run.start), width)
+  }
+}
+
 const listing = (rows: Row[], width: number, now = NOW) => rows.map(r => rowText(r, now, width))
 const right = (left: string, time: string, width = 60) => `${left.padEnd(width - time.length - 2)}  ${time}`
 
@@ -131,7 +176,7 @@ describe('the stage-grouped run tree', () => {
     expect(tree.groups[1]!.lines.some(l => l.includes('checks green'))).toBe(false)
   })
 
-  it('lists the stages that have not started without a fold arrow, and moves the stepper with the stage', () => {
+  it('lists the stages that have not started without a fold arrow, and knows an agent\'s round', () => {
     n = 0
     const impl = agent(3, `implement ${S1}`, 'implementer', 'Implement')
     const outline = outlineOf({ stages: [stageOutline(S1, 1), stageOutline(S2, 2), stageOutline('Docs', 3)] })
@@ -140,12 +185,9 @@ describe('the stage-grouped run tree', () => {
     const rows = visibleRows([tree], view({ focus: 1 }))
     expect(listing(rows, 60).slice(2, 4)).toEqual(['    2 Client pause UI and e2e', '    3 Docs'])
     expect(rows[2]!.folded).toBeUndefined()
-    const steps = (t: typeof tree) => stepsFor(t, 1).map(s => `${s.title} ${s.state}`)
-    expect(steps(tree)).toEqual(['Worktree done', 'Implement current', 'Checks upcoming', 'Review upcoming', 'Final review upcoming', 'PR ready upcoming'])
     const review = agent(130, `review ${S1} r1 a`, 'reviewer', 'Review')
     const later = buildRunTree(RUN, [...entries, ended(100, impl), j(129, 'phase', { title: 'Review' }), review.entry], new Map(), NOW, new Map(), outline)
-    expect(steps(later)).toEqual(['Worktree done', 'Implement done', 'Checks done', 'Review current', 'Final review upcoming', 'PR ready upcoming'])
-    expect(tree.steps).toEqual(stepsFor(tree, 1))
+    expect(later.agents.at(-1)).toMatchObject({ action: 'review r1 a', round: 1 })
   })
 
   it('places the agents of parallel stages by their labels, not the phase they were journalled in', () => {
@@ -190,7 +232,6 @@ describe('the stage-grouped run tree', () => {
       ['Plan', 'done', ['plan']],
       ['Plan review', 'running', ['review r1', 'judge r1', 'fix r1']],
     ])
-    expect(tree.steps.map(s => `${s.title} ${s.state}`)).toEqual(['Worktree done', 'Plan done', 'Plan review current'])
   })
 
   it('marks a stage that ended checks-failed, one not started and a stage of a cancelled run', () => {
@@ -228,9 +269,6 @@ describe('the stage-grouped run tree', () => {
       '▸ ⊘ 2 Client pause UI and e2e',
     ])
     expect(rowText(rows[0]!, NOW, 50)).toBe(right('▾ ✗ 1 Server pause domain, l… checks-failed', '1m34s', 50))
-    expect(stepsFor(tree, 1).find(s => s.title === 'Checks')!.state).toBe('failed')
-    expect(stepsFor(tree, 1).find(s => s.title === 'Implement')!.state).toBe('done')
-    expect(stepsFor(tree, 2).map(s => s.state).slice(1, 4)).toEqual(['skipped', 'skipped', 'skipped'])
 
     const cancelled = buildRunTree({ ...RUN, status: 'cancelled', endedAt: BASE + 99 * S }, twoStages().entries, new Map(), NOW, new Map(), outlineOf())
     expect(cancelled.groups[1]!.state).toBe('cancelled')
@@ -274,7 +312,6 @@ describe('the stage-grouped run tree', () => {
       ['other:Review', 'Review', 'running', ['tidy things']],
     ])
     expect(tree.agents.every(a => a.cwd === undefined)).toBe(true)
-    expect(tree.steps.map(s => `${s.title} ${s.state}`)).toEqual(['Implement done', 'Review current'])
     expect(listing(visibleRows([tree], { run: 'old', folded: new Set(), opened: new Set(), runs: 'one' }), 40).map(l => l.trimEnd().replace(/\s+\S+$/, ''))[0]).toBe('▸ ✓ 1 one')
   })
 
@@ -396,5 +433,85 @@ describe('a long journal', () => {
     expect(g.lines.at(-1)).toEndWith('one: check test failed (exit 299) - repair')
     expect(g.checks!.lines).toHaveLength(50)
     expect(g.checks!.lines[0]).toEndWith('(exit 250) - repair')
+  })
+})
+
+describe('a judge run', () => {
+  const outline = judgeOutline('feat/pause', resolveConfig([{ reviewers: [{ name: 'a', engine: 'agent' }, { name: 'b', engine: 'agent' }] }]))
+  const running = { ...RUN, status: 'running' }
+
+  function reviewed() {
+    n = 0
+    const ra = agent(1, 'review feat/pause r1 a', 'reviewer', 'Review')
+    const rb = agent(1, 'review feat/pause r1 b', 'reviewer', 'Review')
+    const extract = agent(20, 'extract feat/pause r1 b', 'granny', 'Review')
+    const tag = agent(40, 'tag feat/pause', 'judge', 'Judge')
+    return { ra, rb, extract, tag }
+  }
+
+  it('has no stages, no worktree and the reviewers of the config', () => {
+    expect(outline).toEqual({ kind: 'judge', branch: 'feat/pause', worktree: false, planReview: false, finalReview: false, reviewers: ['a', 'b'], fromStage: 1, stages: [] })
+  })
+
+  it('shows the steps review, tag and report before anything ran, with the groups upcoming', () => {
+    const tree = buildRunTree(running, [], new Map(), NOW, new Map(), outline)
+    expect(tree.groups.map(g => [g.title, g.state])).toEqual([['Review', 'upcoming'], ['Tag', 'upcoming'], ['Report', 'upcoming']])
+  })
+
+  it('moves through the steps, with the agents under their group by their short action', () => {
+    const { ra, rb, extract, tag } = reviewed()
+    const review = [j(0, 'phase', { title: 'Review' }), ra.entry, rb.entry, ended(10, ra), ended(20, rb), extract.entry]
+    const atReview = buildRunTree(running, review, new Map([[extract.session, { active: true }]]), NOW, new Map(), outline)
+    expect(atReview.groups[0]).toMatchObject({ key: 'review', state: 'running' })
+    expect(atReview.groups[0]!.agents.map(a => a.action)).toEqual(['review r1 a', 'review r1 b', 'extract r1 b'])
+
+    const judging = [...review, ended(30, extract), j(39, 'phase', { title: 'Judge' }), tag.entry]
+    const atTag = buildRunTree(running, judging, new Map([[tag.session, { active: true }]]), NOW, new Map(), outline)
+    expect(atTag.groups.map(g => [g.title, g.state, g.agents.map(a => a.action)])).toEqual([
+      ['Review', 'done', ['review r1 a', 'review r1 b', 'extract r1 b']],
+      ['Tag', 'running', ['tag']],
+      ['Report', 'upcoming', []],
+    ])
+
+    const done = [...judging, ended(50, tag), j(51, 'phase', { title: 'Report' }), j(52, 'command', { command: 'mkdir -p .granny/reviews' }), j(53, 'log', { message: 'report written: /r/.granny/reviews/x.md' })]
+    const atReport = buildRunTree(running, done, new Map(), NOW, new Map(), outline)
+    expect(atReport.groups[2]).toMatchObject({ key: 'report', state: 'running' })
+    expect(atReport.groups[2]!.lines.at(-1)).toEndWith('report written: /r/.granny/reviews/x.md')
+
+    const finished = buildRunTree({ ...RUN, status: 'done', endedAt: BASE + 60 * S }, done, new Map(), NOW, new Map(), outline)
+    expect(finished.groups.map(g => g.state)).toEqual(['done', 'done', 'done'])
+  })
+
+  it('names a retried reviewer and a retried tagging', () => {
+    n = 0
+    const again = agent(1, 'review feat/pause r1 a #2', 'reviewer', 'Review')
+    const tag = agent(2, 'tag feat/pause retry', 'judge', 'Judge')
+    const tree = buildRunTree(running, [j(0, 'phase', { title: 'Review' }), again.entry, j(2, 'phase', { title: 'Judge' }), tag.entry], new Map(), NOW, new Map(), outline)
+    expect(tree.groups.map(g => g.agents.map(a => a.action))).toEqual([['review r1 a #2'], ['tag retry'], []])
+  })
+
+  it('skips the tagging of a review without findings, and everything after a review with no changes or no reviewer', () => {
+    n = 0
+    const ra = agent(1, 'review feat/pause r1 a', 'reviewer', 'Review')
+    const clean = [j(0, 'phase', { title: 'Review' }), ra.entry, ended(5, ra), j(6, 'phase', { title: 'Report' })]
+    const noFindings = buildRunTree({ ...RUN, status: 'done', endedAt: BASE + 7 * S }, clean, new Map(), NOW, new Map(), outline)
+    expect(noFindings.groups.map(g => g.state)).toEqual(['done', 'skipped', 'done'])
+
+    const stopped = buildRunTree({ ...RUN, status: 'done', endedAt: BASE + 7 * S }, [j(0, 'phase', { title: 'Review' })], new Map(), NOW, new Map(), outline)
+    expect(stopped.groups.map(g => g.state)).toEqual(['done', 'skipped', 'skipped'])
+  })
+
+  it('marks where a cancelled or failed run stopped', () => {
+    const { ra, tag } = reviewed()
+    const entries = [j(0, 'phase', { title: 'Review' }), ra.entry, ended(5, ra), j(6, 'phase', { title: 'Judge' }), tag.entry]
+    const cancelled = buildRunTree({ ...RUN, status: 'cancelled', endedAt: BASE + 7 * S }, entries, new Map(), NOW, new Map(), outline)
+    expect(cancelled.groups.map(g => g.state)).toEqual(['done', 'cancelled', 'skipped'])
+    const failed = buildRunTree({ ...RUN, status: 'failed', endedAt: BASE + 7 * S }, entries, new Map(), NOW, new Map(), outline)
+    expect(failed.groups.map(g => g.state)).toEqual(['done', 'failed', 'skipped'])
+  })
+
+  it('leaves the review and report phases of a normal run alone', () => {
+    const tree = buildRunTree(running, [j(0, 'phase', { title: 'Review' })], new Map(), NOW, new Map(), outlineOf())
+    expect(tree.groups.map(g => g.key)).toEqual(['stage:1', 'stage:2', 'final-review', 'pr-ready'])
   })
 })

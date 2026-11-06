@@ -1,7 +1,7 @@
 import type { GrannyConfig } from './config'
 import { isBlocker } from './review'
 import { shellQuote } from './shell'
-import type { Declined, Finding, StageSpec } from './types'
+import type { Declined, Finding, PlanResult, StageResult, StageSpec } from './types'
 
 /** One review round's decisions in the ledger; loop is set on a round of an earlier review loop (a stage's review). */
 export interface EarlierRound {
@@ -259,6 +259,21 @@ export function gitCommandPrompt(repo: string, step: string, script: string): st
   return oneCommand(`git command for the "${step}" step`, `Repo ${repo}.`, 'Run exactly this:', script)
 }
 
+export const ONE_SHOT_NOTE = 'This is a one-shot review: nobody fixes anything in this run, so report every problem you can confirm in the code.'
+
+export function judgeStepPrompt(repo: string, step: string, script: string): string {
+  return oneCommand(`shell command for the "${step}" step of a review-only run`, `Repo ${repo}.`, 'Run exactly this:', script)
+}
+
+export function reportWritePrompt(repo: string, step: string, script: string): string {
+  return oneCommand(
+    `shell command for the "${step}" step of a review-only run, which saves the review report (the one file this run writes),`,
+    `Repo ${repo}.`,
+    'Run exactly this, as one command with its line breaks and every character kept, down to its last line:',
+    script,
+  )
+}
+
 export function timeoutProbePrompt(repo: string, step: string, script: string): string {
   return oneCommand(
     `shell command for the "${step}" step: it prints the name of the timeout command the checks run in, or nothing`,
@@ -427,6 +442,18 @@ REVIEW:
 ${JSON.stringify(findings)}`
 }
 
+/** The judge of a `granny judge` run: nothing is routed or fixed, so its classification alone places every finding. */
+export function tagPrompt(p: PromptContext, reviewBase: string, findings: Finding[]): string {
+  return `You are the JUDGE tagging the findings of a one-shot code review. Repo ${p.repo}, branch ${p.branch}, diff \`${shellQuote(reviewBase)}...HEAD\`. Do not edit anything.
+${p.context ? 'Design context:\n' + p.context + '\n' : ''}
+Nobody fixes anything in this run. Your classification decides under which heading of the user's report each finding goes, so classify every finding on its merits: the reviewer's severity does not bind you, in either direction.
+For each finding, open the cited code and check that it is real and correctly described. Use scope in-scope or pre-existing only. ${JUDGE_DUPES}
+${rubric('what the change set out to do')}
+
+REVIEW:
+${JSON.stringify(findings)}`
+}
+
 const RETRY_ASK = 'Answer again for every finding, every field set to an allowed value and the evidence filled in'
 
 /** Appended to the judge prompt for its one retry: null when the first answer was empty or did not parse. */
@@ -462,13 +489,38 @@ ${overruledSection(overruled)}
 ${findingsList(accepted)}`
 }
 
-export function finalPrompt(p: PromptContext, plans: string[] = []): string {
+/** How this run's reviews ended, for one repo's final check. */
+export interface RunOutcomes {
+  stages: StageResult[]
+  finalReview?: PlanResult
+  plan?: PlanResult
+  reviewOnly: boolean
+}
+
+function outcomeLine(name: string, r: PlanResult): string {
+  const listed = (kind: string, findings: Finding[]) => (findings.length ? `; ${kind}: ${findings.map(f => `${f.id} ${f.title.replace(/\s+/g, ' ').trim()}`).join(', ')}` : '')
+  const note = r.note?.split('\n')[0]
+  return `- ${name}: ${r.outcome}, ${r.rounds} review round(s)${listed('residual', r.residual)}${listed('unresolved', r.unresolved)}${note ? ` - ${note}` : ''}`
+}
+
+function outcomesList(o: RunOutcomes): string {
+  return [
+    ...(o.plan ? [outcomeLine('plan review', o.plan)] : []),
+    ...(o.stages.length ? o.stages.map(s => outcomeLine(`stage "${s.stage}"`, s)) : ['- no stage of this run worked in this repo']),
+    ...(o.finalReview ? [outcomeLine('final review', o.finalReview)] : []),
+  ].join('\n')
+}
+
+export function finalPrompt(p: PromptContext, plans: string[], outcomes: RunOutcomes): string {
   const attribution = p.config.aiAttribution
     ? ''
     : ` \`git log ${shellQuote(p.base)}..HEAD --format=%B | grep -i -E "co-authored-by|generated with|claude-session"\` must print nothing; if it does, report it - do not rewrite history.`
   return `${common(p)}
 
-You are GRANNY doing the FINAL CHECK. Run every gate and record exact numbers. \`git status --short\` must be clean${plans.length ? ` except for the plan files ${plans.join(', ')}, which stay uncommitted: never stage or commit them` : ''}.${attribution} Make ${prBodyPath(p.config)} complete and accurate against the actual commits${p.config.parallel ? `; fold in the notes of stages that ran in their own worktree (${p.config.workDir}/PR-BODY-*.md, if any) and delete those files` : ''}. Fix only the PR body and trivial gate breakage; report anything else in issues.`
+You are GRANNY doing the FINAL CHECK. Run every gate and record exact numbers. \`git status --short\` must be clean${plans.length ? ` except for the plan files ${plans.join(', ')}, which stay uncommitted: never stage or commit them` : ''}.${attribution} Make ${prBodyPath(p.config)} complete and accurate against the actual commits${p.config.parallel ? `; fold in the notes of stages that ran in their own worktree (${p.config.workDir}/PR-BODY-*.md, if any) and delete those files` : ''}.
+The commits do not show how this run's reviews ended. They ended like this:
+${outcomesList(outcomes)}
+${outcomes.reviewOnly ? 'This run only reviewed: every stage is review-only (implement: false), so any commit it made is a review fix. Say so in the PR body.\n' : ''}Rewrite the PR body's review and status section from this list, adding the section if there is none and replacing any claim of an earlier run on this branch. Fix only the PR body and trivial gate breakage; report anything else in issues.`
 }
 
 export function mergePrompt(p: PromptContext, name: string, lane: string, output: string): string {

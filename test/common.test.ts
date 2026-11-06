@@ -1,7 +1,12 @@
 import { describe, expect, it } from 'bun:test'
-import { dropPlaceholders, HEARTBEAT_MS, hostModelErrors, overridesNotice, planReviewWarning, RUN_INPUT_SCHEMA, RUN_TOOL_DESCRIPTION, withHeartbeat } from '../src/adapters/common'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { dropPlaceholders, HEARTBEAT_MS, hostModelErrors, JUDGE_INPUT_SCHEMA, JUDGE_ROLES, JUDGE_TOOL_DESCRIPTION, overridesNotice, planReviewWarning, RUN_INPUT_SCHEMA, summarize, RUN_TOOL_DESCRIPTION, runStatus, SAME_MODEL_HINT, sameModelNotice, summarizeJudge, withHeartbeat } from '../src/adapters/common'
 import { resolveConfig } from '../src/core/config'
-import { checkInput, type RunInput } from '../src/core/engine'
+import { checkInput, type JudgeInput, type RunInput } from '../src/core/engine'
+import { noteLine, renderReport } from '../src/core/report'
+import type { JudgeResult } from '../src/core/types'
 
 // The granny_run arguments gpt-5.6-luna sent through omp for a plain one-stage run: every optional
 // field filled with an empty placeholder. checkInput refused them ("goal must be a non-empty string").
@@ -144,5 +149,184 @@ describe('withHeartbeat', () => {
     }, 10, t)
     await expect(done).rejects.toThrow('boom')
     expect(t.live.size).toBe(0)
+  })
+})
+
+describe('sameModelNotice', () => {
+  const run: RunInput = { repo: '/r', branch: 'b', stages: [{ task: 't' }] }
+  const notice = (config: unknown, host: 'omp' | 'opencode' = 'omp', input: RunInput = run) => sameModelNotice(input, resolveConfig([config], host), host)
+  const keyed = (model: string) => ({ omp: model, opencode: model })
+  const on = (model: string) => ({ roles: { implementer: { model: keyed(model) } } })
+  const agent = (name: string, model?: string) => ({ name, engine: 'agent', ...(model ? { model: keyed(model) } : {}) })
+
+  it('gives the hint when every agent reviewer resolves to the implementer model, as advice not to act on alone', () => {
+    const text = notice({ ...on('a/x'), reviewers: [agent('one', 'a/x'), agent('two', 'a/x')] })
+    expect(text).toContain(SAME_MODEL_HINT)
+    expect(text).toContain("do not change a model unless the user asks")
+  })
+
+  it('counts an implementer and a reviewer with no model as the same session model', () => {
+    expect(notice({})).toContain(SAME_MODEL_HINT)
+    expect(notice({ roles: { implementer: { model: { 'claude-code': 'opus' } } }, reviewers: [{ name: 'one', engine: 'agent', model: { 'claude-code': 'sonnet' } }] })).toContain(SAME_MODEL_HINT)
+  })
+
+  it('counts an opencode #variant as the same model', () => {
+    expect(notice({ ...on('a/x#high'), reviewers: [agent('one', 'a/x')] }, 'opencode')).toContain(SAME_MODEL_HINT)
+  })
+
+  it('gives no hint for a reviewer on a different model, also when only one of several differs', () => {
+    expect(notice({ ...on('a/x'), reviewers: [agent('one', 'a/y')] })).toBe('')
+    expect(notice({ ...on('a/x'), reviewers: [agent('one', 'a/x'), agent('two', 'a/y')] })).toBe('')
+    expect(notice({ ...on('a/x'), reviewers: [agent('one')] })).toBe('')
+    expect(notice({ reviewers: [agent('one', 'a/x')] })).toBe('')
+  })
+
+  it('counts a Codex or command reviewer as different', () => {
+    const command = { name: 'cmd', engine: 'command', command: 'review {base} {out}' }
+    expect(notice({ reviewers: [command] })).toBe('')
+    expect(notice({ reviewers: [agent('one'), command] })).toBe('')
+    expect(notice({ reviewers: [{ name: 'codex', engine: 'codex' }] }, 'opencode')).toBe('')
+    expect(notice({ reviewers: [{ name: 'auto', engine: 'auto' }] }, 'opencode')).toBe('')
+  })
+
+  it('gives no hint on a planning run, which writes no code to review', () => {
+    expect(notice({}, 'omp', { repo: '/r', branch: 'b', goal: 'build it' })).toBe('')
+  })
+})
+
+describe('runStatus journal tail', () => {
+  const entry = (type: string, data: Record<string, unknown> = {}) => JSON.stringify({ t: '2026-11-06T10:00:00.000Z', type, ...data })
+  const beat = entry('heartbeat', { command: 'bun test' })
+  const tailOf = (lines: string[]) => {
+    const dir = mkdtempSync(join(tmpdir(), 'granny-status-'))
+    try {
+      writeFileSync(join(dir, 'journal.jsonl'), lines.join('\n') + '\n')
+      const status = runStatus(new Map([['R', { dir }]]), 'R')
+      return status.slice(status.indexOf('journal (')).split('\n').slice(1).filter(Boolean)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }
+
+  it('shows the real entries before 60 trailing heartbeats', () => {
+    const real = [entry('phase', { title: 'Checks' }), entry('command', { command: 'bun test' })]
+    expect(tailOf([...real, ...Array.from({ length: 60 }, () => beat)])).toEqual(real)
+  })
+
+  it('keeps the bound of 40 lines, counted without the heartbeats', () => {
+    const real = Array.from({ length: 50 }, (_, i) => entry('log', { message: `line ${i}` }))
+    const mixed = real.flatMap(line => [line, beat])
+    expect(tailOf(mixed)).toEqual(real.slice(-40))
+  })
+
+  it('keeps an entry that only mentions a heartbeat, and a line that does not parse', () => {
+    const mention = entry('log', { message: '"type":"heartbeat"' })
+    expect(tailOf([mention, '{not json', beat])).toEqual([mention, '{not json'])
+  })
+})
+
+describe('the granny_judge tool', () => {
+  it('needs only repo, and says it changes nothing and asks the user for missing models', () => {
+    expect(JUDGE_INPUT_SCHEMA.required).toEqual(['repo'])
+    expect(Object.keys(JUDGE_INPUT_SCHEMA.properties).sort()).toEqual(['base', 'config', 'context', 'repo'])
+    expect(JUDGE_TOOL_DESCRIPTION).toContain('references/judge.md')
+    expect(JUDGE_TOOL_DESCRIPTION).toContain('.granny/reviews/')
+    expect(JUDGE_TOOL_DESCRIPTION).toContain('no fix, commit, push, branch or worktree')
+  })
+
+  it('drops the placeholders of a judge call', () => {
+    const clean = dropPlaceholders({ repo: '/r', base: '', context: '', config: {} } as JudgeInput)
+    expect(clean).toEqual({ repo: '/r' })
+  })
+
+  it('checks only the roles a judge run uses, when given them', () => {
+    const layer = { roles: { implementer: { model: 'bad' }, judge: { model: 'bad' }, granny: { model: 'bad' } }, reviewers: [{ name: 'r', engine: 'agent', model: 'bad' }] }
+    const config = resolveConfig([layer], 'omp')
+    const errors = hostModelErrors(config, [layer], 'omp', () => 'wrong', ['file'], JUDGE_ROLES)
+    expect(errors.map(e => e.split(' "')[0])).toEqual(['roles.granny.model:', 'roles.judge.model:', 'reviewers[0]'])
+    expect(hostModelErrors(config, [layer], 'omp', () => 'wrong', ['file']).map(e => e.split(' "')[0])).toContain('roles.implementer.model:')
+  })
+})
+
+describe('summarize of a planning run', () => {
+  const planned = (questions?: string) => summarize({ repo: '/r', branch: 'b', base: 'main', worktree: '/w', stages: [], final: null, draft: { files: ['/r/plan.md'], stages: [{ name: 'one', task: 't' }], summary: 's', ...(questions ? { questions } : {}) } } as any, true)
+
+  it('carries the open questions and tells the agent to ask them with its question tool', () => {
+    const text = planned('1. Which database?\n2. Which port?\n')
+    expect(text).toContain('ask the user these with your question tool (`ask` on omp, `question` on opencode), do not just write them out')
+    expect(text).toContain('without such a tool, ask in one numbered message:\n1. Which database?\n2. Which port?')
+    expect(text).toContain('show the user the plan and the stages, and wait for their approval')
+  })
+
+  it('says nothing of questions when the planner has none', () => {
+    const text = planned()
+    expect(text).not.toContain('question')
+    expect(text).toContain('wait for their approval')
+  })
+})
+
+describe('summarizeJudge', () => {
+  const result: JudgeResult = {
+    repo: '/r',
+    branch: 'feat/x',
+    base: 'main',
+    head: 'a'.repeat(40),
+    outcome: 'reviewed',
+    counts: { P0: 1, P1: 2, P2: 3, P3: 0, dismissed: 1 },
+    demoted: ['codex-F1', 'codex-F2'],
+    findings: [],
+    failedReviewers: [],
+    notJudged: [],
+    uncommitted: [],
+    reportPath: '/r/.granny/reviews/20261106-101010-feat-x.md',
+    written: true,
+    report: '# report',
+  }
+  const END = 'Nothing was fixed or committed. Give the user the report path and the counts; do not fix anything unless they ask.'
+
+  it('gives the report path first, then the counts and the demoted count, and ends with what to do', () => {
+    const lines = summarizeJudge(result).split('\n')
+    expect(lines[0]).toBe('- report: /r/.granny/reviews/20261106-101010-feat-x.md')
+    expect(lines[1]).toBe('- counts: P0 1, P1 2, P2 3, P3 0, dismissed 1')
+    expect(lines[2]).toBe('- reviewer P0/P1 findings the judge placed lower: 2 (codex-F1, codex-F2)')
+    expect(lines.at(-1)).toBe(END)
+    expect(lines).toHaveLength(4)
+  })
+
+  it('says none were demoted', () => {
+    expect(summarizeJudge({ ...result, demoted: [] })).toContain('- reviewer P0/P1 findings the judge placed lower: 0\n')
+  })
+
+  it('names what was not reviewed, the reviewers that did not run and what the judge left', () => {
+    const text = summarizeJudge({ ...result, uncommitted: ['a.ts', 'b.ts'], failedReviewers: [{ name: 'codex', note: 'exit 1\nlong' }], notJudged: ['kimi-F1'] })
+    expect(text).toContain('- not reviewed, uncommitted: a.ts, b.ts')
+    expect(text).toContain('- did not run: codex: exit 1 long')
+    expect(text).toContain('- not judged, under the reviewer\'s severity: kimi-F1')
+    expect(text.split('\n').at(-1)).toBe(END)
+  })
+
+  it('words a reviewer that did not run the same as the report does', () => {
+    const note = `exit 1\n\n  ${'x'.repeat(400)}`
+    const line = noteLine(note)
+    expect(line).toBe(`exit 1 ${'x'.repeat(293)}`)
+    const failed = [{ name: 'codex', note }]
+    expect(summarizeJudge({ ...result, failedReviewers: failed })).toContain(`- did not run: codex: ${line}\n`)
+    const report = renderReport({ branch: 'feat/x', base: 'main', head: 'abcd1234', commits: 1, repo: '/r', when: 'now', reviewers: [], uncommitted: [], failed }, [])
+    expect(report).toContain(`- Did not run: codex: ${line}\n`)
+  })
+
+  it('says where the report is when it could not be written', () => {
+    const lines = summarizeJudge({ ...result, written: false }).split('\n')
+    expect(lines[0]).toBe('- report NOT written to /r/.granny/reviews/20261106-101010-feat-x.md: its text is in the run\'s result.json (granny_status), under report')
+    expect(lines.at(-1)).toBe(END)
+  })
+
+  it('says there is no report after no-changes and review-failed', () => {
+    const none = summarizeJudge({ ...result, outcome: 'no-changes', reportPath: undefined, report: undefined, written: false, note: 'main..HEAD has no commits, so there was nothing to review' })
+    expect(none.split('\n')[0]).toBe('- no report: main..HEAD has no commits, so there was nothing to review')
+    expect(none.split('\n').at(-1)).toBe('Nothing was fixed or committed. Tell the user; do not fix anything unless they ask.')
+    const failed = summarizeJudge({ ...result, outcome: 'review-failed', reportPath: undefined, report: undefined, written: false, failedReviewers: [{ name: 'codex', note: 'exit 1' }] })
+    expect(failed.split('\n').slice(0, 2)).toEqual(['- no report: no reviewer ran, also on a retry', '- did not run: codex: exit 1'])
+    expect(failed.split('\n').at(-1)).toBe('Nothing was fixed or committed. Tell the user; do not fix anything unless they ask.')
   })
 })

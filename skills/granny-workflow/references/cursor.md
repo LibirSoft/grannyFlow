@@ -8,6 +8,17 @@ Copy `engines/cursor/agents/*.md` to `~/.cursor/agents/` (all projects) or `<pro
 
 Config: read `~/.config/granny/config.json` and `<repo>/granny.config.json` yourself and apply the layering in [config.md](config.md); only `threshold`, `alwaysFix`, `maxRounds`, `planReview`, `finalReview`, `checks`, `maxRepairs`, `base`, `gates`, `workDir`, `worktree`, `worktreeDir`, `language`, `aiAttribution`, `rules` and `reviewers` apply here - of a reviewer, its `name`, `engine`, `mode`, `focus`, `command`, and `model` where the engine passes it on. An `agent` reviewer runs `granny-reviewer` on whatever model that subagent has.
 
+## granny judge
+
+The steps, with what to ask the user first, are in [judge.md](judge.md). Here you run that review and tagging by hand, on the checkout as it is, with no worktree and no branch. It is not deterministic: keep strictly to these steps.
+
+1. Check that `git rev-list --count <base>..HEAD` is not 0. Note the date with `date +%Y%m%d-%H%M%S` and the uncommitted files from `git status --porcelain`.
+2. Run every reviewer once, as in step 2 of [the loop](#the-loop), with `<base>` as the base and this note in each prompt: this is a one-shot review, nobody fixes anything in this run, report every problem you can confirm in the code. A reviewer gets its one retry. When none ran, stop: there is no report.
+3. Give every finding, P0/P1 included, to `granny-judge` with the "Granny judge - tagging" prompt from [prompts.md](prompts.md), read-only, with its one retry. Normalize each classification as in [the decision table](config.md#the-decision-table) and compute its priority. Ignore the table's decision.
+4. Write the report to `<repo>/<workDir>/reviews/<date>-<branch-slug>.md` (by default `.granny/reviews/`), with the headings and tags [judge.md](judge.md#the-report) lists: all four P headings, `None.` when empty, the highest priority first. Check that it is there.
+
+Change nothing else: no fix, no commit. Then report per [judge.md](judge.md#5-report) and stop.
+
 ## The worktree
 
 With `worktree` on (the default), set it up by hand before the first stage - also when you resume with `fromStage` - by the rules the engines follow ([config.md](config.md#worktree)):
@@ -68,7 +79,7 @@ Dedupe happens only among the findings that are not P0/P1, so a P2 that repeats 
 
 After the last stage - unless a stage failed - run the checks once more in each repo that had stages, on the whole branch - every check one of that repo's stages selected (all when one of them lists no `checks`; none when all list `[]`) - with the same repairs, but only when the final review follows and no stage of that repo ended `checks-failed` (otherwise run them once, without repairs); when they stay red the branch is not PR-ready: skip the final review, report `checks-failed` and still do the final check. Then run the final review ([config.md](config.md#final-review)), with `finalReview` on, in every repo that had more than one stage or a merged lane: the review loop above, steps 2-5, named `final review` (`final review <repo name>` in another repo), on the diff from the repo's `<base>` (`codex exec review --base <base>`, `{base}` = `<base>`), with the "Final review" note from [prompts.md](prompts.md) added to every reviewer prompt and the judge prompt; the implementer fixes on the run's branch. A `round-cap` or `review-failed` here does not stop you: report it with the unresolved findings.
 
-Then do the "Granny - final check" yourself - in every repo the stages worked in. With `checks`, when the final check committed anything, run that repo's final checks once more, without repairs; red, or uncommitted files in `git status --porcelain` before or after them (the plan files do not count), means the branch is not PR-ready - say so in the report. Then report per SKILL.md section 5 and wait.
+Then do the "Granny - final check" yourself - in every repo the stages worked in. The outcome lines in that prompt ("plan review: ...", "stage ...", "final review: ...") are an example: replace them with this run's real outcomes in that repo, per stage the outcome, rounds and residual and unresolved ids and titles, plus the final review and the plan review, and rewrite the PR body's review section from them. With `checks`, when the final check committed anything, run that repo's final checks once more, without repairs; red, or uncommitted files in `git status --porcelain` before or after them (the plan files do not count), means the branch is not PR-ready - say so in the report. Then report per SKILL.md section 5 and wait.
 
 ## Parallel stages
 

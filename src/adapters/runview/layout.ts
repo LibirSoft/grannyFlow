@@ -1,9 +1,9 @@
-// The run view's page as rows of tone-coloured cells, shared by the omp and opencode navigators: the
-// header, the stepper, the tree pane, the details and the frame that puts them side by side.
+// The run view's details as rows of tone-coloured cells, shared by the omp and opencode navigators: a
+// group's lines, the checks, the run, and an agent's head and summary.
 import type { AgentEnd, Summary } from './activity'
 import { todoText } from './activity'
-import { clock, duration, fit, pad, shortModel, stamp } from './format'
-import { type AgentNode, type AgentState, focusStage, type GroupState, type Row, rowText, type RunTree, type Step, type StepState, type WorkGroup } from './tree'
+import { clock, duration, fit, shortModel, stamp } from './format'
+import type { AgentNode, AgentState, GroupState, RunTree, WorkGroup } from './tree'
 
 export type Tone = 'base' | 'muted' | 'success' | 'error' | 'warning' | 'info'
 
@@ -17,88 +17,8 @@ export const STATUS_TONES: Record<string, Tone> = { running: 'info', done: 'succ
 export const AGENT_TONES: Record<AgentState, Tone> = { running: 'info', waiting: 'muted', done: 'success', failed: 'error', cancelled: 'warning' }
 const GROUP_TONES: Record<GroupState, Tone> = { upcoming: 'muted', running: 'info', done: 'success', failed: 'error', skipped: 'muted', cancelled: 'warning' }
 
-const STAGE_PHASES = new Set(['Implement', 'Checks', 'Review'])
-
-/** `granny · <branch> · stage <k>/<n> · <phase> · <elapsed>`, the branch dropped first when it does not fit. */
-export function headerText(tree: RunTree, now: number, focus?: number, width = Number.POSITIVE_INFINITY): string {
-  const { outline } = tree
-  const elapsed = duration((tree.end ?? now) - tree.start)
-  const phase = tree.phase ?? 'Starting'
-  let middle: string[]
-  if (tree.status !== 'running') middle = [tree.status]
-  else if (outline?.kind === 'plan') middle = ['planning', phase]
-  else if (outline && outline.stages.length && (STAGE_PHASES.has(phase) || tree.running.length)) {
-    const total = outline.stages.length
-    const k = tree.running.length > 1 ? undefined : (focus ?? tree.running[0] ?? focusStage(tree))
-    middle = [tree.running.length > 1 ? `stages ${tree.running.join('+')}/${total}` : `stage ${k ?? 1}/${total}`, phase]
-  } else middle = [phase]
-  const parts = (branch: boolean) => ['granny', ...(branch && tree.branch ? [tree.branch] : []), ...middle, elapsed].join(' · ')
-  const full = parts(true)
-  if (full.length <= width) return full
-  return fit(parts(false), width)
-}
-
-const STEP_MARKS: Record<StepState, string> = { done: '✓', current: '●', failed: '✗', skipped: '⊘', upcoming: '' }
-const STEP_TONES: Record<StepState, Tone> = { done: 'success', current: 'info', failed: 'error', skipped: 'muted', upcoming: 'muted' }
-const SEPARATOR: Cell = { text: ' › ', tone: 'muted' }
-
-const length = (cells: readonly Cell[]) => cells.reduce((n, c) => n + c.text.length, 0)
-
-/** The steps in one row: `Worktree ✓ › Implement ● › Checks › …`, narrowed to `width`. */
-export function stepperCells(steps: readonly Step[], width: number): Cell[] {
-  if (!steps.length) return []
-  const cell = (s: Step, bare = false): Cell => ({ text: bare ? STEP_MARKS[s.state] : `${s.title}${STEP_MARKS[s.state] ? ` ${STEP_MARKS[s.state]}` : ''}`, tone: STEP_TONES[s.state] })
-  const join = (cells: Cell[]) => cells.flatMap((c, i) => (i ? [SEPARATOR, c] : [c]))
-  const full = join(steps.map(s => cell(s)))
-  if (length(full) <= width) return full
-  const lastDone = steps.map(s => s.state).lastIndexOf('done')
-  const bare = join(steps.map((s, i) => cell(s, s.state === 'done' && i < lastDone)))
-  if (length(bare) <= width) return bare
-  let at = steps.findIndex(s => s.state === 'current' || s.state === 'failed')
-  if (at < 0) at = lastDone >= 0 ? lastDone : 0
-  const s = steps[at]!
-  const one = `${s.title}${STEP_MARKS[s.state] ? ` ${STEP_MARKS[s.state]}` : ''} (${at + 1}/${steps.length})`
-  return [{ text: fit(one, width), tone: STEP_TONES[s.state] }]
-}
-
-/** The tone a tree row is drawn in. */
-export function rowTone(row: Row): Tone {
-  switch (row.kind) {
-    case 'group':
-      return GROUP_TONES[row.group!.state]
-    case 'agent':
-    case 'sub':
-      return AGENT_TONES[row.agent!.state]
-    case 'checks': {
-      const c = row.group!.checks
-      return !c ? 'muted' : c.state === 'running' ? 'info' : c.state === 'passed' ? 'success' : 'error'
-    }
-    case 'label':
-      return 'muted'
-    case 'run':
-      return row.details ? 'muted' : (STATUS_TONES[row.run.status] ?? 'base')
-  }
-}
-
-/** The tree pane, `height` rows of `width`, scrolled from `top` so the selected row shows. */
-export function treeCells(rows: readonly Row[], selectedKey: string, now: number, width: number, height: number, top: number): { cells: Cell[]; top: number } {
-  const at = rows.findIndex(r => r.key === selectedKey)
-  let first = top
-  if (at >= 0) {
-    if (at < first) first = at
-    if (at >= first + height) first = at - height + 1
-  }
-  first = Math.max(0, Math.min(first, Math.max(0, rows.length - height)))
-  const cells: Cell[] = rows.slice(first, first + Math.max(0, height)).map(row => {
-    const chosen = row.key === selectedKey
-    return { text: pad(`${chosen ? '›' : ' '} ${rowText(row, now, width - 2)}`, width), tone: rowTone(row), ...(chosen ? { selected: true } : {}) }
-  })
-  while (cells.length < height) cells.push({ text: pad('', width), tone: 'base' })
-  return { cells, top: first }
-}
-
 /** `text` broken into rows of at most `width` at spaces, words longer than a row cut. */
-function wrap(text: string, width: number): string[] {
+export function wrap(text: string, width: number): string[] {
   if (width < 1) return []
   const out: string[] = []
   let line = ''
@@ -215,47 +135,8 @@ export function summaryCells(summary: Summary, width: number, height?: number): 
   return [...top, ...shown, ...bottom].slice(0, Math.max(0, height))
 }
 
-export interface FrameInput {
-  header: Cell[]
-  stepper: Cell[]
-  left: Cell[]
-  right?: Cell[]
-  help: Cell[]
-  width: number
-  height: number
-  /** Below 100 columns: how many rows of `right` show under `left` (default none). */
-  split?: number
-}
-
-export interface PaneSizes {
-  two: boolean
-  rules: boolean
-  body: number
-  left: { width: number; height: number }
-  right: { width: number; height: number }
-}
-
-const WIDE = 100
-const RULES_FROM = 16
-const PANE_SEPARATOR = ' │ '
-const clamp = (n: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, n))
-
-/** How the page splits `width` × `height` into the tree and detail panes. */
-export function paneSizes(width: number, height: number, split = 0, right = true): PaneSizes {
-  const w = Math.max(1, Math.floor(width))
-  const h = Math.max(3, Math.floor(height))
-  const rules = h >= RULES_FROM
-  const body = Math.max(0, h - 3 - (rules ? 2 : 0))
-  if (right && w >= WIDE) {
-    const tree = clamp(Math.round(w * 0.38), 36, 60)
-    return { two: true, rules, body, left: { width: tree, height: body }, right: { width: w - tree - PANE_SEPARATOR.length, height: body } }
-  }
-  const lower = right ? Math.min(Math.max(0, split), Math.max(0, body - 1)) : 0
-  return { two: false, rules, body, left: { width: w, height: body - lower }, right: { width: w, height: lower } }
-}
-
 /** A row of cells cut and padded to exactly `width`. */
-function fitRow(cells: readonly Cell[], width: number): Cell[] {
+export function fitRow(cells: readonly Cell[], width: number): Cell[] {
   const out: Cell[] = []
   let used = 0
   for (const c of cells) {
@@ -270,29 +151,4 @@ function fitRow(cells: readonly Cell[], width: number): Cell[] {
     else out.push({ text: ' '.repeat(width), tone: 'base' })
   }
   return out
-}
-
-/** The whole page: header, stepper, rules from 16 rows, the panes side by side or stacked, and the key help last. */
-export function frame(input: FrameInput): Cell[][] {
-  const w = Math.max(1, Math.floor(input.width))
-  const sizes = paneSizes(w, input.height, input.split, input.right !== undefined)
-  const paneRows = (cells: readonly Cell[] | undefined, width: number, height: number): Cell[] =>
-    Array.from({ length: height }, (_, i) => {
-      const c = cells?.[i]
-      return c ? { ...c, text: pad(c.text, width) } : { text: ' '.repeat(width), tone: 'base' }
-    })
-  const rule = (joint: string): Cell[] => [{ text: sizes.two ? `${'─'.repeat(sizes.left.width)}─${joint}─${'─'.repeat(sizes.right.width)}` : '─'.repeat(w), tone: 'muted' }]
-  const rows: Cell[][] = [fitRow(input.header, w), fitRow(input.stepper, w)]
-  if (sizes.rules) rows.push(rule('┬'))
-  if (sizes.two) {
-    const left = paneRows(input.left, sizes.left.width, sizes.body)
-    const right = paneRows(input.right, sizes.right.width, sizes.body)
-    for (let i = 0; i < sizes.body; i++) rows.push([left[i]!, { text: PANE_SEPARATOR, tone: 'muted' }, right[i]!])
-  } else {
-    for (const c of paneRows(input.left, w, sizes.left.height)) rows.push([c])
-    for (const c of paneRows(input.right, w, sizes.right.height)) rows.push([c])
-  }
-  if (sizes.rules) rows.push(rule('┴'))
-  rows.push(fitRow(input.help, w))
-  return rows
 }

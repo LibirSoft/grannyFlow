@@ -58,6 +58,30 @@ export interface StageEvent {
   outcome?: StageOutcome
 }
 
+/** One finding of a review round, as a run view shows it. */
+export interface RoundFinding {
+  id: string
+  sent: boolean
+  severity?: string
+  title?: string
+  file?: string
+  line?: number
+  reviewer?: string
+  detail?: string
+  verdict?: string
+  impact?: string
+  priority?: number
+  reason?: string
+  why?: string
+}
+
+/** How a review round of `subject` (a stage's name, `plan review`, `final review`) was routed. */
+export interface RoundEvent {
+  subject: string
+  round: number
+  findings: RoundFinding[]
+}
+
 export interface Host {
   readonly name: HostName
   agent(request: AgentRequest): Promise<any | null>
@@ -68,6 +92,8 @@ export interface Host {
   phase(title: string): void
   /** A stage started or ended; a stage that never starts gets one `end` with outcome `skipped`. */
   stage?(event: StageEvent): void
+  /** A review round was routed: clean, or each finding sent back or kept. */
+  round?(event: RoundEvent): void
 }
 
 export interface Finding {
@@ -206,4 +232,27 @@ export interface RunResult {
   recheck?: Recheck
   final: FinalReport | null
   repos?: RepoResult[]
+}
+
+export type ReportBucket = 'P0' | 'P1' | 'P2' | 'P3' | 'dismissed'
+export type JudgeCounts = Record<ReportBucket, number>
+export type JudgeOutcome = 'reviewed' | 'no-changes' | 'review-failed'
+
+export interface JudgeResult {
+  repo: string
+  branch: string
+  base: string
+  head: string
+  outcome: JudgeOutcome
+  counts: JudgeCounts
+  /** Ids of the findings a reviewer rated P0 or P1 and the judge placed lower or dismissed. */
+  demoted: string[]
+  findings: Finding[]
+  failedReviewers: Array<{ name: string; note: string }>
+  notJudged: string[]
+  uncommitted: string[]
+  reportPath?: string
+  written: boolean
+  report?: string
+  note?: string
 }

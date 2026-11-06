@@ -4,17 +4,17 @@ import { basename, dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { resolveConfig, type WatchMode } from '../../core/config'
 import { GrannyCancelled, isCancelled } from '../../core/cancel'
-import { checkInput, runGranny, stageCheckErrors, type RunInput } from '../../core/engine'
+import { checkInput, type JudgeInput, runGranny, runJudge, stageCheckErrors, type RunInput } from '../../core/engine'
 import { checkShape, SCHEMAS } from '../../core/schemas'
 import type { AgentRequest, Host, ResultKind } from '../../core/types'
-import { DEFAULT_DELAYS, dropPlaceholders, globalConfigPath, HEARTBEAT_MS, hostModelErrors, type HostOptions, KILL_GRACE_MS, layerSources, overridesNotice, pause, planReviewNotice, preflight, readJson, RUN_INPUT_SCHEMA, RUN_TOOL_DESCRIPTION, runCommand, runDir, runId, runStatus, signalGroup, stageRepos, stamp, statusError, SUBMIT, summarize, withHeartbeat } from '../common'
+import { DEFAULT_DELAYS, dropPlaceholders, globalConfigPath, HEARTBEAT_MS, hostModelErrors, type HostOptions, JUDGE_INPUT_SCHEMA, JUDGE_TOOL_DESCRIPTION, judgeStartLine, KILL_GRACE_MS, layerSources, type Launch, overridesNotice, pause, planReviewNotice, preflight, prepareJudge, readJson, RUN_INPUT_SCHEMA, RUN_TOOL_DESCRIPTION, runCommand, runDir, runId, runStatus, sameModelNotice, signalGroup, stageRepos, stamp, statusError, SUBMIT, summarize, summarizeJudge, withHeartbeat } from '../common'
 import { lineType, LiveRun, type LiveOptions, PARSED_EVENTS, type RoleActivity, type RoleOutcome } from './panel'
 import { Navigator } from './navigator'
-import { type RunOutline, runOutline } from '../runview/outline'
+import { judgeOutline, type RunOutline, runOutline } from '../runview/outline'
 import { EventLog } from './watch'
 
 // The omp (oh-my-pi) host. One file, two modes: in the user's omp session it registers granny_run,
-// granny_status, granny_wait and granny_cancel and runs the loop; every role runs as its own `omp --mode json`
+// granny_judge, granny_status, granny_wait and granny_cancel and runs the loop; every role runs as its own `omp --mode json`
 // process that loads this same file with GRANNY_OMP_CHILD set, where it registers only the role's
 // submit tool and a tool_call guard.
 
@@ -72,6 +72,8 @@ interface RunState {
   reply?: string
   /** Pending granny_wait calls; set at the moment the run ends, so a run reports either to them or by notice. */
   waiters: Set<(reply: string) => void>
+  /** Esc stopped a granny_wait for it: omp then starts no turn by itself. */
+  waitStopped?: boolean
   live: LiveRun
   watch: WatchMode
   branch: string
@@ -282,9 +284,38 @@ export type ExtensionOptions = HostOptions & LiveOptions
 const STATUS_KEEP_MS = 60_000
 
 const WATCH_HELP =
-  "granny-workflow: watch granny runs - /granny (or alt+w) opens the run navigator: a stepper of the run's steps, its stage groups with their agents, and what the selected agent is doing now (or its transcript); /granny <runId> opens it on that run; /granny off|on hides or shows the run panel in this session"
+  "granny-workflow: watch granny runs - /granny (or alt+w) opens the run navigator: the run's stages, a stage's review rounds, a round's agents side by side, and what an agent is doing now (or its transcript); /granny <runId> opens it on that run; /granny off|on hides or shows the run panel in this session"
 
 const NAVIGATOR_HINT = '/granny or alt+w: agents'
+const ESCAPE_GUARD_MS = 500
+const ESCAPES = new Set(['\x1b', '\x1b[27u'])
+
+/**
+ * Esc goes up the navigator's levels, so it is pressed several times to leave. One press too many would reach omp
+ * and stop the turn, so for a moment after the navigator closes Esc does nothing; each press holds that moment open.
+ */
+function swallowStrayEscape(ctx: any) {
+  try {
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const off = ctx?.ui?.onTerminalInput?.((data: string) => {
+      if (!ESCAPES.has(data)) return undefined
+      hold()
+      return { consume: true }
+    })
+    if (typeof off !== 'function') return
+    const hold = () => {
+      if (timer) clearTimeout(timer)
+      timer = setTimeout(() => {
+        try {
+          off()
+        } catch {}
+      }, ESCAPE_GUARD_MS)
+      timer.unref?.()
+    }
+    hold()
+  } catch {}
+}
+
 const NAVIGATOR_SENTENCE = '\nTell the user: /granny or alt+w opens the run navigator (stages, agents, live activity).'
 
 const OVERLAY = { width: '100%', maxHeight: '100%', margin: 0, fullscreen: true, mouseTracking: false }
@@ -349,20 +380,7 @@ export const createGrannyExtension =
     const child = process.env.GRANNY_OMP_CHILD
     if (child) return registerChild(pi, JSON.parse(child) as ChildSpec)
 
-    const startRun = (input: RunInput, ctx: any): string => {
-      const problems = checkInput(input)
-      if (problems.length) return `granny_run refused:\n- ${problems.join('\n- ')}`
-
-      const layers = [readJson(globalConfigPath()), readJson(join(input.repo, 'granny.config.json')), input.config]
-      const config = resolveConfig(layers, 'omp')
-      const unknownChecks = stageCheckErrors(input.stages, config.checks)
-      if (unknownChecks.length) return `granny_run refused:\n- ${unknownChecks.join('\n- ')}`
-      const badModels = hostModelErrors(config, layers, 'omp', ompModelProblem, layerSources(input.repo))
-      if (badModels.length) return `granny_run refused:\n- ${badModels.join('\n- ')}`
-      const blockers = preflight(input.repo, input.branch, config.workDir, config.worktree)
-      for (const repo of stageRepos(input)) blockers.push(...preflight(repo, input.branch, config.workDir, config.worktree).map(b => `${repo}: ${b}`))
-      if (blockers.length) return `granny_run refused:\n- ${blockers.join('\n- ')}`
-
+    const launch = <R>({ input, layers, config, branch, outline, engine, finished, started }: Launch<R>, ctx: any): string => {
       const id = runId()
       const dir = join(input.repo, config.workDir, 'runs', id)
       mkdirSync(dir, { recursive: true })
@@ -370,13 +388,12 @@ export const createGrannyExtension =
       shared.clearStatus = undefined
       const { watch } = config
       const live = new LiveRun(id, watch !== 'off' && ctx?.hasUI === true ? ctx.ui : undefined, { now, renderEveryMs, ...(watch === 'full' ? { hint: NAVIGATOR_HINT } : {}) }, !shared.hidden)
-      const outline = runOutline(input, config)
-      const run: RunState = { id, dir, status: 'running', cancelled: false, abort: new AbortController(), children: new Set(), agents: 0, waiters: new Set(), live, watch, branch: input.branch, outline }
+      const run: RunState = { id, dir, status: 'running', cancelled: false, abort: new AbortController(), children: new Set(), agents: 0, waiters: new Set(), live, watch, branch, outline }
       runs.set(id, run)
       const journal = (type: string, data: Record<string, unknown>) =>
         appendFileSync(join(dir, 'journal.jsonl'), JSON.stringify({ t: stamp(), type, ...data }) + '\n')
       const writeStatus = (extra: Record<string, unknown> = {}) =>
-        writeFileSync(join(dir, 'status.json'), JSON.stringify({ id, status: run.status, repo: input.repo, branch: input.branch, outline, ...extra }, null, 2))
+        writeFileSync(join(dir, 'status.json'), JSON.stringify({ id, status: run.status, repo: input.repo, branch, outline, ...extra }, null, 2))
       writeFileSync(join(dir, 'input.json'), JSON.stringify({ ...input, config: layers }, null, 2))
       writeStatus({ startedAt: stamp() })
 
@@ -526,6 +543,7 @@ export const createGrannyExtension =
           live.setPhase(title)
         },
         stage: ({ number, name, event, outcome }) => journal('stage', { number, name, event, ...(outcome ? { outcome } : {}) }),
+        round: event => journal('round', { ...event }),
       }
 
       const notify = (content: string) => {
@@ -547,15 +565,22 @@ export const createGrannyExtension =
         run.waiters.clear()
         for (const deliver of waiting) deliver(reply)
         if (waiting.length) journal('notified-via-wait', { waits: waiting.length })
-        else if (notice) notify(notice)
+        else if (notice) {
+          notify(notice)
+          if (run.waitStopped && ctx?.hasUI === true) {
+            try {
+              ctx.ui.notify(`granny: run ${id} finished. If omp does not go on by itself (it stays paused after Esc), send it a message.`, 'info')
+            } catch {}
+          }
+        }
       }
 
-      void runGranny(host, { ...input, config: layers })
+      void engine(host)
         .then(result => {
           run.status = 'done'
           writeStatus({ finishedAt: stamp() })
           writeResult(result)
-          const reply = `[granny] Run ${id} finished.\n${summarize(result, config.worktree)}\nCall granny_status with runId "${id}" for the full result, verify load-bearing claims yourself, report to the user and wait. Do not push.`
+          const reply = `[granny] Run ${id} finished.\n${finished(result, id)}`
           settle(reply, reply)
         })
         .catch(error => {
@@ -574,9 +599,62 @@ export const createGrannyExtension =
         })
         .catch(() => {})
 
-      return `granny run ${id} started on ${input.repo} (${input.branch}), ${input.goal !== undefined ? 'planning only' : `${input.stages?.length ?? 0} stage(s)${config.parallel ? `, up to ${config.maxParallel} in parallel` : ''}`}, threshold ${config.threshold}, maxRounds ${config.maxRounds}.
-Journal: ${join(dir, 'journal.jsonl')}
-To wait in this turn, call granny_wait { runId: "${id}" }; otherwise end your turn - the finish message starts a new one. Never write your own watcher, sleep or poll loop on the run files. Use granny_status { runId: "${id}" } for progress and granny_cancel to stop it.${planReviewNotice(input, config)}${watch === 'full' ? NAVIGATOR_SENTENCE : ''}${overridesNotice(layers, 'omp')}`
+      return started(id, join(dir, 'journal.jsonl'))
+    }
+
+    const waitSentence = (id: string) =>
+      `To wait in this turn, call granny_wait { runId: "${id}" }; otherwise end your turn - the finish message starts a new one. Never write your own watcher, sleep or poll loop on the run files. Use granny_status { runId: "${id}" } for progress and granny_cancel to stop it.`
+
+    const startRun = (input: RunInput, ctx: any): string => {
+      const problems = checkInput(input)
+      if (problems.length) return `granny_run refused:\n- ${problems.join('\n- ')}`
+
+      const layers = [readJson(globalConfigPath()), readJson(join(input.repo, 'granny.config.json')), input.config]
+      const config = resolveConfig(layers, 'omp')
+      const unknownChecks = stageCheckErrors(input.stages, config.checks)
+      if (unknownChecks.length) return `granny_run refused:\n- ${unknownChecks.join('\n- ')}`
+      const badModels = hostModelErrors(config, layers, 'omp', ompModelProblem, layerSources(input.repo))
+      if (badModels.length) return `granny_run refused:\n- ${badModels.join('\n- ')}`
+      const blockers = preflight(input.repo, input.branch, config.workDir, config.worktree)
+      for (const repo of stageRepos(input)) blockers.push(...preflight(repo, input.branch, config.workDir, config.worktree).map(b => `${repo}: ${b}`))
+      if (blockers.length) return `granny_run refused:\n- ${blockers.join('\n- ')}`
+
+      return launch(
+        {
+          input,
+          layers,
+          config,
+          branch: input.branch,
+          outline: runOutline(input, config),
+          engine: host => runGranny(host, { ...input, config: layers }),
+          finished: (result, id) => `${summarize(result, config.worktree)}\nCall granny_status with runId "${id}" for the full result, verify load-bearing claims yourself, report to the user and wait. Do not push.`,
+          started: (id, journalPath) => `granny run ${id} started on ${input.repo} (${input.branch}), ${input.goal !== undefined ? 'planning only' : `${input.stages?.length ?? 0} stage(s)${config.parallel ? `, up to ${config.maxParallel} in parallel` : ''}`}, threshold ${config.threshold}, maxRounds ${config.maxRounds}.
+Journal: ${journalPath}
+${waitSentence(id)}${planReviewNotice(input, config)}${sameModelNotice(input, config, 'omp')}${config.watch === 'full' ? NAVIGATOR_SENTENCE : ''}${overridesNotice(layers, 'omp')}`,
+        },
+        ctx,
+      )
+    }
+
+    const startJudge = (input: JudgeInput, ctx: any): string => {
+      const ready = prepareJudge(input, 'omp', ompModelProblem)
+      if ('refused' in ready) return ready.refused
+      const { layers, config, branch } = ready
+      return launch(
+        {
+          input,
+          layers,
+          config,
+          branch,
+          outline: judgeOutline(branch, config),
+          engine: host => runJudge(host, { ...input, config: layers }),
+          finished: result => summarizeJudge(result),
+          started: (id, journalPath) => `${judgeStartLine(id, input, branch, config, 'omp')}
+Journal: ${journalPath}
+${waitSentence(id)}${config.watch === 'full' ? NAVIGATOR_SENTENCE : ''}${overridesNotice(layers, 'omp')}`,
+        },
+        ctx,
+      )
     }
 
     pi.registerTool({
@@ -590,6 +668,20 @@ To wait in this turn, call granny_wait { runId: "${id}" }; otherwise end your tu
           return text(startRun(dropPlaceholders(params), ctx))
         } catch (e) {
           return text(`granny_run failed to start: ${(e as Error).message}`)
+        }
+      },
+    })
+    pi.registerTool({
+      name: 'granny_judge',
+      label: 'granny judge',
+      description: JUDGE_TOOL_DESCRIPTION,
+      parameters: JUDGE_INPUT_SCHEMA,
+      loadMode: 'essential',
+      async execute(_id, params: JudgeInput, _signal, _onUpdate, ctx) {
+        try {
+          return text(startJudge(dropPlaceholders(params), ctx))
+        } catch (e) {
+          return text(`granny_judge failed to start: ${(e as Error).message}`)
         }
       },
     })
@@ -634,7 +726,10 @@ To wait in this turn, call granny_wait { runId: "${id}" }; otherwise end your tu
         }
         if (run.reply !== undefined) return text(run.reply)
         const stopped = `Stopped waiting; run ${run.id} is still running.`
-        if (signal?.aborted) return text(stopped)
+        if (signal?.aborted) {
+          run.waitStopped = true
+          return text(stopped)
+        }
         const seconds = waitSeconds(params.timeoutSeconds)
         return new Promise<ToolResult>(resolve => {
           const done = (reply: string) => {
@@ -643,7 +738,10 @@ To wait in this turn, call granny_wait { runId: "${id}" }; otherwise end your tu
             run.waiters.delete(done)
             resolve(text(reply))
           }
-          const onAbort = () => done(stopped)
+          const onAbort = () => {
+            run.waitStopped = true
+            done(stopped)
+          }
           const timer = setTimeout(
             () => done(`Run ${run.id} is still running after ${seconds} s. Call granny_wait again to keep waiting, or end your turn - the finish message will start a new one.`),
             seconds * 1000,
@@ -700,6 +798,7 @@ To wait in this turn, call granny_wait { runId: "${id}" }; otherwise end your tu
       } finally {
         navigator?.dispose()
         shared.navigating = false
+        swallowStrayEscape(ctx)
       }
     }
 

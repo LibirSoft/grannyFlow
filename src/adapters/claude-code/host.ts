@@ -7,7 +7,7 @@ export interface WorkflowApi {
   agent: (prompt: string, opts: Record<string, unknown>) => Promise<any>
   log: (message: string) => void
   phase: (title: string) => void
-  args: RunInput
+  args: RunInput & { judge?: boolean }
 }
 
 export function claudeCodeHost(api: WorkflowApi): Host {

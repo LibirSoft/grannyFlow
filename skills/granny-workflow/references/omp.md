@@ -1,6 +1,6 @@
 # granny on omp
 
-The engine is an omp (oh-my-pi) extension (`engines/omp/extensions/granny-workflow/`). In your omp session it adds `granny_run`, `granny_status`, `granny_wait` and `granny_cancel`, the `/granny` command and the `alt+w` shortcut. The loop is code inside the extension, which runs in your omp process. Every role runs as its own `omp` process on its own model and answers through a `granny_submit_*` tool. The review commands and the checks run directly in your omp process.
+The engine is an omp (oh-my-pi) extension (`engines/omp/extensions/granny-workflow/`). In your omp session it adds `granny_run`, `granny_judge`, `granny_status`, `granny_wait` and `granny_cancel`, the `/granny` command and the `alt+w` shortcut. The loop is code inside the extension, which runs in your omp process. Every role runs as its own `omp` process on its own model and answers through a `granny_submit_*` tool. The review commands and the checks run directly in your omp process.
 
 ## Install
 
@@ -14,7 +14,7 @@ The engine is an omp (oh-my-pi) extension (`engines/omp/extensions/granny-workfl
 
    Install it globally. omp loads project extensions only from `<cwd>/.omp/extensions/`, and with `worktree` on (the default) the run works in the branch's worktree. The role processes do not need the install: they load the extension file by its absolute path. `granny_run` itself must be in your session, though, and a per-project copy is missing in every other directory you start omp in.
 
-3. Quit omp and start it again. `granny_run`, `granny_status`, `granny_wait` and `granny_cancel` should be listed among the tools of the new session, and `/granny` among its commands.
+3. Quit omp and start it again. `granny_run`, `granny_judge`, `granny_status`, `granny_wait` and `granny_cancel` should be listed among the tools of the new session, and `/granny` among its commands.
 
 There is no `granny` agent definition for omp: omp's agent files define task subagents, not the agent of your session. To run granny's roles on a particular model, start the session on that model - a role without its own model uses the model of the session that called `granny_run` - or set `model` on each role ([config.md](config.md#models-per-host)). `roles.granny` is only the model of the extraction fallback and the final PR-ready check; it does not change your session's model.
 
@@ -35,13 +35,29 @@ The extension reads `~/.config/granny/config.json` (or `$GRANNY_CONFIG`) and `<r
 
 Independent stages run at the same time, up to `maxParallel` ([config.md](config.md#parallel-stages)), each with its own role processes. With `checks` in the config ([config.md](config.md#checks)) the extension runs each check command itself (`bash -c` in the stage's worktree, its exit code is the real one) after the implementer, after every fix, once per repo before the final review, and once more without repairs when the final check moved HEAD. The completion message is the same as on opencode ([opencode.md](opencode.md#launch) lists its lines).
 
-`granny_run` returns a run id at once, and the run goes on in the background. Its reply tells the agent to wait with `granny_wait` or end its turn, and never to write its own watcher, sleep or poll loop on the run files. With `watch` `"full"` the reply also tells the agent to tell you where the [run navigator](#watching-a-role) is, and it lists every value a run's `config` changed ([Models and permissions](#models-and-permissions)). When it ends, the extension posts a `[granny] Run … finished` message into the session that called `granny_run`, with a `- worktree: <path>` line - that is your cue to report. The message is an omp aside: in a running turn omp injects it at the next step boundary, cutting short an interruptible wait in progress (`granny_wait`, omp's `wait`), and in an idle session it starts a turn (in plan mode, or while an Esc is in effect, omp only adds it to the context). A turn blocked in a tool that is not interruptible - its own watcher, sleep or poll loop in `bash` - gets it only when that tool returns. When it cannot be posted, the journal has a `notify-failed` entry, and `granny_status` still has the result.
+`granny_run` returns a run id at once, and the run goes on in the background. Its reply tells the agent to wait with `granny_wait` or end its turn, and never to write its own watcher, sleep or poll loop on the run files. With `watch` `"full"` the reply also tells the agent to tell you where the [run navigator](#watching-a-role) is, and it lists every value a run's `config` changed ([Models and permissions](#models-and-permissions)). When every reviewer is an `agent` reviewer on the implementer's model (two roles with no model share the session model), it adds: "reviewers share the implementer's model; a different model may catch more". That is advice: the run starts either way, and the agent changes no model on its own. A Codex or `command` reviewer counts as different. When it ends, the extension posts a `[granny] Run … finished` message into the session that called `granny_run`, with a `- worktree: <path>` line - that is your cue to report. The message is an omp aside: in a running turn omp injects it at the next step boundary, cutting short an interruptible wait in progress (`granny_wait`, omp's `wait`), and in an idle session it starts a turn (in plan mode, or while an Esc is in effect, omp only adds it to the context). A turn blocked in a tool that is not interruptible - its own watcher, sleep or poll loop in `bash` - gets it only when that tool returns. When it cannot be posted, the journal has a `notify-failed` entry, and `granny_status` still has the result.
 
 - `granny_status({ runId })` - status, journal tail, result. `granny_status({ repo })` finds the latest run in that repo. For a running run of this omp process it appends the [live view](#live-panel) under `live (this omp process):`, every active role, in any mode.
-- `granny_wait({ runId, timeoutSeconds? })` - blocks the turn until the run ends and returns what the message would carry: the finish summary, the failure, or `Run <id> was cancelled.` A run that has already ended returns at once. After `timeoutSeconds` (default 1800, clamped to 1-7200) it returns `Run <id> is still running after <n> s. ...`; Esc returns `Stopped waiting; run <id> is still running.` It is interruptible: a message you type, or any other aside, ends it with that same text. A run that ends while a `granny_wait` for it is pending reports only through those waits: no message is posted, and the journal has `notified-via-wait`. It waits only for a run of this omp process (the run table is in memory); for any other run it points to `granny_status({ repo })`.
+- `granny_wait({ runId, timeoutSeconds? })` - blocks the turn until the run ends and returns what the message would carry: the finish summary, the failure, or `Run <id> was cancelled.` A run that has already ended returns at once. After `timeoutSeconds` (default 1800, clamped to 1-7200) it returns `Run <id> is still running after <n> s. ...`; Esc returns `Stopped waiting; run <id> is still running.` omp then starts no turn by itself until you send a message, also when the run finishes, so the finish message waits in the session and a notice says to send one. It is interruptible: a message you type, or any other aside, ends it with that same text. A run that ends while a `granny_wait` for it is pending reports only through those waits: no message is posted, and the journal has `notified-via-wait`. It waits only for a run of this omp process (the run table is in memory); for any other run it points to `granny_status({ repo })`.
 - `granny_cancel({ runId })` - interrupts every running step; nothing further starts. Every role process and every review command runs in its own process group. Each group gets SIGTERM, then SIGKILL 5 s later when it is still running. The run ends `cancelled` at once: the step that was running is not retried, and a reviewer or check it stopped is not reported as a failed review or a red check.
 
-Run files: `<repo>/.granny/runs/<id>/` - `input.json`, `status.json`, `journal.jsonl`, `result.json` - in the main checkout you passed as `repo`, also when the run works in another worktree. Every terminal state writes `result.json`, after `status.json`, so a `result.json` means the run has ended and `status.json` already says how: `done` writes the run's result, `failed` and `cancelled` write `{ id, status, finishedAt, error }` with the error message (a failure's stack is in `status.json`; a cancel leaves `"error": "cancelled"` there). Each role process has its own directory there, `sessions/<n>-<label>/`, which holds its omp session (`<time>_<uuid>.jsonl`, its `task` subagents' sessions as `<time>_<uuid>/<Name>.jsonl`), `submission.json`, the arguments of its submit call, and with `watch` `"full"` its [event log](#watching-a-role) `events.jsonl`. The journal's `agent` entry `{ label, role, phase, session, model, effort?, cwd }` names the phase of the call and the directory the agent works in (`cwd`), and every agent that started is followed by `agent-end { label, session, outcome, error? }` - `done`, `failed` (no result, or the error it threw) or `cancelled` - in every `watch` mode. The journal has a `stage { number, name, event, outcome? }` entry when a stage starts and ends (`event` is `start` or `end`, `outcome` the stage's outcome on `end`; a stage that never started because one it builds on failed has one `end` with outcome `skipped`, and a stage before `fromStage` has none), and a `heartbeat { command }` entry every 60 s while a check or review command runs, which says only that the run is alive; `granny_status`'s journal tail shows it, the views draw nothing for it. `status.json` holds the run's `outline` from the start, `{ kind, branch, worktree, planReview, finalReview, reviewers, fromStage, stages: [{ number, name, implement, review, checks }] }` with `kind` `plan` or `implement`: what the navigator needs to list stages and steps still to come. The PR body and the review outputs are in the worktree's `.granny/`.
+Run files: `<repo>/.granny/runs/<id>/` - `input.json`, `status.json`, `journal.jsonl`, `result.json` - in the main checkout you passed as `repo`, also when the run works in another worktree. Every terminal state writes `result.json`, after `status.json`, so a `result.json` means the run has ended and `status.json` already says how: `done` writes the run's result, `failed` and `cancelled` write `{ id, status, finishedAt, error }` with the error message (a failure's stack is in `status.json`; a cancel leaves `"error": "cancelled"` there). Each role process has its own directory there, `sessions/<n>-<label>/`, which holds its omp session (`<time>_<uuid>.jsonl`, its `task` subagents' sessions as `<time>_<uuid>/<Name>.jsonl`), `submission.json`, the arguments of its submit call, and with `watch` `"full"` its [event log](#watching-a-role) `events.jsonl`. The journal's `agent` entry `{ label, role, phase, session, model, effort?, cwd }` names the phase of the call and the directory the agent works in (`cwd`), and every agent that started is followed by `agent-end { label, session, outcome, error? }` - `done`, `failed` (no result, or the error it threw) or `cancelled` - in every `watch` mode. The journal has a `stage { number, name, event, outcome? }` entry when a stage starts and ends (`event` is `start` or `end`, `outcome` the stage's outcome on `end`; a stage that never started because one it builds on failed has one `end` with outcome `skipped`, and a stage before `fromStage` has none), and a `heartbeat { command }` entry every 60 s while a check or review command runs, which says only that the run is alive; `granny_status`'s journal tail leaves it out and the views draw nothing for it. `status.json` holds the run's `outline` from the start, `{ kind, branch, worktree, planReview, finalReview, reviewers, fromStage, stages: [{ number, name, implement, review, checks }] }` with `kind` `plan`, `implement` or `judge`: what the navigator needs to list stages and steps still to come. The PR body and the review outputs are in the worktree's `.granny/`.
+
+## Review only: `granny judge`
+
+```
+granny_judge({ repo, base?, context?, config? })
+```
+
+The steps, with what to ask the user, are in [judge.md](judge.md). One review of the checkout's `<base>...HEAD` and one tagging of its findings, and the report goes to `<repo>/<workDir>/reviews/<date>-<branch>.md` (by default `.granny/reviews/`). It changes nothing else: no fix, commit, push, branch or worktree.
+
+It refuses, with `granny_judge refused:`, before anything starts:
+
+- when the reviewers or the judge model are missing from the config files: `reviewers: no config sets who reviews`, `reviewers[<n>] (<name>): no model for omp`, `roles.judge.model: no model for omp`. The reply ends by telling the agent to ask the user and write them to the config. The run's own `config` does not answer this, so the agent cannot pick the models itself; it can still open a gap, which is refused too.
+- when a model it would use cannot run here, in the judge, the extraction agent (`roles.granny`) or an `agent` reviewer. A bad `roles.implementer.model` does not block a review that never uses it.
+- when `repo` is not a git repository.
+
+There is no preflight: a dirty tree is allowed, and the uncommitted files are listed in the report and the finish message; no branch is required, and a detached HEAD goes by its short SHA. The run's files, `granny_wait`, `granny_status` and `granny_cancel` work as on any run. `status.json`'s `outline` has `kind` `judge`, no stages and no worktree, and the [run navigator](#watching-a-role) lists `Review`, `Tag` and `Report`, with the role agents selectable as in any run. The start reply names the reviewers and the judge model, says nothing will be changed, and has the `granny_wait` sentence and the `overrides:` line. The finish message gives the report path first, the counts per heading, how many reviewer P0/P1 findings the judge placed lower, what was not reviewed and which reviewers did not run, and tells the agent to give the user the path and counts and to fix nothing unless asked. With `written: false` the report's text is in `result.json`, under `report`.
 
 ## Live panel
 
@@ -73,41 +89,88 @@ A failed append is journalled once per role (`event-log-failed` with the path an
 
 **Run navigator.** `/granny` or `alt+w` in the omp TUI opens it; the run panel says so. It is a full-screen page (omp's alternate screen; an omp without it draws an overlay) on the latest running run of this omp process, else its latest run; `/granny <runId>` opens it on that run. It lists only this process's runs (the run table is in memory, as for `granny_wait`) with `watch` `"full"`; a second `/granny` or `alt+w` while it is open does nothing.
 
+The navigator shows one level at a time. Enter goes down, Esc goes up, and the first row always says where you are: `granny › 2 Client pause UI › Round 2 of 4 › terra`. `/granny` or `alt+w` opens it on the stages, with the running one selected.
+
+**1. The stages**: every piece of work in order, what it is doing, how many agents it had and how many run now.
+
 ```
-granny · feat/pause · stage 1/2 · Implement · 1m40s
-Worktree ✓ › Implement ● › Checks › Review › Final review › PR ready
-───────────────────────────────────────────┬──────────────────────────────────────────────────
-  ▾ ● 1 Server pause domain, lifec…  1m40s │ implementer · k3.1-pro · 1m40s
-›   ● implement                      1m40s │
-      2 Client pause UI and e2e            │ NOW   ● bash · 12s
-      Final review                         │       Running the game service tests
-      PR ready                             │       » Checking the lifecycle against the tests
-  run details                              │
-                                           │ TODO  ✓ Pause domain  ● Lifecycle and socket proof
-                                           │
-                                           │ RECENT
-                                           │  23:31:25  edit   src/game/protocol.ts
-                                           │  23:30:46  read   2 files · src/services/GameSer…
-                                           │
-                                           │ LAST SAID  "Added pause/resume messages to the protocol."
-───────────────────────────────────────────┴──────────────────────────────────────────────────
-↑↓ move · Enter/→ open · Tab/] next agent · [ prev · Space fold · Esc close
+granny  feat/pause  ● running · 21m36s
+
+  ✓ Worktree                                                                2s
+  │
+  ✓ 1 Server pause domain      clean · 2 rounds       7 agents          12m04s
+  │
+› ● 2 Client pause UI          round 2 of 4           7 agents · 2 running  9m30s
+  │
+  · Final review               waiting
+  │
+  · PR ready                   waiting
+
+  run details
+
+↑↓ move · Enter open · Esc close
 ```
 
-From 100 columns the tree is on the left and the selected row's detail on the right; narrower, one pane at a time. The `─` rules show from 16 rows. The last line is the keys of the focused pane.
+A row that has not started does not open. `run details` is the only place with the run's id, repo, branch, times, `result.json` path and result. With several runs the list of runs takes its place: Enter on another run shows it.
 
-- Header: `granny · <branch> · stage <k>/<n> · <phase> · <elapsed>`, the one place for the run's position. `stages 1+2/<n>` while several stages run, `planning` in a planning run, no stage part outside the stages, `granny · <branch> · done|failed|cancelled · <total>` after the end. Too wide, the branch goes first, then the tail is cut.
-- Stepper: the steps this run has, in order, from its `outline`: `Worktree ✓ › Implement ● › Checks › Review › Final review › PR ready`, or `Worktree › Plan › Plan review` for a planning run. `✓` done, `●` current, `✗` failed, `⊘` skipped or cancelled, no marker still to come. Implement, Checks and Review describe one stage: the selected row's, else the newest running one, else the last started, so selecting a row of another stage changes them. Too wide, the done steps become a bare `✓`, then only the current step shows with `(<i>/<n>)`.
-- Tree: one group row per piece of work: Plan, Plan review, each stage (`1 <name>`), Final review, PR ready, with `▾` or `▸`, a marker (`●` running, `✓` done, `✗` failed, with the outcome when it fits, `⊘` skipped or cancelled) and the time on the right. Work that has not started is listed muted, without an arrow or marker, and has no rows under it. The running group is open, or the last started stage when none runs; the others are folded, and Space on a group folds or opens it for good. Under a group, its agents as `<marker> <action>` with their time: `implement`, `commit`, `commit #2`, `repair #1`, `review r1` (with the reviewer's name when the run has several, `#2` on a retried attempt), `judge r1`, `fix r1`, `extract r1`, `resolve merge`, `plan`, `pr-ready check`. Agent markers: `●` running, `…` between turns (a backoff or retry), `✓` done, `✗` failed, `⊘` cancelled. A stage with checks has a row after the step they followed: `checks ✓`, `checks ✗ <names>` or `checks …`. Under an agent, its `task` subagents. An agent whose label names no group lands in a group titled with its phase. The worktree step and the commands have no rows. At the bottom a `run details` row, or, when this process knows several runs, a `runs` list with one row per run, `<marker> <last 4 characters of the id> · <status>`; Enter or Space on another run shows it. The full run id is only in the run's detail.
-- Agent detail: `<role> · <short model> · <time>` (the short model is the model without its provider and `#default`, plus its variant or effort: `gpt-6.1-sol/xhigh`, or `default model`), `! <error>` when it failed, then a summary fitted to the pane:
-  - `NOW`: what it does this moment and for how long - `● thinking 42s`, `● writing 5s`, `● bash · 7s` with the tool's intent or short argument on the next row, `… waiting for model 3s` - and the latest `»` reasoning heading. State changes only update this block. A finished agent's outcome goes here: `✓ done in 18m`, `✗ failed after 3m: <error>`, `⊘ cancelled after 2m`.
-  - `TODO`: one row with the items of its todo tool (`✓` done, `●` active, `·` pending), when it used one.
-  - `RECENT`: newest first, one row per item, cut and never wrapped: `HH:MM:SS  <tool>  <intent, else a short argument>`, the arguments relative to the agent's work directory. Calls of the same tool within a few seconds collapse (`read   7 files · a.ts, b.ts, …`, `(2×)` for one target), `task` rows show the subagents with their end marker, a failed call ends in `✗` in the error colour, and retries and provider errors from the journal are rows too. The running tool joins the list when it ends. A short pane drops the oldest rows first.
-  - `LAST SAID`: the latest assistant text, at most two rows.
-- `v` shows the agent's full event list in time order instead (`·` states, `»` headings, `▸` tool calls with intent and argument, `✗` failed tools, `└ task:`, `✎` the first line of each answer, `■` exit) with its journal notes, and `t` opens its conversation from the omp session files (prompt head, reasoning summaries, thinking heads, answers, tool calls with intent and one-line arguments, tool result heads, provider errors), running or finished. Each key turns its view on, and back to the summary when pressed again; `f` turns follow on or off in both.
-- Other details: a subagent's own session; a group's full name, state, time, outcome, checks result and journal lines; a checks row's journal lines; a run's id, status, repo, branch, times, `result.json` path and finish or failure text.
-- Keys: ↑/↓ (`k`/`j`), PgUp/PgDn, Home/End move in the tree or scroll a list in the detail (the summary does not scroll); Enter or → focuses the detail, ← or Esc goes back (← in the tree goes to the parent row); Space folds a group; Tab or `]`, Shift+Tab or `[` select the next or previous agent of the open groups, from the detail too; `v`, `t` and `f` work with the detail focused; Esc in the tree, or `q`, closes. The keys come from omp's default bindings (user rebinds do not reach extension overlays), with the plain terminal sequences as fallback.
-- A list opens at its end; follow is on for a running agent, so new lines keep the view at the end; scrolling up turns it off, End turns it on. Files are read by offset, only the new bytes, at most once a second while they grow and at once after a key; a list keeps its last 5000 events or lines, a group its last 200 journal lines, a checks row its last 50, and a first read of a file over 8 MB starts at its last 8 MB. Nothing in the run waits for the navigator, and a TUI that can no longer redraw it closes it.
+**2. A stage**: its implementer and checks, then the review loop with its rounds, the ones still possible and the round cap.
+
+```
+granny › 2 Client pause UI
+
+  ✓ Implement     k3.1-pro                     1 agent     4m52s
+  │
+  ✓ Checks        passed
+  │
+┌ ↺ review loop · up to 4 rounds ───────────────────────────────────────┐
+│   ✓ Round 1   4 findings: 3 sent back, 1 kept   5 agents        3m42s │
+│ › ● Round 2   reviewing                         2 agents · 2 running 42s │
+│   · Round 3   only if round 2 sends findings back                     │
+│   · Round 4   the last one                                            │
+└───────────────────────────────────────────────────────────────────────┘
+  │
+  · Next          Final review
+
+↑↓ move · Enter open · l log · Esc back
+```
+
+`l` shows the stage's full name, state, time, outcome, checks result and journal lines. Final review and plan review have the same loop. A group without a loop lists its agents; a judge run has the groups `Review`, `Tag` and `Report`. A run journalled before round entries existed still has its rounds, without their findings.
+
+**3. A round**: what happens in it in order, with the agents that run at the same time side by side (stacked when the terminal is narrow).
+
+```
+granny › 2 Client pause UI › Round 2 of 4
+
+  ● Review   2 agents at the same time
+    ┌──────────────────────────────┐  ┌──────────────────────────────┐
+    │ ● terra  42s                 │  │ ● sol  38s                   │
+    │ running read: PauseButton.tsx│  │ running bash: bun test       │
+    └──────────────────────────────┘  └──────────────────────────────┘
+  │
+  · Judge    after the reviewers
+  │
+  · Fix      only if findings go back
+  │
+  · Checks   after the fix
+  │
+  · Next     Round 3, or the stage is done
+
+↑↓←→ move · Enter open agent · [ ] other round · l log · Esc back
+```
+
+A finished round says what each step did: `2 findings` under Review, `1 sent back, 1 kept` at the judge, and on each reviewer's card how many it found. `f` lists the round's findings with `↺ sent back` or `· kept`; below the list, the selected one's file, what the reviewer said, how the judge classified it and why it went back or stayed. Enter opens the agent that found it. A checks row opens its journal lines.
+
+**4. An agent**: the first rows are `<role> · <short model> · <time>` (the short model is the model without its provider and `#default`, plus its variant or effort: `gpt-6.1-sol/xhigh`, or `default model`), `! <error>` when it failed, then the summary. `t` opens its conversation file, `v` its full event list. Tab, `]` and `[` go through the other agents of its round and their subagents.
+
+- `NOW`: what it does this moment and for how long - `● thinking 42s`, `● writing 5s`, `● bash · 7s` with the tool's intent or short argument on the next row, `… waiting for model 3s`. A finished agent's outcome goes here: `✓ done in 18m`, `✗ failed after 3m: <error>`, `⊘ cancelled after 2m`.
+- `TODO`: one row with the items of its todo tool (`✓` done, `●` active, `·` pending), when it used one.
+- `RECENT`: newest first, one row per item, cut and never wrapped: `HH:MM:SS  <tool>  <short argument>`, relative to the agent's work directory. Calls of the same tool within a few seconds collapse (`read   7 files · a.ts, b.ts, …`, `(2×)` for one target), a failed call ends in `✗`, and retries and provider errors from the journal are rows too.
+- `LAST SAID`: the latest assistant text, at most two rows.
+- `v` shows every event in time order instead; PgUp/PgDn and Home/End scroll that list, End and `f` follow its end, and `v` goes back to the summary.
+
+Esc at the top closes the navigator; for half a second after that, one press too many does nothing, so it cannot stop the turn. The last row of the page is the keys of that level (`v details · t transcript · Tab/] [ agent · ←/Esc back · q close` on an agent). Rows fit any width: narrow, a row's middle column goes first, then its agents; a page too short for its rows drops the `│` rows and then scrolls to the selection.
+
+A list opens at its end; follow is on for a running agent, so new lines keep the view at the end; scrolling up turns it off, End turns it on. Files are read by offset, only the new bytes, at most once a second while they grow and at once after a key; a list keeps its last 5000 events or lines, a group its last 200 journal lines, a checks row its last 50, and a first read of a file over 8 MB starts at its last 8 MB. Nothing in the run waits for the navigator, and a TUI that can no longer redraw it closes it.
 
 `/granny off` / `/granny on` hide or show the panel (above). For a run with `"panel"` or `"off"`, `/granny` and `alt+w` say `watching is off for run <id> (watch: "<mode>")` and how to turn it on. Outside the TUI (print, json, rpc mode) `/granny` prints each role's `events.jsonl` path instead, as a message that starts no turn. The navigator is an omp page, not a terminal pane (omp's `openTerminal` needs a multiplexer), so to follow a log outside omp, `tail -f` its path. `alt+w` is free in omp 18.16; should a later omp bind it, `/granny` still opens the navigator.
 

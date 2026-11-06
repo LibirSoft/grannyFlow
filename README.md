@@ -71,6 +71,37 @@ A planner writes the plan to `.granny/plans/feat-oauth.md` and proposes the stag
 
 When a run ends you get the worktree path, and per stage: commits, review rounds, the outcome, and the findings left for you to decide. The PR body is at `.granny/PR-BODY.md` in the worktree. Review and push from there.
 
+## Review only: `granny judge`
+
+Want granny only for a review? In your project, ask your agent:
+
+> granny judge
+
+If the agents are not configured yet, granny asks who reviews and who tags, and writes the config. Then one agent reviews the checkout's `<base>...HEAD`, a second agent tags what it found, and the review goes to `.granny/reviews/<date>-<branch>.md`. You get the path and the counts, and you can read the file later. Nothing is fixed or committed, and no branch or worktree is created; uncommitted files are not reviewed, and the report lists them.
+
+```markdown
+# Granny judge - feat/login
+
+- Reviewed: `main...HEAD` at 1a2b3c4d, 3 commit(s), in /work/app
+- When: 20261106-101010
+- Reviewers: reviewer (agent, openai-codex/gpt-6.1-sol) · Judge: anthropic/claude-haiku-5-5
+- Totals: P0 1, P1 0, P2 1, P3 0, dismissed 0
+
+## P0
+
+### Session cookie is not marked secure
+
+`src/auth.ts:12` · `confirmed` `critical` `common` `small` `in-scope` · priority 95 · `reviewer: P1` · from `reviewer-F1`
+
+The detail, the evidence and the judge's reason follow here.
+
+## P1
+
+None.
+```
+
+The heading is the tagging agent's call: `critical` goes under P0, `major` under P1, `moderate` under P2 and `minor` under P3; what it refutes goes under `Dismissed by the judge`, with its reason. A finding it placed below the reviewer's severity is tagged `demoted`. Details: [references/judge.md](skills/granny-workflow/references/judge.md).
+
 ## How it works
 
 <picture>

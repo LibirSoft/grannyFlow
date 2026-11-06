@@ -54,6 +54,8 @@ Ask these five, each with the current value (or the default) marked:
 
    Skip `helper` on opencode and omp: granny runs those commands itself there and starts no helper. On Claude Code and omp, ask the implementer's and the planner's effort too (`low`, `medium`, `high`, `xhigh`, `max`; default: the host's own); omp passes it as `--thinking`. On opencode effort is ignored: offer the model's `#variant` instead. A Codex reviewer keeps Codex's own model unless the user names one.
 
+   When the answers leave every reviewer an `agent` reviewer on the implementer's model (two roles with no model share the session model; a Codex or `command` reviewer counts as different), tell the user: "reviewers share the implementer's model; a different model may catch more". This is advice on every host: never refuse, and write what the user chose.
+
 5. **Where to save** - this project (`<repo>/granny.config.json`, default; commit it to share it with the team) or every project (`~/.config/granny/config.json`).
 
 Plan review, round cap and language keep their defaults. Mention in one line that the user can ask for them (`planReview`, `maxRounds`, `language`), and set them only when asked; say that plan review is off by default because every round is a full review + judge + fix, which uses many more tokens and makes runs much longer. When the user asks to turn it on, state that cost, with the round cap (`maxRounds`), before writing it.

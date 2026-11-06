@@ -166,6 +166,18 @@ export function resolveConfig(layers: unknown[], host?: HostName): GrannyConfig 
   return config
 }
 
+/** What `granny judge` needs the user to choose, one line each: it never picks the reviewers or a model itself. */
+export function judgeConfigGaps(layers: unknown[], host: HostName): string[] {
+  const reviewersSet = layers.some(layer => isObject(layer) && layer.reviewers !== undefined)
+  const config = resolveConfig(layers, host)
+  return [
+    ...(reviewersSet
+      ? config.reviewers.flatMap((rv, i) => (rv.engine === 'agent' && !resolveModel(rv.model, host) ? [`reviewers[${i}] (${rv.name}): no model for ${host}`] : []))
+      : ['reviewers: no config sets who reviews']),
+    ...(resolveModel(config.roles.judge.model, host) ? [] : [`roles.judge.model: no model for ${host}`]),
+  ]
+}
+
 function modelErrors(path: string, spec: unknown): string[] {
   if (spec === undefined) return []
   if (typeof spec !== 'string' && !isObject(spec)) return [`${path} must be a string or an object keyed by host`]

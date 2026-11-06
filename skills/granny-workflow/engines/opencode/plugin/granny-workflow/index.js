@@ -121,6 +121,14 @@ function resolveConfig(layers, host) {
 - `)}`);
   return config;
 }
+function judgeConfigGaps(layers, host) {
+  const reviewersSet = layers.some((layer) => isObject(layer) && layer.reviewers !== undefined);
+  const config = resolveConfig(layers, host);
+  return [
+    ...reviewersSet ? config.reviewers.flatMap((rv, i) => rv.engine === "agent" && !resolveModel(rv.model, host) ? [`reviewers[${i}] (${rv.name}): no model for ${host}`] : []) : ["reviewers: no config sets who reviews"],
+    ...resolveModel(config.roles.judge.model, host) ? [] : [`roles.judge.model: no model for ${host}`]
+  ];
+}
 function modelErrors(path, spec) {
   if (spec === undefined)
     return [];
@@ -595,6 +603,14 @@ function declinedOf(value, sent) {
 function shellQuote(value) {
   return /^[\w@%+=:,./-]+$/.test(value) ? value : `'${value.replaceAll("'", `'\\''`)}'`;
 }
+function heredocWriteScript(path, text) {
+  let end = "GRANNY_REPORT_END";
+  while (text.includes(end))
+    end += "_";
+  return `mkdir -p ${shellQuote(path.slice(0, path.lastIndexOf("/")) || "/")} && cat > ${shellQuote(path)} <<'${end}'
+${text}${end}
+`;
+}
 
 // src/core/prompts.ts
 var roundLabel = (round, f, loop) => `${loop ? `${loop.id}/` : ""}r${round}/${f.id}`;
@@ -777,6 +793,13 @@ function worktreeCommandPrompt(repo, branch, script) {
 function gitCommandPrompt(repo, step, script) {
   return oneCommand(`git command for the "${step}" step`, `Repo ${repo}.`, "Run exactly this:", script);
 }
+var ONE_SHOT_NOTE = "This is a one-shot review: nobody fixes anything in this run, so report every problem you can confirm in the code.";
+function judgeStepPrompt(repo, step, script) {
+  return oneCommand(`shell command for the "${step}" step of a review-only run`, `Repo ${repo}.`, "Run exactly this:", script);
+}
+function reportWritePrompt(repo, step, script) {
+  return oneCommand(`shell command for the "${step}" step of a review-only run, which saves the review report (the one file this run writes),`, `Repo ${repo}.`, "Run exactly this, as one command with its line breaks and every character kept, down to its last line:", script);
+}
 function timeoutProbePrompt(repo, step, script) {
   return oneCommand(`shell command for the "${step}" step: it prints the name of the timeout command the checks run in, or nothing`, `Install nothing. Repo ${repo}.`, "Run exactly this:", script);
 }
@@ -894,6 +917,18 @@ ${judgeHistory(earlier)}
 REVIEW:
 ${JSON.stringify(findings)}`;
 }
+function tagPrompt(p, reviewBase, findings) {
+  return `You are the JUDGE tagging the findings of a one-shot code review. Repo ${p.repo}, branch ${p.branch}, diff \`${shellQuote(reviewBase)}...HEAD\`. Do not edit anything.
+${p.context ? `Design context:
+` + p.context + `
+` : ""}
+Nobody fixes anything in this run. Your classification decides under which heading of the user's report each finding goes, so classify every finding on its merits: the reviewer's severity does not bind you, in either direction.
+For each finding, open the cited code and check that it is real and correctly described. Use scope in-scope or pre-existing only. ${JUDGE_DUPES}
+${rubric("what the change set out to do")}
+
+REVIEW:
+${JSON.stringify(findings)}`;
+}
 var RETRY_ASK = "Answer again for every finding, every field set to an allowed value and the evidence filled in";
 function judgeRetryNote(problems) {
   return problems ? `RETRY: your last answer left these findings unclassified. ${RETRY_ASK}:
@@ -922,11 +957,29 @@ Fix every finding below. If you believe a finding is wrong, leave the plan as is
 ${overruledSection(overruled)}
 ${findingsList(accepted)}`;
 }
-function finalPrompt(p, plans = []) {
+function outcomeLine(name, r) {
+  const listed = (kind, findings) => findings.length ? `; ${kind}: ${findings.map((f) => `${f.id} ${f.title.replace(/\s+/g, " ").trim()}`).join(", ")}` : "";
+  const note = r.note?.split(`
+`)[0];
+  return `- ${name}: ${r.outcome}, ${r.rounds} review round(s)${listed("residual", r.residual)}${listed("unresolved", r.unresolved)}${note ? ` - ${note}` : ""}`;
+}
+function outcomesList(o) {
+  return [
+    ...o.plan ? [outcomeLine("plan review", o.plan)] : [],
+    ...o.stages.length ? o.stages.map((s) => outcomeLine(`stage "${s.stage}"`, s)) : ["- no stage of this run worked in this repo"],
+    ...o.finalReview ? [outcomeLine("final review", o.finalReview)] : []
+  ].join(`
+`);
+}
+function finalPrompt(p, plans, outcomes) {
   const attribution = p.config.aiAttribution ? "" : ` \`git log ${shellQuote(p.base)}..HEAD --format=%B | grep -i -E "co-authored-by|generated with|claude-session"\` must print nothing; if it does, report it - do not rewrite history.`;
   return `${common(p)}
 
-You are GRANNY doing the FINAL CHECK. Run every gate and record exact numbers. \`git status --short\` must be clean${plans.length ? ` except for the plan files ${plans.join(", ")}, which stay uncommitted: never stage or commit them` : ""}.${attribution} Make ${prBodyPath(p.config)} complete and accurate against the actual commits${p.config.parallel ? `; fold in the notes of stages that ran in their own worktree (${p.config.workDir}/PR-BODY-*.md, if any) and delete those files` : ""}. Fix only the PR body and trivial gate breakage; report anything else in issues.`;
+You are GRANNY doing the FINAL CHECK. Run every gate and record exact numbers. \`git status --short\` must be clean${plans.length ? ` except for the plan files ${plans.join(", ")}, which stay uncommitted: never stage or commit them` : ""}.${attribution} Make ${prBodyPath(p.config)} complete and accurate against the actual commits${p.config.parallel ? `; fold in the notes of stages that ran in their own worktree (${p.config.workDir}/PR-BODY-*.md, if any) and delete those files` : ""}.
+The commits do not show how this run's reviews ended. They ended like this:
+${outcomesList(outcomes)}
+${outcomes.reviewOnly ? `This run only reviewed: every stage is review-only (implement: false), so any commit it made is a review fix. Say so in the PR body.
+` : ""}Rewrite the PR body's review and status section from this list, adding the section if there is none and replacing any claim of an earlier run on this branch. Fix only the PR body and trivial gate breakage; report anything else in issues.`;
 }
 function mergePrompt(p, name, lane, output) {
   return `${common(p)}
@@ -935,6 +988,111 @@ You are the IMPLEMENTER, finishing a merge. Stage "${name}" ran in parallel on b
 ${output.slice(-3000)}
 
 First read ${branchLog(p)} and \`git log --oneline HEAD..${shellQuote(lane)}\`. Resolve every conflict so both sides' intent survives, keep the gates green, and conclude with \`git commit --no-edit\`. Never abort the merge or reset. Return startSha = HEAD before the merge (\`git rev-parse HEAD\` before you commit).`;
+}
+
+// src/core/report.ts
+var HEADINGS = { critical: "P0", major: "P1", moderate: "P2", minor: "P3" };
+var P_HEADINGS = ["P0", "P1", "P2", "P3"];
+var ORDER = [...P_HEADINGS, "dismissed"];
+var NOTE_LENGTH = 300;
+var oneLine = (text) => String(text ?? "").replace(/\s+/g, " ").trim();
+var noteLine = (note) => oneLine(note).slice(0, NOTE_LENGTH);
+var SEVERITY_WORDS = { critical: "P0", high: "P1", medium: "P2", low: "P3" };
+function severityOf(f) {
+  const said = /^\s*(p[0-3]|critical|high|medium|low)\b/i.exec(String(f.severity ?? ""))?.[1]?.toLowerCase();
+  if (said === undefined)
+    return "P2";
+  return SEVERITY_WORDS[said] ?? P_HEADINGS[Number(said[1])];
+}
+var isJudged = (f) => f.impact !== undefined;
+function bucketOf(f) {
+  if (f.impact === undefined)
+    return severityOf(f);
+  return f.verdict === "refuted" || f.impact === "none" ? "dismissed" : HEADINGS[f.impact];
+}
+var isDemoted = (f) => ORDER.indexOf(bucketOf(f)) > ORDER.indexOf(severityOf(f));
+function countsOf(findings) {
+  const counts = { P0: 0, P1: 0, P2: 0, P3: 0, dismissed: 0 };
+  for (const f of findings)
+    counts[bucketOf(f)]++;
+  return counts;
+}
+function utf8Length(text) {
+  let bytes = 0;
+  for (const ch of text) {
+    const c = ch.codePointAt(0);
+    bytes += c < 128 ? 1 : c < 2048 ? 2 : c < 65536 ? 3 : 4;
+  }
+  return bytes;
+}
+var code = (text) => `\`${text}\``;
+function tags(f) {
+  const reviewer = `${code(`reviewer: ${severityOf(f)}`)}${isDemoted(f) ? ` ${code("demoted")}` : ""}`;
+  const place = f.file ? [code(f.line === undefined ? f.file : `${f.file}:${f.line}`)] : [];
+  const judged = isJudged(f) ? [[f.verdict, f.impact, f.likelihood, f.fixCost, f.scope].map(code).join(" "), `priority ${f.priority}`] : [code("not judged")];
+  const from = `from ${[f.id, ...f.duplicates ?? []].map(code).join(", ")}`;
+  return [...place, ...judged, reviewer, from].join(" \xB7 ");
+}
+function body(text) {
+  let open = "";
+  const lines = text.split(`
+`).map((line) => {
+    const [, marker = "", rest = ""] = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(line) ?? [];
+    if (open) {
+      if (marker[0] === open[0] && marker.length >= open.length && !rest.trim())
+        open = "";
+      return line;
+    }
+    if (marker && !(marker[0] === "`" && rest.includes("`"))) {
+      open = marker;
+      return line;
+    }
+    return /^ {0,3}(#{1,6}(\s|$)|=+\s*$|-+\s*$)/.test(line) ? `\\${line.trimStart()}` : line;
+  });
+  return (open ? [...lines, open] : lines).join(`
+`);
+}
+function section(f) {
+  return [
+    `### ${oneLine(f.title) || "(no title)"}`,
+    tags(f),
+    ...String(f.detail ?? "").trim() ? [body(String(f.detail).trim())] : [],
+    ...f.evidence ? [`**Evidence:** ${body(f.evidence)}`] : [],
+    ...f.reason?.trim() ? [`**Judge:** ${body(f.reason.trim())}`] : []
+  ].join(`
+
+`);
+}
+var byPriority = (a, b) => (b.priority ?? -1) - (a.priority ?? -1) || (a.file === b.file ? 0 : a.file < b.file ? -1 : 1) || (a.line ?? 0) - (b.line ?? 0);
+function heading(title, findings) {
+  return [`## ${title}`, ...findings.length ? [...findings].sort(byPriority).map(section) : ["None."]].join(`
+
+`);
+}
+function renderReport(meta, findings) {
+  const of = (bucket) => findings.filter((f) => bucketOf(f) === bucket);
+  const c = countsOf(findings);
+  const unjudged = findings.filter((f) => !isJudged(f)).length;
+  const reviewer = (r) => `${r.name} (${r.engine}${r.model ? `, ${r.model}` : ""})`;
+  const header = [
+    `- Reviewed: ${code(`${meta.base}...HEAD`)} at ${meta.head}, ${meta.commits} commit(s), in ${meta.repo}`,
+    `- When: ${meta.when}`,
+    `- Reviewers: ${meta.reviewers.map(reviewer).join(", ")} \xB7 Judge: ${meta.judge ?? "none"}`,
+    `- Totals: P0 ${c.P0}, P1 ${c.P1}, P2 ${c.P2}, P3 ${c.P3}, dismissed ${c.dismissed}`,
+    ...meta.uncommitted.length ? [`- Not reviewed: ${meta.uncommitted.join(", ")}`] : [],
+    ...meta.failed.map((r) => `- Did not run: ${r.name}: ${noteLine(r.note)}`),
+    ...unjudged ? [`- Not judged: the judge left ${unjudged} finding(s) unclassified; they stay under the reviewer's severity`] : []
+  ];
+  return [
+    `# Granny judge - ${meta.branch}`,
+    header.join(`
+`),
+    ...P_HEADINGS.map((p) => heading(p, of(p))),
+    ...c.dismissed ? [heading("Dismissed by the judge", of("dismissed"))] : []
+  ].join(`
+
+`) + `
+`;
 }
 
 // src/core/reviewer.ts
@@ -1197,15 +1355,17 @@ function worktreePath(repo, branch, worktreeDir, shared = false) {
   const prefix = shared && worktreeDir !== undefined ? `${name}-` : "";
   return normalize(`${dir}/${prefix}${branchSlug(branch)}`);
 }
-function worktreeScript(c, branch, base, path) {
+function excludeScript(c) {
   const entry = shellQuote(`/${c.workDir}/`);
+  return `ex="$(git rev-parse --git-common-dir)/info/exclude" && mkdir -p "\${ex%/*}" && { grep -qxF -e ${entry} "$ex" 2>/dev/null || { if [ -s "$ex" ] && [ -n "$(tail -c 1 "$ex")" ]; then echo >> "$ex"; fi; printf '%s\\n' ${entry} >> "$ex"; }; }`;
+}
+function worktreeScript(c, branch, base, path) {
   const b = shellQuote(branch);
-  const exclude = `ex="$(git rev-parse --git-common-dir)/info/exclude" && mkdir -p "\${ex%/*}" && { grep -qxF -e ${entry} "$ex" 2>/dev/null || { if [ -s "$ex" ] && [ -n "$(tail -c 1 "$ex")" ]; then echo >> "$ex"; fi; printf '%s\\n' ${entry} >> "$ex"; }; }`;
   const find = `wt=$(git worktree list --porcelain | while IFS= read -r l; do case "$l" in "worktree "*) p=\${l#worktree };; "branch refs/heads/"*) if [ "\${l#branch refs/heads/}" = ${b} ]; then printf '%s\\n' "$p"; break; fi;; esac; done)`;
   const reuse = `changes=$(git -C "$wt" status --porcelain) || exit 1; if [ -n "$changes" ]; then printf '[granny] worktree failed: %s has %s checked out with uncommitted changes - commit or discard them, then run again:\\n' "$wt" ${b}; git -C "$wt" status --short; exit 1; fi`;
   const add = `wt=${shellQuote(path)}; git worktree add "$wt" ${b} || exit 1`;
   const create = `wt=${shellQuote(path)}; git worktree add -b ${b} "$wt" ${shellQuote(base)} || exit 1`;
-  return `${exclude} && ${find} && if [ -n "$wt" ]; then ${reuse}; elif git show-ref --verify --quiet ${shellQuote(`refs/heads/${branch}`)}; then ${add}; else ${create}; fi && printf '%s%s\\n' ${shellQuote(SAID2)} "$wt"`;
+  return `${excludeScript(c)} && ${find} && if [ -n "$wt" ]; then ${reuse}; elif git show-ref --verify --quiet ${shellQuote(`refs/heads/${branch}`)}; then ${add}; else ${create}; fi && printf '%s%s\\n' ${shellQuote(SAID2)} "$wt"`;
 }
 function reportedWorktree(output) {
   return REPORTED.exec(output)?.[1];
@@ -1216,6 +1376,9 @@ var PLAN_PHASE = "Plan review";
 var DRAFT_PHASE = "Plan";
 var FINAL_REVIEW_PHASE = "Final review";
 var CHECKS_PHASE = "Checks";
+var REVIEW_PHASE = "Review";
+var JUDGE_PHASE = "Judge";
+var REPORT_PHASE = "Report";
 var TIMEOUT_PROBE = "if command -v timeout >/dev/null; then echo timeout; elif command -v gtimeout >/dev/null; then echo gtimeout; else exit 1; fi";
 var TIMEOUT_MISSING = /(^|[\s:])g?timeout: (command )?not found|command not found: g?timeout$/m;
 var EXIT_MARK = /\[granny\] exit=(\d+)[ \t]*(?:\r?\n|$)/g;
@@ -1228,6 +1391,24 @@ function exitMarked(output) {
 }
 var saidSomething = (d) => typeof d === "string" && d.trim() && !/^\s*(none|n\/a|-|no deviations)?\.?\s*$/i.test(d) ? d : undefined;
 var slug = (s) => s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "stage";
+var ROUND_DETAIL = 2000;
+function roundFinding(f, sent) {
+  return {
+    id: f.id,
+    sent,
+    ...f.severity ? { severity: f.severity } : {},
+    ...f.title ? { title: f.title } : {},
+    ...f.file ? { file: f.file } : {},
+    ...f.line !== undefined ? { line: f.line } : {},
+    ...f.reviewer ? { reviewer: f.reviewer } : {},
+    ...f.detail ? { detail: String(f.detail).slice(0, ROUND_DETAIL) } : {},
+    ...f.verdict ? { verdict: f.verdict } : {},
+    ...f.impact ? { impact: f.impact } : {},
+    ...f.priority !== undefined ? { priority: f.priority } : {},
+    ...f.reason ? { reason: String(f.reason).slice(0, ROUND_DETAIL) } : {},
+    ...f.decision?.why ? { why: f.decision.why } : {}
+  };
+}
 var trimPath = (s) => s.replace(/\/+$/, "") || "/";
 var repoPathOf = (r) => typeof r === "string" ? r : r && typeof r === "object" ? r.repo : undefined;
 var baseName = (path) => path.slice(path.lastIndexOf("/") + 1);
@@ -1238,6 +1419,9 @@ var COUNT = /^\d+$/;
 var short = (sha) => sha.slice(0, 8);
 var STATUS_LINE = /^\s*[MADRCUT?!]{1,2}\s+\S/;
 var listed = (status) => status.map((l) => l.trim()).join(", ");
+var entriesOf = (answer) => Array.isArray(answer?.perFinding) ? answer.perFinding.filter((x) => x && typeof x === "object" && typeof x.id === "string") : [];
+var workOf = (c) => c.workDir.replace(/\/+$/, "");
+var phaseOf = (subject) => subject.kind === "plan" ? PLAN_PHASE : subject.note === WHOLE_BRANCH_NOTE ? FINAL_REVIEW_PHASE : REVIEW_PHASE;
 function checkInput(input) {
   const errors = [];
   if (!input || typeof input !== "object")
@@ -1313,30 +1497,7 @@ function stageCheckErrors(stages, checks) {
 }
 var planFiles = (input) => input.plan === undefined ? [] : Array.isArray(input.plan) ? input.plan : [input.plan];
 var configLayers = (input) => Array.isArray(input.config) ? input.config : [input.config];
-async function runGranny(host, input) {
-  const inputErrors = checkInput(input);
-  if (inputErrors.length)
-    throw new Error(`Invalid granny input:
-- ${inputErrors.join(`
-- `)}`);
-  const config = resolveConfig(configLayers(input), host.name);
-  const base = input.base ?? config.base;
-  const fromStage = input.fromStage ?? 1;
-  const primary = trimPath(input.repo);
-  const extra = (input.repos ?? []).map((r) => typeof r === "string" ? { repo: trimPath(r), base: config.base } : { repo: trimPath(r.repo), base: r.base ?? config.base });
-  const baseOf = (repo) => repo === primary ? base : extra.find((r) => r.repo === repo).base;
-  const specs = input.stages ?? [];
-  const repoOf = (st) => st.repo === undefined ? primary : trimPath(st.repo);
-  const unknownChecks = stageCheckErrors(specs, config.checks);
-  if (unknownChecks.length)
-    throw new Error(`Invalid granny input:
-- ${unknownChecks.join(`
-- `)}`);
-  const checksOf = (st) => st.checks === undefined ? config.checks : config.checks.filter((c) => st.checks.includes(c.name));
-  const finalChecksOf = (repo) => {
-    const theirs = specs.filter((st) => repoOf(st) === repo).map(checksOf);
-    return config.checks.filter((c) => theirs.some((list) => list.includes(c)));
-  };
+function engineParts(host, config) {
   const stopIfCancelled = () => {
     if (host.cancelled?.())
       throw new GrannyCancelled;
@@ -1392,9 +1553,9 @@ ${note}` : ""}` : missing };
     const sha = r.ran ? lineShaped(r.output, SHA) : undefined;
     return { sha, code: r.code, output: r.output };
   };
-  const work = config.workDir.replace(/\/+$/, "");
-  const uncommitted = async (label, phase, cwd) => {
-    const keep = plansIn(cwd).map((f) => shellQuote(`:(exclude,literal)${f.slice(trimPath(cwd).length + 1)}`));
+  const work = workOf(config);
+  const uncommitted = async (label, phase, cwd, plans = []) => {
+    const keep = plans.map((f) => shellQuote(`:(exclude,literal)${f.slice(trimPath(cwd).length + 1)}`));
     const read = () => shell(label, phase, `git status --porcelain${keep.length ? ` -- ':(top)' ${keep.join(" ")}` : ""}`, cwd);
     let r = await read();
     if (!r.ran) {
@@ -1408,6 +1569,164 @@ ${note}` : ""}` : missing };
     }
     return r.output.split(`
 `).filter((l) => STATUS_LINE.test(l) && !`${l.trim().replace(/^\S+\s+/, "")}/`.startsWith(`${work}/`));
+  };
+  const attribute = (rv, findings) => findings.map((f, i) => ({ ...f, id: `${rv.name}-F${i + 1}`, reviewer: rv.name }));
+  const review = async (lane, rv, name, subject, round, attempt) => {
+    const { p, cwd } = lane;
+    const tag = `${name} r${round} ${rv.name}${attempt > 1 ? ` #${attempt}` : ""}`;
+    const phase = phaseOf(subject);
+    if (rv.engine === "agent") {
+      const prompt = subject.kind === "plan" ? agentPlanReviewPrompt(p, subject.files) : agentReviewPrompt(p, name, subject.base, subject.stage, subject.note);
+      const r = await call("reviewer", "findings", `review ${tag}`, phase, prompt, "read-only", rv, cwd);
+      if (!r)
+        return { ran: false, findings: [], note: "reviewer agent returned nothing" };
+      return { ran: true, findings: Array.isArray(r.findings) ? r.findings : [] };
+    }
+    const stem = reviewStem(config, slug(name), round, rv);
+    const plan = subject.kind === "plan" ? planReviewScript(rv, config, host.name, lane.base, stem, planReviewPrompt(p, subject.files)) : reviewPlan(rv, config, host.name, subject.base, stem, commandReviewPrompt(p, name, subject.base, subject.stage, subject.note));
+    if (!plan)
+      return { ran: false, findings: [], note: "this reviewer has no command for a plan review" };
+    let ran;
+    let output;
+    let note;
+    if (host.run) {
+      const r = await run(plan.script, cwd);
+      ran = r.code === 0;
+      output = r.output;
+      if (!ran)
+        note = `review command exited ${r.code}: ${r.output.slice(-2000)}`;
+    } else {
+      const job = detachedReview(plan, config, stem, cwd);
+      const step = async (label, prompt) => {
+        const r = await call("helper", "command", label, phase, prompt, "read-only", config.roles.helper, cwd);
+        return r ? reported(r) : undefined;
+      };
+      const started = await step(`review ${tag}`, reviewStartPrompt(p, name, rv.name, markExit(job.start)));
+      if (!started?.ran) {
+        return { ran: false, findings: [], note: started ? `review command did not start (exit ${started.code})${started.note ? ` (${started.note})` : ""}: ${started.output.slice(-2000)}` : "review runner returned nothing" };
+      }
+      let done = false;
+      for (let n = 1;n <= MAX_WAITS && !done; n++) {
+        const w = await step(`review ${tag} wait ${n}`, reviewWaitPrompt(p, name, rv.name, n, MAX_WAITS, WAIT_SECONDS / 60, markExit(job.wait)));
+        done = lineShaped(w?.output ?? "", /^done$/) !== undefined;
+      }
+      if (!done) {
+        await step(`review ${tag} stop`, reviewStopPrompt(p, name, rv.name, markExit(job.stop)));
+        const limit = `${MAX_WAITS} waits of up to ${WAIT_SECONDS / 60} minutes (${MAX_WAITS * WAIT_SECONDS / 60} minutes)`;
+        return { ran: false, findings: [], note: `review command still running after ${limit} - stopped it` };
+      }
+      const r = await step(`review ${tag} read`, reviewReadPrompt(p, name, rv.name, markExit(job.read)));
+      ran = Boolean(r?.ran);
+      output = r?.output ?? "";
+      if (!ran)
+        note = r ? `review command exited ${r.code}${r.note ? ` (${r.note})` : ""}: ${output.slice(-2000)}` : "review runner returned nothing";
+    }
+    host.log(`${tag}: reviewer: ${plan.backend ?? reportedBackend(output) ?? "not reported"}`);
+    if (!ran)
+      return { ran, findings: [], note };
+    const failure = reviewFailure(output);
+    if (failure)
+      return { ran: false, findings: [], note: `reviewer returned no usable result (${failure}): ${output.slice(-2000)}` };
+    const parsed = parseCodexReview(output, subject.kind === "plan" ? undefined : cwd);
+    const extractions = async (label, prompt) => call("granny", "findings", label, phase, prompt, "read-only", config.roles.granny, cwd);
+    const extract = async (label, prompt) => {
+      const r = await extractions(label, prompt);
+      return Array.isArray(r?.findings) ? r.findings : [];
+    };
+    if (parsed.markers === 0 && !saysNoFindings(output)) {
+      host.log(`${tag}: no finding in the expected form and not just "No findings." - asking an agent to extract findings`);
+      const r = await extractions(`extract ${tag}`, extractPrompt(name, output, "unmarked"));
+      const found = Array.isArray(r?.findings) ? r.findings : [];
+      if (found.length || r?.clean === true)
+        return { ran, findings: found };
+      return { ran: false, findings: [], note: `reviewer output had no findings in the expected form and was not just No findings, and an extraction found none in it: ${output.slice(-2000)}` };
+    }
+    if (parsed.markers <= parsed.findings.length)
+      return { ran, findings: parsed.findings };
+    host.log(`${tag}: parser read ${parsed.findings.length}/${parsed.markers} findings - asking an agent to extract them`);
+    const first = await extract(`extract ${tag}`, extractPrompt(name, output));
+    if (first.length >= parsed.markers)
+      return { ran, findings: first };
+    host.log(`${tag}: extraction recovered ${first.length}/${parsed.markers} findings - asking once more with the expected count`);
+    const second = await extract(`extract ${tag} retry`, extractPrompt(name, output, { markers: parsed.markers, got: first.length }));
+    if (second.length >= parsed.markers)
+      return { ran, findings: second };
+    return {
+      ran: false,
+      findings: [],
+      note: `review reported ${parsed.markers} finding marker(s), parser read ${parsed.findings.length}; extraction recovered ${first.length}, then ${second.length} on a retry that named the count: ${output.slice(-2000)}`
+    };
+  };
+  const attempt = async (lane, rv, name, subject, round, n) => {
+    try {
+      return await review(lane, rv, name, subject, round, n);
+    } catch (e) {
+      if (isCancelled(e))
+        throw e;
+      return { ran: false, findings: [], note: `reviewer call failed: ${String(e?.message ?? e)}` };
+    }
+  };
+  const reviewAll = (lane, reviewers, name, subject, round) => Promise.all(reviewers.map(async (reviewer) => {
+    let r = await attempt(lane, reviewer, name, subject, round, 1);
+    if (!r.ran) {
+      host.log(`${name} r${round} ${reviewer.name}: did not run - retrying once. ${r.note ?? ""}`);
+      r = await attempt(lane, reviewer, name, subject, round, 2);
+    }
+    return { reviewer, ...r, findings: attribute(reviewer, r.findings) };
+  }));
+  const judgeAnswers = async (o) => {
+    const unjudged = (decided) => decided.filter((f) => o.ids.has(f.id) && f.decision.rule === 2);
+    const named = (fs) => fs.map((f) => `${f.id} (${f.decision.why})`).join(", ");
+    const scored = await o.ask(o.label, o.prompt);
+    let per = entriesOf(scored);
+    let decided = o.apply(per);
+    let left = unjudged(decided);
+    if (left.length) {
+      host.log(`${o.at}: ${scored ? `judge left ${left.length} finding(s) unclassified - retrying once: ${named(left)}` : "judge returned nothing - retrying once"}`);
+      const problems = scored ? left.map((f) => ({ id: f.id, why: f.decision.why === "not judged" ? "no classification in your answer" : f.decision.why })) : null;
+      const retried = await o.ask(`${o.label} retry`, `${o.prompt}
+
+${judgeRetryNote(problems)}`);
+      const again = new Set(left.map((f) => f.id));
+      const fresh = entriesOf(retried).filter((x) => again.has(x.id));
+      per = [...per.filter((x) => !again.has(x.id) || !fresh.some((y) => y.id === x.id)), ...fresh];
+      decided = o.apply(per);
+      left = unjudged(decided);
+      if (!scored && !retried)
+        host.log(`${o.at}: judge returned nothing, also on a retry - all ${o.ids.size} finding(s) go ${o.leftTo}`);
+      else if (left.length)
+        host.log(`${o.at}: judge left ${left.length} finding(s) unclassified, also on a retry - ${o.leftTo}: ${named(left)}`);
+    }
+    return { per, decided };
+  };
+  return { call, shell, readHead, uncommitted, reviewAll, judgeAnswers };
+}
+async function runGranny(host, input) {
+  const inputErrors = checkInput(input);
+  if (inputErrors.length)
+    throw new Error(`Invalid granny input:
+- ${inputErrors.join(`
+- `)}`);
+  const config = resolveConfig(configLayers(input), host.name);
+  const { call, shell, readHead, uncommitted: statusOf, reviewAll, judgeAnswers } = engineParts(host, config);
+  const work = workOf(config);
+  const uncommitted = (label, phase, cwd) => statusOf(label, phase, cwd, plansIn(cwd));
+  const base = input.base ?? config.base;
+  const fromStage = input.fromStage ?? 1;
+  const primary = trimPath(input.repo);
+  const extra = (input.repos ?? []).map((r) => typeof r === "string" ? { repo: trimPath(r), base: config.base } : { repo: trimPath(r.repo), base: r.base ?? config.base });
+  const baseOf = (repo) => repo === primary ? base : extra.find((r) => r.repo === repo).base;
+  const specs = input.stages ?? [];
+  const repoOf = (st) => st.repo === undefined ? primary : trimPath(st.repo);
+  const unknownChecks = stageCheckErrors(specs, config.checks);
+  if (unknownChecks.length)
+    throw new Error(`Invalid granny input:
+- ${unknownChecks.join(`
+- `)}`);
+  const checksOf = (st) => st.checks === undefined ? config.checks : config.checks.filter((c) => st.checks.includes(c.name));
+  const finalChecksOf = (repo) => {
+    const theirs = specs.filter((st) => repoOf(st) === repo).map(checksOf);
+    return config.checks.filter((c) => theirs.some((list) => list.includes(c)));
   };
   const setUpWorktree = async (repo, branch, from, label, shared) => {
     const script = worktreeScript(config, branch, from, worktreePath(repo, branch, config.worktreeDir, shared));
@@ -1617,7 +1936,6 @@ the last repair's deviations: ${deviations}` : ""}`;
       deviations = await step(`repair ${name} ${at} #${repairs + 1}`, "the last repair", repairPrompt(lane.p, name, at, repairs + 1, sent, stage));
     }
   };
-  const attribute = (rv, findings) => findings.map((f, i) => ({ ...f, id: `${rv.name}-F${i + 1}`, reviewer: rv.name }));
   const fixPlan = async (label, prompt) => {
     const r = await call("implementer", "planFix", label, PLAN_PHASE, prompt, "write", config.roles.implementer, worktree);
     if (!r)
@@ -1625,110 +1943,6 @@ the last repair's deviations: ${deviations}` : ""}`;
     host.log(`${label}: plan edited - ${Array.isArray(r.files) && r.files.length ? r.files.join(", ") : "no file reported"}`);
     return r;
   };
-  const phaseOf = (subject) => subject.kind === "plan" ? PLAN_PHASE : subject.note ? FINAL_REVIEW_PHASE : "Review";
-  const review = async (lane, rv, name, subject, round, attempt) => {
-    const { p, cwd } = lane;
-    const tag = `${name} r${round} ${rv.name}${attempt > 1 ? ` #${attempt}` : ""}`;
-    const phase = phaseOf(subject);
-    if (rv.engine === "agent") {
-      const prompt = subject.kind === "plan" ? agentPlanReviewPrompt(p, subject.files) : agentReviewPrompt(p, name, subject.base, subject.stage, subject.note);
-      const r = await call("reviewer", "findings", `review ${tag}`, phase, prompt, "read-only", rv, cwd);
-      if (!r)
-        return { ran: false, findings: [], note: "reviewer agent returned nothing" };
-      return { ran: true, findings: Array.isArray(r.findings) ? r.findings : [] };
-    }
-    const stem = reviewStem(config, slug(name), round, rv);
-    const plan = subject.kind === "plan" ? planReviewScript(rv, config, host.name, lane.base, stem, planReviewPrompt(p, subject.files)) : reviewPlan(rv, config, host.name, subject.base, stem, commandReviewPrompt(p, name, subject.base, subject.stage, subject.note));
-    if (!plan)
-      return { ran: false, findings: [], note: "this reviewer has no command for a plan review" };
-    let ran;
-    let output;
-    let note;
-    if (host.run) {
-      const r = await run(plan.script, cwd);
-      ran = r.code === 0;
-      output = r.output;
-      if (!ran)
-        note = `review command exited ${r.code}: ${r.output.slice(-2000)}`;
-    } else {
-      const job = detachedReview(plan, config, stem, cwd);
-      const step = async (label, prompt) => {
-        const r = await call("helper", "command", label, phase, prompt, "read-only", config.roles.helper, cwd);
-        return r ? reported(r) : undefined;
-      };
-      const started = await step(`review ${tag}`, reviewStartPrompt(p, name, rv.name, markExit(job.start)));
-      if (!started?.ran) {
-        return { ran: false, findings: [], note: started ? `review command did not start (exit ${started.code})${started.note ? ` (${started.note})` : ""}: ${started.output.slice(-2000)}` : "review runner returned nothing" };
-      }
-      let done = false;
-      for (let n = 1;n <= MAX_WAITS && !done; n++) {
-        const w = await step(`review ${tag} wait ${n}`, reviewWaitPrompt(p, name, rv.name, n, MAX_WAITS, WAIT_SECONDS / 60, markExit(job.wait)));
-        done = lineShaped(w?.output ?? "", /^done$/) !== undefined;
-      }
-      if (!done) {
-        await step(`review ${tag} stop`, reviewStopPrompt(p, name, rv.name, markExit(job.stop)));
-        const limit = `${MAX_WAITS} waits of up to ${WAIT_SECONDS / 60} minutes (${MAX_WAITS * WAIT_SECONDS / 60} minutes)`;
-        return { ran: false, findings: [], note: `review command still running after ${limit} - stopped it` };
-      }
-      const r = await step(`review ${tag} read`, reviewReadPrompt(p, name, rv.name, markExit(job.read)));
-      ran = Boolean(r?.ran);
-      output = r?.output ?? "";
-      if (!ran)
-        note = r ? `review command exited ${r.code}${r.note ? ` (${r.note})` : ""}: ${output.slice(-2000)}` : "review runner returned nothing";
-    }
-    host.log(`${tag}: reviewer: ${plan.backend ?? reportedBackend(output) ?? "not reported"}`);
-    if (!ran)
-      return { ran, findings: [], note };
-    const failure = reviewFailure(output);
-    if (failure)
-      return { ran: false, findings: [], note: `reviewer returned no usable result (${failure}): ${output.slice(-2000)}` };
-    const parsed = parseCodexReview(output, subject.kind === "plan" ? undefined : cwd);
-    const extractions = async (label, prompt) => call("granny", "findings", label, phase, prompt, "read-only", config.roles.granny, cwd);
-    const extract = async (label, prompt) => {
-      const r = await extractions(label, prompt);
-      return Array.isArray(r?.findings) ? r.findings : [];
-    };
-    if (parsed.markers === 0 && !saysNoFindings(output)) {
-      host.log(`${tag}: no finding in the expected form and not just "No findings." - asking an agent to extract findings`);
-      const r = await extractions(`extract ${tag}`, extractPrompt(name, output, "unmarked"));
-      const found = Array.isArray(r?.findings) ? r.findings : [];
-      if (found.length || r?.clean === true)
-        return { ran, findings: found };
-      return { ran: false, findings: [], note: `reviewer output had no findings in the expected form and was not just No findings, and an extraction found none in it: ${output.slice(-2000)}` };
-    }
-    if (parsed.markers <= parsed.findings.length)
-      return { ran, findings: parsed.findings };
-    host.log(`${tag}: parser read ${parsed.findings.length}/${parsed.markers} findings - asking an agent to extract them`);
-    const first = await extract(`extract ${tag}`, extractPrompt(name, output));
-    if (first.length >= parsed.markers)
-      return { ran, findings: first };
-    host.log(`${tag}: extraction recovered ${first.length}/${parsed.markers} findings - asking once more with the expected count`);
-    const second = await extract(`extract ${tag} retry`, extractPrompt(name, output, { markers: parsed.markers, got: first.length }));
-    if (second.length >= parsed.markers)
-      return { ran, findings: second };
-    return {
-      ran: false,
-      findings: [],
-      note: `review reported ${parsed.markers} finding marker(s), parser read ${parsed.findings.length}; extraction recovered ${first.length}, then ${second.length} on a retry that named the count: ${output.slice(-2000)}`
-    };
-  };
-  const attempt = async (lane, rv, name, subject, round, n) => {
-    try {
-      return await review(lane, rv, name, subject, round, n);
-    } catch (e) {
-      if (isCancelled(e))
-        throw e;
-      return { ran: false, findings: [], note: `reviewer call failed: ${String(e?.message ?? e)}` };
-    }
-  };
-  const reviewAll = (lane, reviewers, name, subject, round) => Promise.all(reviewers.map(async (reviewer) => {
-    let r = await attempt(lane, reviewer, name, subject, round, 1);
-    if (!r.ran) {
-      host.log(`${name} r${round} ${reviewer.name}: did not run - retrying once. ${r.note ?? ""}`);
-      r = await attempt(lane, reviewer, name, subject, round, 2);
-    }
-    return { reviewer, ...r, findings: attribute(reviewer, r.findings) };
-  }));
   const reviewLoop = async (lane, name, subject, reviewers = config.reviewers, opts = {}) => {
     const { gates, checks = [], runs = [], notes = [], prior = [], record } = opts;
     const { p } = lane;
@@ -1753,6 +1967,7 @@ the last repair's deviations: ${deviations}` : ""}`;
       }
       if (!found.length) {
         host.log(`${name} r${round}: clean`);
+        host.round?.({ subject: name, round, findings: [] });
         return { outcome: "clean", rounds: round, residual: kept(), unresolved: [], history };
       }
       const declined = new Map(earlier.flatMap((e) => (e.declined ?? []).map((d) => [roundLabel(e.round, d, e.loop), d.reason])));
@@ -1774,35 +1989,20 @@ the last repair's deviations: ${deviations}` : ""}`;
         const label = `judge ${name} r${round}`;
         const judgedIds = new Set(judged.map((f) => f.id));
         const blockerIds = new Set(blockers.map((f) => f.id));
-        const entriesOf = (answer) => Array.isArray(answer?.perFinding) ? answer.perFinding.filter((x) => x && typeof x === "object" && typeof x.id === "string") : [];
         const decideAll = (per) => found.map((f) => {
           const s = judgedIds.has(f.id) ? per.find((x) => x.id === f.id) : undefined;
           const repeat = typeof s?.repeatOf === "string" && ledger.has(s.repeatOf) ? { repeatOf: s.repeatOf } : {};
           return decide({ ...f, ...repeat }, s, policy, declinedBefore, earlierOf);
         });
-        const unjudged = (decided) => decided.filter((f) => judgedIds.has(f.id) && f.decision.rule === 2);
-        const listed = (fs) => fs.map((f) => `${f.id} (${f.decision.why})`).join(", ");
-        const scored = await call("judge", "judge", label, phase, prompt, "read-only", config.roles.judge, lane.cwd);
-        let per = entriesOf(scored);
-        let withScores = decideAll(per);
-        let left = unjudged(withScores);
-        let retried;
-        if (left.length) {
-          host.log(`${name} r${round}: ${scored ? `judge left ${left.length} finding(s) unclassified - retrying once: ${listed(left)}` : "judge returned nothing - retrying once"}`);
-          const problems = scored ? left.map((f) => ({ id: f.id, why: f.decision.why === "not judged" ? "no classification in your answer" : f.decision.why })) : null;
-          retried = await call("judge", "judge", `${label} retry`, phase, `${prompt}
-
-${judgeRetryNote(problems)}`, "read-only", config.roles.judge, lane.cwd);
-          const again = new Set(left.map((f) => f.id));
-          const fresh = entriesOf(retried).filter((x) => again.has(x.id));
-          per = [...per.filter((x) => !again.has(x.id) || !fresh.some((y) => y.id === x.id)), ...fresh];
-          withScores = decideAll(per);
-          left = unjudged(withScores);
-          if (!scored && !retried)
-            host.log(`${name} r${round}: judge returned nothing, also on a retry - all ${judged.length} finding(s) go to the implementer unjudged (rule 2)`);
-          else if (left.length)
-            host.log(`${name} r${round}: judge left ${left.length} finding(s) unclassified, also on a retry - to the implementer unjudged (rule 2): ${listed(left)}`);
-        }
+        const { per, decided: withScores } = await judgeAnswers({
+          at: `${name} r${round}`,
+          label,
+          prompt,
+          ids: judgedIds,
+          ask: (l, text) => call("judge", "judge", l, phase, text, "read-only", config.roles.judge, lane.cwd),
+          apply: decideAll,
+          leftTo: "to the implementer unjudged (rule 2)"
+        });
         const duplicateOf = new Map(per.filter((x) => judgedIds.has(x.id) && typeof x.duplicateOf === "string" && judgedIds.has(x.duplicateOf)).filter((x) => !blockerIds.has(x.id) || blockerIds.has(x.duplicateOf)).map((x) => [x.id, x.duplicateOf]));
         const merge = mergeDuplicates(withScores, duplicateOf);
         for (const m of merge.merged)
@@ -1813,6 +2013,7 @@ ${judgeRetryNote(problems)}`, "read-only", config.roles.judge, lane.cwd);
       history.push({ round, findings });
       host.log(`${name} r${round}: ${findings.length} finding(s)`);
       const { accepted, residual } = triage(findings);
+      host.round?.({ subject: name, round, findings: findings.map((f) => roundFinding(f, accepted.includes(f))) });
       const entry = { round, sent: accepted, ...residual.length ? { residual } : {} };
       const recorded = record ? { ...entry, loop: record.loop } : undefined;
       if (recorded)
@@ -2309,9 +2510,20 @@ ${note}` : note } : result;
     host.log(`${label}: the checks left uncommitted changes after the pr-ready check - the branch is not PR-ready: ${listed(left)}`);
     return { passed: false, note: `uncommitted changes after the checks at pr-ready: ${listed(left)}` };
   };
+  const outcomesOf = (s) => {
+    const own = specs.flatMap((st, i) => repoOf(st) === s.lane.repo ? [i] : []);
+    const resumed = "it ran in an earlier run, which this run resumes: keep what the PR body says about it";
+    const review = reviews.get(s);
+    return {
+      stages: own.map((i) => i < fromStage - 1 ? { ...results[i], note: resumed } : results[i]),
+      ...review ? { finalReview: review } : {},
+      ...planResult && s.lane.repo === primary ? { plan: fromStage > 1 && planResult.outcome === "skipped" ? { ...planResult, note: resumed } : planResult } : {},
+      reviewOnly: own.length > 0 && own.every((i) => specs[i].implement === false)
+    };
+  };
   const check = async (s) => {
     const label = s.lane.repo === primary ? "pr-ready check" : `pr-ready check ${baseName(s.lane.repo)}`;
-    const final = await call("granny", "final", label, "PR ready", finalPrompt(s.lane.p, plansIn(s.lane.cwd)), "write", config.roles.granny, s.lane.cwd);
+    const final = await call("granny", "final", label, "PR ready", finalPrompt(s.lane.p, plansIn(s.lane.cwd), outcomesOf(s)), "write", config.roles.granny, s.lane.cwd);
     if (!final)
       host.log(s.lane.repo === primary ? "final check returned nothing" : `${label} returned nothing`);
     const review = reviews.get(s);
@@ -2342,6 +2554,190 @@ ${note}` : note } : result;
     final,
     ...finals.length > 1 ? { repos: finals } : {}
   };
+}
+function checkJudgeInput(input) {
+  if (!input || typeof input !== "object")
+    return ["input must be an object"];
+  const errors = [];
+  if (typeof input.repo !== "string" || !input.repo.startsWith("/"))
+    errors.push("repo must be an absolute path");
+  if (input.base !== undefined && (typeof input.base !== "string" || !input.base))
+    errors.push("base must be a non-empty string");
+  if (input.context !== undefined && typeof input.context !== "string")
+    errors.push("context must be a string");
+  return errors;
+}
+var TAG_POLICY = { threshold: 100, alwaysFix: [] };
+var DATE_STAMP = /^\d{8}-\d{6}$/;
+var BRANCH_LINE = /^\S+$/;
+async function runJudge(host, input) {
+  const inputErrors = checkJudgeInput(input);
+  if (inputErrors.length)
+    throw new Error(`Invalid granny judge input:
+- ${inputErrors.join(`
+- `)}`);
+  const layers = configLayers(input);
+  const gaps = judgeConfigGaps(layers, host.name);
+  if (gaps.length)
+    throw new Error(`granny judge needs models: ${gaps.join("; ")}`);
+  const config = resolveConfig(layers, host.name);
+  const { call, shell, readHead, uncommitted, reviewAll, judgeAnswers } = engineParts(host, config);
+  const repo = trimPath(input.repo);
+  const base = input.base ?? config.base;
+  host.phase(REVIEW_PHASE);
+  const excluded = await shell("exclude", REVIEW_PHASE, excludeScript(config), repo, judgeStepPrompt);
+  if (!excluded.ran)
+    host.log(`could not add ${config.workDir}/ to the git excludes, so the report may show as untracked (exit ${excluded.code}): ${excluded.output.slice(-300)}`);
+  const needed = async (label, script, ask) => {
+    const r = await shell(label, REVIEW_PHASE, script, repo, ask);
+    if (!r.ran)
+      throw new Error(`granny judge could not read the ${label} in ${repo} (exit ${r.code}): ${r.output.slice(-500)}`);
+    return r.output;
+  };
+  const date = lineShaped(await needed("date", "date +%Y%m%d-%H%M%S", judgeStepPrompt), DATE_STAMP);
+  if (!date)
+    throw new Error("granny judge could not read the date");
+  const current = lineShaped(await needed("branch", "git branch --show-current"), BRANCH_LINE);
+  const read = await readHead("head", REVIEW_PHASE, repo);
+  if (!read.sha)
+    throw new Error(`granny judge could not read HEAD in ${repo} (exit ${read.code}): ${read.output.slice(-500)}`);
+  const head = read.sha;
+  const branch = current ?? short(head);
+  const count = await shell("commits", REVIEW_PHASE, `git rev-list --count ${shellQuote(base)}..HEAD`, repo);
+  const commits = count.ran ? lineShaped(count.output, COUNT) : undefined;
+  if (commits === undefined) {
+    throw new Error(`granny judge could not count the commits in ${base}..HEAD in ${repo} (exit ${count.code}): ${count.output.slice(-500)} - ${base} may not be this repo's base; it may use another one such as master, so pass base`);
+  }
+  const dirty = await uncommitted("status", REVIEW_PHASE, repo);
+  const notReviewed = Array.isArray(dirty) ? dirty.map((l) => l.trim().replace(/^\S+\s+/, "")) : [`the working tree status could not be read (${dirty.unreadable.replace(/\s+/g, " ")})`];
+  const finish = (outcome, rest = {}) => ({
+    repo,
+    branch,
+    base,
+    head,
+    outcome,
+    counts: countsOf([]),
+    demoted: [],
+    findings: [],
+    failedReviewers: [],
+    notJudged: [],
+    uncommitted: notReviewed,
+    written: false,
+    ...rest
+  });
+  if (Number(commits) === 0) {
+    const note = `${base}..HEAD has no commits, so there was nothing to review${notReviewed.length ? `; uncommitted files are not reviewed: ${notReviewed.join(", ")}` : ""}`;
+    host.log(`no-changes - ${note}`);
+    return finish("no-changes", { note });
+  }
+  const p = { repo, branch, base, config, ...input.context ? { context: input.context } : {} };
+  const lane = { repo, base, branch, cwd: repo, p };
+  const note = `${ONE_SHOT_NOTE}${current ? "" : ` HEAD is detached at ${branch}, so that is the "branch" named here.`}`;
+  const results = await reviewAll(lane, config.reviewers, branch, { kind: "diff", base, note }, 1);
+  const failedReviewers = results.filter((r) => !r.ran).map((r) => ({ name: r.reviewer.name, note: r.note ?? "no output" }));
+  if (failedReviewers.length === results.length) {
+    const notes = failedReviewers.map((r) => `${r.name}: ${r.note}`).join(`
+`);
+    host.log(`review-failed - no reviewer ran, also on a retry, so there is no report:
+${notes}`);
+    return finish("review-failed", { failedReviewers, note: notes });
+  }
+  for (const r of failedReviewers)
+    host.log(`${r.name} did not run, also on a retry - going on without it: ${r.note}`);
+  const found = results.filter((r) => r.ran).flatMap((r) => r.findings);
+  const tag = async () => {
+    host.phase(JUDGE_PHASE);
+    const ids = new Set(found.map((f) => f.id));
+    const label = `tag ${branch}`;
+    const { per, decided } = await judgeAnswers({
+      at: label,
+      label,
+      prompt: tagPrompt(p, base, found),
+      ids,
+      ask: async (l, text) => {
+        try {
+          return await call("judge", "judge", l, JUDGE_PHASE, text, "read-only", config.roles.judge, repo);
+        } catch (e) {
+          if (isCancelled(e))
+            throw e;
+          host.log(`${l}: the judge call failed: ${String(e?.message ?? e)}`);
+          return null;
+        }
+      },
+      apply: (per) => found.map((f) => decide(f, per.find((x) => x.id === f.id), TAG_POLICY, () => true)),
+      leftTo: "under the reviewer's severity, not judged"
+    });
+    const duplicateOf = new Map(per.filter((x) => ids.has(x.id) && typeof x.duplicateOf === "string" && ids.has(x.duplicateOf)).map((x) => [x.id, x.duplicateOf]));
+    const placed = decided.map((f) => ({ ...f, decision: { ...f.decision, action: isJudged(f) && bucketOf(f) !== "dismissed" ? "fix" : "residual" } }));
+    const { findings, merged } = mergeDuplicates(placed, duplicateOf);
+    for (const m of merged)
+      host.log(`${label}: judge merged ${m.id} into ${m.into} (duplicate)`);
+    const severity = new Map(found.map((f) => [f.id, f.severity]));
+    return findings.map(({ decision: _decision, ...f }) => ({
+      ...f,
+      severity: (f.duplicates ?? []).map((id) => severity.get(id)).reduce((worst, s) => severityOf({ severity: s }) < severityOf({ severity: worst }) ? s : worst, f.severity)
+    }));
+  };
+  const findings = found.length ? await tag() : [];
+  const counts = countsOf(findings);
+  const demoted = findings.filter((f) => isDemoted(f) && (severityOf(f) === "P0" || severityOf(f) === "P1")).map((f) => f.id);
+  const notJudged = findings.filter((f) => !isJudged(f)).map((f) => f.id);
+  if (demoted.length)
+    host.log(`the judge placed ${demoted.length} reviewer P0/P1 finding(s) lower: ${demoted.join(", ")}`);
+  host.phase(REPORT_PHASE);
+  const meta = {
+    branch,
+    base,
+    head: short(head),
+    commits: Number(commits),
+    repo,
+    when: date,
+    reviewers: config.reviewers.map((rv) => {
+      const model = resolveModel(rv.model, host.name);
+      return { name: rv.name, engine: rv.engine, ...model ? { model } : {} };
+    }),
+    judge: resolveModel(config.roles.judge.model, host.name),
+    uncommitted: notReviewed,
+    failed: failedReviewers
+  };
+  const report = renderReport(meta, findings);
+  const reportPath = `${repo}/${workOf(config)}/reviews/${date}-${branchSlug(branch)}.md`;
+  const save = async () => {
+    const want = utf8Length(report);
+    for (let n = 1;n <= 2; n++) {
+      const w = await shell(n === 1 ? "write report" : "write report retry", REPORT_PHASE, heredocWriteScript(reportPath, report), repo, reportWritePrompt);
+      if (!w.ran) {
+        host.log(`writing the report failed (exit ${w.code}): ${w.output.slice(-300)}`);
+        return false;
+      }
+      const size = await shell("report size", REPORT_PHASE, `wc -c < ${shellQuote(reportPath)}`, repo, judgeStepPrompt);
+      const got = size.ran ? lineShaped(size.output, COUNT) : undefined;
+      if (got !== undefined && Number(got) === want)
+        return true;
+      host.log(`${reportPath} holds ${got ?? "an unknown number of"} bytes, not ${want}${n === 1 ? " - writing it once more" : ""}`);
+    }
+    return false;
+  };
+  let written = false;
+  try {
+    written = await save();
+  } catch (e) {
+    if (isCancelled(e))
+      throw e;
+    host.log(`writing the report failed: ${String(e?.message ?? e)}`);
+  }
+  host.log(written ? `report written: ${reportPath}` : `report not written: ${reportPath} - the result holds its text`);
+  return finish("reviewed", {
+    counts,
+    demoted,
+    findings,
+    failedReviewers,
+    notJudged,
+    reportPath,
+    written,
+    report,
+    ...written ? {} : { note: `the report could not be written to ${reportPath}; it is in this result` }
+  });
 }
 
 // src/adapters/common.ts
@@ -2442,7 +2838,10 @@ function summarize(result, worktree) {
     lines.push(`- plan written: ${result.draft.files.join(", ")} - ${result.draft.stages.length} proposed stage(s)${result.draft.questions ? ", open questions for the user" : ""}`);
     if (result.plan)
       lines.push(line(result.plan, "plan review"));
-    lines.push("- stopped after planning, nothing was implemented: show the user the plan, the stages and the questions, and wait for their approval");
+    if (result.draft.questions)
+      lines.push(`- open questions: ask the user these with your question tool (\`ask\` on omp, \`question\` on opencode), do not just write them out; without such a tool, ask in one numbered message:
+${result.draft.questions.trim()}`);
+    lines.push("- stopped after planning, nothing was implemented: show the user the plan and the stages, and wait for their approval");
   } else if (result.plan) {
     const stopped = result.plan.outcome === "round-cap" || result.plan.outcome === "review-failed";
     lines.unshift(`${line(result.plan, "plan review")}${stopped ? " - stopped before stage 1, nothing was implemented" : ""}`);
@@ -2468,15 +2867,45 @@ function summarize(result, worktree) {
   return lines.join(`
 `);
 }
+function summarizeJudge(result) {
+  const didNotRun = result.failedReviewers.map((r) => `- did not run: ${r.name}: ${noteLine(r.note)}`);
+  if (result.outcome !== "reviewed") {
+    const why = result.outcome === "no-changes" ? oneLine(result.note ?? "nothing to review") : "no reviewer ran, also on a retry";
+    return [`- no report: ${why}`, ...didNotRun, "Nothing was fixed or committed. Tell the user; do not fix anything unless they ask."].join(`
+`);
+  }
+  const { P0, P1, P2, P3, dismissed } = result.counts;
+  return [
+    result.written ? `- report: ${result.reportPath}` : `- report NOT written to ${result.reportPath}: its text is in the run's result.json (granny_status), under report`,
+    `- counts: P0 ${P0}, P1 ${P1}, P2 ${P2}, P3 ${P3}, dismissed ${dismissed}`,
+    `- reviewer P0/P1 findings the judge placed lower: ${result.demoted.length}${result.demoted.length ? ` (${result.demoted.join(", ")})` : ""}`,
+    ...result.uncommitted.length ? [`- not reviewed, uncommitted: ${result.uncommitted.join(", ")}`] : [],
+    ...didNotRun,
+    ...result.notJudged.length ? [`- not judged, under the reviewer's severity: ${result.notJudged.join(", ")}`] : [],
+    "Nothing was fixed or committed. Give the user the report path and the counts; do not fix anything unless they ask."
+  ].join(`
+`);
+}
 function planReviewNotice(input, config) {
   const reviewsPlan = config.planReview && (input.plan !== undefined || input.goal !== undefined) && !((input.fromStage ?? 1) > 1);
   return reviewsPlan ? `
 ${planReviewWarning(config.maxRounds)} Tell the user this in your next message.` : "";
 }
+var SAME_MODEL_HINT = "reviewers share the implementer's model; a different model may catch more";
+function sameModelNotice(input, config, host) {
+  if (input.goal !== undefined)
+    return "";
+  const modelOf = (spec) => resolveModel(spec, host)?.split("#")[0];
+  const implementer = modelOf(config.roles.implementer.model);
+  const shared = config.reviewers.every((rv) => rv.engine === "agent" && modelOf(rv.model) === implementer);
+  return shared ? `
+${SAME_MODEL_HINT}. Mention this to the user in your next message; do not change a model unless the user asks.` : "";
+}
 var layerSources = (repo) => [globalConfigPath(), join(repo, "granny.config.json"), "the run's config"];
 var AGENT_ROLES = ["granny", "helper", "planner", "implementer", "judge"];
+var JUDGE_ROLES = ["granny", "judge"];
 var isObject2 = (v) => !!v && typeof v === "object" && !Array.isArray(v);
-function hostModelErrors(config, layers, host, problem, sources) {
+function hostModelErrors(config, layers, host, problem, sources, checked = AGENT_ROLES) {
   const from = (set) => {
     for (let i = layers.length - 1;i >= 0; i--) {
       const layer = layers[i];
@@ -2493,7 +2922,7 @@ function hostModelErrors(config, layers, host, problem, sources) {
     const claude = typeof spec === "string" ? spec : spec?.["claude-code"] ?? model;
     return [`${what} "${model}"${where} - ${wrong}; give a host-keyed model, e.g. { "claude-code": "${claude}", "${host}": "<provider/model>" }`];
   };
-  const roles = AGENT_ROLES.flatMap((role) => check(`roles.${role}.model:`, config.roles[role].model, from((l) => isObject2(l.roles) && isObject2(l.roles[role]) && l.roles[role].model !== undefined)));
+  const roles = checked.flatMap((role) => check(`roles.${role}.model:`, config.roles[role].model, from((l) => isObject2(l.roles) && isObject2(l.roles[role]) && l.roles[role].model !== undefined)));
   const reviewers = config.reviewers.flatMap((rv, i) => rv.engine === "agent" ? check(`reviewers[${i}] "${rv.name}": model`, rv.model, from((l) => Array.isArray(l.reviewers))) : []);
   return [...roles, ...reviewers];
 }
@@ -2623,6 +3052,49 @@ var RUN_INPUT_SCHEMA = {
   },
   required: ["repo", "branch"]
 };
+var JUDGE_TOOL_DESCRIPTION = `granny-workflow: a review-only run ("granny judge"), in the background. One review of the checkout's <base>...HEAD and one tagging of its findings by another agent, saved as a markdown report under <workDir>/reviews/ (default .granny/reviews/). It changes nothing else: no fix, commit, push, branch or worktree. The reviewers and the judge model must be in the user's config files; when they are not, it refuses, and you ask the user as the skill's references/judge.md says - never choose a model yourself. Send only the fields you set. ${USER_SETTINGS}`;
+var JUDGE_INPUT_SCHEMA = {
+  type: "object",
+  properties: {
+    repo: { type: "string", description: "Absolute path of the checkout to review, on the branch to review; the run files and the report go to <repo>/<workDir>/" },
+    base: { type: "string", description: "The branch to diff against; defaults to config.base" },
+    context: { type: "string", description: "What the user wants looked at, or a plan to check against" },
+    config: {
+      type: "object",
+      additionalProperties: true,
+      description: `Per-run overrides of granny.config.json (same shape). They do not answer a refusal: what is missing goes to the config files, from the user. ${USER_SETTINGS}`
+    }
+  },
+  required: ["repo"]
+};
+var ASK_FOR_MODELS = "Ask the user for these per the skill's references/judge.md and write them to the config. Do not choose a model yourself.";
+function prepareJudge(input, host, problem) {
+  const refused = (problems, end = "") => ({ refused: `granny_judge refused:
+- ${problems.join(`
+- `)}${end}` });
+  const problems = checkJudgeInput(input);
+  if (problems.length)
+    return refused(problems);
+  const files = [readJson(globalConfigPath()), readJson(join(input.repo, "granny.config.json"))];
+  const layers = [...files, input.config];
+  const gaps = [...new Set([...judgeConfigGaps(files, host), ...judgeConfigGaps(layers, host)])];
+  if (gaps.length)
+    return refused(gaps, `
+${ASK_FOR_MODELS}`);
+  const config = resolveConfig(layers, host);
+  const badModels = hostModelErrors(config, layers, host, problem, layerSources(input.repo), JUDGE_ROLES);
+  if (badModels.length)
+    return refused(badModels);
+  try {
+    return { layers, config, branch: git(input.repo, ["branch", "--show-current"]) || git(input.repo, ["rev-parse", "HEAD"]).slice(0, 8) };
+  } catch (e) {
+    return refused([e.message]);
+  }
+}
+function judgeStartLine(id, input, branch, config, host) {
+  const reviews = `${input.base ?? config.base}...HEAD by ${reviewersText(config.reviewers, host)}, tagged by ${resolveModel(config.roles.judge.model, host)}`;
+  return `granny judge run ${id} started on ${input.repo} (${branch}): one review of ${reviews}. Nothing will be changed: no fix, commit, push, branch or worktree, only a report under ${config.workDir.replace(/\/+$/, "")}/reviews/. Uncommitted files are not reviewed.`;
+}
 var HEARTBEAT_MS = 60000;
 var intervals = {
   setInterval: (fn, ms) => setInterval(fn, ms),
@@ -2703,18 +3175,37 @@ function runDir(runs, runIdArg, repo) {
   const pick = runIdArg ?? ids.at(-1);
   return pick && ids.includes(pick) ? join(root, pick) : undefined;
 }
+var isHeartbeat = (line) => {
+  try {
+    return JSON.parse(line)?.type === "heartbeat";
+  } catch {
+    return false;
+  }
+};
+function journalTail(journal, count) {
+  const tail = [];
+  let end = journal.trimEnd().length;
+  while (end > 0 && tail.length < count) {
+    const start = journal.lastIndexOf(`
+`, end - 1);
+    const line = journal.slice(start + 1, end);
+    if (!isHeartbeat(line))
+      tail.push(line);
+    end = Math.max(start, 0);
+  }
+  return tail.reverse().join(`
+`);
+}
 function runStatus(runs, runIdArg, repo) {
   const dir = runDir(runs, runIdArg, repo);
   if (!dir)
     return "No such granny run. Pass runId, or repo to see the latest run in that repo.";
   const read = (f) => existsSync(join(dir, f)) ? readFileSync(join(dir, f), "utf8") : "";
-  const tail = read("journal.jsonl").trim().split(`
-`).slice(-40).join(`
-`);
+  const tail = journalTail(read("journal.jsonl"), 40);
   const result = read("result.json");
   return [
     `status: ${read("status.json")}`,
-    `journal (last 40 lines):
+    `journal (last 40 lines, without heartbeats):
 ${tail}`,
     result ? `result (${join(dir, "result.json")}):
 ${result.length > 30000 ? result.slice(0, 30000) + `
@@ -2757,8 +3248,12 @@ function runOutline(input, config) {
     finalReview: config.finalReview && stages.length > 1,
     reviewers: config.reviewers.map((r) => clean(r.name)),
     fromStage,
-    stages
+    stages,
+    maxRounds: config.maxRounds
   };
+}
+function judgeOutline(branch, config) {
+  return { kind: "judge", branch: clean(branch), worktree: false, planReview: false, finalReview: false, reviewers: config.reviewers.map((r) => clean(r.name)), fromStage: 1, stages: [] };
 }
 
 // src/adapters/opencode/plugin.ts
@@ -2827,31 +3322,7 @@ function isTransient(error) {
 var createGrannyPlugin = ({ delays = DEFAULT_DELAYS, sleep = pause, killGraceMs = KILL_GRACE_MS, heartbeatMs = HEARTBEAT_MS } = {}) => ({
   id: "granny-workflow",
   async setup(ctx) {
-    const startRun = async (input, parentSession) => {
-      const problems = checkInput(input);
-      if (problems.length)
-        return `granny_run refused:
-- ${problems.join(`
-- `)}`;
-      const layers = [readJson(globalConfigPath()), readJson(join2(input.repo, "granny.config.json")), input.config];
-      const config = resolveConfig(layers, "opencode");
-      const unknownChecks = stageCheckErrors(input.stages, config.checks);
-      if (unknownChecks.length)
-        return `granny_run refused:
-- ${unknownChecks.join(`
-- `)}`;
-      const badModels = hostModelErrors(config, layers, "opencode", opencodeModelProblem, layerSources(input.repo));
-      if (badModels.length)
-        return `granny_run refused:
-- ${badModels.join(`
-- `)}`;
-      const blockers = preflight(input.repo, input.branch, config.workDir, config.worktree);
-      for (const repo of stageRepos(input))
-        blockers.push(...preflight(repo, input.branch, config.workDir, config.worktree).map((b) => `${repo}: ${b}`));
-      if (blockers.length)
-        return `granny_run refused:
-- ${blockers.join(`
-- `)}`;
+    const launch = async ({ input, layers, config, branch, outline, engine, finished, started }, parentSession) => {
       const id = runId();
       const dir = join2(input.repo, config.workDir, "runs", id);
       mkdirSync2(dir, { recursive: true });
@@ -2870,8 +3341,7 @@ var createGrannyPlugin = ({ delays = DEFAULT_DELAYS, sleep = pause, killGraceMs 
       runs.set(id, run);
       const journal = (type, data) => appendFileSync2(join2(dir, "journal.jsonl"), JSON.stringify({ t: stamp(), type, ...data }) + `
 `);
-      const outline = runOutline(input, config);
-      const writeStatus = (extra = {}) => writeFileSync(join2(dir, "status.json"), JSON.stringify({ id, status: run.status, repo: input.repo, branch: input.branch, parent: parentSession, watch: config.watch, outline, ...extra }, null, 2));
+      const writeStatus = (extra = {}) => writeFileSync(join2(dir, "status.json"), JSON.stringify({ id, status: run.status, repo: input.repo, branch, parent: parentSession, watch: config.watch, outline, ...extra }, null, 2));
       writeFileSync(join2(dir, "input.json"), JSON.stringify({ ...input, config: layers }, null, 2));
       writeStatus({ startedAt: stamp() });
       let parentModel;
@@ -3025,7 +3495,8 @@ When done, call the \`${tool}\` tool exactly once with your result. That call is
         },
         log: (message) => journal("log", { message }),
         phase: (title) => journal("phase", { title }),
-        stage: ({ number, name, event, outcome }) => journal("stage", { number, name, event, ...outcome ? { outcome } : {} })
+        stage: ({ number, name, event, outcome }) => journal("stage", { number, name, event, ...outcome ? { outcome } : {} }),
+        round: (event) => journal("round", { ...event })
       };
       const notify = async (text) => {
         try {
@@ -3034,13 +3505,12 @@ When done, call the \`${tool}\` tool exactly once with your result. That call is
           journal("notify-failed", { error: String(e) });
         }
       };
-      runGranny(host, { ...input, config: layers }).then(async (result) => {
+      engine(host).then(async (result) => {
         run.status = "done";
         writeFileSync(join2(dir, "result.json"), JSON.stringify(result, null, 2));
         writeStatus({ finishedAt: stamp() });
         await notify(`[granny] Run ${id} finished.
-${summarize(result, config.worktree)}
-Call granny_status with runId "${id}" for the full result, verify load-bearing claims yourself, report to the user and wait. Do not push.`);
+${finished(result, id)}`);
       }).catch(async (error) => {
         run.status = run.cancelled ? "cancelled" : "failed";
         writeStatus({ finishedAt: stamp(), error: statusError(error, run.cancelled) });
@@ -3049,10 +3519,67 @@ Call granny_status with runId "${id}" for the full result, verify load-bearing c
           await notify(`[granny] Run ${id} failed: ${String(error?.message ?? error)}
 Call granny_status with runId "${id}" and report to the user.`);
       });
-      return `granny run ${id} started on ${input.repo} (${input.branch}), ${input.goal !== undefined ? "planning only" : `${input.stages?.length ?? 0} stage(s)${config.parallel ? `, up to ${config.maxParallel} in parallel` : ""}`}, threshold ${config.threshold}, maxRounds ${config.maxRounds}.
-Journal: ${join2(dir, "journal.jsonl")}
-You will receive a message when it finishes. Use granny_status { runId: "${id}" } to check progress and granny_cancel to stop it. Do not poll in a loop.${config.watch === "full" ? `
-${NAVIGATOR_HINT}` : ""}${planReviewNotice(input, config)}${overridesNotice(layers, "opencode")}`;
+      return started(id, join2(dir, "journal.jsonl"));
+    };
+    const notifySentence = (id) => `You will receive a message when it finishes. Use granny_status { runId: "${id}" } to check progress and granny_cancel to stop it. Do not poll in a loop.`;
+    const startRun = async (input, parentSession) => {
+      const problems = checkInput(input);
+      if (problems.length)
+        return `granny_run refused:
+- ${problems.join(`
+- `)}`;
+      const layers = [readJson(globalConfigPath()), readJson(join2(input.repo, "granny.config.json")), input.config];
+      const config = resolveConfig(layers, "opencode");
+      const unknownChecks = stageCheckErrors(input.stages, config.checks);
+      if (unknownChecks.length)
+        return `granny_run refused:
+- ${unknownChecks.join(`
+- `)}`;
+      const badModels = hostModelErrors(config, layers, "opencode", opencodeModelProblem, layerSources(input.repo));
+      if (badModels.length)
+        return `granny_run refused:
+- ${badModels.join(`
+- `)}`;
+      const blockers = preflight(input.repo, input.branch, config.workDir, config.worktree);
+      for (const repo of stageRepos(input))
+        blockers.push(...preflight(repo, input.branch, config.workDir, config.worktree).map((b) => `${repo}: ${b}`));
+      if (blockers.length)
+        return `granny_run refused:
+- ${blockers.join(`
+- `)}`;
+      return launch({
+        input,
+        layers,
+        config,
+        branch: input.branch,
+        outline: runOutline(input, config),
+        engine: (host) => runGranny(host, { ...input, config: layers }),
+        finished: (result, id) => `${summarize(result, config.worktree)}
+Call granny_status with runId "${id}" for the full result, verify load-bearing claims yourself, report to the user and wait. Do not push.`,
+        started: (id, journalPath) => `granny run ${id} started on ${input.repo} (${input.branch}), ${input.goal !== undefined ? "planning only" : `${input.stages?.length ?? 0} stage(s)${config.parallel ? `, up to ${config.maxParallel} in parallel` : ""}`}, threshold ${config.threshold}, maxRounds ${config.maxRounds}.
+Journal: ${journalPath}
+${notifySentence(id)}${config.watch === "full" ? `
+${NAVIGATOR_HINT}` : ""}${planReviewNotice(input, config)}${sameModelNotice(input, config, "opencode")}${overridesNotice(layers, "opencode")}`
+      }, parentSession);
+    };
+    const startJudge = async (input, parentSession) => {
+      const ready = prepareJudge(input, "opencode", opencodeModelProblem);
+      if ("refused" in ready)
+        return ready.refused;
+      const { layers, config, branch } = ready;
+      return launch({
+        input,
+        layers,
+        config,
+        branch,
+        outline: judgeOutline(branch, config),
+        engine: (host) => runJudge(host, { ...input, config: layers }),
+        finished: (result) => summarizeJudge(result),
+        started: (id, journalPath) => `${judgeStartLine(id, input, branch, config, "opencode")}
+Journal: ${journalPath}
+${notifySentence(id)}${config.watch === "full" ? `
+${NAVIGATOR_HINT}` : ""}${overridesNotice(layers, "opencode")}`
+      }, parentSession);
     };
     await ctx.tool.transform((editor) => {
       for (const [kind, name] of Object.entries(SUBMIT)) {
@@ -3075,6 +3602,18 @@ ${NAVIGATOR_HINT}` : ""}${planReviewNotice(input, config)}${overridesNotice(laye
             return { content: await startRun(dropPlaceholders(value), context.sessionID) };
           } catch (e) {
             return { content: `granny_run failed to start: ${e.message}` };
+          }
+        }
+      });
+      editor.add({
+        name: "granny_judge",
+        description: JUDGE_TOOL_DESCRIPTION,
+        input: JUDGE_INPUT_SCHEMA,
+        execute: async (value, context) => {
+          try {
+            return { content: await startJudge(dropPlaceholders(value), context.sessionID) };
+          } catch (e) {
+            return { content: `granny_judge failed to start: ${e.message}` };
           }
         }
       });

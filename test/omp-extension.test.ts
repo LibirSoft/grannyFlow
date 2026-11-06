@@ -4,6 +4,7 @@ import * as fs from 'node:fs'
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { SAME_MODEL_HINT } from '../src/adapters/common'
 import extension, { blockReason, createGrannyExtension, isTransient, waitSeconds } from '../src/adapters/omp/extension'
 import { lineType, LiveRun, type LogEntry, PARSED_EVENTS, type RoleActivity } from '../src/adapters/omp/panel'
 import { EventLog } from '../src/adapters/omp/watch'
@@ -726,15 +727,16 @@ describe('omp extension in the user session (parent mode)', () => {
   it('registers granny_run, granny_status, granny_wait and granny_cancel as essential tools, and no submit tool', async () => {
     const f = fakePi()
     await extension(f.pi as any)
-    expect([...f.tools.keys()].sort()).toEqual(['granny_cancel', 'granny_run', 'granny_status', 'granny_wait'])
+    expect([...f.tools.keys()].sort()).toEqual(['granny_cancel', 'granny_judge', 'granny_run', 'granny_status', 'granny_wait'])
     expect(f.tools.get('granny_wait').parameters.required).toEqual(['runId'])
     expect(f.tools.get('granny_wait').interruptible).toBe(true)
-    for (const name of ['granny_run', 'granny_status', 'granny_cancel']) expect(f.tools.get(name).interruptible).toBeUndefined()
+    for (const name of ['granny_run', 'granny_judge', 'granny_status', 'granny_cancel']) expect(f.tools.get(name).interruptible).toBeUndefined()
     for (const tool of f.tools.values()) {
       expect(tool.loadMode).toBe('essential')
       expect(tool.label).toBeString()
     }
     expect(f.tools.get('granny_run').parameters.required).toEqual(['repo', 'branch'])
+    expect(f.tools.get('granny_judge').parameters.required).toEqual(['repo'])
     expect(f.handlers).toEqual([])
     expect([...f.commands.keys()]).toEqual(['granny'])
     expect([...f.shortcuts.keys()]).toEqual(['alt+w'])
@@ -762,6 +764,20 @@ describe('omp extension in the user session (parent mode)', () => {
     await finished(off.dir)
   })
 
+  it('hints in its start reply when the reviewers share the implementer model, and starts the run either way', async () => {
+    behave({ wait: ['implement-one'] })
+    const f = fakePi()
+    await createGrannyExtension({ killGraceMs: 100 })(f.pi as any)
+    const same = await start(f, { reviewers: [{ name: 'reviewer', engine: 'agent' }] })
+    expect(same.started).toContain(SAME_MODEL_HINT)
+    await exec(f.tools.get('granny_cancel'), { runId: same.id })
+    await finished(same.dir)
+    const other = await start(f, { reviewers: [{ name: 'reviewer', engine: 'agent', model: { omp: 'openai-codex/gpt-6.1-sol' } }] })
+    expect(other.started).not.toContain(SAME_MODEL_HINT)
+    await exec(f.tools.get('granny_cancel'), { runId: other.id })
+    await finished(other.dir)
+  })
+
   it('writes the run outline to status.json from the start, and a planning run as kind plan', async () => {
     behave({ wait: ['implement-one', 'plan'] })
     const f = fakePi()
@@ -781,6 +797,20 @@ describe('omp extension in the user session (parent mode)', () => {
     expect(journalOf(dir).find(e => e.type === 'agent')).toMatchObject({ label: 'plan', cwd: repo })
     await exec(f.tools.get('granny_cancel'), { runId: id })
     await finished(dir)
+  })
+
+  it('leaves the heartbeats out of granny_status, so a long command does not push out the real entries', async () => {
+    behave({ wait: ['implement-one'] })
+    const f = fakePi()
+    await createGrannyExtension({ killGraceMs: 100 })(f.pi as any)
+    const run = await start(f)
+    await waitFor(() => callsTo('implement-one').length > 0)
+    fs.appendFileSync(join(run.dir, 'journal.jsonl'), Array.from({ length: 60 }, () => `${JSON.stringify({ t: 'now', type: 'heartbeat', command: 'bun test' })}\n`).join(''))
+    const status = textOf(await exec(f.tools.get('granny_status'), { runId: run.id }))
+    expect(status).toContain('"type":"phase"')
+    expect(status).not.toContain('"type":"heartbeat"')
+    await exec(f.tools.get('granny_cancel'), { runId: run.id })
+    await finished(run.dir)
   })
 
   it('journals a heartbeat while a long command runs, and none after it ends', async () => {
@@ -881,6 +911,7 @@ describe('omp extension in the user session (parent mode)', () => {
     ])
     expect(JSON.parse(readRun(dir, 'status.json')).outline).toEqual({
       kind: 'implement',
+      maxRounds: 4,
       branch: 'feat/x',
       worktree: true,
       planReview: false,
@@ -1193,8 +1224,8 @@ describe('omp extension in the user session (parent mode)', () => {
     expect(u.widget(`granny-${panel.id}`)![0]).not.toContain('/granny')
     writeFileSync(join(fake, 'release-implement-one'), '')
     await finished(panel.dir)
-    expect(f.commands.get('granny').description).toContain('stepper')
-    expect(f.commands.get('granny').description).toContain('stage groups')
+    expect(f.commands.get('granny').description).toContain('review rounds')
+    expect(f.commands.get('granny').description).toContain('side by side')
   })
 
   const wait = (f: ReturnType<typeof fakePi>, params: Record<string, unknown>, signal?: AbortSignal) =>
@@ -1267,6 +1298,33 @@ describe('omp extension in the user session (parent mode)', () => {
     expect(waitsJournalled(dir)).toEqual([])
   })
 
+  const pausedNotes = async (stop: boolean) => {
+    behave({ hold: ['implement-one'] })
+    const f = fakePi()
+    const notes: string[] = []
+    const ctx = { ...CTX, hasUI: true, mode: 'tui', ui: { ...fakeUi().ui, notify: (message: string) => void notes.push(message) } }
+    await createGrannyExtension({ killGraceMs: 100, renderEveryMs: 10 })(f.pi as any)
+    const { id, dir } = await start(f, {}, ctx)
+    if (stop) {
+      const esc = new AbortController()
+      esc.abort()
+      await wait(f, { runId: id }, esc.signal)
+    }
+    writeFileSync(join(fake, 'release-implement-one'), '')
+    await finished(dir)
+    await waitFor(() => f.sent.length > 0)
+    return { id, paused: notes.filter(n => n.includes('stays paused after Esc')) }
+  }
+
+  it('says omp may stay paused when Esc stopped a granny_wait and the run ends later', async () => {
+    const { id, paused } = await pausedNotes(true)
+    expect(paused).toEqual([`granny: run ${id} finished. If omp does not go on by itself (it stays paused after Esc), send it a message.`])
+  })
+
+  it('says nothing of a pause when no granny_wait was stopped', async () => {
+    expect((await pausedNotes(false)).paused).toEqual([])
+  })
+
   it('granny_wait stops on abort and leaves the run going', async () => {
     behave({ wait: ['implement-one'] })
     const f = fakePi()
@@ -1286,6 +1344,245 @@ describe('omp extension in the user session (parent mode)', () => {
     await exec(f.tools.get('granny_cancel'), { runId: id })
     await finished(dir)
     expect(waitsJournalled(dir)).toEqual([])
+  })
+
+  describe('granny_judge', () => {
+    const MODELS = { reviewers: [{ name: 'reviewer', engine: 'agent', model: { omp: 'prov/review' } }], roles: { judge: { model: { omp: 'prov/tag' } } } }
+    const ASK = "Ask the user for these per the skill's references/judge.md and write them to the config. Do not choose a model yourself."
+    const configure = (config: unknown) => {
+      writeFileSync(join(repo, 'granny.config.json'), JSON.stringify(config))
+      git(repo, 'add', 'granny.config.json')
+      git(repo, 'commit', '-qm', 'cfg')
+    }
+    const call = async (f: ReturnType<typeof fakePi>, params: Record<string, unknown> = {}, ctx: unknown = CTX) => textOf(await exec(f.tools.get('granny_judge'), { repo, ...params }, ctx))
+    const tool = async () => {
+      const f = fakePi()
+      await createGrannyExtension({ killGraceMs: 100 })(f.pi as any)
+      return f
+    }
+    const launch = async (f: ReturnType<typeof fakePi>, params: Record<string, unknown> = {}, ctx: unknown = CTX) => {
+      const started = await call(f, params, ctx)
+      const id = /granny judge run (\S+) started/.exec(started)?.[1]
+      if (!id) throw new Error(started)
+      return { id, started, dir: join(repo, '.granny/runs', id) }
+    }
+
+    it('refuses without config, naming every gap and telling the agent to ask the user, before anything runs', async () => {
+      const f = await tool()
+      const reply = await call(f)
+      expect(reply.split('\n')).toEqual(['granny_judge refused:', '- reviewers: no config sets who reviews', '- roles.judge.model: no model for omp', ASK])
+      expect(calls()).toEqual([])
+      expect(existsSync(join(repo, '.granny/runs'))).toBe(false)
+    })
+
+    it('refuses an agent reviewer with no model for omp', async () => {
+      const f = await tool()
+      configure({ ...MODELS, reviewers: [{ name: 'kimi', engine: 'agent', model: { opencode: 'a/b' } }] })
+      expect((await call(f)).split('\n')).toEqual(['granny_judge refused:', '- reviewers[0] (kimi): no model for omp', ASK])
+    })
+
+    it('refuses no judge model for omp', async () => {
+      const f = await tool()
+      configure({ reviewers: MODELS.reviewers })
+      expect((await call(f)).split('\n')).toEqual(['granny_judge refused:', '- roles.judge.model: no model for omp', ASK])
+    })
+
+    it('does not let the run\'s own config answer the gate, so the agent cannot pick the models itself', async () => {
+      const f = await tool()
+      const reply = await call(f, { config: MODELS })
+      expect(reply).toStartWith('granny_judge refused:')
+      expect(reply).toContain('- reviewers: no config sets who reviews')
+      expect(reply).toEndWith(ASK)
+    })
+
+    it('still names a gap the run\'s own config opens', async () => {
+      const f = await tool()
+      configure(MODELS)
+      const reply = await call(f, { config: { reviewers: [{ name: 'bare', engine: 'agent' }] } })
+      expect(reply.split('\n')).toEqual(['granny_judge refused:', '- reviewers[0] (bare): no model for omp', ASK])
+    })
+
+    it('refuses a model omp cannot run, in a reviewer, the judge and the extraction agent', async () => {
+      const f = await tool()
+      configure({ reviewers: [{ name: 'r', engine: 'agent', model: 'sonnet' }], roles: { judge: { model: 'haiku' }, granny: { model: 'opus' } } })
+      const reply = await call(f)
+      expect(reply).toStartWith('granny_judge refused:')
+      expect(reply).toContain('roles.judge.model: "haiku"')
+      expect(reply).toContain('roles.granny.model: "opus"')
+      expect(reply).toContain('reviewers[0] "r": model "sonnet"')
+      expect(reply).not.toContain(ASK)
+      expect(calls()).toEqual([])
+    })
+
+    it('does not refuse a bad implementer model, which a judge run never uses', async () => {
+      behave({ wait: ['review-feat-x-r1-reviewer'] })
+      const f = await tool()
+      configure({ ...MODELS, roles: { ...MODELS.roles, implementer: { model: 'sonnet' }, planner: { model: 'opus' } } })
+      const { id, dir } = await launch(f)
+      await exec(f.tools.get('granny_cancel'), { runId: id })
+      await finished(dir)
+    })
+
+    it('refuses a relative repo and a directory that is not a git repository', async () => {
+      const f = await tool()
+      expect(await call(f, { repo: 'relative/path' })).toBe('granny_judge refused:\n- repo must be an absolute path')
+      const plain = mkdtempSync(join(tmpdir(), 'granny-plain-'))
+      writeFileSync(join(plain, 'granny.config.json'), JSON.stringify(MODELS))
+      const reply = await call(f, { repo: plain })
+      rmSync(plain, { recursive: true, force: true })
+      expect(reply).toStartWith('granny_judge refused:')
+      expect(reply).toContain('not a git repository')
+    })
+
+    it('ends with the report on disk, the exact bytes, read-only agents, and the path and counts in the finish message', async () => {
+      const f = await tool()
+      configure(MODELS)
+      const head = git(repo, 'rev-parse', 'HEAD')
+      const { id, dir } = await launch(f)
+      const result = await finished(dir)
+      expect(result).toMatchObject({ outcome: 'reviewed', branch: 'feat/x', base: 'main', written: true, counts: { P0: 1, P1: 0, P2: 0, P3: 0, dismissed: 0 } })
+      expect(result.reportPath).toMatch(new RegExp(`^${repo}/\\.granny/reviews/\\d{8}-\\d{6}-feat-x\\.md$`))
+      expect(readFileSync(result.reportPath)).toEqual(Buffer.from(result.report))
+      expect(result.report).toContain('## P0\n\n### Real issue')
+      expect(JSON.parse(readRun(dir, 'status.json'))).toMatchObject({ status: 'done', branch: 'feat/x', outline: { kind: 'judge', branch: 'feat/x', worktree: false, reviewers: ['reviewer'], stages: [] } })
+      for (const c of calls()) expect(c.child.access).toBe('read-only')
+      expect(calls().map(c => c.slug)).toEqual(['review-feat-x-r1-reviewer', 'tag-feat-x'])
+      expect(calls().find(c => c.slug === 'tag-feat-x').argv).toContain('prov/tag')
+      expect(git(repo, 'rev-parse', 'HEAD')).toBe(head)
+      expect(git(repo, 'branch', '--show-current')).toBe('feat/x')
+      expect(git(repo, 'status', '--short')).toBe('')
+      expect(git(repo, 'worktree', 'list').split('\n')).toHaveLength(1)
+      await waitFor(() => f.sent.length > 0)
+      const notice = f.sent[0]!.message.content
+      expect(notice).toStartWith(`[granny] Run ${id} finished.\n- report: ${result.reportPath}\n- counts: P0 1, P1 0, P2 0, P3 0, dismissed 0\n`)
+      expect(notice).toEndWith('Nothing was fixed or committed. Give the user the report path and the counts; do not fix anything unless they ask.')
+    })
+
+    it('names the reviewers and the judge model in the start reply, says nothing will change, and keeps the wait sentence and the overrides', async () => {
+      behave({ wait: ['review-feat-x-r1-reviewer'] })
+      const f = await tool()
+      configure(MODELS)
+      const { id, dir, started } = await launch(f, { config: { language: 'Turkish' } })
+      expect(started).toContain(`granny judge run ${id} started on ${repo} (feat/x)`)
+      expect(started).toContain('main...HEAD by reviewer (agent, prov/review)')
+      expect(started).toContain('tagged by prov/tag')
+      expect(started).toContain('Nothing will be changed: no fix, commit, push, branch or worktree')
+      expect(started).toContain('.granny/reviews/')
+      expect(started).toContain(`Journal: ${join(dir, 'journal.jsonl')}`)
+      expect(started).toContain(`To wait in this turn, call granny_wait { runId: "${id}" }`)
+      expect(started).toContain('\noverrides: language Turkish')
+      expect(started).not.toContain('threshold')
+      expect(started).not.toContain('reviewers share')
+      await exec(f.tools.get('granny_cancel'), { runId: id })
+      await finished(dir)
+    })
+
+    it('starts on a dirty tree and lists what it did not review', async () => {
+      const f = await tool()
+      configure(MODELS)
+      writeFileSync(join(repo, 'dirty.txt'), 'x')
+      const { dir } = await launch(f)
+      const result = await finished(dir)
+      expect(result.outcome).toBe('reviewed')
+      expect(result.uncommitted).toEqual(['dirty.txt'])
+      expect(result.report).toContain('- Not reviewed: dirty.txt')
+      await waitFor(() => f.sent.length > 0)
+      expect(f.sent[0]!.message.content).toContain('- not reviewed, uncommitted: dirty.txt')
+      expect(readFileSync(join(repo, 'dirty.txt'), 'utf8')).toBe('x')
+    })
+
+    it('takes placeholders for the optional fields', async () => {
+      behave({ wait: ['review-feat-x-r1-reviewer'] })
+      const f = await tool()
+      configure(MODELS)
+      const { id, dir, started } = await launch(f, { base: '', context: '', config: {} })
+      expect(started).not.toContain('overrides:')
+      await exec(f.tools.get('granny_cancel'), { runId: id })
+      await finished(dir)
+    })
+
+    it('names a detached HEAD by its short SHA in the views', async () => {
+      const f = await tool()
+      configure(MODELS)
+      git(repo, 'checkout', '-q', '--detach')
+      const head = git(repo, 'rev-parse', 'HEAD').slice(0, 8)
+      const { dir, started } = await launch(f)
+      expect(started).toContain(`(${head})`)
+      const result = await finished(dir)
+      expect(result.branch).toBe(head)
+      expect(JSON.parse(readRun(dir, 'status.json')).outline.branch).toBe(head)
+    })
+
+    it('granny_wait returns the report path and counts', async () => {
+      behave({ hold: ['tag-feat-x'] })
+      const f = await tool()
+      configure(MODELS)
+      const { id, dir } = await launch(f)
+      const waiting = exec(f.tools.get('granny_wait'), { runId: id })
+      await waitFor(() => callsTo('tag-feat-x').length > 0)
+      writeFileSync(join(fake, 'release-tag-feat-x'), '')
+      const reply = textOf(await waiting)
+      const result = await finished(dir)
+      expect(reply).toContain(`- report: ${result.reportPath}`)
+      expect(reply).toContain('- counts: P0 1, P1 0, P2 0, P3 0, dismissed 0')
+      expect(f.sent).toEqual([])
+    })
+
+    it('granny_cancel stops it, with no report', async () => {
+      behave({ wait: ['tag-feat-x'] })
+      const f = await tool()
+      configure(MODELS)
+      const { id, dir } = await launch(f)
+      await waitFor(() => callsTo('tag-feat-x').length > 0)
+      await exec(f.tools.get('granny_cancel'), { runId: id })
+      expect(await finished(dir)).toMatchObject({ status: 'cancelled' })
+      expect(JSON.parse(readRun(dir, 'status.json')).status).toBe('cancelled')
+      expect(existsSync(join(repo, '.granny/reviews'))).toBe(false)
+    })
+
+    it('shows a judge run in granny_status', async () => {
+      const f = await tool()
+      configure(MODELS)
+      const { id, dir } = await launch(f)
+      const result = await finished(dir)
+      const status = textOf(await exec(f.tools.get('granny_status'), { runId: id }))
+      expect(status).toContain('"kind": "judge"')
+      expect(status).toContain(result.reportPath)
+    })
+
+    it('reports no-changes with no agent and no report', async () => {
+      process.env.GRANNY_CONFIG = join(fake, 'config.json')
+      writeFileSync(process.env.GRANNY_CONFIG, JSON.stringify(MODELS))
+      git(repo, 'checkout', '-q', 'main')
+      const f = await tool()
+      const { dir } = await launch(f)
+      expect(await finished(dir)).toMatchObject({ outcome: 'no-changes', written: false })
+      expect(calls()).toEqual([])
+      await waitFor(() => f.sent.length > 0)
+      expect(f.sent[0]!.message.content).toContain('- no report: main..HEAD has no commits')
+    })
+
+    it('reports review-failed when no reviewer ran, with no report', async () => {
+      behave({ errors: [{ slug: 'review-feat-x-r1-reviewer', message: 'model not found', times: 9 }, { slug: 'review-feat-x-r1-reviewer-2', message: 'model not found', times: 9 }] })
+      const f = await tool()
+      configure(MODELS)
+      const { dir } = await launch(f)
+      expect(await finished(dir)).toMatchObject({ outcome: 'review-failed', written: false })
+      expect(existsSync(join(repo, '.granny/reviews'))).toBe(false)
+      await waitFor(() => f.sent.length > 0)
+      expect(f.sent[0]!.message.content).toContain('- no report: no reviewer ran, also on a retry')
+    })
+
+    it('points to the navigator and keeps the outline for it', async () => {
+      behave({ wait: ['review-feat-x-r1-reviewer'] })
+      const f = await tool()
+      configure({ ...MODELS, watch: 'full' })
+      const { id, dir, started } = await launch(f)
+      expect(started).toContain('/granny or alt+w')
+      expect(ompState().runs.get(id).outline.kind).toBe('judge')
+      await exec(f.tools.get('granny_cancel'), { runId: id })
+      await finished(dir)
+    })
   })
 
   it('granny_wait points to granny_status for a run this process does not know', async () => {
@@ -1587,50 +1884,53 @@ describe('omp extension in the user session (parent mode)', () => {
     expect(c.views[0]!.options).toEqual(OVERLAY)
     expect(c.selects).toEqual([])
     const view = c.views[0]!.view
+    await waitFor(() => screen(view).includes('1 one'), 3000)
+    const stages = screen(view).split('\n').map(l => l.trimEnd())
+    expect(stages[0]).toMatch(/^granny {2}feat\/x {2}● running · \d+s$/)
+    expect(stages).toContainEqual(expect.stringMatching(/^› ● 1 one +implement +1 agent · 1 running +\d+s$/))
+    expect(stages.at(-1)).toBe('↑↓ move · Enter open · Esc close')
+    press(view, '\r', '\r')
     await waitFor(() => screen(view).includes('task   BaselineGates ✓'), 3000)
-    const live = screen(view).split('\n')
-    const tree = (lines: string[]) => lines.map(l => l.split(' │ ')[0]!.trimEnd())
-    const detail = (lines: string[]) => lines.map(l => (l.includes(' │ ') ? l.slice(l.indexOf(' │ ') + 3).trimEnd() : ''))
-    expect(live[0]).toMatch(/^granny · feat\/x · stage 1\/1 · Implement · \d+s +$/)
-    expect(live[1]).toStartWith('Worktree ✓ › Implement ● › Review › PR ready')
-    expect(tree(live)).toContainEqual(expect.stringMatching(/^ {2}▾ ● 1 one +\d+s$/))
-    expect(tree(live)).toContainEqual(expect.stringMatching(/^› {3}● implement +\d+s$/))
-    expect(tree(live)).toContain('      └ ● BaselineGates')
-    expect(detail(live)).toContainEqual(expect.stringMatching(/^implementer · parent-model · \d+s$/))
-    expect(detail(live)).toContainEqual(expect.stringMatching(/^NOW {3}… waiting for model \d+s$/))
-    expect(detail(live)).toContainEqual(expect.stringMatching(/^ \d\d:\d\d:\d\d {2}task {3}BaselineGates ✓$/))
-    expect(detail(live)).toContainEqual(expect.stringMatching(/^ \d\d:\d\d:\d\d {2}read {3}Reading the plan$/))
-    expect(detail(live)).toContain('LAST SAID  "Spawning helpers."')
+    const live = screen(view).split('\n').map(l => l.trimEnd())
+    expect(live[0]).toBe('granny › 1 one › implement')
+    expect(live).toContainEqual(expect.stringMatching(/^implementer · parent-model · \d+s$/))
+    expect(live).toContainEqual(expect.stringMatching(/^NOW {3}… waiting for model \d+s$/))
+    expect(live).toContainEqual(expect.stringMatching(/^ \d\d:\d\d:\d\d {2}task {3}BaselineGates ✓$/))
+    expect(live).toContainEqual(expect.stringMatching(/^ \d\d:\d\d:\d\d {2}read {3}Reading the plan$/))
+    expect(live).toContain('LAST SAID  "Spawning helpers."')
     expect(live.filter(l => l.includes(id))).toEqual([])
-    expect(live.at(-1)!.trimEnd()).toBe('↑↓ move · Enter/→ open · Tab/] next agent · [ prev · Space fold · Esc close')
+    expect(live.at(-1)).toBe('v details · t transcript · Tab/] [ agent · ←/Esc back · q close')
     expect(live).toHaveLength(40)
 
+    press(view, '\x1b', '\x1b')
     writeFileSync(join(fake, 'release-implement-one'), '')
     expect((await finished(dir)).stages[0].outcome).toBe('clean')
-    await waitFor(() => /^granny · feat\/x · done · /.test(screen(view)), 3000)
-    const ended = screen(view).split('\n')
-    expect(tree(ended)).toContainEqual(expect.stringMatching(/^ {2}▾ ✓ 1 one +\d+s$/))
-    expect(tree(ended)).toContainEqual(expect.stringMatching(/^› {3}✓ implement +\d+s$/))
-    for (const action of ['review r1', 'judge r1', 'fix r1', 'review r2']) expect(tree(ended)).toContainEqual(expect.stringMatching(new RegExp(`^ {4}✓ ${action} +\\d+s$`)))
-    expect(tree(ended)).toContainEqual(expect.stringMatching(/^ {2}▸ ✓ PR ready +\d+s$/))
-    expect(tree(ended)).toContain('      └ ✓ BaselineGates')
-    expect(ended[1]).toStartWith('Worktree ✓ › Implement ✓ › Review ✓ › PR ready ✓')
-    expect(detail(ended)).toContainEqual(expect.stringMatching(/^implementer · parent-model · ✓ \d+s$/))
-    expect(detail(ended)).toContainEqual(expect.stringMatching(/^NOW {3}✓ done in \d+s$/))
+    await waitFor(() => /^granny {2}feat\/x {2}done · /.test(screen(view)), 3000)
+    const ended = screen(view).split('\n').map(l => l.trimEnd())
+    expect(ended).toContainEqual(expect.stringMatching(/^› ✓ 1 one +clean · 2 rounds +\d+ agents +\d+s$/))
+    expect(ended).toContainEqual(expect.stringMatching(/^ {2}✓ PR ready /))
+    press(view, '\r')
+    const rounds = screen(view).split('\n').map(l => l.trimEnd())
+    expect(rounds[0]).toBe('granny › 1 one')
+    expect(rounds).toContainEqual(expect.stringMatching(/^│ {3}✓ Round 1 +1 finding: 1 sent back, 0 kept +3 agents +\d+s │$/))
+    expect(rounds).toContainEqual(expect.stringMatching(/^│ › ✓ Round 2 /))
+    press(view, '\x1b[H', '\r')
+    await waitFor(() => screen(view).includes('NOW   ✓ done in'), 3000)
+    expect(screen(view)).toMatch(/implementer · parent-model · ✓ \d+s/)
 
-    press(view, '\r', 't')
+    press(view, 't')
     await waitFor(() => screen(view).includes('✎ Stage one is implemented.'), 3000)
     const transcript = screen(view)
     expect(transcript).toContain('── session fake-session · /work')
     expect(transcript).toMatch(/\d\d:\d\d:\d\d {2}▸ read: Reading the plan/)
     expect(transcript.split('\n').at(-1)).toStartWith('↑↓ PgUp/PgDn Home/End scroll · f follow (off) · v details · t summary')
 
-    press(view, '\x1b', '\x1b[B')
+    press(view, ']')
     await waitFor(() => screen(view).includes('✎ Baseline gates are green.'), 3000)
-    expect(screen(view)).toContain('│ BaselineGates · subagent of implement')
+    expect(screen(view)).toContain('BaselineGates · subagent of implement')
     expect(screen(view)).not.toContain('Stage one is implemented.')
 
-    press(view, '\r', '\x1b', '\x1b')
+    press(view, '\x1b', '\x1b', '\x1b')
     expect(await opened).toBeUndefined()
     expect(c.views[0]!.closed).toBe(1)
     expect(view.disposed).toBe(true)
@@ -1650,12 +1950,12 @@ describe('omp extension in the user session (parent mode)', () => {
     const third = await start(f, { maxRounds: 3 }, c.ctx)
     await waitFor(() => existsSync(join(third.dir, 'sessions')))
     const granny = f.commands.get('granny')
-    const runRow = (shown: string, run: string, status: string) => new RegExp(`^${shown} [✓●] ${run.slice(-4)} · ${status}`)
+    const runRow = (shown: string, run: string, status: string) => new RegExp(`^${shown} ${run.slice(-4)} · ${status}`)
 
     const opened = granny.handler(first.id, c.ctx)
     await waitFor(() => c.views.length === 1)
     const shown = screen(c.views[0]!.view).split('\n')
-    expect(shown[0]).toStartWith('granny · feat/x · done · ')
+    expect(shown[0]).toStartWith('granny  feat/x  done · ')
     expect(shown).toContainEqual(expect.stringMatching(runRow(' ', first.id, 'done \\(shown\\)')))
     expect(shown).toContainEqual(expect.stringMatching(runRow(' ', third.id, 'running')))
     expect(shown.filter(l => l.includes(` ${second.id.slice(-4)} · `))).toEqual([])
@@ -1670,7 +1970,7 @@ describe('omp extension in the user session (parent mode)', () => {
     const reopened = granny.handler('', c.ctx)
     await waitFor(() => c.views.length === 2)
     const again = screen(c.views[1]!.view).split('\n')
-    expect(again[0]).toStartWith('granny · feat/x · stage 1/1 · ')
+    expect(again[0]).toStartWith('granny  feat/x  ● running')
     expect(again).toContainEqual(expect.stringMatching(runRow(' ', third.id, 'running \\(shown\\)')))
     press(c.views[1]!.view, 'q')
     await reopened
@@ -1745,6 +2045,38 @@ describe('omp extension in the user session (parent mode)', () => {
     await finished(dir)
   })
 
+  it('lets a stray Esc after the navigator closes do nothing for a moment, then lets go', async () => {
+    behave({ hold: ['implement-one'] })
+    const c = commandUi()
+    const listeners = new Set<(data: string) => { consume?: boolean } | undefined>()
+    ;(c.ui as any).onTerminalInput = (handler: (data: string) => { consume?: boolean } | undefined) => {
+      listeners.add(handler)
+      return () => void listeners.delete(handler)
+    }
+    const f = fakePi()
+    await createGrannyExtension({ renderEveryMs: 10 })(f.pi as any)
+    const { dir } = await start(f, {}, c.ctx)
+    await waitFor(() => existsSync(join(dir, 'sessions')))
+    const opened = f.commands.get('granny').handler('', c.ctx)
+    await waitFor(() => c.views.length === 1)
+    expect(listeners.size).toBe(0)
+    press(c.views[0]!.view, '\x1b')
+    await opened
+    expect(listeners.size).toBe(1)
+    const [listener] = [...listeners]
+    expect(listener!('\x1b')).toEqual({ consume: true })
+    expect(listener!('\x1b[27u')).toEqual({ consume: true })
+    expect(listener!('a')).toBeUndefined()
+    await Bun.sleep(300)
+    expect(listener!('\x1b')).toEqual({ consume: true })
+    await Bun.sleep(300)
+    expect(listeners.size).toBe(1)
+    await Bun.sleep(300)
+    expect(listeners.size).toBe(0)
+    writeFileSync(join(fake, 'release-implement-one'), '')
+    await finished(dir)
+  })
+
   it('registers alt+w in parent mode, which opens the navigator in the TUI, once at a time', async () => {
     behave({ hold: ['implement-one'] })
     const c = commandUi()
@@ -1758,9 +2090,9 @@ describe('omp extension in the user session (parent mode)', () => {
     expect(handler(c.ctx)).toBeUndefined()
     await waitFor(() => c.views.length === 1)
     expect(c.views[0]!.options).toEqual(OVERLAY)
-    expect(screen(c.views[0]!.view).split('\n')[0]).toStartWith('granny · feat/x · ')
-    press(c.views[0]!.view, '\x1b[F')
-    expect(screen(c.views[0]!.view)).toContain(`│ run ${id}`)
+    expect(screen(c.views[0]!.view).split('\n')[0]).toStartWith('granny  feat/x  ')
+    press(c.views[0]!.view, '\x1b[F', '\r')
+    expect(screen(c.views[0]!.view)).toContain(`run ${id}`)
     handler(c.ctx)
     await Bun.sleep(50)
     expect(c.views).toHaveLength(1)

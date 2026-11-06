@@ -51,14 +51,30 @@ The plugin reads `~/.config/granny/config.json` and `<repo>/granny.config.json` 
 
 Independent stages run at the same time, up to `maxParallel` ([config.md](config.md#parallel-stages)): each stage has its own child sessions, and a same-repo stage that runs in its own worktree has its sessions work there; its merge and cleanup run as commands in the server. The completion message lists each stage with its repo, the final review of every repo (`- final review: <outcome>, <n> review round(s)`, with the skip reason, or `- the branch still has unresolved findings; the final check ran anyway` after `round-cap` or `review-failed`; [config.md](config.md#final-review)), the final check of every other repo, and every repo's worktree. The final review's sessions are `granny · review final review r<n> <reviewer>`, `granny · judge final review r<n>` and `granny · fix final review r<n>`. With `checks` in the config ([config.md](config.md#checks)) the server executes each check command itself in the stage's worktree - a direct exec, the exit code is the real one; a check with a `timeout` runs in `timeout`, or `gtimeout` when only that is on PATH, and with neither the run fails before any session starts - after the implementer, after every fix, once per repo before the final review, and once more without repairs when the final check moved HEAD; a red check goes to a write session `granny · repair <stage> <gate> #<n>`, and uncommitted work found by the `git status --porcelain` read before each run to `granny · commit <stage> <gate> #<n>`. A stage that stays red is listed as `checks-failed` with its note; a red whole branch shows as `- final review: checks-failed, ... - NOT PR-ready, the checks fail: <note>`, and a red run after the final check, or one that left uncommitted files, as `- checks after the final check: RED - NOT PR-ready after the pr-ready check moved HEAD: <note>`. A stage or final review whose work stayed uncommitted ends its line with ` - uncommitted changes after <step>: ...`; a stage whose checks passed while the agent that last touched its code reported red gates ends it with ` - the checks passed, but <who> reported red gates: <gates>`; a `no-changes` stage ends its line with its note, which names the files it left uncommitted. A stage picks its checks with `stages[].checks` (names; default all). The global plugin install below is needed for every repo and every worktree a run touches.
 
-It returns a run id at once and works in the background; its role sessions appear under your session as `granny · <step>` ([Watching a run](#watching-a-run)). With `watch` `"full"` the reply also tells the agent to tell you where the run navigator is, and it lists every value a run's `config` changed ([Models and permissions](#models-and-permissions)). When the run ends the plugin posts a `[granny] Run … finished` message into your session, with a `- worktree: <path>` line - that is your cue to report.
+It returns a run id at once and works in the background; its role sessions appear under your session as `granny · <step>` ([Watching a run](#watching-a-run)). With `watch` `"full"` the reply also tells the agent to tell you where the run navigator is, and it lists every value a run's `config` changed ([Models and permissions](#models-and-permissions)). When every reviewer is an `agent` reviewer on the implementer's model (two roles with no model share the session model), it adds: "reviewers share the implementer's model; a different model may catch more". That is advice: the run starts either way, and the agent changes no model on its own. A Codex or `command` reviewer counts as different. When the run ends the plugin posts a `[granny] Run … finished` message into your session, with a `- worktree: <path>` line - that is your cue to report.
 
 - `granny_status({ runId })` - status, journal tail, result. `granny_status({ repo })` finds the latest run in that repo. For a run of this server that is still running it ends with `active roles:`, one line per role at work: `- <label> (<role>, <model>) session <id> · <elapsed>`.
 - `granny_cancel({ runId })` - interrupts every running step; nothing further starts. With several reviewers that is every child session running at that moment, and every review command: each command is stopped with everything it started - its process group gets SIGTERM, then SIGKILL 5 s later. A `codex-plugin` review script also stops the app-server broker its companion started outside that process group ([config.md](config.md#the-codex-plugin)). The run ends `cancelled` at once: the step that was running is not retried, and a reviewer or check it stopped is not reported as a failed review or a red check.
 
-Run files: `<repo>/.granny/runs/<id>/` - `input.json`, `status.json`, `journal.jsonl`, `result.json` - in the main checkout you passed as `repo`, also when the run works in another worktree, so `granny_status({ repo })` and `granny_cancel` find runs as before. The PR body and the review outputs are in the worktree's `.granny/`. `status.json` names the session that called `granny_run` (`parent`) and the run's `watch` mode. It also holds the run's `outline` from the start, `{ kind, branch, worktree, planReview, finalReview, reviewers, fromStage, stages: [{ number, name, implement, review, checks }] }` with `kind` `plan` or `implement`: what the navigator needs to list stages and steps still to come. In the journal every `agent { label, role, phase, session, model, linked, cwd }` entry names the directory the agent works in (`cwd`) and is followed by one `agent-end { label, session, outcome, error? }` when the agent ends (`outcome` `done`, `failed` or `cancelled`), and a role session that could not be linked to your session adds `link-failed { label, error }`. A `stage { number, name, event, outcome? }` entry marks a stage's start and end (`event` is `start` or `end`, `outcome` the stage's outcome on `end`; a stage that never started because one it builds on failed has one `end` with outcome `skipped`, and a stage before `fromStage` has none). A `heartbeat { command }` entry follows every 60 s while a check or review command runs; it says only that the run is alive, so a long command does not look like a dead run, and `granny_status`'s journal tail shows it. Each role session also carries `metadata["granny-workflow"] = { run, dir, parent, label, role, phase, model }` (`dir` is the run directory, `model` is `provider/id[#variant]` or `null`), which the TUI view uses to find the run.
+Run files: `<repo>/.granny/runs/<id>/` - `input.json`, `status.json`, `journal.jsonl`, `result.json` - in the main checkout you passed as `repo`, also when the run works in another worktree, so `granny_status({ repo })` and `granny_cancel` find runs as before. The PR body and the review outputs are in the worktree's `.granny/`. `status.json` names the session that called `granny_run` (`parent`) and the run's `watch` mode. It also holds the run's `outline` from the start, `{ kind, branch, worktree, planReview, finalReview, reviewers, fromStage, stages: [{ number, name, implement, review, checks }] }` with `kind` `plan`, `implement` or `judge`: what the navigator needs to list stages and steps still to come. In the journal every `agent { label, role, phase, session, model, linked, cwd }` entry names the directory the agent works in (`cwd`) and is followed by one `agent-end { label, session, outcome, error? }` when the agent ends (`outcome` `done`, `failed` or `cancelled`), and a role session that could not be linked to your session adds `link-failed { label, error }`. A `stage { number, name, event, outcome? }` entry marks a stage's start and end (`event` is `start` or `end`, `outcome` the stage's outcome on `end`; a stage that never started because one it builds on failed has one `end` with outcome `skipped`, and a stage before `fromStage` has none). A `heartbeat { command }` entry follows every 60 s while a check or review command runs; it says only that the run is alive, so a long command does not look like a dead run, and `granny_status`'s journal tail leaves it out. Each role session also carries `metadata["granny-workflow"] = { run, dir, parent, label, role, phase, model }` (`dir` is the run directory, `model` is `provider/id[#variant]` or `null`), which the TUI view uses to find the run.
 
 Reloading opencode's configuration or the plugin while a run is in progress (`opencode reload`, a changed plugin file) does not interrupt the run: the role sessions' results still reach it, and `granny_status` / `granny_cancel` still find it. Only stopping the server ends it.
+
+## Review only: `granny judge`
+
+```
+granny_judge({ repo, base?, context?, config? })
+```
+
+The steps, with what to ask the user, are in [judge.md](judge.md). One review of the checkout's `<base>...HEAD` and one tagging of its findings, and the report goes to `<repo>/<workDir>/reviews/<date>-<branch>.md` (by default `.granny/reviews/`). It changes nothing else: no fix, commit, push, branch or worktree.
+
+It refuses, with `granny_judge refused:`, before anything starts:
+
+- when the reviewers or the judge model are missing from the config files: `reviewers: no config sets who reviews`, `reviewers[<n>] (<name>): no model for opencode`, `roles.judge.model: no model for opencode`. The reply ends by telling the agent to ask the user and write them to the config. The run's own `config` does not answer this, so the agent cannot pick the models itself; it can still open a gap, which is refused too.
+- when a model it would use cannot run here, in the judge, the extraction agent (`roles.granny`) or an `agent` reviewer. A bad `roles.implementer.model` does not block a review that never uses it.
+- when `repo` is not a git repository.
+
+There is no preflight: a dirty tree is allowed, and the uncommitted files are listed in the report and the finish message; no branch is required, and a detached HEAD goes by its short SHA. The run's files, `granny_status` and `granny_cancel` work as on any run. `status.json`'s `outline` has `kind` `judge`, no stages and no worktree, and the [run navigator](#watching-a-run) lists `Review`, `Tag` and `Report`, with the role agents selectable as in any run. The start reply names the reviewers and the judge model, says nothing will be changed, and has the sentence about the finish message and the `overrides:` line. The finish message gives the report path first, the counts per heading, how many reviewer P0/P1 findings the judge placed lower, what was not reviewed and which reviewers did not run, and tells the agent to give the user the path and counts and to fix nothing unless asked. With `written: false` the report's text is in `result.json`, under `report`.
 
 ## Watching a run
 
@@ -78,52 +94,101 @@ When linking a role session fails - creating it as a child throws, the move thro
 - **Toasts** on a phase change, a failed role (`<label> failed: <error>`) and the run's end (`run <id> done · <time>`, or its failure or cancellation). They reach you in every session of this TUI once it has seen the run, and from a session outside the run's family opencode gives them an **Open** action that goes to the session that started the run. A TUI that starts watching a run already in progress shows no toasts for what happened before. At most three toasts a second; more become `+N more granny events`.
 - **Run navigator**: `/granny`, `<leader>j` or `granny: run navigator` in the command palette opens a full-screen page on the run (`/granny <runId>` on another run this TUI knows; from a role session, with that role selected).
 
+The navigator shows one level at a time. Enter goes down, Esc goes up, and the first row always says where you are: `granny › 2 Client pause UI › Round 2 of 4 › terra`. `/granny`, `<leader>j` or `granny: run navigator` in the command palette opens it on the stages, with the running one selected.
+
+**1. The stages**: every piece of work in order, what it is doing, how many agents it had and how many run now.
+
 ```
-granny · feat/pause · stage 1/2 · Implement · 1m40s
-Worktree ✓ › Implement ● › Checks › Review › Final review › PR ready
-───────────────────────────────────────────┬──────────────────────────────────────────────────
-  ▾ ● 1 Server pause domain, lifec…  1m40s │ implementer · k3.1-pro · 1m40s
-›   ● implement                      1m40s │
-      2 Client pause UI and e2e            │ NOW   ● shell · 12s
-      Final review                         │       bun test test/GameService.test.ts
-      PR ready                             │
-  run details                              │ TODO  ✓ Pause domain  ● Lifecycle and socket proof
-                                           │
-                                           │ RECENT
-                                           │  23:31:25  edit   src/game/protocol.ts
-                                           │  23:30:46  read   2 files · src/services/GameSer…
-                                           │
-                                           │ LAST SAID  "Added pause/resume messages to the protocol."
-───────────────────────────────────────────┴──────────────────────────────────────────────────
-↑↓ move · Enter open session · Tab next agent · Space fold · v details · p parent · Esc close
+granny  feat/pause  ● running · 21m36s
+
+  ✓ Worktree                                                                2s
+  │
+  ✓ 1 Server pause domain      clean · 2 rounds       7 agents          12m04s
+  │
+› ● 2 Client pause UI          round 2 of 4           7 agents · 2 running  9m30s
+  │
+  · Final review               waiting
+  │
+  · PR ready                   waiting
+
+  run details
+
+↑↓ move · Enter open · Esc close
 ```
 
-From 100 columns the tree is on the left and the detail on the right; narrower, the detail takes the last 4 rows under the tree. The `─` rules show from 16 rows. The last line is the key help for the selected row.
+A row that has not started does not open. `run details` is the only place with the run's id, repo, branch, times, `result.json` path and result. With several runs the list of runs takes its place: Enter on another run shows it.
 
-- Header: `granny · <branch> · stage <k>/<n> · <phase> · <elapsed>`, the one place for the run's position. `stages 1+2/<n>` while several stages run, `planning` in a planning run, no stage part outside the stages, `granny · <branch> · done|failed|cancelled · <total>` after the end. Too wide, the branch goes first, then the tail is cut.
-- Stepper: the steps this run has, in order, from its `outline`: `Worktree ✓ › Implement ● › Checks › Review › Final review › PR ready`, or `Worktree › Plan › Plan review` for a planning run. `✓` done, `●` current, `✗` failed, `⊘` skipped or cancelled, no marker still to come. Implement, Checks and Review describe one stage: the selected row's, else the newest running one, else the last started, so selecting a row of another stage changes them. Too wide, the done steps become a bare `✓`, then only the current step shows with `(<i>/<n>)`.
-- Tree: one group row per piece of work: Plan, Plan review, each stage (`1 <name>`), Final review, PR ready, with `▾` or `▸`, a marker (`●` running, `✓` done, `✗` failed, with the outcome when it fits, `⊘` skipped or cancelled) and the time on the right. Work that has not started is listed muted, without an arrow or marker, and has no rows under it. The running group is open, or the last started stage when none runs; the others are folded, and Space or Enter on a group folds or opens it for good. Under a group, its agents as `<marker> <action>` with their time: `implement`, `commit`, `commit #2`, `repair #1`, `review r1` (with the reviewer's name when the run has several, `#2` on a retried attempt), `judge r1`, `fix r1`, `extract r1`, `resolve merge`, `plan`, `pr-ready check`. A stage with checks has a row after the step they followed: `checks ✓`, `checks ✗ <names>` or `checks …`. Under an agent, the child sessions of its role session (its `task` subagents, `●` running, `✓` done). An agent whose label names no group lands in a group titled with its phase. The worktree step and the commands have no rows. At the bottom a `run details` row, or, when this TUI knows several runs, a `runs` list with one row per run, `<marker> <last 4 characters of the id> · <status>`; Enter or Space on another run shows it. The full run id is only in the run's detail.
-- Agent detail: `<role> · <short model> · <time>` (the short model is the model without its provider and `#default`, with another variant as `/<variant>`: `k3.1-pro`, `claude-sonnet-5-5/high`, or `default model`), `! <error>` when it failed, `! not linked to the parent session - it is in the session list` when linking failed, then a summary of what the role session is doing, read live from the TUI's own session store:
-  - `NOW`: what it does this moment and for how long - `● thinking 42s`, `● writing 5s`, `● shell · 7s` with the tool's short argument on the next row, `… waiting for model 3s`. State changes only update this block. A finished agent's outcome goes here: `✓ done in 18m`, `✗ failed after 3m: <error>`, `⊘ cancelled after 2m`; for the whole conversation, Enter opens the session.
-  - `TODO`: one row with the items of its `todowrite` calls (`✓` done, `●` active, `·` pending), when it made one.
-  - `RECENT`: newest first, one row per item, cut and never wrapped: `HH:MM:SS  <tool>  <short argument>`, relative to the agent's work directory, a command without its leading `cd <dir> && `. Calls of the same tool within a few seconds collapse (`read   7 files · a.ts, b.ts, …`, `(2×)` for one target), a `subagent` call shows its description, a failed call ends in `✗` in the error colour, and retries and provider errors from the journal are rows too. The running tool joins the list when it ends. A short pane drops the oldest rows first.
-  - `LAST SAID`: the latest assistant text, at most two rows.
-- `v` shows the agent's full activity in time order instead (`▸` tool calls, `✗` failed tools, `✎` the first line of each answer, with its journal notes); PgUp/PgDn and Home/End then scroll that list, End and `f` follow its end. `v` again goes back to the summary.
-- Other details: a subagent's title, state and the agent it belongs to; a group's full name, state, time, outcome, checks result and journal lines (the last 200); a checks row's journal lines (the last 50); a run's id, status, repo, branch, times, `result.json` path and error.
+**2. A stage**: its implementer and checks, then the review loop with its rounds, the ones still possible and the round cap.
+
+```
+granny › 2 Client pause UI
+
+  ✓ Implement     k3.1-pro                     1 agent     4m52s
+  │
+  ✓ Checks        passed
+  │
+┌ ↺ review loop · up to 4 rounds ───────────────────────────────────────┐
+│   ✓ Round 1   4 findings: 3 sent back, 1 kept   5 agents        3m42s │
+│ › ● Round 2   reviewing                         2 agents · 2 running 42s │
+│   · Round 3   only if round 2 sends findings back                     │
+│   · Round 4   the last one                                            │
+└───────────────────────────────────────────────────────────────────────┘
+  │
+  · Next          Final review
+
+↑↓ move · Enter open · l log · Esc back
+```
+
+`l` shows the stage's full name, state, time, outcome, checks result and journal lines. Final review and plan review have the same loop. A group without a loop lists its agents; a judge run has the groups `Review`, `Tag` and `Report`. A run journalled before round entries existed still has its rounds, without their findings.
+
+**3. A round**: what happens in it in order, with the agents that run at the same time side by side (stacked when the terminal is narrow).
+
+```
+granny › 2 Client pause UI › Round 2 of 4
+
+  ● Review   2 agents at the same time
+    ┌──────────────────────────────┐  ┌──────────────────────────────┐
+    │ ● terra  42s                 │  │ ● sol  38s                   │
+    │ running read: PauseButton.tsx│  │ running bash: bun test       │
+    └──────────────────────────────┘  └──────────────────────────────┘
+  │
+  · Judge    after the reviewers
+  │
+  · Fix      only if findings go back
+  │
+  · Checks   after the fix
+  │
+  · Next     Round 3, or the stage is done
+
+↑↓←→ move · Enter open agent · [ ] other round · l log · Esc back
+```
+
+A finished round says what each step did: `2 findings` under Review, `1 sent back, 1 kept` at the judge, and on each reviewer's card how many it found. `f` lists the round's findings with `↺ sent back` or `· kept`; below the list, the selected one's file, what the reviewer said, how the judge classified it and why it went back or stayed. Enter opens the agent that found it. A checks row opens its journal lines.
+
+**4. An agent**: the first rows are `<role> · <short model> · <time>` (the short model is the model without its provider and `#default`, plus its variant or effort: `gpt-6.1-sol/xhigh`, or `default model`), `! <error>` when it failed, then the summary. Enter opens its opencode session, `v` its full activity list. Tab, `]` and `[` go through the other agents of its round and their subagents.
+
+- `NOW`: what it does this moment and for how long - `● thinking 42s`, `● writing 5s`, `● bash · 7s` with the tool's intent or short argument on the next row, `… waiting for model 3s`. A finished agent's outcome goes here: `✓ done in 18m`, `✗ failed after 3m: <error>`, `⊘ cancelled after 2m`.
+- `TODO`: one row with the items of its todo tool (`✓` done, `●` active, `·` pending), when it used one.
+- `RECENT`: newest first, one row per item, cut and never wrapped: `HH:MM:SS  <tool>  <short argument>`, relative to the agent's work directory. Calls of the same tool within a few seconds collapse (`read   7 files · a.ts, b.ts, …`, `(2×)` for one target), a failed call ends in `✗`, and retries and provider errors from the journal are rows too.
+- `LAST SAID`: the latest assistant text, at most two rows.
+- `v` shows every event in time order instead; PgUp/PgDn and Home/End scroll that list, End and `f` follow its end, and `v` goes back to the summary.
+
+The last row of the page is the keys of that level (`Enter open session · v details · Tab next agent · p parent · Esc back` on an agent). Rows fit any width: narrow, a row's middle column goes first, then its agents; a page too short for its rows drops the `│` rows and then scrolls to the selection.
 
 | Key | In the navigator |
 | --- | --- |
-| `↑` / `↓` (`k` / `j`) | move |
+| `↑` / `↓` (`k` / `j`) | move; on an agent's list, scroll |
+| `←` / `→` | on a round: the agent before or after; elsewhere: up a level, or down |
 | PgUp / PgDn, Home / End | a page; the first or last row; with `v` on an agent: scroll its list |
-| Enter | on an agent or subagent: open its opencode session; on a group: fold or unfold; on another run: show it |
-| Space | fold or unfold a group; on another run: show it |
-| Tab or `]`, `[` | the next or previous agent of the open groups |
+| Enter, Space | down a level; on an agent or subagent: open its opencode session; on another run: show it |
+| Tab or `]`, `[` | the next or previous row; on a round: the other round; on an agent: the other agents of its round |
+| `f` | on a round: its findings; with `v` on an agent: follow its list, on or off |
+| `l` | on a stage or round: its journal lines |
 | `v` | an agent's full activity list, or back to the summary |
-| `f` | with that list showing: follow its end, on or off |
 | `p` | the session that started the run |
-| Esc or `q` | back where `/granny` was opened, else the session that started the run |
+| Esc or `q` | up a level; at the top: back where `/granny` was opened, else the session that started the run |
 
-After Enter opened a role's session, `/granny` there brings the navigator back with that role selected. `/granny` inside the navigator does nothing. `<leader>j` is free in opencode 2.2's default keys; should a keybind of yours take it, `/granny` and the palette still open the navigator.
+After Enter opened a role's session, `/granny` there brings the navigator back on that agent, with the levels above it behind Esc. `/granny` inside the navigator does nothing. `<leader>j` is free in opencode 2.2's default keys; should a keybind of yours take it, `/granny` and the palette still open the navigator.
 
 `watch` on opencode: `"full"` all of the above; `"panel"` the sidebar section and the chip only, and `/granny` answers `granny: watching is off for run <id> (watch: "panel")` with how to turn it on; `"off"` none of it. `/granny off` and `/granny on` hide or show the sidebar section and the chip in this TUI until it restarts. With no run in the session, `/granny` says `granny: no granny run in this session yet - role sessions appear once the run starts its first agent.`
 

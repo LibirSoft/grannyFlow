@@ -1,10 +1,11 @@
-// The /granny navigator's model: the shown run's work groups, agents, checks and subagent sessions,
-// the other known runs, a selection and the detail of the selected row, laid out as the shared page.
+// The /granny navigator's model: the shared levels - the run's stages, a stage's rounds, a round's agents,
+// one agent's detail - over the shown run, with its role sessions' subagents and the other known runs.
 // It reads the hub's cached snapshots and activity, and opencode's in-memory session list.
-import { type ActivityItem, activityLines, summarise } from '../runview/activity'
-import { clean, fit, pad } from '../runview/format'
-import { agentEnd, agentHead, type Cell, checksDetail, frame, groupDetail, headerText, paneSizes, runDetail, stepperCells, summaryCells, treeCells } from '../runview/layout'
-import { type AgentNode, agentKey, focusStage, nextAgent, type Row, type RunTree, stepsFor, visibleRows } from '../runview/tree'
+import { type ActivityItem, activityLines, nowLine, summarise } from '../runview/activity'
+import { clean } from '../runview/format'
+import { agentEnd, agentHead, type Cell, checksDetail, groupDetail, runDetail, summaryCells } from '../runview/layout'
+import { flowOf, levelBody, levelFrame, type LevelView, LevelNav, selectedRow } from '../runview/levels'
+import { type AgentNode, groupKey, type Row, type RunTree, visibleRows } from '../runview/tree'
 import type { MessageActivity } from './activity'
 import type { RunSnapshot } from './runwatch'
 import { attempt } from './tui-view'
@@ -28,17 +29,17 @@ export interface NavDeps {
   linked(session: string): boolean | undefined
   /** What the hub last read of a role session's messages. */
   activity?(session: string): MessageActivity | undefined
-  /** Told the selected agent's session, or undefined off an agent, whenever that changes. */
-  onSelect?(session: string | undefined): void
+  /** Told the role sessions the page shows the activity of, whenever those change. */
+  onWatch?(sessions: readonly string[]): void
   home?: string
   now(): number
 }
 
-export type NavKey = 'up' | 'down' | 'pageup' | 'pagedown' | 'home' | 'end' | 'return' | 'space' | 'next' | 'prev' | 'parent' | 'back' | 'verbose' | 'follow'
+export type NavKey = 'up' | 'down' | 'left' | 'right' | 'pageup' | 'pagedown' | 'home' | 'end' | 'return' | 'space' | 'next' | 'prev' | 'parent' | 'back' | 'verbose' | 'follow' | 'log'
 
 export type NavAction = { type: 'open'; sessionID: string } | { type: 'parent'; sessionID: string } | { type: 'back' }
 
-const NARROW_DETAIL = 4
+const MAX_WATCHED = 4
 const UNREADABLE = 'run files not readable from this TUI - showing the role sessions only'
 const BLANK: Cell = { text: '', tone: 'base' }
 
@@ -47,22 +48,20 @@ const clamp = (n: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, n
 export class NavModel {
   /** The run the page shows. */
   shown: string
-  selected = ''
   verbose = false
   private follow = true
   private listTop = 0
   private listRows = 0
   private listRoom = 0
   private listFor = ''
-  private readonly folded = new Set<string>()
-  private readonly opened = new Set<string>()
-  private readonly parents = new Map<string, string>()
+  private readonly nav = new LevelNav()
   private readonly subs = new Map<string, ChildSession>()
   private runs: NavRun[] = []
   private rows: Row[] = []
-  private top = 0
-  private page = 10
-  private told: string | undefined | null = null
+  private trees: RunTree[] = []
+  private shownTree?: RunTree
+  private lastSize = { width: 100, height: 30 }
+  private told?: string
 
   constructor(
     private readonly deps: NavDeps,
@@ -71,8 +70,13 @@ export class NavModel {
   ) {
     this.shown = runId
     this.refresh()
-    this.selected = select && this.rows.some(r => r.key === select && r.selectable) ? select : this.defaultSelection()
+    if (select && this.shownTree) this.nav.openAt(this.shownTree, select)
     this.settle()
+  }
+
+  /** What the page has selected: the row of a level, or what the detail shows. */
+  get selected(): string {
+    return this.nav.selected
   }
 
   /** The run the page shows. */
@@ -82,13 +86,6 @@ export class NavModel {
 
   private tree(): RunTree | undefined {
     return this.run()?.snapshot.tree
-  }
-
-  private defaultSelection(): string {
-    const tree = this.tree()
-    const agent = tree && ([...tree.agents].reverse().find(a => a.state === 'running') ?? tree.agents.at(-1))
-    if (agent) return agentKey(agent.session)
-    return this.rows.find(r => r.selectable)?.key ?? ''
   }
 
   private refresh() {
@@ -104,9 +101,10 @@ export class NavModel {
     const children = (sessions.length ? attempt(() => this.deps.children(sessions)) : undefined) ?? new Map<string, readonly ChildSession[]>()
     const trees = this.runs.map(r => (r.snapshot.id === this.shown ? this.withChildren(r.snapshot.tree, children) : r.snapshot.tree))
     const shown = trees.find(t => t.id === this.shown)
-    const focus = shown ? focusStage(shown) : undefined
-    this.rows = visibleRows(trees, { run: this.shown, folded: this.folded, opened: this.opened, ...(focus !== undefined ? { focus } : {}), runs: trees.length > 1 ? 'list' : 'one' })
-    for (const row of this.rows) if (row.parent) this.parents.set(row.key, row.parent)
+    this.shownTree = shown
+    this.trees = trees
+    const opened = new Set(shown?.groups.map(g => groupKey(shown.id, g.key)) ?? [])
+    this.rows = visibleRows(trees, { run: this.shown, folded: new Set(), opened, runs: trees.length > 1 ? 'list' : 'one' })
   }
 
   /** The tree with each agent's subagents taken from its session's children, leaving the snapshot as it was. */
@@ -127,24 +125,55 @@ export class NavModel {
     return { ...tree, groups, agents: tree.agents.map(copy) }
   }
 
-  /** Keeps the selection on a row that shows, and tells the hub which agent to read. */
+  private levelView(tree: RunTree, width: number, height: number): LevelView {
+    const now = this.deps.now()
+    return {
+      tree,
+      trees: this.trees,
+      now,
+      width,
+      height,
+      activity: agent => {
+        const live = attempt(() => this.deps.activity?.(agent.session))?.now
+        return live ? nowLine(live, now, agent.cwd) : undefined
+      },
+      subName: name => clean(this.subs.get(name)?.title || name),
+    }
+  }
+
+  private levelPage() {
+    const tree = this.shownTree
+    return tree ? this.nav.layout(this.levelView(tree, this.lastSize.width, levelBody(this.lastSize.height))) : undefined
+  }
+
+  /** Keeps the levels on what exists, and tells the hub which agents to read. */
   private settle() {
-    let key: string | undefined = this.selected
-    while (key && !this.rows.some(r => r.key === key && r.selectable)) key = this.parents.get(key)
-    this.selected = key ?? this.rows.find(r => r.selectable)?.key ?? ''
+    if (this.nav.detail && !this.selectedRow()) this.nav.back()
+    this.levelPage()
     if (this.selected !== this.listFor) {
       this.listFor = this.selected
       this.follow = true
     }
+    const watched = this.watched().join('\n')
+    if (watched === this.told) return
+    this.told = watched
+    attempt(() => this.deps.onWatch?.(this.watched()))
+  }
+
+  /** The agent the detail shows, or the running agents of the round on screen. */
+  private watched(): string[] {
     const row = this.selectedRow()
-    const session = row?.kind === 'agent' ? row.agent!.session : undefined
-    if (session === this.told) return
-    this.told = session
-    attempt(() => this.deps.onSelect?.(session))
+    if (this.nav.detail) return row?.kind === 'agent' ? [row.agent!.session] : []
+    const { screen } = this.nav
+    if (screen.kind !== 'round') return []
+    const group = this.shownTree?.groups.find(g => g.key === screen.group)
+    const round = group && flowOf(group).rounds.find(r => r.number === screen.round)
+    return round ? round.review.filter(a => a.state === 'running').slice(0, MAX_WATCHED).map(a => a.session) : []
   }
 
   private selectedRow(): Row | undefined {
-    return this.rows.find(r => r.key === this.selected)
+    const key = this.nav.detail
+    return key ? this.rows.find(r => r.key === key) : undefined
   }
 
   // --- keys -------------------------------------------------------------------------------------
@@ -159,30 +188,82 @@ export class NavModel {
   }
 
   private press(key: NavKey): NavAction | undefined {
-    const selectable = this.rows.filter(r => r.selectable)
-    const at = selectable.findIndex(r => r.key === this.selected)
-    const move = (delta: number) => {
-      const next = selectable[clamp(at + delta, 0, selectable.length - 1)]
-      if (next) this.selected = next.key
+    if (key === 'parent') {
+      const parent = this.run()?.snapshot.parent
+      return parent ? { type: 'parent', sessionID: parent } : undefined
     }
-    const listing = this.listing()
-    const listPage = Math.max(1, this.listRoom - 1)
+    return this.nav.detail ? this.pressDetail(key) : this.pressLevel(key)
+  }
+
+  private pressLevel(key: NavKey): NavAction | undefined {
+    const { nav } = this
+    const tree = this.shownTree
+    const inRound = nav.screen.kind === 'round'
+    const page = Math.max(1, levelBody(this.lastSize.height))
     switch (key) {
       case 'up':
-        return void move(-1)
+        return void nav.move(-1)
       case 'down':
-        return void move(1)
+        return void nav.move(1)
       case 'pageup':
-        return void (listing ? this.scroll(-listPage) : move(-this.page))
+        return void nav.move(-page)
       case 'pagedown':
-        return void (listing ? this.scroll(listPage) : move(this.page))
+        return void nav.move(page)
       case 'home':
-        return void (listing ? this.scroll(-this.listRows) : (this.selected = selectable[0]?.key ?? this.selected))
+        return void nav.edge(false)
       case 'end':
-        return void (listing ? (this.follow = true) : (this.selected = selectable.at(-1)?.key ?? this.selected))
+        return void nav.edge(true)
+      case 'left':
+        return void (inRound ? nav.move(-1) : nav.back())
+      case 'right':
+        return void (inRound ? nav.move(1) : this.enter())
+      case 'return':
+      case 'space':
+        return void this.enter()
       case 'next':
+        return void (inRound && tree ? nav.otherRound(tree, 1) : nav.move(1))
       case 'prev':
-        return void (this.selected = nextAgent(this.rows, this.selected, key === 'next' ? 1 : -1) ?? this.selected)
+        return void (inRound && tree ? nav.otherRound(tree, -1) : nav.move(-1))
+      case 'follow':
+        return void (tree && nav.findings(tree))
+      case 'log':
+        return void (tree && nav.log(tree))
+      case 'back':
+        return nav.back() ? undefined : { type: 'back' }
+      default:
+        return undefined
+    }
+  }
+
+  private enter() {
+    const { run } = this.nav.enter()
+    if (!run) return
+    this.shown = run
+    this.nav.reset()
+    this.refresh()
+  }
+
+  private pressDetail(key: NavKey): NavAction | undefined {
+    const listing = this.listing()
+    const listPage = Math.max(1, this.listRoom - 1)
+    const tree = this.shownTree
+    switch (key) {
+      case 'up':
+        return void (listing && this.scroll(-1))
+      case 'down':
+        return void (listing && this.scroll(1))
+      case 'pageup':
+        return void (listing && this.scroll(-listPage))
+      case 'pagedown':
+        return void (listing && this.scroll(listPage))
+      case 'home':
+        return void (listing && this.scroll(-this.listRows))
+      case 'end':
+        return void (listing && (this.follow = true))
+      case 'next':
+        return void (tree && this.nav.stepDetail(tree, 1))
+      case 'prev':
+        return void (tree && this.nav.stepDetail(tree, -1))
       case 'verbose':
         this.verbose = !this.verbose
         this.follow = true
@@ -193,20 +274,20 @@ export class NavModel {
           this.follow = !this.follow
         }
         return
+      case 'return':
       case 'space':
-        return void this.toggle()
-      case 'return': {
+      case 'right': {
         const row = this.selectedRow()
         if (row?.kind === 'agent' && row.agent!.session) return { type: 'open', sessionID: row.agent!.session }
         if (row?.kind === 'sub') return { type: 'open', sessionID: row.sub!.name }
-        return void this.toggle()
+        return undefined
       }
-      case 'parent': {
-        const parent = this.run()?.snapshot.parent
-        return parent ? { type: 'parent', sessionID: parent } : undefined
-      }
+      case 'left':
       case 'back':
-        return { type: 'back' }
+        this.nav.back()
+        return undefined
+      default:
+        return undefined
     }
   }
 
@@ -222,70 +303,32 @@ export class NavModel {
     if (this.listTop < max) this.follow = false
   }
 
-  /** Folds or opens the selected group, or shows the selected run. */
-  private toggle() {
-    const row = this.selectedRow()
-    if (row?.kind === 'run' && row.run.id !== this.shown) {
-      this.shown = row.run.id
-      this.top = 0
-      this.refresh()
-      this.selected = this.defaultSelection()
-      return
-    }
-    if (row?.kind !== 'group' || row.folded === undefined) return
-    if (row.folded) {
-      this.opened.add(row.key)
-      this.folded.delete(row.key)
-    } else {
-      this.folded.add(row.key)
-      this.opened.delete(row.key)
-    }
-  }
-
   // --- layout -----------------------------------------------------------------------------------
 
-  /** The whole page: header, stepper, the panes and the key help, every row exactly `width` long. */
+  /** The whole page, every row exactly `width` long. */
   frame(width: number, height: number): Cell[][] {
+    const w = Math.max(1, Math.floor(width))
+    this.lastSize = { width: w, height }
     this.refresh()
     this.settle()
     const now = this.deps.now()
-    const w = Math.max(1, Math.floor(width))
-    const sizes = paneSizes(w, height, NARROW_DETAIL)
-    const tree = this.tree()
-    const focus = tree ? focusStage(tree, this.selected) : undefined
-    const header: Cell[] = [{ text: tree ? headerText(tree, now, focus, w) : 'granny · no run', tone: 'base' }]
-    const stepper = tree ? stepperCells(stepsFor(tree, focus), w) : []
-    this.page = Math.max(1, sizes.left.height - 1)
-    const left = this.treePane(now, sizes.left.width, sizes.left.height)
-    const right = this.detail(now, sizes.right.width, sizes.right.height)
-    return frame({ header, stepper, left, right, help: [{ text: this.help(), tone: 'muted' }], width: w, height, split: NARROW_DETAIL })
-  }
-
-  private treePane(now: number, width: number, height: number): Cell[] {
-    const { cells, top } = treeCells(this.rows, this.selected, now, width, height, this.top)
-    this.top = top
-    return cells.map((cell, i) => {
-      const row = this.rows[top + i]
-      if (row?.kind !== 'sub') return cell
-      const child = this.subs.get(row.sub!.name)
-      const text = `${'  '.repeat(row.depth)}└ ${child?.running ? '●' : '✓'} ${clean(child?.title || row.sub!.name)}`
-      return { ...cell, text: pad(`${cell.selected ? '›' : ' '} ${fit(text, width - 2)}`, width), tone: child?.running ? 'info' : 'muted' }
-    })
+    const body = levelBody(height)
+    const page = this.levelPage()
+    if (!page) return levelFrame([{ text: 'granny · no run', tone: 'base' }], [{ text: 'no granny run here', tone: 'muted' }].map(c => [c as Cell]), 'Esc close', w, height)
+    if (!this.nav.detail) {
+      const readable = this.run()?.snapshot.readable !== false
+      const rows = readable ? page.rows : [[{ text: UNREADABLE, tone: 'warning' as const }], ...page.rows]
+      return levelFrame(page.crumbs, rows, page.help, w, height, selectedRow(page, this.nav.selected) + (readable ? 0 : 1))
+    }
+    return levelFrame(page.crumbs, this.detail(now, w, body).map(c => [c]), this.help(), w, height)
   }
 
   private help(): string {
     const row = this.selectedRow()
-    const enter =
-      row?.kind === 'agent' || row?.kind === 'sub'
-        ? 'Enter open session'
-        : row?.kind === 'group' && row.folded !== undefined
-          ? 'Enter fold'
-          : row?.kind === 'run' && row.run.id !== this.shown
-            ? 'Enter switch run'
-            : undefined
-    if (this.listing()) return ['↑↓ move', 'PgUp/PgDn scroll', `f follow ${this.follow ? 'on' : 'off'}`, 'v summary', enter, 'Tab next agent', 'p parent', 'Esc close'].join(' · ')
-    const verbose = row?.kind === 'agent' ? 'v details' : undefined
-    return ['↑↓ move', enter, 'Tab next agent', 'Space fold', verbose, 'p parent', 'Esc close'].filter(Boolean).join(' · ')
+    const session = row?.kind === 'agent' || row?.kind === 'sub'
+    const open = session ? 'Enter open session' : undefined
+    if (this.listing()) return ['PgUp/PgDn scroll', `f follow ${this.follow ? 'on' : 'off'}`, 'v summary', open, 'Tab next agent', 'p parent', 'Esc back'].filter(Boolean).join(' · ')
+    return [open, row?.kind === 'agent' ? 'v details' : undefined, session ? 'Tab next agent' : undefined, 'p parent', 'Esc back'].filter(Boolean).join(' · ')
   }
 
   private detail(now: number, width: number, height: number): Cell[] {
