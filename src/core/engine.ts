@@ -1,5 +1,5 @@
 import { GrannyCancelled, isCancelled } from './cancel'
-import { planReviewWarning, resolveConfig, resolveModel, type CheckConfig, type GrannyConfig, type ReviewerConfig, type RoleConfig } from './config'
+import { judgeConfigGaps, planReviewWarning, resolveConfig, resolveModel, type CheckConfig, type GrannyConfig, type ReviewerConfig, type RoleConfig } from './config'
 import {
   agentPlanReviewPrompt,
   agentReviewPrompt,
@@ -13,16 +13,20 @@ import {
   implementPrompt,
   judgePrompt,
   judgeRetryNote,
+  judgeStepPrompt,
   mergePrompt,
+  ONE_SHOT_NOTE,
   planFixPrompt,
   planJudgePrompt,
   planReviewPrompt,
   repairPrompt,
+  reportWritePrompt,
   reviewReadPrompt,
   reviewStartPrompt,
   reviewStopPrompt,
   reviewWaitPrompt,
   gitCommandPrompt,
+  tagPrompt,
   timeoutProbePrompt,
   worktreeCommandPrompt,
   roundLabel,
@@ -34,11 +38,12 @@ import {
   type StageTask,
   WHOLE_BRANCH_NOTE,
 } from './prompts'
-import { decide, declinedOf, isBlocker, mergeDuplicates, parseCodexReview, reviewFailure, saysNoFindings, triage } from './review'
+import { bucketOf, countsOf, isDemoted, isJudged, renderReport, severityOf, utf8Length, type ReportMeta } from './report'
+import { decide, declinedOf, isBlocker, mergeDuplicates, parseCodexReview, reviewFailure, saysNoFindings, triage, type Policy } from './review'
 import { detachedReview, MAX_WAITS, planReviewScript, reportedBackend, reviewPlan, reviewStem, WAIT_SECONDS } from './reviewer'
 import { SCHEMAS } from './schemas'
-import { shellQuote } from './shell'
-import { branchSlug, reportedWorktree, worktreePath, worktreeScript } from './worktree'
+import { heredocWriteScript, shellQuote } from './shell'
+import { branchSlug, excludeScript, reportedWorktree, worktreePath, worktreeScript } from './worktree'
 import type {
   AgentRequest,
   CheckResult,
@@ -47,6 +52,8 @@ import type {
   Finding,
   Host,
   Implementation,
+  JudgeOutcome,
+  JudgeResult,
   PlanDraft,
   PlanFix,
   PlanResult,
@@ -68,6 +75,9 @@ const PLAN_PHASE = 'Plan review'
 const DRAFT_PHASE = 'Plan'
 const FINAL_REVIEW_PHASE = 'Final review'
 const CHECKS_PHASE = 'Checks'
+const REVIEW_PHASE = 'Review'
+const JUDGE_PHASE = 'Judge'
+const REPORT_PHASE = 'Report'
 const TIMEOUT_PROBE = 'if command -v timeout >/dev/null; then echo timeout; elif command -v gtimeout >/dev/null; then echo gtimeout; else exit 1; fi'
 const TIMEOUT_MISSING = /(^|[\s:])g?timeout: (command )?not found|command not found: g?timeout$/m
 
@@ -152,7 +162,7 @@ type JudgeEntry = Record<string, unknown> & { id: string; duplicateOf?: unknown;
 const entriesOf = (answer: any): JudgeEntry[] =>
   Array.isArray(answer?.perFinding) ? answer.perFinding.filter((x: unknown) => x && typeof x === 'object' && typeof (x as { id?: unknown }).id === 'string') : []
 const workOf = (c: GrannyConfig) => c.workDir.replace(/\/+$/, '')
-const phaseOf = (subject: Subject) => (subject.kind === 'plan' ? PLAN_PHASE : subject.note ? FINAL_REVIEW_PHASE : 'Review')
+const phaseOf = (subject: Subject) => (subject.kind === 'plan' ? PLAN_PHASE : subject.note === WHOLE_BRANCH_NOTE ? FINAL_REVIEW_PHASE : REVIEW_PHASE)
 
 export function checkInput(input: RunInput): string[] {
   const errors: string[] = []
@@ -1263,6 +1273,193 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
     final,
     ...(finals.length > 1 ? { repos: finals } : {}),
   }
+}
+
+export interface JudgeInput {
+  repo: string
+  base?: string
+  context?: string
+  config?: unknown | unknown[]
+}
+
+function checkJudgeInput(input: JudgeInput): string[] {
+  if (!input || typeof input !== 'object') return ['input must be an object']
+  const errors: string[] = []
+  if (typeof input.repo !== 'string' || !input.repo.startsWith('/')) errors.push('repo must be an absolute path')
+  if (input.base !== undefined && (typeof input.base !== 'string' || !input.base)) errors.push('base must be a non-empty string')
+  if (input.context !== undefined && typeof input.context !== 'string') errors.push('context must be a string')
+  return errors
+}
+
+const TAG_POLICY: Policy = { threshold: 100, alwaysFix: [] }
+const DATE_STAMP = /^\d{8}-\d{6}$/
+const BRANCH_LINE = /^\S+$/
+
+/** One review round of `<base>...HEAD` in the checkout as it is, one tagging of its findings, and a report file. It changes nothing else. */
+export async function runJudge(host: Host, input: JudgeInput): Promise<JudgeResult> {
+  const inputErrors = checkJudgeInput(input)
+  if (inputErrors.length) throw new Error(`Invalid granny judge input:\n- ${inputErrors.join('\n- ')}`)
+
+  const layers = configLayers(input)
+  const gaps = judgeConfigGaps(layers, host.name)
+  if (gaps.length) throw new Error(`granny judge needs models: ${gaps.join('; ')}`)
+  const config = resolveConfig(layers, host.name)
+  const { call, shell, readHead, uncommitted, reviewAll, judgeAnswers } = engineParts(host, config)
+  const repo = trimPath(input.repo)
+  const base = input.base ?? config.base
+
+  host.phase(REVIEW_PHASE)
+  const excluded = await shell('exclude', REVIEW_PHASE, excludeScript(config), repo, judgeStepPrompt)
+  if (!excluded.ran) host.log(`could not add ${config.workDir}/ to the git excludes, so the report may show as untracked (exit ${excluded.code}): ${excluded.output.slice(-300)}`)
+  const needed = async (label: string, script: string, ask?: typeof judgeStepPrompt) => {
+    const r = await shell(label, REVIEW_PHASE, script, repo, ask)
+    if (!r.ran) throw new Error(`granny judge could not read the ${label} in ${repo} (exit ${r.code}): ${r.output.slice(-500)}`)
+    return r.output
+  }
+  const date = lineShaped(await needed('date', 'date +%Y%m%d-%H%M%S', judgeStepPrompt), DATE_STAMP)
+  if (!date) throw new Error('granny judge could not read the date')
+  const current = lineShaped(await needed('branch', 'git branch --show-current'), BRANCH_LINE)
+  const read = await readHead('head', REVIEW_PHASE, repo)
+  if (!read.sha) throw new Error(`granny judge could not read HEAD in ${repo} (exit ${read.code}): ${read.output.slice(-500)}`)
+  const head = read.sha
+  const branch = current ?? short(head)
+
+  const count = await shell('commits', REVIEW_PHASE, `git rev-list --count ${shellQuote(base)}..HEAD`, repo)
+  const commits = count.ran ? lineShaped(count.output, COUNT) : undefined
+  if (commits === undefined) {
+    throw new Error(`granny judge could not count the commits in ${base}..HEAD in ${repo} (exit ${count.code}): ${count.output.slice(-500)} - ${base} may not be this repo's base; it may use another one such as master, so pass base`)
+  }
+
+  const dirty = await uncommitted('status', REVIEW_PHASE, repo)
+  const notReviewed = Array.isArray(dirty)
+    ? dirty.map(l => l.trim().replace(/^\S+\s+/, ''))
+    : [`the working tree status could not be read (${dirty.unreadable.replace(/\s+/g, ' ')})`]
+  const finish = (outcome: JudgeOutcome, rest: Partial<JudgeResult> = {}): JudgeResult => ({
+    repo: input.repo,
+    branch,
+    base,
+    head,
+    outcome,
+    counts: countsOf([]),
+    demoted: [],
+    findings: [],
+    failedReviewers: [],
+    notJudged: [],
+    uncommitted: notReviewed,
+    written: false,
+    ...rest,
+  })
+
+  if (Number(commits) === 0) {
+    const note = `${base}..HEAD has no commits, so there was nothing to review${notReviewed.length ? `; uncommitted files are not reviewed: ${notReviewed.join(', ')}` : ''}`
+    host.log(`no-changes - ${note}`)
+    return finish('no-changes', { note })
+  }
+
+  const p: PromptContext = { repo, branch, base, config, ...(input.context ? { context: input.context } : {}) }
+  const lane: Lane = { repo, base, branch, cwd: repo, p }
+  const note = `${ONE_SHOT_NOTE}${current ? '' : ` HEAD is detached at ${branch}, so that is the "branch" named here.`}`
+  const results = await reviewAll(lane, config.reviewers, branch, { kind: 'diff', base, note }, 1)
+  const failedReviewers = results.filter(r => !r.ran).map(r => ({ name: r.reviewer.name, note: r.note ?? 'no output' }))
+  if (failedReviewers.length === results.length) {
+    const notes = failedReviewers.map(r => `${r.name}: ${r.note}`).join('\n')
+    host.log(`review-failed - no reviewer ran, also on a retry, so there is no report:\n${notes}`)
+    return finish('review-failed', { failedReviewers, note: notes })
+  }
+  for (const r of failedReviewers) host.log(`${r.name} did not run, also on a retry - going on without it: ${r.note}`)
+  const found = results.filter(r => r.ran).flatMap(r => r.findings)
+
+  const tag = async (): Promise<Finding[]> => {
+    host.phase(JUDGE_PHASE)
+    const ids = new Set(found.map(f => f.id))
+    const label = `tag ${branch}`
+    const { per, decided } = await judgeAnswers({
+      at: label,
+      label,
+      prompt: tagPrompt(p, base, found),
+      ids,
+      ask: async (l, text) => {
+        try {
+          return await call('judge', 'judge', l, JUDGE_PHASE, text, 'read-only', config.roles.judge, repo)
+        } catch (e) {
+          if (isCancelled(e)) throw e
+          host.log(`${l}: the judge call failed: ${String((e as Error)?.message ?? e)}`)
+          return null
+        }
+      },
+      // Treating every finding as a declined repeat keeps P0/P1 out of decide's rule 1, which would hide that the judge left one unclassified.
+      apply: per => found.map(f => decide(f, per.find(x => x.id === f.id), TAG_POLICY, () => true)),
+      leftTo: "under the reviewer's severity, not judged",
+    })
+    const duplicateOf = new Map(per.filter(x => ids.has(x.id) && typeof x.duplicateOf === 'string' && ids.has(x.duplicateOf)).map(x => [x.id, x.duplicateOf as string]))
+    // mergeDuplicates prefers a copy to fix: here that is one the report keeps under a P heading on the judge's word.
+    const placed = decided.map(f => ({ ...f, decision: { ...f.decision!, action: isJudged(f) && bucketOf(f) !== 'dismissed' ? ('fix' as const) : ('residual' as const) } }))
+    const { findings, merged } = mergeDuplicates(placed, duplicateOf)
+    for (const m of merged) host.log(`${label}: judge merged ${m.id} into ${m.into} (duplicate)`)
+    const severity = new Map(found.map(f => [f.id, f.severity]))
+    return findings.map(({ decision: _decision, ...f }) => ({
+      ...f,
+      severity: (f.duplicates ?? []).map(id => severity.get(id)!).reduce((worst, s) => (severityOf({ severity: s }) < severityOf({ severity: worst }) ? s : worst), f.severity),
+    }))
+  }
+  const findings = found.length ? await tag() : []
+  const counts = countsOf(findings)
+  const demoted = findings.filter(f => isDemoted(f) && (severityOf(f) === 'P0' || severityOf(f) === 'P1')).map(f => f.id)
+  const notJudged = findings.filter(f => !isJudged(f)).map(f => f.id)
+  if (demoted.length) host.log(`the judge placed ${demoted.length} reviewer P0/P1 finding(s) lower: ${demoted.join(', ')}`)
+
+  host.phase(REPORT_PHASE)
+  const meta: ReportMeta = {
+    branch,
+    base,
+    head: short(head),
+    commits: Number(commits),
+    repo,
+    when: date,
+    reviewers: config.reviewers.map(rv => {
+      const model = resolveModel(rv.model, host.name)
+      return { name: rv.name, engine: rv.engine, ...(model ? { model } : {}) }
+    }),
+    judge: resolveModel(config.roles.judge.model, host.name),
+    uncommitted: notReviewed,
+    failed: failedReviewers,
+  }
+  const report = renderReport(meta, findings)
+  const reportPath = `${repo}/${workOf(config)}/reviews/${date}-${branchSlug(branch)}.md`
+  const save = async (): Promise<boolean> => {
+    const want = utf8Length(report)
+    for (let n = 1; n <= 2; n++) {
+      const w = await shell(n === 1 ? 'write report' : 'write report retry', REPORT_PHASE, heredocWriteScript(reportPath, report), repo, reportWritePrompt)
+      if (!w.ran) {
+        host.log(`writing the report failed (exit ${w.code}): ${w.output.slice(-300)}`)
+        return false
+      }
+      const size = await shell('report size', REPORT_PHASE, `wc -c < ${shellQuote(reportPath)}`, repo, judgeStepPrompt)
+      const got = size.ran ? lineShaped(size.output, COUNT) : undefined
+      if (got !== undefined && Number(got) === want) return true
+      host.log(`${reportPath} holds ${got ?? 'an unknown number of'} bytes, not ${want}${n === 1 ? ' - writing it once more' : ''}`)
+    }
+    return false
+  }
+  let written = false
+  try {
+    written = await save()
+  } catch (e) {
+    if (isCancelled(e)) throw e
+    host.log(`writing the report failed: ${String((e as Error)?.message ?? e)}`)
+  }
+  host.log(written ? `report written: ${reportPath}` : `report not written: ${reportPath} - the result holds its text`)
+  return finish('reviewed', {
+    counts,
+    demoted,
+    findings,
+    failedReviewers,
+    notJudged,
+    reportPath,
+    written,
+    report,
+    ...(written ? {} : { note: `the report could not be written to ${reportPath}; it is in this result` }),
+  })
 }
 
 export type { GrannyConfig }

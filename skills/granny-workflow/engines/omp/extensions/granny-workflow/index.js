@@ -957,6 +957,10 @@ ${output.slice(-3000)}
 First read ${branchLog(p)} and \`git log --oneline HEAD..${shellQuote(lane)}\`. Resolve every conflict so both sides' intent survives, keep the gates green, and conclude with \`git commit --no-edit\`. Never abort the merge or reset. Return startSha = HEAD before the merge (\`git rev-parse HEAD\` before you commit).`;
 }
 
+// src/core/report.ts
+var P_HEADINGS = ["P0", "P1", "P2", "P3"];
+var ORDER = [...P_HEADINGS, "dismissed"];
+
 // src/core/reviewer.ts
 var SAID = "[granny] reviewer: ";
 var BACKEND_LINE2 = /^\[granny\] reviewer: (.*)$/m;
@@ -1238,6 +1242,7 @@ var PLAN_PHASE = "Plan review";
 var DRAFT_PHASE = "Plan";
 var FINAL_REVIEW_PHASE = "Final review";
 var CHECKS_PHASE = "Checks";
+var REVIEW_PHASE = "Review";
 var TIMEOUT_PROBE = "if command -v timeout >/dev/null; then echo timeout; elif command -v gtimeout >/dev/null; then echo gtimeout; else exit 1; fi";
 var TIMEOUT_MISSING = /(^|[\s:])g?timeout: (command )?not found|command not found: g?timeout$/m;
 var EXIT_MARK = /\[granny\] exit=(\d+)[ \t]*(?:\r?\n|$)/g;
@@ -1262,7 +1267,7 @@ var STATUS_LINE = /^\s*[MADRCUT?!]{1,2}\s+\S/;
 var listed = (status) => status.map((l) => l.trim()).join(", ");
 var entriesOf = (answer) => Array.isArray(answer?.perFinding) ? answer.perFinding.filter((x) => x && typeof x === "object" && typeof x.id === "string") : [];
 var workOf = (c) => c.workDir.replace(/\/+$/, "");
-var phaseOf = (subject) => subject.kind === "plan" ? PLAN_PHASE : subject.note ? FINAL_REVIEW_PHASE : "Review";
+var phaseOf = (subject) => subject.kind === "plan" ? PLAN_PHASE : subject.note === WHOLE_BRANCH_NOTE ? FINAL_REVIEW_PHASE : REVIEW_PHASE;
 function checkInput(input) {
   const errors = [];
   if (!input || typeof input !== "object")
@@ -4080,7 +4085,7 @@ function focusStage(tree, selectedKey) {
   const started = tree.groups.filter((g) => g.number !== undefined && g.start !== undefined).sort((a, b) => a.start - b.start);
   return started.at(-1)?.number;
 }
-var ORDER = { Worktree: 0, Plan: 1, "Plan review": 2, Implement: 3, Checks: 3, Review: 3, "Final review": 4, "PR ready": 5 };
+var ORDER2 = { Worktree: 0, Plan: 1, "Plan review": 2, Implement: 3, Checks: 3, Review: 3, "Final review": 4, "PR ready": 5 };
 var REVIEWING = /^(review|judge|fix|extract) /;
 var IMPLEMENTING = /^implement$/;
 var FAILED_STEP = { "checks-failed": "Checks", "round-cap": "Review", "review-failed": "Review", "no-changes": "Implement", "gates-red": "Implement" };
@@ -4118,12 +4123,12 @@ function stepsFor(tree, focus) {
       run.push("Final review");
     run.push("PR ready");
   }
-  const latest = titles.length ? ORDER[titles.at(-1)] ?? -1 : -1;
+  const latest = titles.length ? ORDER2[titles.at(-1)] ?? -1 : -1;
   const end = status === "failed" ? "failed" : status === "cancelled" ? "skipped" : status === "running" ? "current" : "done";
-  const stageSteps = run.filter((t) => ORDER[t] === 3);
+  const stageSteps = run.filter((t) => ORDER2[t] === 3);
   const stageStates = stageStepStates(stageSteps, group, latest, end);
   return run.map((title) => {
-    const o = ORDER[title];
+    const o = ORDER2[title];
     if (o === 3)
       return { title, state: stageStates.get(title) ?? "upcoming" };
     return { title, state: o < latest ? "done" : o === latest ? end : "upcoming" };
