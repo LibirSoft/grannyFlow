@@ -323,9 +323,9 @@ describe('skill docs', () => {
     }
   })
 
-  it('releases 1.5.0 with a CHANGELOG entry for the package version', () => {
+  it('releases 1.6.0 with a CHANGELOG entry for the package version', () => {
     const { version } = JSON.parse(readRoot('package.json'))
-    expect(version).toBe('1.5.0')
+    expect(version).toBe('1.6.0')
     const changelog = readRoot('CHANGELOG.md')
     expect(changelog.match(/^## (\S+)/m)?.[1]).toMatch(new RegExp(`^(Unreleased|${version.replaceAll('.', '\\.')})$`))
     expect(changelog.match(/^## (?!Unreleased$)(\S+)$/m)?.[1]).toBe(version)
