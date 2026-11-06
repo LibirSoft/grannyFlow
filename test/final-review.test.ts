@@ -209,3 +209,92 @@ describe('the decision ledger across review loops', () => {
     expect(f.calls.find(c => c.label === 'judge two r1')!.prompt).not.toContain('EARLIER DECISIONS')
   })
 })
+
+describe('the final check prompt carries the run outcomes', () => {
+  const finalPrompt = (f: ReturnType<typeof fakeHost>, label = 'pr-ready check') => f.calls.find(c => c.label === label)!.prompt
+
+  it('replaces a stale review-failed section: a failed run, then a review-only run ending clean', async () => {
+    let reviews = 0
+    const failed = fakeHost({ override: req => (req.role === 'reviewer' && reviews++ < 2 ? null : undefined) })
+    await runGranny(failed.host, { repo: A, branch: 'feat/x', base: 'main', stages: [{ name: 'one', task: 'WP-01' }, { name: 'two', task: 'WP-02' }] })
+    expect(finalPrompt(failed)).toContain('- stage "one": review-failed, 1 review round(s)')
+
+    const reviewOnly = fakeHost()
+    const r = await runGranny(reviewOnly.host, { repo: A, branch: 'feat/x', base: 'main', stages: [{ name: 'review it', implement: false }] })
+    expect(r.stages[0]!.outcome).toBe('clean')
+    const prompt = finalPrompt(reviewOnly)
+    expect(prompt).toContain('- stage "review it": clean, 1 review round(s)')
+    expect(prompt).not.toContain('review-failed')
+    expect(prompt).toContain('every stage is review-only')
+    expect(prompt).toContain('replacing any claim of an earlier run on this branch')
+  })
+
+  it('does not call a run review-only when any stage implements', async () => {
+    const f = fakeHost()
+    await runGranny(f.host, { repo: A, branch: 'feat/x', base: 'main', stages: [{ name: 'build', task: 'WP-01' }, { name: 'look', implement: false }] })
+    expect(finalPrompt(f)).not.toContain('review-only')
+    expect(finalPrompt(f)).toContain('- final review: clean')
+  })
+
+  it('names the residual and unresolved findings per stage by id and title, on one line each', async () => {
+    const finding = (id: string, severity: string, title: string) => ({ id, severity, file: 'src/a.ts', line: 1, title, detail: 'd' })
+    let rounds = 0
+    const f = fakeHost({
+      scores: [{ 'opus-F1': 10 }],
+      override: req => {
+        if (req.role !== 'reviewer') return undefined
+        rounds++
+        return { findings: rounds === 1 ? [finding('F1', 'P3', 'Nit in\ntwo lines'), finding('F2', 'P1', 'Still broken')] : [finding('F1', 'P1', 'Still broken')] }
+      },
+    })
+    await runGranny(f.host, { repo: A, branch: 'feat/x', base: 'main', stages: [{ name: 'one', task: 'WP-01' }], config: { ...agentReviewer, maxRounds: 2 } })
+    expect(finalPrompt(f)).toMatch(/- stage "one": round-cap, 2 review round\(s\); residual: \S+ Nit in two lines; unresolved: \S+ Still broken\n/)
+  })
+
+  it('gives the final review its reason and the plan review its outcome', async () => {
+    const f = fakeHost()
+    await runGranny(f.host, { repo: A, branch: 'feat/x', base: 'main', plan: ['/plans/v1.md'], stages: [{ name: 'one', task: 'WP-01' }] })
+    const prompt = finalPrompt(f)
+    expect(prompt).toContain('- final review: skipped, 0 review round(s) - one stage and no lane merge')
+    expect(prompt).toContain('- plan review: review-skipped, 0 review round(s)')
+  })
+
+  it('keeps what an earlier run said about the stages a resumed run skipped past', async () => {
+    const f = fakeHost()
+    await runGranny(f.host, { repo: A, branch: 'feat/x', base: 'main', plan: ['/plans/v1.md'], stages: [{ name: 'one', task: 'WP-01' }, { name: 'two', task: 'WP-02' }], fromStage: 2, config: { planReview: true } })
+    const prompt = finalPrompt(f)
+    const keep = 'it ran in an earlier run, which this run resumes: keep what the PR body says about it'
+    expect(prompt).toContain(`- stage "one": skipped, 0 review round(s) - ${keep}`)
+    expect(prompt).toContain(`- plan review: skipped, 0 review round(s) - ${keep}`)
+    expect(prompt).toContain('- stage "two": clean')
+  })
+
+  it("gives each repo's final check only that repo's stages, and the plan review only to the primary", async () => {
+    const f = fakeHost()
+    await runGranny(f.host, {
+      repo: A,
+      branch: 'feat/x',
+      base: 'main',
+      repos: [{ repo: B }],
+      plan: ['/plans/v1.md'],
+      stages: [{ name: 'in a', task: 'WP-01' }, { name: 'in b', implement: false, repo: B }],
+    })
+    const primary = finalPrompt(f)
+    expect(primary).toContain('- stage "in a": clean')
+    expect(primary).not.toContain('- stage "in b"')
+    expect(primary).toContain('- plan review:')
+    expect(primary).not.toContain('review-only')
+    const other = finalPrompt(f, 'pr-ready check b')
+    expect(other).toContain('- stage "in b": clean')
+    expect(other).not.toContain('- stage "in a"')
+    expect(other).not.toContain('- plan review:')
+    expect(other).toContain('every stage is review-only')
+  })
+
+  it('says when no stage worked in a repo', async () => {
+    const f = fakeHost()
+    await runGranny(f.host, { repo: A, branch: 'feat/x', base: 'main', repos: [{ repo: B }], stages: [{ name: 'in b', task: 'WP-01', repo: B }] })
+    expect(finalPrompt(f)).toContain('- no stage of this run worked in this repo')
+    expect(finalPrompt(f)).not.toContain('review-only')
+  })
+})

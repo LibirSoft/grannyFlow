@@ -527,7 +527,7 @@ READ-ONLY ROLE: do not edit, create, stage or commit any file.
 Besides Read (and Grep and Glob where you have them), your Bash runs only: git diff, git log, git show, git blame, git status, git rev-parse, git merge-base, git ls-files, git branch --show-current, cat, sed -n '<from>,<to>p', grep, find (without -exec, -delete or -fprint), ls, head, tail, wc, pwd. Plain commands only: a `cd <dir> && ` prefix, `|` between them and `2>/dev/null` are fine; a hook blocks `$(...)`, backticks, `$VARIABLES`, redirection into a file and any other command.
 ```
 
-## Granny - final check (the plan-file part only when a plan file sits inside the repo, outside the work dir)
+## Granny - final check (the plan-file part only when a plan file sits inside the repo, outside the work dir; the list is this run's real outcomes, here an example: a plan review line only with plan files, a final review line only for a repo that had stages, the review-only sentence only when every stage of the repo has `implement: false`)
 
 ```text
 Working repo: <repo>, branch `<branch>` (verify with `git branch --show-current`). Never touch `<base>`. NEVER push, force-push, rebase, `git remote add` or open a PR.
@@ -543,5 +543,11 @@ CONTEXT - read it before anything else and obey it:
 Plan files - read them first: <plan files>
 <context: work-order files and override notes>
 
-You are GRANNY doing the FINAL CHECK. Run every gate and record exact numbers. `git status --short` must be clean except for the plan files <plan files inside the repo>, which stay uncommitted: never stage or commit them. `git log '<base>'..HEAD --format=%B | grep -i -E "co-authored-by|generated with|claude-session"` must print nothing; if it does, report it - do not rewrite history. Make .granny/PR-BODY.md complete and accurate against the actual commits; fold in the notes of stages that ran in their own worktree (.granny/PR-BODY-*.md, if any) and delete those files. Fix only the PR body and trivial gate breakage; report anything else in issues.
+You are GRANNY doing the FINAL CHECK. Run every gate and record exact numbers. `git status --short` must be clean except for the plan files <plan files inside the repo>, which stay uncommitted: never stage or commit them. `git log '<base>'..HEAD --format=%B | grep -i -E "co-authored-by|generated with|claude-session"` must print nothing; if it does, report it - do not rewrite history. Make .granny/PR-BODY.md complete and accurate against the actual commits; fold in the notes of stages that ran in their own worktree (.granny/PR-BODY-*.md, if any) and delete those files.
+The commits do not show how this run's reviews ended. They ended like this:
+- plan review: review-skipped, 0 review round(s)
+- stage "<stage name>": residual-only, 2 review round(s); residual: F1 <title>
+- final review: clean, 1 review round(s)
+This run only reviewed: every stage is review-only (implement: false), so any commit it made is a review fix. Say so in the PR body.
+Rewrite the PR body's review and status section from this list, adding the section if there is none and replacing any claim of an earlier run on this branch. Fix only the PR body and trivial gate breakage; report anything else in issues.
 ```

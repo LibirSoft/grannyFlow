@@ -1,7 +1,7 @@
 import type { GrannyConfig } from './config'
 import { isBlocker } from './review'
 import { shellQuote } from './shell'
-import type { Declined, Finding, StageSpec } from './types'
+import type { Declined, Finding, PlanResult, StageResult, StageSpec } from './types'
 
 /** One review round's decisions in the ledger; loop is set on a round of an earlier review loop (a stage's review). */
 export interface EarlierRound {
@@ -462,13 +462,38 @@ ${overruledSection(overruled)}
 ${findingsList(accepted)}`
 }
 
-export function finalPrompt(p: PromptContext, plans: string[] = []): string {
+/** How this run's reviews ended, for one repo's final check. */
+export interface RunOutcomes {
+  stages: StageResult[]
+  finalReview?: PlanResult
+  plan?: PlanResult
+  reviewOnly: boolean
+}
+
+function outcomeLine(name: string, r: PlanResult): string {
+  const listed = (kind: string, findings: Finding[]) => (findings.length ? `; ${kind}: ${findings.map(f => `${f.id} ${f.title.replace(/\s+/g, ' ').trim()}`).join(', ')}` : '')
+  const note = r.note?.split('\n')[0]
+  return `- ${name}: ${r.outcome}, ${r.rounds} review round(s)${listed('residual', r.residual)}${listed('unresolved', r.unresolved)}${note ? ` - ${note}` : ''}`
+}
+
+function outcomesList(o: RunOutcomes): string {
+  return [
+    ...(o.plan ? [outcomeLine('plan review', o.plan)] : []),
+    ...(o.stages.length ? o.stages.map(s => outcomeLine(`stage "${s.stage}"`, s)) : ['- no stage of this run worked in this repo']),
+    ...(o.finalReview ? [outcomeLine('final review', o.finalReview)] : []),
+  ].join('\n')
+}
+
+export function finalPrompt(p: PromptContext, plans: string[], outcomes: RunOutcomes): string {
   const attribution = p.config.aiAttribution
     ? ''
     : ` \`git log ${shellQuote(p.base)}..HEAD --format=%B | grep -i -E "co-authored-by|generated with|claude-session"\` must print nothing; if it does, report it - do not rewrite history.`
   return `${common(p)}
 
-You are GRANNY doing the FINAL CHECK. Run every gate and record exact numbers. \`git status --short\` must be clean${plans.length ? ` except for the plan files ${plans.join(', ')}, which stay uncommitted: never stage or commit them` : ''}.${attribution} Make ${prBodyPath(p.config)} complete and accurate against the actual commits${p.config.parallel ? `; fold in the notes of stages that ran in their own worktree (${p.config.workDir}/PR-BODY-*.md, if any) and delete those files` : ''}. Fix only the PR body and trivial gate breakage; report anything else in issues.`
+You are GRANNY doing the FINAL CHECK. Run every gate and record exact numbers. \`git status --short\` must be clean${plans.length ? ` except for the plan files ${plans.join(', ')}, which stay uncommitted: never stage or commit them` : ''}.${attribution} Make ${prBodyPath(p.config)} complete and accurate against the actual commits${p.config.parallel ? `; fold in the notes of stages that ran in their own worktree (${p.config.workDir}/PR-BODY-*.md, if any) and delete those files` : ''}.
+The commits do not show how this run's reviews ended. They ended like this:
+${outcomesList(outcomes)}
+${outcomes.reviewOnly ? 'This run only reviewed: every stage is review-only (implement: false), so any commit it made is a review fix. Say so in the PR body.\n' : ''}Rewrite the PR body's review and status section from this list, adding the section if there is none and replacing any claim of an earlier run on this branch. Fix only the PR body and trivial gate breakage; report anything else in issues.`
 }
 
 export function mergePrompt(p: PromptContext, name: string, lane: string, output: string): string {

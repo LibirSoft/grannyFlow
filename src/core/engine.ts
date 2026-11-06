@@ -30,6 +30,7 @@ import {
   type FailedCheck,
   type Overruled,
   type PromptContext,
+  type RunOutcomes,
   type StageTask,
   WHOLE_BRANCH_NOTE,
 } from './prompts'
@@ -1194,9 +1195,21 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
     return { passed: false, note: `uncommitted changes after the checks at pr-ready: ${listed(left)}` }
   }
 
+  const outcomesOf = (s: RepoState): RunOutcomes => {
+    const own = specs.flatMap((st, i) => (repoOf(st) === s.lane.repo ? [i] : []))
+    const resumed = 'it ran in an earlier run, which this run resumes: keep what the PR body says about it'
+    const review = reviews.get(s)
+    return {
+      stages: own.map(i => (i < fromStage - 1 ? { ...results[i]!, note: resumed } : results[i]!)),
+      ...(review ? { finalReview: review } : {}),
+      ...(planResult && s.lane.repo === primary ? { plan: fromStage > 1 && planResult.outcome === 'skipped' ? { ...planResult, note: resumed } : planResult } : {}),
+      reviewOnly: own.length > 0 && own.every(i => specs[i]!.implement === false),
+    }
+  }
+
   const check = async (s: RepoState): Promise<RepoResult> => {
     const label = s.lane.repo === primary ? 'pr-ready check' : `pr-ready check ${baseName(s.lane.repo)}`
-    const final = (await call('granny', 'final', label, 'PR ready', finalPrompt(s.lane.p, plansIn(s.lane.cwd)), 'write', config.roles.granny, s.lane.cwd)) as FinalReport | null
+    const final = (await call('granny', 'final', label, 'PR ready', finalPrompt(s.lane.p, plansIn(s.lane.cwd), outcomesOf(s)), 'write', config.roles.granny, s.lane.cwd)) as FinalReport | null
     if (!final) host.log(s.lane.repo === primary ? 'final check returned nothing' : `${label} returned nothing`)
     const review = reviews.get(s)
     const runs = finalRuns.get(s) ?? []

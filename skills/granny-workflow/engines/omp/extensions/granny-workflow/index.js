@@ -924,11 +924,29 @@ Fix every finding below. If you believe a finding is wrong, leave the plan as is
 ${overruledSection(overruled)}
 ${findingsList(accepted)}`;
 }
-function finalPrompt(p, plans = []) {
+function outcomeLine(name, r) {
+  const listed = (kind, findings) => findings.length ? `; ${kind}: ${findings.map((f) => `${f.id} ${f.title.replace(/\s+/g, " ").trim()}`).join(", ")}` : "";
+  const note = r.note?.split(`
+`)[0];
+  return `- ${name}: ${r.outcome}, ${r.rounds} review round(s)${listed("residual", r.residual)}${listed("unresolved", r.unresolved)}${note ? ` - ${note}` : ""}`;
+}
+function outcomesList(o) {
+  return [
+    ...o.plan ? [outcomeLine("plan review", o.plan)] : [],
+    ...o.stages.length ? o.stages.map((s) => outcomeLine(`stage "${s.stage}"`, s)) : ["- no stage of this run worked in this repo"],
+    ...o.finalReview ? [outcomeLine("final review", o.finalReview)] : []
+  ].join(`
+`);
+}
+function finalPrompt(p, plans, outcomes) {
   const attribution = p.config.aiAttribution ? "" : ` \`git log ${shellQuote(p.base)}..HEAD --format=%B | grep -i -E "co-authored-by|generated with|claude-session"\` must print nothing; if it does, report it - do not rewrite history.`;
   return `${common(p)}
 
-You are GRANNY doing the FINAL CHECK. Run every gate and record exact numbers. \`git status --short\` must be clean${plans.length ? ` except for the plan files ${plans.join(", ")}, which stay uncommitted: never stage or commit them` : ""}.${attribution} Make ${prBodyPath(p.config)} complete and accurate against the actual commits${p.config.parallel ? `; fold in the notes of stages that ran in their own worktree (${p.config.workDir}/PR-BODY-*.md, if any) and delete those files` : ""}. Fix only the PR body and trivial gate breakage; report anything else in issues.`;
+You are GRANNY doing the FINAL CHECK. Run every gate and record exact numbers. \`git status --short\` must be clean${plans.length ? ` except for the plan files ${plans.join(", ")}, which stay uncommitted: never stage or commit them` : ""}.${attribution} Make ${prBodyPath(p.config)} complete and accurate against the actual commits${p.config.parallel ? `; fold in the notes of stages that ran in their own worktree (${p.config.workDir}/PR-BODY-*.md, if any) and delete those files` : ""}.
+The commits do not show how this run's reviews ended. They ended like this:
+${outcomesList(outcomes)}
+${outcomes.reviewOnly ? `This run only reviewed: every stage is review-only (implement: false), so any commit it made is a review fix. Say so in the PR body.
+` : ""}Rewrite the PR body's review and status section from this list, adding the section if there is none and replacing any claim of an earlier run on this branch. Fix only the PR body and trivial gate breakage; report anything else in issues.`;
 }
 function mergePrompt(p, name, lane, output) {
   return `${common(p)}
@@ -2311,9 +2329,20 @@ ${note}` : note } : result;
     host.log(`${label}: the checks left uncommitted changes after the pr-ready check - the branch is not PR-ready: ${listed(left)}`);
     return { passed: false, note: `uncommitted changes after the checks at pr-ready: ${listed(left)}` };
   };
+  const outcomesOf = (s) => {
+    const own = specs.flatMap((st, i) => repoOf(st) === s.lane.repo ? [i] : []);
+    const resumed = "it ran in an earlier run, which this run resumes: keep what the PR body says about it";
+    const review = reviews.get(s);
+    return {
+      stages: own.map((i) => i < fromStage - 1 ? { ...results[i], note: resumed } : results[i]),
+      ...review ? { finalReview: review } : {},
+      ...planResult && s.lane.repo === primary ? { plan: fromStage > 1 && planResult.outcome === "skipped" ? { ...planResult, note: resumed } : planResult } : {},
+      reviewOnly: own.length > 0 && own.every((i) => specs[i].implement === false)
+    };
+  };
   const check = async (s) => {
     const label = s.lane.repo === primary ? "pr-ready check" : `pr-ready check ${baseName(s.lane.repo)}`;
-    const final = await call("granny", "final", label, "PR ready", finalPrompt(s.lane.p, plansIn(s.lane.cwd)), "write", config.roles.granny, s.lane.cwd);
+    const final = await call("granny", "final", label, "PR ready", finalPrompt(s.lane.p, plansIn(s.lane.cwd), outcomesOf(s)), "write", config.roles.granny, s.lane.cwd);
     if (!final)
       host.log(s.lane.repo === primary ? "final check returned nothing" : `${label} returned nothing`);
     const review = reviews.get(s);

@@ -198,6 +198,12 @@ describe('skill docs', () => {
     expect(opencode).toContain('Enter opens the session')
   })
 
+  it("tells the final check to rewrite the PR body's review section from the run's outcomes, by hand on Cursor too", () => {
+    expect(read('references/prompts.md')).toContain("Rewrite the PR body's review and status section from this list")
+    expect(read('references/cursor.md')).toContain("rewrite the PR body's review section from it")
+    expect(read('references/config.md')).toContain("rewrite the PR body's review section from them")
+  })
+
   it('names the run files the views read in both host references', () => {
     for (const file of ['references/omp.md', 'references/opencode.md']) {
       const text = read(file)
