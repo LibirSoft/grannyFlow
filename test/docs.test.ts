@@ -70,7 +70,7 @@ describe('skill docs', () => {
   it('has a SKILL.md with the frontmatter every host reads', () => {
     const md = read('SKILL.md')
     expect(md).toMatch(/^---\nname: granny-workflow\ndescription: .{50,1024}\n---\n/)
-    for (const ref of ['references/claude-code.md', 'references/opencode.md', 'references/omp.md', 'references/cursor.md', 'references/config.md', 'references/setup.md']) {
+    for (const ref of ['references/claude-code.md', 'references/opencode.md', 'references/omp.md', 'references/cursor.md', 'references/config.md', 'references/setup.md', 'references/judge.md']) {
       expect(md).toContain(`(${ref}`)
       expect(() => read(ref)).not.toThrow()
     }
@@ -148,6 +148,63 @@ describe('skill docs', () => {
       expect(read('references/setup.md')).toMatch(new RegExp(`^ *\\| ${name}( \\(default\\))? \\| \`${threshold}\` \\|`, 'm'))
       expect(read('references/config.md')).toContain(`${name} \`${threshold}\``)
     }
+  })
+
+  describe('granny judge', () => {
+    const MAPPING = /critical.*P0.*major.*P1.*moderate.*P2.*minor.*P3/s
+
+    it('has a reference with config examples that parse, the launch per host, the mapping and the report directory', () => {
+      const judge = read('references/judge.md')
+      const blocks = jsonBlocks(judge)
+      expect(blocks.length).toBeGreaterThan(0)
+      for (const block of blocks) {
+        const config = JSON.parse(block)
+        expect(Object.keys(config).sort()).toEqual(['reviewers', 'roles'])
+        for (const host of HOSTS) expect(() => resolveConfig([config], host)).not.toThrow()
+      }
+      expect(judge).toMatch(MAPPING)
+      expect(judge).toContain('.granny/reviews/')
+      expect(judge).toContain('granny_judge({ repo, base?, context? })')
+      expect(judge).toContain('args: { judge: true, repo, base, context, config: [<user>, <project>] }')
+      expect(judge).toContain('[setup.md](setup.md#1-look-first)')
+      expect(judge).toContain('A parent never answers these for the user')
+      expect(judge).toContain('`written: false`')
+      expect(judge).toContain('`implement: false`')
+    })
+
+    it('is routed from SKILL.md, whose description names it', () => {
+      const md = read('SKILL.md')
+      expect(md).toContain('[references/judge.md](references/judge.md)')
+      expect(md.split('\n')[2]).toContain('granny judge')
+      expect(md.split('\n')[2]).toContain('review only')
+      expect(md).toContain('`granny_judge`')
+    })
+
+    it('is named in the host references, the config reference, the README and the changelog', () => {
+      for (const file of ['references/omp.md', 'references/opencode.md']) {
+        expect({ file, tool: read(file).includes('granny_judge({ repo, base?, context?, config? })') }).toEqual({ file, tool: true })
+        expect({ file, reviews: read(file).includes('.granny/reviews/') }).toEqual({ file, reviews: true })
+      }
+      expect(read('references/claude-code.md')).toContain('judge: true')
+      expect(read('references/claude-code.md')).toContain('.granny/reviews/')
+      expect(read('references/cursor.md')).toContain('## granny judge')
+      expect(read('references/cursor.md')).toMatch(/granny judge[\s\S]*not deterministic/)
+      expect(read('references/cursor.md')).toContain('.granny/reviews/')
+      const config = read('references/config.md')
+      expect(config).toContain('## Judge runs')
+      expect(config).toContain('(#judge-runs)')
+      expect(config.slice(config.indexOf('## Judge runs'))).toMatch(MAPPING)
+      expect(config).toContain('names both a role and a method')
+      const readme = readRoot('README.md')
+      expect(readme).toContain('## Review only: `granny judge`')
+      expect(readme.indexOf('## Use')).toBeLessThan(readme.indexOf('## Review only: `granny judge`'))
+      expect(readme.indexOf('## Review only: `granny judge`')).toBeLessThan(readme.indexOf('## How it works'))
+      expect(readme).toContain('.granny/reviews/')
+      expect(readme).toMatch(MAPPING)
+      const unreleased = readRoot('CHANGELOG.md').split('\n## ')[1]!
+      expect(unreleased).toContain('`granny_judge`')
+      expect(read('engines/opencode/agents/granny.md')).toContain('granny judge')
+    })
   })
 
   it('has the Cursor protocol route and triage findings in the engine order', () => {

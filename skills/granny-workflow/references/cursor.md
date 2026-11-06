@@ -8,6 +8,17 @@ Copy `engines/cursor/agents/*.md` to `~/.cursor/agents/` (all projects) or `<pro
 
 Config: read `~/.config/granny/config.json` and `<repo>/granny.config.json` yourself and apply the layering in [config.md](config.md); only `threshold`, `alwaysFix`, `maxRounds`, `planReview`, `finalReview`, `checks`, `maxRepairs`, `base`, `gates`, `workDir`, `worktree`, `worktreeDir`, `language`, `aiAttribution`, `rules` and `reviewers` apply here - of a reviewer, its `name`, `engine`, `mode`, `focus`, `command`, and `model` where the engine passes it on. An `agent` reviewer runs `granny-reviewer` on whatever model that subagent has.
 
+## granny judge
+
+The steps, with what to ask the user first, are in [judge.md](judge.md). Here you run that review and tagging by hand, on the checkout as it is, with no worktree and no branch. It is not deterministic: keep strictly to these steps.
+
+1. Check that `git rev-list --count <base>..HEAD` is not 0. Note the date with `date +%Y%m%d-%H%M%S` and the uncommitted files from `git status --porcelain`.
+2. Run every reviewer once, as in step 2 of [the loop](#the-loop), with `<base>` as the base and this note in each prompt: this is a one-shot review, nobody fixes anything in this run, report every problem you can confirm in the code. A reviewer gets its one retry. When none ran, stop: there is no report.
+3. Give every finding, P0/P1 included, to `granny-judge` with the "Granny judge - tagging" prompt from [prompts.md](prompts.md), read-only, with its one retry. Normalize each classification as in [the decision table](config.md#the-decision-table) and compute its priority. Ignore the table's decision.
+4. Write the report to `<repo>/<workDir>/reviews/<date>-<branch-slug>.md` (by default `.granny/reviews/`), with the headings and tags [judge.md](judge.md#the-report) lists: all four P headings, `None.` when empty, the highest priority first. Check that it is there.
+
+Change nothing else: no fix, no commit. Then report per [judge.md](judge.md#5-report) and stop.
+
 ## The worktree
 
 With `worktree` on (the default), set it up by hand before the first stage - also when you resume with `fromStage` - by the rules the engines follow ([config.md](config.md#worktree)):

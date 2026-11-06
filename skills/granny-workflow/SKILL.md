@@ -1,6 +1,6 @@
 ---
 name: granny-workflow
-description: Run a planned implementation through the granny loop - an implementer agent builds each stage of a plan on a feature branch, any number of reviewers (the host's model by default; also Codex or any CLI) review it in parallel, every P0/P1 goes straight back to the implementer, a judge classifies the other findings, the critical and major ones and those whose priority tops the threshold go back too, and the loop repeats until the review is clean; ends PR-ready without pushing. With no plan yet, a planner agent writes the plan and the run stops for the user's approval. "granny setup" (or "granny init") walks the user through the project's config (review strictness, reviewers, checks, a model per role) and writes it. Use when the user says "implement this plan", "plan this with granny", "run granny", "granny workflow", "granny setup", "granny init", "set up granny", "implement → review → fix", hands over a plan or work orders to build, or asks granny to plan a feature first.
+description: Run a planned implementation through the granny loop - an implementer agent builds each stage of a plan on a feature branch, any number of reviewers (the host's model by default; also Codex or any CLI) review it in parallel, every P0/P1 goes straight back to the implementer, a judge classifies the other findings, the critical and major ones and those whose priority tops the threshold go back too, and the loop repeats until the review is clean; ends PR-ready without pushing. With no plan yet, a planner agent writes the plan and the run stops for the user's approval. "granny setup" (or "granny init") asks about the project's config and writes it. "granny judge" is review only: one agent reviews, another tags, into a report file. Use when the user says "implement this plan", "plan this with granny", "run granny", "granny workflow", "granny setup", "granny init", "granny judge", "implement → review → fix", hands over a plan or work orders to build, or asks granny to plan a feature first.
 ---
 
 # granny-workflow
@@ -8,6 +8,8 @@ description: Run a planned implementation through the granny loop - an implement
 You are **Granny**: you prepare the run, launch the engine, and report the result. The engine owns the loop; you do not implement, review or judge yourself. Invoking this skill is the user's opt-in to a multi-agent run.
 
 **Setup:** when the user says `granny setup` or `granny init`, or asks to set up or configure granny, follow [references/setup.md](references/setup.md) instead of the steps below: ask about review strictness, reviewers, checks, the model of each role and where to save, write the config, and launch nothing.
+
+**Judge:** when the user says `granny judge`, or wants granny only to review, follow [references/judge.md](references/judge.md) instead of the steps below: it asks for the reviewers and the judge model only when they are missing, then one agent reviews the checkout's `<base>...HEAD`, another tags the findings, and the result goes to a report file under `<workDir>/reviews/`, by the headings P0 to P3. Nothing is fixed or committed. "Judge" names both the method and the role in the table below: the method's tagging agent runs on the `judge` role.
 
 ```
 before the first stage: reuse the branch's worktree or create one (config worktree, default on); everything below runs there
@@ -62,6 +64,7 @@ then: granny's final check in every repo (gates, clean tree, no AI trailers, PR 
 - You have a tool named `Workflow` → **Claude Code** → follow [references/claude-code.md](references/claude-code.md).
 - You have a tool named `granny_run` and run in opencode → **opencode** → follow [references/opencode.md](references/opencode.md).
 - You have a tool named `granny_run` and run in omp (oh-my-pi) → **omp** → follow [references/omp.md](references/omp.md).
+- `granny judge` on any of these: `granny_judge` is the tool on opencode and omp, the same Workflow script with `judge: true` on Claude Code - [references/judge.md](references/judge.md) has the steps.
 - You run in opencode but have no `granny_run` → install the plugin per [references/opencode.md](references/opencode.md#install), ask the user to restart, stop.
 - You run in omp but have no `granny_run` → install the extension per [references/omp.md](references/omp.md#install), ask the user to restart omp, stop.
 - Anything else (Cursor, other agents) → [references/cursor.md](references/cursor.md): the same loop run by hand. Tell the user it is not deterministic there.
