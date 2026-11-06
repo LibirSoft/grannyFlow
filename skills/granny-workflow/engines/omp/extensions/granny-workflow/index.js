@@ -1217,15 +1217,17 @@ function worktreePath(repo, branch, worktreeDir, shared = false) {
   const prefix = shared && worktreeDir !== undefined ? `${name}-` : "";
   return normalize(`${dir}/${prefix}${branchSlug(branch)}`);
 }
-function worktreeScript(c, branch, base, path) {
+function excludeScript(c) {
   const entry = shellQuote(`/${c.workDir}/`);
+  return `ex="$(git rev-parse --git-common-dir)/info/exclude" && mkdir -p "\${ex%/*}" && { grep -qxF -e ${entry} "$ex" 2>/dev/null || { if [ -s "$ex" ] && [ -n "$(tail -c 1 "$ex")" ]; then echo >> "$ex"; fi; printf '%s\\n' ${entry} >> "$ex"; }; }`;
+}
+function worktreeScript(c, branch, base, path) {
   const b = shellQuote(branch);
-  const exclude = `ex="$(git rev-parse --git-common-dir)/info/exclude" && mkdir -p "\${ex%/*}" && { grep -qxF -e ${entry} "$ex" 2>/dev/null || { if [ -s "$ex" ] && [ -n "$(tail -c 1 "$ex")" ]; then echo >> "$ex"; fi; printf '%s\\n' ${entry} >> "$ex"; }; }`;
   const find = `wt=$(git worktree list --porcelain | while IFS= read -r l; do case "$l" in "worktree "*) p=\${l#worktree };; "branch refs/heads/"*) if [ "\${l#branch refs/heads/}" = ${b} ]; then printf '%s\\n' "$p"; break; fi;; esac; done)`;
   const reuse = `changes=$(git -C "$wt" status --porcelain) || exit 1; if [ -n "$changes" ]; then printf '[granny] worktree failed: %s has %s checked out with uncommitted changes - commit or discard them, then run again:\\n' "$wt" ${b}; git -C "$wt" status --short; exit 1; fi`;
   const add = `wt=${shellQuote(path)}; git worktree add "$wt" ${b} || exit 1`;
   const create = `wt=${shellQuote(path)}; git worktree add -b ${b} "$wt" ${shellQuote(base)} || exit 1`;
-  return `${exclude} && ${find} && if [ -n "$wt" ]; then ${reuse}; elif git show-ref --verify --quiet ${shellQuote(`refs/heads/${branch}`)}; then ${add}; else ${create}; fi && printf '%s%s\\n' ${shellQuote(SAID2)} "$wt"`;
+  return `${excludeScript(c)} && ${find} && if [ -n "$wt" ]; then ${reuse}; elif git show-ref --verify --quiet ${shellQuote(`refs/heads/${branch}`)}; then ${add}; else ${create}; fi && printf '%s%s\\n' ${shellQuote(SAID2)} "$wt"`;
 }
 function reportedWorktree(output) {
   return REPORTED.exec(output)?.[1];

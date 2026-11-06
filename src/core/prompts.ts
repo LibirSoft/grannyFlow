@@ -259,6 +259,21 @@ export function gitCommandPrompt(repo: string, step: string, script: string): st
   return oneCommand(`git command for the "${step}" step`, `Repo ${repo}.`, 'Run exactly this:', script)
 }
 
+export const ONE_SHOT_NOTE = 'This is a one-shot review: nobody fixes anything in this run, so report every problem you can confirm in the code.'
+
+export function judgeStepPrompt(repo: string, step: string, script: string): string {
+  return oneCommand(`shell command for the "${step}" step of a review-only run`, `Repo ${repo}.`, 'Run exactly this:', script)
+}
+
+export function reportWritePrompt(repo: string, step: string, script: string): string {
+  return oneCommand(
+    `shell command for the "${step}" step of a review-only run, which saves the review report (the one file this run writes),`,
+    `Repo ${repo}.`,
+    'Run exactly this, as one command with its line breaks and every character kept, down to its last line:',
+    script,
+  )
+}
+
 export function timeoutProbePrompt(repo: string, step: string, script: string): string {
   return oneCommand(
     `shell command for the "${step}" step: it prints the name of the timeout command the checks run in, or nothing`,
@@ -423,6 +438,18 @@ ${judgeRouting(findings)}
 For each finding, open the cited code and check that it is real and correctly described.${stage ? " Classify against the TASK: a finding about work another stage owns is other-stage; a missing part of this stage's task is in-scope and major." : ''} ${JUDGE_DUPES}
 ${rubric(stage ? "the stage's TASK" : 'what the change set out to do')}
 ${judgeHistory(earlier)}
+REVIEW:
+${JSON.stringify(findings)}`
+}
+
+/** The judge of a `granny judge` run: nothing is routed or fixed, so its classification alone places every finding. */
+export function tagPrompt(p: PromptContext, reviewBase: string, findings: Finding[]): string {
+  return `You are the JUDGE tagging the findings of a one-shot code review. Repo ${p.repo}, branch ${p.branch}, diff \`${shellQuote(reviewBase)}...HEAD\`. Do not edit anything.
+${p.context ? 'Design context:\n' + p.context + '\n' : ''}
+Nobody fixes anything in this run. Your classification decides under which heading of the user's report each finding goes, so classify every finding on its merits: the reviewer's severity does not bind you, in either direction.
+For each finding, open the cited code and check that it is real and correctly described. Use scope in-scope or pre-existing only. ${JUDGE_DUPES}
+${rubric('what the change set out to do')}
+
 REVIEW:
 ${JSON.stringify(findings)}`
 }

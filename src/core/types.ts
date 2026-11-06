@@ -207,3 +207,26 @@ export interface RunResult {
   final: FinalReport | null
   repos?: RepoResult[]
 }
+
+export type ReportBucket = 'P0' | 'P1' | 'P2' | 'P3' | 'dismissed'
+export type JudgeCounts = Record<ReportBucket, number>
+export type JudgeOutcome = 'reviewed' | 'no-changes' | 'review-failed'
+
+export interface JudgeResult {
+  repo: string
+  branch: string
+  base: string
+  head: string
+  outcome: JudgeOutcome
+  counts: JudgeCounts
+  /** Ids of the findings a reviewer rated P0 or P1 and the judge placed lower or dismissed. */
+  demoted: string[]
+  findings: Finding[]
+  failedReviewers: Array<{ name: string; note: string }>
+  notJudged: string[]
+  uncommitted: string[]
+  reportPath?: string
+  written: boolean
+  report?: string
+  note?: string
+}

@@ -514,6 +514,69 @@ RAW REVIEW OUTPUT:
 <raw review output>
 ```
 
+## Granny judge - the note every reviewer prompt (after its first line naming the diff) carries, with the branch as the stage name and diff base `<base>`
+
+```text
+This is a one-shot review: nobody fixes anything in this run, so report every problem you can confirm in the code.
+```
+
+## Granny judge - tagging (every finding, P0/P1 included; label `tag <branch>`; the retry note above is appended once when it left findings unclassified)
+
+```text
+You are the JUDGE tagging the findings of a one-shot code review. Repo <repo>, branch <branch>, diff `'<base>'...HEAD`. Do not edit anything.
+Design context:
+Plan files - read them first: <plan files>
+<context: work-order files and override notes>
+
+Nobody fixes anything in this run. Your classification decides under which heading of the user's report each finding goes, so classify every finding on its merits: the reviewer's severity does not bind you, in either direction.
+For each finding, open the cited code and check that it is real and correctly described. Use scope in-scope or pre-existing only. If a finding reports the same problem as another one in this list (reviewers overlap), classify it too and set its duplicateOf to the id of the one to keep.
+Classify every finding with exactly these fields:
+- verdict: confirmed (the code shows the problem) | refuted (the code shows it is absent or not a problem) | unverified (you cannot tell either way).
+- impact, how bad IF it triggers: critical | major | moderate | minor | none.
+  Judge impact assuming the trigger happens. Likelihood never lowers impact; it is its own field.
+  - critical: data loss or corruption, writing to the wrong record, security or authorization bypass, secret or personal data leak, a draft going public, an irreversible operation, stored data silently read differently.
+  - major: the user cannot get out from inside the app (a lock only a reload clears, endless loading, a crash); something that worked silently breaks; an API or contract break; a required part of what the change set out to do is missing.
+  - moderate: wrong behaviour with an easy workaround; wrong or missing error message; missing test for changed behaviour; duplicated logic.
+  - minor: visual defect, naming, style.
+  - none: not a problem.
+- likelihood: common (the normal flow) | edge (special timing or state: a race, an expired session, a boundary value) | rare (forced input, a rarely used feature).
+- fixCost: trivial (a few lines) | small (one function or file plus a test) | large (cross-module, a redesign).
+- scope: in-scope | pre-existing (there before this change) | other-stage (another stage's job).
+- evidence: path:line plus the concrete trigger steps, e.g. `Editor.tsx:225` + "save -> go back -> late response arrives -> save again". Always give a path:line: without one the finding counts as unverified, which lowers its impact one class.
+- reason: one line.
+Example: a late save response re-binds the editor to another post's id, so the next save can overwrite the wrong post: confirmed, critical, edge, small, in-scope, though the window is narrow.
+
+REVIEW:
+<findings as JSON>
+```
+
+## Granny judge - a plain step, the helper agent on Claude Code (on opencode and omp granny runs it itself): the exclude step, the date and the size of the written report; the git reads use the git command prompt
+
+```text
+Run one shell command for the "exclude" step of a review-only run and return its output. Run nothing else; edit, stage or commit nothing.
+Repo <repo>.
+
+Run exactly this:
+cd '<repo>' && ex="$(git rev-parse --git-common-dir)/info/exclude" && mkdir -p "${ex%/*}" && { grep -qxF -e /.granny/ "$ex" 2>/dev/null || { if [ -s "$ex" ] && [ -n "$(tail -c 1 "$ex")" ]; then echo >> "$ex"; fi; printf '%s\n' /.granny/ >> "$ex"; }; }
+
+Return ran: true only if it exited 0; exitCode: its exit code; output: everything it printed, verbatim and complete. If it failed, set ran=false and explain in note. Never invent output.
+```
+
+## Granny judge - writing the report, the helper agent on Claude Code
+
+```text
+Run one shell command for the "write report" step of a review-only run, which saves the review report (the one file this run writes), and return its output. Run nothing else; edit, stage or commit nothing.
+Repo <repo>.
+
+Run exactly this, as one command with its line breaks and every character kept, down to its last line:
+cd '<repo>' && mkdir -p '<repo>/.granny/reviews' && cat > '<repo>/.granny/reviews/<date>-<branch-slug>.md' <<'GRANNY_REPORT_END'
+<report>
+GRANNY_REPORT_END
+
+
+Return ran: true only if it exited 0; exitCode: its exit code; output: everything it printed, verbatim and complete. If it failed, set ran=false and explain in note. Never invent output.
+```
+
 ## Claude Code - the line before every read-only prompt (an `agent` reviewer, the judge, the extraction agent, and the helpers that start, wait for, read and stop a review command)
 
 ```text

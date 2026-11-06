@@ -14,21 +14,26 @@ import {
   implementPrompt,
   judgePrompt,
   judgeRetryNote,
+  judgeStepPrompt,
   mergePrompt,
   planFixPrompt,
   planJudgePrompt,
   planReviewPrompt,
   repairPrompt,
+  reportWritePrompt,
   reviewReadPrompt,
   reviewStartPrompt,
   reviewStopPrompt,
   reviewWaitPrompt,
+  tagPrompt,
   worktreeCommandPrompt,
   type EarlierRound,
+  ONE_SHOT_NOTE,
   WHOLE_BRANCH_NOTE,
 } from '../src/core/prompts'
 import { detachedReview, MAX_WAITS, WAIT_SECONDS } from '../src/core/reviewer'
-import { worktreeScript } from '../src/core/worktree'
+import { heredocWriteScript } from '../src/core/shell'
+import { excludeScript, worktreeScript } from '../src/core/worktree'
 import { readOnlyPrefix } from '../src/adapters/claude-code/readonly'
 
 const root = join(import.meta.dir, '..')
@@ -164,6 +169,13 @@ export function renderPrompts(): string {
     ],
     ['Final review - the note every reviewer prompt (after its first line naming the diff) and the judge prompt (after its first line) carry, with name `final review` and diff base `<base>`', WHOLE_BRANCH_NOTE],
     ['Extraction fallback', extractPrompt('<stage name>', '<raw review output>')],
+    ['Granny judge - the note every reviewer prompt (after its first line naming the diff) carries, with the branch as the stage name and diff base `<base>`', ONE_SHOT_NOTE],
+    ['Granny judge - tagging (every finding, P0/P1 included; label `tag <branch>`; the retry note above is appended once when it left findings unclassified)', tagPrompt(p, '<base>', []).replace(/\[\]$/, '<findings as JSON>')],
+    [
+      'Granny judge - a plain step, the helper agent on Claude Code (on opencode and omp granny runs it itself): the exclude step, the date and the size of the written report; the git reads use the git command prompt',
+      judgeStepPrompt('<repo>', 'exclude', `cd '<repo>' && ${excludeScript(p.config)}`),
+    ],
+    ['Granny judge - writing the report, the helper agent on Claude Code', reportWritePrompt('<repo>', 'write report', `cd '<repo>' && ${heredocWriteScript('<repo>/.granny/reviews/<date>-<branch-slug>.md', '<report>\n')}`)],
     [
       'Claude Code - the line before every read-only prompt (an `agent` reviewer, the judge, the extraction agent, and the helpers that start, wait for, read and stop a review command)',
       readOnlyPrefix(false).trimEnd(),
