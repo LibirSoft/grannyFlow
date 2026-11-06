@@ -4,6 +4,7 @@ import * as fs from 'node:fs'
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { SAME_MODEL_HINT } from '../src/adapters/common'
 import extension, { blockReason, createGrannyExtension, isTransient, waitSeconds } from '../src/adapters/omp/extension'
 import { lineType, LiveRun, type LogEntry, PARSED_EVENTS, type RoleActivity } from '../src/adapters/omp/panel'
 import { EventLog } from '../src/adapters/omp/watch'
@@ -760,6 +761,20 @@ describe('omp extension in the user session (parent mode)', () => {
     expect(off.started).not.toContain('overrides:')
     await exec(f.tools.get('granny_cancel'), { runId: off.id })
     await finished(off.dir)
+  })
+
+  it('hints in its start reply when the reviewers share the implementer model, and starts the run either way', async () => {
+    behave({ wait: ['implement-one'] })
+    const f = fakePi()
+    await createGrannyExtension({ killGraceMs: 100 })(f.pi as any)
+    const same = await start(f, { reviewers: [{ name: 'reviewer', engine: 'agent' }] })
+    expect(same.started).toContain(SAME_MODEL_HINT)
+    await exec(f.tools.get('granny_cancel'), { runId: same.id })
+    await finished(same.dir)
+    const other = await start(f, { reviewers: [{ name: 'reviewer', engine: 'agent', model: { omp: 'openai-codex/gpt-6.1-sol' } }] })
+    expect(other.started).not.toContain(SAME_MODEL_HINT)
+    await exec(f.tools.get('granny_cancel'), { runId: other.id })
+    await finished(other.dir)
   })
 
   it('writes the run outline to status.json from the start, and a planning run as kind plan', async () => {

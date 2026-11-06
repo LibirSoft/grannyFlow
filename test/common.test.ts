@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test'
-import { dropPlaceholders, HEARTBEAT_MS, hostModelErrors, overridesNotice, planReviewWarning, RUN_INPUT_SCHEMA, RUN_TOOL_DESCRIPTION, withHeartbeat } from '../src/adapters/common'
+import { dropPlaceholders, HEARTBEAT_MS, hostModelErrors, overridesNotice, planReviewWarning, RUN_INPUT_SCHEMA, RUN_TOOL_DESCRIPTION, SAME_MODEL_HINT, sameModelNotice, withHeartbeat } from '../src/adapters/common'
 import { resolveConfig } from '../src/core/config'
 import { checkInput, type RunInput } from '../src/core/engine'
 
@@ -144,5 +144,47 @@ describe('withHeartbeat', () => {
     }, 10, t)
     await expect(done).rejects.toThrow('boom')
     expect(t.live.size).toBe(0)
+  })
+})
+
+describe('sameModelNotice', () => {
+  const run: RunInput = { repo: '/r', branch: 'b', stages: [{ task: 't' }] }
+  const notice = (config: unknown, host: 'omp' | 'opencode' = 'omp', input: RunInput = run) => sameModelNotice(input, resolveConfig([config], host), host)
+  const keyed = (model: string) => ({ omp: model, opencode: model })
+  const on = (model: string) => ({ roles: { implementer: { model: keyed(model) } } })
+  const agent = (name: string, model?: string) => ({ name, engine: 'agent', ...(model ? { model: keyed(model) } : {}) })
+
+  it('gives the hint when every agent reviewer resolves to the implementer model, as advice not to act on alone', () => {
+    const text = notice({ ...on('a/x'), reviewers: [agent('one', 'a/x'), agent('two', 'a/x')] })
+    expect(text).toContain(SAME_MODEL_HINT)
+    expect(text).toContain("do not change a model unless the user asks")
+  })
+
+  it('counts an implementer and a reviewer with no model as the same session model', () => {
+    expect(notice({})).toContain(SAME_MODEL_HINT)
+    expect(notice({ roles: { implementer: { model: { 'claude-code': 'opus' } } }, reviewers: [{ name: 'one', engine: 'agent', model: { 'claude-code': 'sonnet' } }] })).toContain(SAME_MODEL_HINT)
+  })
+
+  it('counts an opencode #variant as the same model', () => {
+    expect(notice({ ...on('a/x#high'), reviewers: [agent('one', 'a/x')] }, 'opencode')).toContain(SAME_MODEL_HINT)
+  })
+
+  it('gives no hint for a reviewer on a different model, also when only one of several differs', () => {
+    expect(notice({ ...on('a/x'), reviewers: [agent('one', 'a/y')] })).toBe('')
+    expect(notice({ ...on('a/x'), reviewers: [agent('one', 'a/x'), agent('two', 'a/y')] })).toBe('')
+    expect(notice({ ...on('a/x'), reviewers: [agent('one')] })).toBe('')
+    expect(notice({ reviewers: [agent('one', 'a/x')] })).toBe('')
+  })
+
+  it('counts a Codex or command reviewer as different', () => {
+    const command = { name: 'cmd', engine: 'command', command: 'review {base} {out}' }
+    expect(notice({ reviewers: [command] })).toBe('')
+    expect(notice({ reviewers: [agent('one'), command] })).toBe('')
+    expect(notice({ reviewers: [{ name: 'codex', engine: 'codex' }] }, 'opencode')).toBe('')
+    expect(notice({ reviewers: [{ name: 'auto', engine: 'auto' }] }, 'opencode')).toBe('')
+  })
+
+  it('gives no hint on a planning run, which writes no code to review', () => {
+    expect(notice({}, 'omp', { repo: '/r', branch: 'b', goal: 'build it' })).toBe('')
   })
 })

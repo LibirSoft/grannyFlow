@@ -3,6 +3,7 @@ import { spawnSync } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { SAME_MODEL_HINT } from '../src/adapters/common'
 import plugin, { createGrannyPlugin, isTransient, modelRef, pause, permissions, preflight, providerError, summarize } from '../src/adapters/opencode/plugin'
 import { brokerCompanion, records, sessionEndHook } from './fake-companion'
 import { planReviewWarning } from '../src/core/config'
@@ -606,6 +607,21 @@ describe('opencode plugin', () => {
     const started = (await f.tools.get('granny_run').execute({ repo, branch: 'feat/x', stages: [{ name: 'one', task: 'Do it.' }], config }, { sessionID: 'parent' })).content
     expect(started).toContain('\noverrides: roles.implementer.model kimi-code/k3.1-pro (config: openai/gpt-x), threshold 50 (config: 70) - show this line to the user in your next message')
     await finished(join(repo, '.granny/runs', /granny run (\S+) started/.exec(started)![1]!))
+  })
+
+  it('hints in its start reply when the reviewers share the implementer model, and starts the run either way', async () => {
+    const agent = (model?: Record<string, string>) => ({ reviewers: [{ name: 'reviewer', engine: 'agent', ...(model ? { model } : {}) }] })
+    const f = fakeContext()
+    await plugin.setup(f.ctx)
+    const startWith = async (config: unknown) => {
+      const started = (await f.tools.get('granny_run').execute({ repo, branch: 'feat/x', stages: [{ name: 'one', task: 'Do it.' }], config }, { sessionID: 'parent' })).content as string
+      const id = /granny run (\S+) started/.exec(started)![1]!
+      await f.tools.get('granny_cancel').execute({ runId: id })
+      await waitFor(() => readRun(join(repo, '.granny/runs', id), 'status.json').includes('"status": "cancelled"'))
+      return started
+    }
+    expect(await startWith(agent())).toContain(SAME_MODEL_HINT)
+    expect(await startWith(agent({ opencode: 'openai/gpt-x' }))).not.toContain(SAME_MODEL_HINT)
   })
 
   it('tells the agent to point the user at the run navigator with watch full only', async () => {

@@ -131,6 +131,17 @@ export function planReviewNotice(input: RunInput, config: { planReview: boolean;
   return reviewsPlan ? `\n${planReviewWarning(config.maxRounds)} Tell the user this in your next message.` : ''
 }
 
+export const SAME_MODEL_HINT = "reviewers share the implementer's model; a different model may catch more"
+
+/** The start reply's advice for a run that writes code when every reviewer is an `agent` reviewer on the implementer's model; empty otherwise. */
+export function sameModelNotice(input: RunInput, config: GrannyConfig, host: Exclude<HostName, 'claude-code'>): string {
+  if (input.goal !== undefined) return ''
+  const modelOf = (spec: ModelSpec | undefined) => resolveModel(spec, host)?.split('#')[0]
+  const implementer = modelOf(config.roles.implementer.model)
+  const shared = config.reviewers.every(rv => rv.engine === 'agent' && modelOf(rv.model) === implementer)
+  return shared ? `\n${SAME_MODEL_HINT}. Mention this to the user in your next message; do not change a model unless the user asks.` : ''
+}
+
 /** The config files a run reads, in layer order, as the start reply and refusals name them. */
 export const layerSources = (repo: string): string[] => [globalConfigPath(), join(repo, 'granny.config.json'), "the run's config"]
 

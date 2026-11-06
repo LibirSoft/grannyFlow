@@ -2502,6 +2502,16 @@ function planReviewNotice(input, config) {
   return reviewsPlan ? `
 ${planReviewWarning(config.maxRounds)} Tell the user this in your next message.` : "";
 }
+var SAME_MODEL_HINT = "reviewers share the implementer's model; a different model may catch more";
+function sameModelNotice(input, config, host) {
+  if (input.goal !== undefined)
+    return "";
+  const modelOf = (spec) => resolveModel(spec, host)?.split("#")[0];
+  const implementer = modelOf(config.roles.implementer.model);
+  const shared = config.reviewers.every((rv) => rv.engine === "agent" && modelOf(rv.model) === implementer);
+  return shared ? `
+${SAME_MODEL_HINT}. Mention this to the user in your next message; do not change a model unless the user asks.` : "";
+}
 var layerSources = (repo) => [globalConfigPath(), join(repo, "granny.config.json"), "the run's config"];
 var AGENT_ROLES = ["granny", "helper", "planner", "implementer", "judge"];
 var isObject2 = (v) => !!v && typeof v === "object" && !Array.isArray(v);
@@ -3081,7 +3091,7 @@ Call granny_status with runId "${id}" and report to the user.`);
       return `granny run ${id} started on ${input.repo} (${input.branch}), ${input.goal !== undefined ? "planning only" : `${input.stages?.length ?? 0} stage(s)${config.parallel ? `, up to ${config.maxParallel} in parallel` : ""}`}, threshold ${config.threshold}, maxRounds ${config.maxRounds}.
 Journal: ${join2(dir, "journal.jsonl")}
 You will receive a message when it finishes. Use granny_status { runId: "${id}" } to check progress and granny_cancel to stop it. Do not poll in a loop.${config.watch === "full" ? `
-${NAVIGATOR_HINT}` : ""}${planReviewNotice(input, config)}${overridesNotice(layers, "opencode")}`;
+${NAVIGATOR_HINT}` : ""}${planReviewNotice(input, config)}${sameModelNotice(input, config, "opencode")}${overridesNotice(layers, "opencode")}`;
     };
     await ctx.tool.transform((editor) => {
       for (const [kind, name] of Object.entries(SUBMIT)) {

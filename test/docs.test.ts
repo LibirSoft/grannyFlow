@@ -2,6 +2,7 @@ import { describe, expect, it } from 'bun:test'
 import { readdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { renderPrompts } from '../scripts/build'
+import { SAME_MODEL_HINT } from '../src/adapters/common'
 import { blockReason } from '../src/adapters/omp/extension'
 import { DEFAULT_CONFIG, resolveConfig } from '../src/core/config'
 import { HOSTS } from '../src/core/types'
@@ -202,6 +203,11 @@ describe('skill docs', () => {
     expect(read('references/prompts.md')).toContain("Rewrite the PR body's review and status section from this list")
     expect(read('references/cursor.md')).toContain("rewrite the PR body's review section from it")
     expect(read('references/config.md')).toContain("rewrite the PR body's review section from them")
+  })
+
+  it('gives the same-model hint in setup on every host and names it in the omp and opencode references', () => {
+    expect(read('references/setup.md')).toContain(SAME_MODEL_HINT)
+    for (const file of ['references/omp.md', 'references/opencode.md']) expect({ file, text: read(file).includes(SAME_MODEL_HINT) }).toEqual({ file, text: true })
   })
 
   it('names the run files the views read in both host references', () => {
