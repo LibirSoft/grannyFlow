@@ -692,7 +692,7 @@ describe('Navigator', () => {
     nav = new Navigator({ runs: () => [{ id: 'J1', dir, status: 'running', live, branch: 'feat/x', outline }], runId: 'J1', tui: { requestRender: () => {}, terminal: { rows: 30 } }, theme: {}, keys: { matches: () => false }, done: () => {}, now: () => time.t, tickMs: 60_000 })
     const lines = nav.render(160).map(l => l.trimEnd())
     expect(lines[0]).toBe('granny  feat/x  ● running · 40s')
-    expect(lines.slice(2, 7).map(l => l.replace(/ {2,}/g, '  '))).toEqual(['  ✓ Review  1 agent  31s', '  │', '› ● Tag  tag  1 agent · 1 running  9s', '  │', '  · Report  waiting'])
+    expect(lines.slice(2, 7).map(l => l.replace(/ {2,}/g, '  '))).toEqual(['  ✓ Review  1 agent  31s', '  │', '› ● Tag  1 agent · 1 running  9s', '  │', '  · Report  waiting'])
     expect(lines.join('\n')).not.toContain('Implement')
     nav.handleInput('\r')
     expect(nav.render(160)[0]!.trimEnd()).toBe('granny › Tag')

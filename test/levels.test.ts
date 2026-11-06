@@ -223,6 +223,21 @@ describe('the levels', () => {
     expect(rows.at(-1)).toBe('  · Next  clean')
     expect(rows.join('\n')).not.toContain('Fix')
   })
+
+  it('leaves the middle empty when a running group would repeat its name, and a stage keeps its action', () => {
+    const live = (label: string) => new Map([[`s:${label}`, { active: true }]])
+    const row = (tree: RunTree, name: string) => text(new LevelNav(), viewOf(tree)).find(l => l.includes(name))
+    const planning: RunOutline = { kind: 'plan', branch: 'feat/x', worktree: false, planReview: false, finalReview: false, reviewers: [], fromStage: 1, stages: [] }
+    const plan = buildRunTree(RUN, [j(0, 'phase', { title: 'Plan' }), agent(1, 'plan', 'planner')], live('plan'), NOW, new Map(), planning)
+    expect(row(plan, 'Plan')).toBe('› ● Plan  1 agent · 1 running  1m40s')
+    const judge: RunOutline = { ...planning, kind: 'judge' }
+    const tag = buildRunTree(RUN, [j(0, 'phase', { title: 'Judge' }), { ...agent(1, 'tag feat/x', 'judge'), phase: 'Judge' }], live('tag feat/x'), NOW, new Map(), judge)
+    expect(row(tag, 'Tag')).toBe('› ● Tag  1 agent · 1 running  1m40s')
+    const building = [j(1, 'stage', { number: 1, name: 'Server', event: 'start' }), agent(1, 'implement Server', 'implementer')]
+    expect(row(buildRunTree(RUN, building, live('implement Server'), NOW, new Map(), OUTLINE), '1 Server')).toBe('› ● 1 Server  implement  1 agent · 1 running  1m39s')
+    const named = [j(1, 'stage', { number: 1, name: 'Implement', event: 'start' }), agent(1, 'implement Implement', 'implementer')]
+    expect(row(buildRunTree(RUN, named, live('implement Implement'), NOW, new Map(), { ...OUTLINE, stages: [stage(1, 'Implement')] }), '1 Implement')).toBe('› ● 1 Implement  implement  1 agent · 1 running  1m39s')
+  })
 })
 
 describe('the engine', () => {

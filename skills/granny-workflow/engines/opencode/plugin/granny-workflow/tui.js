@@ -1842,7 +1842,8 @@ function groupMiddle(tree, group, rounds) {
       return `round ${rounds.at(-1).number}${max ? ` of ${max}` : ""}`;
     if (group.checks?.state === "running")
       return "checks";
-    return lastOf(group.agents, busy)?.action ?? group.agents.at(-1)?.action ?? "";
+    const action = lastOf(group.agents, busy)?.action ?? group.agents.at(-1)?.action ?? "";
+    return group.number === undefined && action.toLowerCase() === group.title.toLowerCase() ? "" : action;
   }
   const result = group.outcome ?? group.result;
   const turns = rounds.length ? count(rounds.length, "round") : "";

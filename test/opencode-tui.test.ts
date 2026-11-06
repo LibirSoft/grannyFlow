@@ -746,7 +746,7 @@ describe('opencode TUI plugin: the /granny navigator', () => {
     const v = view(m, (m.fc.navigations.at(-1) as { data: unknown }).data)
     const lines = v.lines().map(l => l.trimEnd().replace(/ {2,}/g, '  '))
     expect(lines[0]).toBe('granny  feat/x  ● running · 40s')
-    expect(lines.slice(2, 7)).toEqual(['  ✓ Review  1 agent  31s', '  │', '› ● Tag  tag  1 agent · 1 running  9s', '  │', '  · Report  waiting'])
+    expect(lines.slice(2, 7)).toEqual(['  ✓ Review  1 agent  31s', '  │', '› ● Tag  1 agent · 1 running  9s', '  │', '  · Report  waiting'])
     expect(v.text()).not.toContain('Implement')
     v.key('return')
     v.key('return')
