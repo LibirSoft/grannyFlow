@@ -137,7 +137,7 @@ function columns(cols: readonly Col[], width: number, selected: boolean): Cell[]
   const flex = Math.max(0, width - fixed)
   return cols.map(c => {
     const w = c.width ?? flex
-    const body = fit(c.text, Math.max(0, w - (c.width && !c.right ? 1 : 0)))
+    const body = fit(c.text, Math.max(0, w - (c.right ? 0 : 1)))
     return { text: c.right ? body.padStart(w) : body.padEnd(w), tone: c.tone ?? 'base', ...(selected ? { selected: true } : {}) }
   })
 }
@@ -166,7 +166,7 @@ const blank = (width: number): Cell[] => [{ text: ' '.repeat(Math.max(0, width))
 
 function groupMiddle(tree: RunTree, group: WorkGroup, rounds: readonly RoundView[]): string {
   const max = tree.outline?.maxRounds
-  if (group.state === 'upcoming') return 'waiting'
+  if (group.state === 'upcoming') return tree.status === 'running' ? 'waiting' : 'not run'
   if (group.state === 'skipped') return group.note ?? 'skipped'
   if (group.state === 'running') {
     if (rounds.length) return `round ${rounds.at(-1)!.number}${max ? ` of ${max}` : ''}`
@@ -174,7 +174,9 @@ function groupMiddle(tree: RunTree, group: WorkGroup, rounds: readonly RoundView
     const action = lastOf(group.agents, busy)?.action ?? group.agents.at(-1)?.action ?? ''
     return group.number === undefined && action.toLowerCase() === group.title.toLowerCase() ? '' : action
   }
-  const result = group.outcome ?? group.result
+  const last = rounds.at(-1)?.result
+  const ended = last && !last.findings.some(f => f.sent) ? (last.findings.length ? 'residual-only' : 'clean') : undefined
+  const result = group.outcome ?? group.result ?? ended
   const turns = rounds.length ? count(rounds.length, 'round') : ''
   return [result, turns].filter(Boolean).join(' · ')
 }
@@ -394,9 +396,13 @@ function roundPage(view: LevelView, group: WorkGroup, number: number, selected: 
   const gap = () => {
     if (roomy) rows.push(connector(width))
   }
-  gap()
-  if (round.judge.length) stepAgents(view, round.judge, 'Judge', routed(round.result), selected, items, rows)
-  else if (!(sentNothing && round.result?.findings.length === 0)) rows.push(tableRow(width, false, '·', 'muted', 'Judge', closed ? (routed(round.result) ?? 'not needed') : 'after the reviewers', '', '', 'muted'))
+  if (round.judge.length) {
+    gap()
+    stepAgents(view, round.judge, 'Judge', routed(round.result), selected, items, rows)
+  } else if (!(sentNothing && round.result?.findings.length === 0)) {
+    gap()
+    rows.push(tableRow(width, false, '·', 'muted', 'Judge', closed ? (routed(round.result) ?? 'not needed') : 'after the reviewers', '', '', 'muted'))
+  }
   if (!sentNothing) {
     gap()
     if (round.fix.length) stepAgents(view, round.fix, 'Fix', undefined, selected, items, rows)

@@ -4459,7 +4459,7 @@ function workGroups(tree, entries, now) {
       return { group: ensure(`stage:${n}`, n), ...after.startsWith(":") ? { rest: after.slice(1).trimStart() } : {} };
     }
     if (message.startsWith("plan review"))
-      return { group: ensure("plan-review"), rest: message };
+      return outline && !outline.planReview ? undefined : { group: ensure("plan-review"), rest: message };
     if (message.startsWith("final review"))
       return { group: ensure("final-review"), rest: message };
     if (message.startsWith("plan:"))
@@ -4831,7 +4831,7 @@ function columns(cols, width, selected) {
   const flex = Math.max(0, width - fixed);
   return cols.map((c) => {
     const w = c.width ?? flex;
-    const body = fit(c.text, Math.max(0, w - (c.width && !c.right ? 1 : 0)));
+    const body = fit(c.text, Math.max(0, w - (c.right ? 0 : 1)));
     return { text: c.right ? body.padStart(w) : body.padEnd(w), tone: c.tone ?? "base", ...selected ? { selected: true } : {} };
   });
 }
@@ -4854,7 +4854,7 @@ var blank = (width) => [{ text: " ".repeat(Math.max(0, width)), tone: "base" }];
 function groupMiddle(tree, group, rounds) {
   const max = tree.outline?.maxRounds;
   if (group.state === "upcoming")
-    return "waiting";
+    return tree.status === "running" ? "waiting" : "not run";
   if (group.state === "skipped")
     return group.note ?? "skipped";
   if (group.state === "running") {
@@ -4865,7 +4865,9 @@ function groupMiddle(tree, group, rounds) {
     const action = lastOf(group.agents, busy)?.action ?? group.agents.at(-1)?.action ?? "";
     return group.number === undefined && action.toLowerCase() === group.title.toLowerCase() ? "" : action;
   }
-  const result = group.outcome ?? group.result;
+  const last = rounds.at(-1)?.result;
+  const ended = last && !last.findings.some((f) => f.sent) ? last.findings.length ? "residual-only" : "clean" : undefined;
+  const result = group.outcome ?? group.result ?? ended;
   const turns = rounds.length ? count(rounds.length, "round") : "";
   return [result, turns].filter(Boolean).join(" \xB7 ");
 }
@@ -5083,11 +5085,13 @@ function roundPage(view, group, number, selected, chain) {
     if (roomy)
       rows.push(connector(width));
   };
-  gap();
-  if (round.judge.length)
+  if (round.judge.length) {
+    gap();
     stepAgents(view, round.judge, "Judge", routed(round.result), selected, items, rows);
-  else if (!(sentNothing && round.result?.findings.length === 0))
+  } else if (!(sentNothing && round.result?.findings.length === 0)) {
+    gap();
     rows.push(tableRow(width, false, "\xB7", "muted", "Judge", closed ? routed(round.result) ?? "not needed" : "after the reviewers", "", "", "muted"));
+  }
   if (!sentNothing) {
     gap();
     if (round.fix.length)

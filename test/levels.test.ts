@@ -15,7 +15,7 @@ const RUN: RunInfo = { id: 'R', status: 'running', startedAt: BASE, branch: 'fea
 const agent = (sec: number, label: string, role: string) => j(sec, 'agent', { label, role, session: `s:${label}`, model: 'openai/gpt-x', phase: 'Review' })
 const end = (sec: number, label: string) => j(sec, 'agent-end', { label, session: `s:${label}`, outcome: 'done' })
 const sent = { id: 'terra-F1', sent: true, severity: 'P1', title: 'Pause survives a reconnect', reviewer: 'terra', file: 'a.ts', line: 3, detail: 'It never stops.', why: 'P0/P1' }
-const kept = { id: 'sol-F1', sent: false, severity: 'P3', title: 'Hard-coded text', reviewer: 'sol', verdict: 'confirmed', impact: 'minor', priority: 42, why: 'not above the threshold' }
+const kept_ = { id: 'sol-F1', sent: false, severity: 'P3', title: 'Hard-coded text', reviewer: 'sol', verdict: 'confirmed', impact: 'minor', priority: 42, why: 'not above the threshold' }
 
 const JOURNAL: JournalEntry[] = [
   j(0, 'phase', { title: 'Worktree' }),
@@ -31,7 +31,7 @@ const JOURNAL: JournalEntry[] = [
   end(32, 'review Server r1 sol'),
   agent(32, 'judge Server r1', 'judge'),
   end(35, 'judge Server r1'),
-  j(35, 'round', { subject: 'Server', round: 1, findings: [sent, kept] }),
+  j(35, 'round', { subject: 'Server', round: 1, findings: [sent, kept_] }),
   agent(35, 'fix Server r1', 'implementer'),
   end(50, 'fix Server r1'),
   agent(50, 'commit Server fix r1', 'implementer'),
@@ -237,6 +237,58 @@ describe('the levels', () => {
     expect(row(buildRunTree(RUN, building, live('implement Server'), NOW, new Map(), OUTLINE), '1 Server')).toBe('› ● 1 Server  implement  1 agent · 1 running  1m39s')
     const named = [j(1, 'stage', { number: 1, name: 'Implement', event: 'start' }), agent(1, 'implement Implement', 'implementer')]
     expect(row(buildRunTree(RUN, named, live('implement Implement'), NOW, new Map(), { ...OUTLINE, stages: [stage(1, 'Implement')] }), '1 Implement')).toBe('› ● 1 Implement  implement  1 agent · 1 running  1m39s')
+  })
+})
+
+describe('what a real run showed', () => {
+  const NAME = 'A stage with a name long enough to fill its whole column in the table of stages'
+  const OUT: RunOutline = { ...OUTLINE, stages: [stage(1, NAME, false)] }
+  const ENDED: JournalEntry[] = [
+    j(0, 'log', { message: 'plan review off (planReview: false)' }),
+    j(1, 'stage', { number: 1, name: NAME, event: 'start' }),
+    agent(1, `implement ${NAME}`, 'implementer'),
+    end(5, `implement ${NAME}`),
+    agent(6, `review ${NAME} r1 terra`, 'reviewer'),
+    end(8, `review ${NAME} r1 terra`),
+    j(8, 'round', { subject: NAME, round: 1, findings: [] }),
+    j(9, 'stage', { number: 1, name: NAME, event: 'end', outcome: 'clean' }),
+    agent(9, 'review final review r1 terra', 'reviewer'),
+    end(10, 'review final review r1 terra'),
+    j(10, 'round', { subject: 'final review', round: 1, findings: [] }),
+  ]
+  const done = { ...RUN, status: 'done', endedAt: BASE + 11 * S }
+  const rowsOf = (nav = new LevelNav(), tree = buildRunTree(done, ENDED, new Map(), NOW, new Map(), OUT)) => ({ nav, tree, rows: nav.layout(viewOf(tree, 120)).rows.map(r => r.map(c => c.text).join('').trimEnd()) })
+
+  it('lists no plan review when the run has none, though its log says so', () => {
+    expect(rowsOf().rows.join('\n')).not.toContain('Plan review')
+    const has = buildRunTree(done, ENDED, new Map(), NOW, new Map(), { ...OUT, planReview: true })
+    expect(rowsOf(new LevelNav(), has).rows.join('\n')).toContain('Plan review')
+  })
+
+  it('keeps a space between a cut name and the next column', () => {
+    const row = rowsOf().rows.find(r => r.includes('A stage with'))!
+    expect(row).toMatch(/… +clean · 1 round/)
+  })
+
+  it('names how a final review ended, from its last round', () => {
+    expect(rowsOf().rows.find(r => r.includes('Final review'))!.replace(/ {2,}/g, '  ')).toContain('Final review  clean · 1 round')
+    const kept = [...ENDED.slice(0, -1), j(10, 'round', { subject: 'final review', round: 1, findings: [kept_] })]
+    const tree = buildRunTree(done, kept, new Map(), NOW, new Map(), OUT)
+    expect(rowsOf(new LevelNav(), tree).rows.find(r => r.includes('Final review'))!.replace(/ {2,}/g, '  ')).toContain('Final review  residual-only · 1 round')
+  })
+
+  it('says a step that never came was not run, once the run has ended', () => {
+    const stopped = buildRunTree({ ...RUN, status: 'failed', endedAt: BASE + 3 * S }, ENDED.slice(0, 3), new Map(), NOW, new Map(), OUT)
+    expect(rowsOf(new LevelNav(), stopped).rows.find(r => r.includes('Final review'))!.replace(/ {2,}/g, '  ')).toContain('Final review  not run')
+  })
+
+  it('draws one connector between the steps of a clean round', () => {
+    const { nav, tree } = rowsOf()
+    nav.openAt(tree, `agent:s:review ${NAME} r1 terra`)
+    nav.back()
+    const rows = nav.layout(viewOf(tree, 120)).rows.map(r => r.map(c => c.text).join('').trim())
+    expect(rows.filter((r, i) => r === '│' && rows[i + 1] === '│')).toEqual([])
+    expect(rows.at(-1)!.replace(/ {2,}/g, '  ')).toBe('· Next  clean')
   })
 })
 

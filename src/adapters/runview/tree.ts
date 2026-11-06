@@ -589,7 +589,7 @@ function workGroups(tree: RunTree, entries: readonly JournalEntry[], now: number
       const n = pick(stages.filter(s => s.name === st.name).map(s => s.number))
       return { group: ensure(`stage:${n}`, n), ...(after.startsWith(':') ? { rest: after.slice(1).trimStart() } : {}) }
     }
-    if (message.startsWith('plan review')) return { group: ensure('plan-review'), rest: message }
+    if (message.startsWith('plan review')) return outline && !outline.planReview ? undefined : { group: ensure('plan-review'), rest: message }
     if (message.startsWith('final review')) return { group: ensure('final-review'), rest: message }
     if (message.startsWith('plan:')) return { group: ensure('plan'), rest: message }
     if (message.startsWith('pr-ready check')) return { group: ensure('pr-ready'), rest: message }
