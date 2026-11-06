@@ -1001,9 +1001,12 @@ var ORDER = [...P_HEADINGS, "dismissed"];
 var NOTE_LENGTH = 300;
 var oneLine = (text) => String(text ?? "").replace(/\s+/g, " ").trim();
 var noteLine = (note) => oneLine(note).slice(0, NOTE_LENGTH);
+var SEVERITY_WORDS = { critical: "P0", high: "P1", medium: "P2", low: "P3" };
 function severityOf(f) {
-  const n = /^\s*p([0-3])\b/i.exec(String(f.severity ?? ""))?.[1];
-  return n === undefined ? "P2" : P_HEADINGS[Number(n)];
+  const said = /^\s*(p[0-3]|critical|high|medium|low)\b/i.exec(String(f.severity ?? ""))?.[1]?.toLowerCase();
+  if (said === undefined)
+    return "P2";
+  return SEVERITY_WORDS[said] ?? P_HEADINGS[Number(said[1])];
 }
 var isJudged = (f) => f.impact !== undefined;
 function bucketOf(f) {
@@ -1034,13 +1037,32 @@ function tags(f) {
   const from = `from ${[f.id, ...f.duplicates ?? []].map(code).join(", ")}`;
   return [...place, ...judged, reviewer, from].join(" · ");
 }
+function body(text) {
+  let open = "";
+  const lines = text.split(`
+`).map((line) => {
+    const [, marker = "", rest = ""] = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(line) ?? [];
+    if (open) {
+      if (marker[0] === open[0] && marker.length >= open.length && !rest.trim())
+        open = "";
+      return line;
+    }
+    if (marker && !(marker[0] === "`" && rest.includes("`"))) {
+      open = marker;
+      return line;
+    }
+    return /^ {0,3}(#{1,6}(\s|$)|=+\s*$|-+\s*$)/.test(line) ? `\\${line.trimStart()}` : line;
+  });
+  return (open ? [...lines, open] : lines).join(`
+`);
+}
 function section(f) {
   return [
     `### ${oneLine(f.title) || "(no title)"}`,
     tags(f),
-    ...String(f.detail ?? "").trim() ? [String(f.detail).trim()] : [],
-    ...f.evidence ? [`**Evidence:** ${f.evidence}`] : [],
-    ...f.reason?.trim() ? [`**Judge:** ${f.reason.trim()}`] : []
+    ...String(f.detail ?? "").trim() ? [body(String(f.detail).trim())] : [],
+    ...f.evidence ? [`**Evidence:** ${body(f.evidence)}`] : [],
+    ...f.reason?.trim() ? [`**Judge:** ${body(f.reason.trim())}`] : []
   ].join(`
 
 `);
@@ -1345,6 +1367,24 @@ function exitMarked(output) {
 }
 var saidSomething = (d) => typeof d === "string" && d.trim() && !/^\s*(none|n\/a|-|no deviations)?\.?\s*$/i.test(d) ? d : undefined;
 var slug = (s) => s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "stage";
+var ROUND_DETAIL = 2000;
+function roundFinding(f, sent) {
+  return {
+    id: f.id,
+    sent,
+    ...f.severity ? { severity: f.severity } : {},
+    ...f.title ? { title: f.title } : {},
+    ...f.file ? { file: f.file } : {},
+    ...f.line !== undefined ? { line: f.line } : {},
+    ...f.reviewer ? { reviewer: f.reviewer } : {},
+    ...f.detail ? { detail: String(f.detail).slice(0, ROUND_DETAIL) } : {},
+    ...f.verdict ? { verdict: f.verdict } : {},
+    ...f.impact ? { impact: f.impact } : {},
+    ...f.priority !== undefined ? { priority: f.priority } : {},
+    ...f.reason ? { reason: String(f.reason).slice(0, ROUND_DETAIL) } : {},
+    ...f.decision?.why ? { why: f.decision.why } : {}
+  };
+}
 var trimPath = (s) => s.replace(/\/+$/, "") || "/";
 var repoPathOf = (r) => typeof r === "string" ? r : r && typeof r === "object" ? r.repo : undefined;
 var baseName = (path) => path.slice(path.lastIndexOf("/") + 1);
@@ -1903,6 +1943,7 @@ the last repair's deviations: ${deviations}` : ""}`;
       }
       if (!found.length) {
         host.log(`${name} r${round}: clean`);
+        host.round?.({ subject: name, round, findings: [] });
         return { outcome: "clean", rounds: round, residual: kept(), unresolved: [], history };
       }
       const declined = new Map(earlier.flatMap((e) => (e.declined ?? []).map((d) => [roundLabel(e.round, d, e.loop), d.reason])));
@@ -1948,6 +1989,7 @@ the last repair's deviations: ${deviations}` : ""}`;
       history.push({ round, findings });
       host.log(`${name} r${round}: ${findings.length} finding(s)`);
       const { accepted, residual } = triage(findings);
+      host.round?.({ subject: name, round, findings: findings.map((f) => roundFinding(f, accepted.includes(f))) });
       const entry = { round, sent: accepted, ...residual.length ? { residual } : {} };
       const recorded = record ? { ...entry, loop: record.loop } : undefined;
       if (recorded)
@@ -2545,7 +2587,7 @@ async function runJudge(host, input) {
   const dirty = await uncommitted("status", REVIEW_PHASE, repo);
   const notReviewed = Array.isArray(dirty) ? dirty.map((l) => l.trim().replace(/^\S+\s+/, "")) : [`the working tree status could not be read (${dirty.unreadable.replace(/\s+/g, " ")})`];
   const finish = (outcome, rest = {}) => ({
-    repo: input.repo,
+    repo,
     branch,
     base,
     head,

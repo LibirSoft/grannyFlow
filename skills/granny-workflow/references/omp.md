@@ -89,41 +89,88 @@ A failed append is journalled once per role (`event-log-failed` with the path an
 
 **Run navigator.** `/granny` or `alt+w` in the omp TUI opens it; the run panel says so. It is a full-screen page (omp's alternate screen; an omp without it draws an overlay) on the latest running run of this omp process, else its latest run; `/granny <runId>` opens it on that run. It lists only this process's runs (the run table is in memory, as for `granny_wait`) with `watch` `"full"`; a second `/granny` or `alt+w` while it is open does nothing.
 
+The navigator shows one level at a time. Enter goes down, Esc goes up, and the first row always says where you are: `granny › 2 Client pause UI › Round 2 of 4 › terra`. `/granny` or `alt+w` opens it on the stages, with the running one selected.
+
+**1. The stages**: every piece of work in order, what it is doing, how many agents it had and how many run now.
+
 ```
-granny · feat/pause · stage 1/2 · Implement · 1m40s
-Worktree ✓ › Implement ● › Checks › Review › Final review › PR ready
-───────────────────────────────────────────┬──────────────────────────────────────────────────
-  ▾ ● 1 Server pause domain, lifec…  1m40s │ implementer · k3.1-pro · 1m40s
-›   ● implement                      1m40s │
-      2 Client pause UI and e2e            │ NOW   ● bash · 12s
-      Final review                         │       Running the game service tests
-      PR ready                             │       » Checking the lifecycle against the tests
-  run details                              │
-                                           │ TODO  ✓ Pause domain  ● Lifecycle and socket proof
-                                           │
-                                           │ RECENT
-                                           │  23:31:25  edit   src/game/protocol.ts
-                                           │  23:30:46  read   2 files · src/services/GameSer…
-                                           │
-                                           │ LAST SAID  "Added pause/resume messages to the protocol."
-───────────────────────────────────────────┴──────────────────────────────────────────────────
-↑↓ move · Enter/→ open · Tab/] next agent · [ prev · Space fold · Esc close
+granny  feat/pause  ● running · 21m36s
+
+  ✓ Worktree                                                                2s
+  │
+  ✓ 1 Server pause domain      clean · 2 rounds       7 agents          12m04s
+  │
+› ● 2 Client pause UI          round 2 of 4           7 agents · 2 running  9m30s
+  │
+  · Final review               waiting
+  │
+  · PR ready                   waiting
+
+  run details
+
+↑↓ move · Enter open · Esc close
 ```
 
-From 100 columns the tree is on the left and the selected row's detail on the right; narrower, one pane at a time. The `─` rules show from 16 rows. The last line is the keys of the focused pane.
+A row that has not started does not open. `run details` is the only place with the run's id, repo, branch, times, `result.json` path and result. With several runs the list of runs takes its place: Enter on another run shows it.
 
-- Header: `granny · <branch> · stage <k>/<n> · <phase> · <elapsed>`, the one place for the run's position. `stages 1+2/<n>` while several stages run, `planning` in a planning run, no stage part outside the stages, `granny · <branch> · done|failed|cancelled · <total>` after the end. Too wide, the branch goes first, then the tail is cut.
-- Stepper: the steps this run has, in order, from its `outline`: `Worktree ✓ › Implement ● › Checks › Review › Final review › PR ready`, `Worktree › Plan › Plan review` for a planning run, or `Review ✓ › Tag ● › Report` for a judge run. `✓` done, `●` current, `✗` failed, `⊘` skipped or cancelled, no marker still to come. Implement, Checks and Review describe one stage: the selected row's, else the newest running one, else the last started, so selecting a row of another stage changes them. Too wide, the done steps become a bare `✓`, then only the current step shows with `(<i>/<n>)`.
-- Tree: one group row per piece of work: Plan, Plan review, each stage (`1 <name>`), Final review, PR ready, with `▾` or `▸`, a marker (`●` running, `✓` done, `✗` failed, with the outcome when it fits, `⊘` skipped or cancelled) and the time on the right. Work that has not started is listed muted, without an arrow or marker, and has no rows under it. The running group is open, or the last started stage when none runs; the others are folded, and Space on a group folds or opens it for good. Under a group, its agents as `<marker> <action>` with their time: `implement`, `commit`, `commit #2`, `repair #1`, `review r1` (with the reviewer's name when the run has several, `#2` on a retried attempt), `judge r1`, `fix r1`, `extract r1`, `resolve merge`, `plan`, `pr-ready check`. Agent markers: `●` running, `…` between turns (a backoff or retry), `✓` done, `✗` failed, `⊘` cancelled. A stage with checks has a row after the step they followed: `checks ✓`, `checks ✗ <names>` or `checks …`. Under an agent, its `task` subagents. An agent whose label names no group lands in a group titled with its phase. The worktree step and the commands have no rows. At the bottom a `run details` row, or, when this process knows several runs, a `runs` list with one row per run, `<marker> <last 4 characters of the id> · <status>`; Enter or Space on another run shows it. The full run id is only in the run's detail.
-- Agent detail: `<role> · <short model> · <time>` (the short model is the model without its provider and `#default`, plus its variant or effort: `gpt-6.1-sol/xhigh`, or `default model`), `! <error>` when it failed, then a summary fitted to the pane:
-  - `NOW`: what it does this moment and for how long - `● thinking 42s`, `● writing 5s`, `● bash · 7s` with the tool's intent or short argument on the next row, `… waiting for model 3s` - and the latest `»` reasoning heading. State changes only update this block. A finished agent's outcome goes here: `✓ done in 18m`, `✗ failed after 3m: <error>`, `⊘ cancelled after 2m`.
-  - `TODO`: one row with the items of its todo tool (`✓` done, `●` active, `·` pending), when it used one.
-  - `RECENT`: newest first, one row per item, cut and never wrapped: `HH:MM:SS  <tool>  <intent, else a short argument>`, the arguments relative to the agent's work directory. Calls of the same tool within a few seconds collapse (`read   7 files · a.ts, b.ts, …`, `(2×)` for one target), `task` rows show the subagents with their end marker, a failed call ends in `✗` in the error colour, and retries and provider errors from the journal are rows too. The running tool joins the list when it ends. A short pane drops the oldest rows first.
-  - `LAST SAID`: the latest assistant text, at most two rows.
-- `v` shows the agent's full event list in time order instead (`·` states, `»` headings, `▸` tool calls with intent and argument, `✗` failed tools, `└ task:`, `✎` the first line of each answer, `■` exit) with its journal notes, and `t` opens its conversation from the omp session files (prompt head, reasoning summaries, thinking heads, answers, tool calls with intent and one-line arguments, tool result heads, provider errors), running or finished. Each key turns its view on, and back to the summary when pressed again; `f` turns follow on or off in both.
-- Other details: a subagent's own session; a group's full name, state, time, outcome, checks result and journal lines; a checks row's journal lines; a run's id, status, repo, branch, times, `result.json` path and finish or failure text.
-- Keys: ↑/↓ (`k`/`j`), PgUp/PgDn, Home/End move in the tree or scroll a list in the detail (the summary does not scroll); Enter or → focuses the detail, ← or Esc goes back (← in the tree goes to the parent row); Space folds a group; Tab or `]`, Shift+Tab or `[` select the next or previous agent of the open groups, from the detail too; `v`, `t` and `f` work with the detail focused; Esc in the tree, or `q`, closes. The keys come from omp's default bindings (user rebinds do not reach extension overlays), with the plain terminal sequences as fallback.
-- A list opens at its end; follow is on for a running agent, so new lines keep the view at the end; scrolling up turns it off, End turns it on. Files are read by offset, only the new bytes, at most once a second while they grow and at once after a key; a list keeps its last 5000 events or lines, a group its last 200 journal lines, a checks row its last 50, and a first read of a file over 8 MB starts at its last 8 MB. Nothing in the run waits for the navigator, and a TUI that can no longer redraw it closes it.
+**2. A stage**: its implementer and checks, then the review loop with its rounds, the ones still possible and the round cap.
+
+```
+granny › 2 Client pause UI
+
+  ✓ Implement     k3.1-pro                     1 agent     4m52s
+  │
+  ✓ Checks        passed
+  │
+┌ ↺ review loop · up to 4 rounds ───────────────────────────────────────┐
+│   ✓ Round 1   4 findings: 3 sent back, 1 kept   5 agents        3m42s │
+│ › ● Round 2   reviewing                         2 agents · 2 running 42s │
+│   · Round 3   only if round 2 sends findings back                     │
+│   · Round 4   the last one                                            │
+└───────────────────────────────────────────────────────────────────────┘
+  │
+  · Next          Final review
+
+↑↓ move · Enter open · l log · Esc back
+```
+
+`l` shows the stage's full name, state, time, outcome, checks result and journal lines. Final review and plan review have the same loop. A group without a loop lists its agents; a judge run has the groups `Review`, `Tag` and `Report`. A run journalled before round entries existed still has its rounds, without their findings.
+
+**3. A round**: what happens in it in order, with the agents that run at the same time side by side (stacked when the terminal is narrow).
+
+```
+granny › 2 Client pause UI › Round 2 of 4
+
+  ● Review   2 agents at the same time
+    ┌──────────────────────────────┐  ┌──────────────────────────────┐
+    │ ● terra  42s                 │  │ ● sol  38s                   │
+    │ running read: PauseButton.tsx│  │ running bash: bun test       │
+    └──────────────────────────────┘  └──────────────────────────────┘
+  │
+  · Judge    after the reviewers
+  │
+  · Fix      only if findings go back
+  │
+  · Checks   after the fix
+  │
+  · Next     Round 3, or the stage is done
+
+↑↓←→ move · Enter open agent · [ ] other round · l log · Esc back
+```
+
+A finished round says what each step did: `2 findings` under Review, `1 sent back, 1 kept` at the judge, and on each reviewer's card how many it found. `f` lists the round's findings with `↺ sent back` or `· kept`; below the list, the selected one's file, what the reviewer said, how the judge classified it and why it went back or stayed. Enter opens the agent that found it. A checks row opens its journal lines.
+
+**4. An agent**: the first rows are `<role> · <short model> · <time>` (the short model is the model without its provider and `#default`, plus its variant or effort: `gpt-6.1-sol/xhigh`, or `default model`), `! <error>` when it failed, then the summary. `t` opens its conversation file, `v` its full event list. Tab, `]` and `[` go through the other agents of its round and their subagents.
+
+- `NOW`: what it does this moment and for how long - `● thinking 42s`, `● writing 5s`, `● bash · 7s` with the tool's intent or short argument on the next row, `… waiting for model 3s`. A finished agent's outcome goes here: `✓ done in 18m`, `✗ failed after 3m: <error>`, `⊘ cancelled after 2m`.
+- `TODO`: one row with the items of its todo tool (`✓` done, `●` active, `·` pending), when it used one.
+- `RECENT`: newest first, one row per item, cut and never wrapped: `HH:MM:SS  <tool>  <short argument>`, relative to the agent's work directory. Calls of the same tool within a few seconds collapse (`read   7 files · a.ts, b.ts, …`, `(2×)` for one target), a failed call ends in `✗`, and retries and provider errors from the journal are rows too.
+- `LAST SAID`: the latest assistant text, at most two rows.
+- `v` shows every event in time order instead; PgUp/PgDn and Home/End scroll that list, End and `f` follow its end, and `v` goes back to the summary.
+
+The last row of the page is the keys of that level (`v details · t transcript · Tab/] [ agent · ←/Esc back · q close` on an agent). Rows fit any width: narrow, a row's middle column goes first, then its agents; a page too short for its rows drops the `│` rows and then scrolls to the selection.
+
+A list opens at its end; follow is on for a running agent, so new lines keep the view at the end; scrolling up turns it off, End turns it on. Files are read by offset, only the new bytes, at most once a second while they grow and at once after a key; a list keeps its last 5000 events or lines, a group its last 200 journal lines, a checks row its last 50, and a first read of a file over 8 MB starts at its last 8 MB. Nothing in the run waits for the navigator, and a TUI that can no longer redraw it closes it.
 
 `/granny off` / `/granny on` hide or show the panel (above). For a run with `"panel"` or `"off"`, `/granny` and `alt+w` say `watching is off for run <id> (watch: "<mode>")` and how to turn it on. Outside the TUI (print, json, rpc mode) `/granny` prints each role's `events.jsonl` path instead, as a message that starts no turn. The navigator is an omp page, not a terminal pane (omp's `openTerminal` needs a multiplexer), so to follow a log outside omp, `tail -f` its path. `alt+w` is free in omp 18.16; should a later omp bind it, `/granny` still opens the navigator.
 

@@ -1,15 +1,16 @@
-// The run navigator: a full-screen overlay with the shared run page - header, stepper, the run's stage
-// groups with their agents beside a detail pane, key help - for the runs of this omp process. Files are
-// read only in the tick; render() lays out what the tick read.
+// The run navigator: a full-screen overlay with the shared levels - the run's stages, a stage's rounds, a
+// round's agents, one agent's detail - for the runs of this omp process. Files are read only in the tick;
+// render() lays out what the tick read.
 import { readdirSync, readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
-import { type ActivityItem, activityLines, summarise } from '../runview/activity'
+import { type ActivityItem, activityLines, nowLine, summarise } from '../runview/activity'
 import { clean, fit } from '../runview/format'
-import { agentEnd, agentHead, type Cell, checksDetail, frame, groupDetail, headerText, paneSizes, runDetail, type RunFacts, stepperCells, summaryCells, type Tone, treeCells } from '../runview/layout'
+import { agentEnd, agentHead, type Cell, checksDetail, groupDetail, runDetail, type RunFacts, summaryCells, type Tone } from '../runview/layout'
+import { levelBody, levelFrame, type LevelView, LevelNav, selectedRow } from '../runview/levels'
 import type { RunOutline } from '../runview/outline'
 import { TailReader } from '../runview/tail'
-import { agentKey, buildRunTree, focusStage, groupKey, type JournalEntry, nextAgent, type Row, runKey, type RunTree, stepsFor, visibleRows } from '../runview/tree'
+import { buildRunTree, groupKey, type JournalEntry, type Row, runKey, type RunTree, visibleRows } from '../runview/tree'
 import { eventLine } from './activity'
 import type { LiveRun, RoleActivity } from './panel'
 import { subagentFiles } from './subagents'
@@ -38,7 +39,7 @@ export interface NavigatorDeps {
 
 type Key =
   | 'up' | 'down' | 'pageUp' | 'pageDown' | 'home' | 'end' | 'enter' | 'right' | 'left' | 'escape'
-  | 'tab' | 'backtab' | 'space' | 'next' | 'prev' | 'follow' | 'toggle' | 'verbose' | 'quit'
+  | 'tab' | 'backtab' | 'space' | 'next' | 'prev' | 'follow' | 'toggle' | 'verbose' | 'log' | 'quit'
 
 const NAMED: Array<[string, Key]> = [
   ['tui.select.up', 'up'],
@@ -65,10 +66,9 @@ const RAW: Record<string, Key> = {
   '\r': 'enter', '\n': 'enter',
   '\x1b': 'escape',
   '\t': 'tab', '\x1b[Z': 'backtab',
-  ' ': 'space', ']': 'next', '[': 'prev', f: 'follow', t: 'toggle', v: 'verbose', q: 'quit',
+  ' ': 'space', ']': 'next', '[': 'prev', f: 'follow', t: 'toggle', v: 'verbose', l: 'log', q: 'quit',
 }
 
-const TREE_HELP = '↑↓ move · Enter/→ open · Tab/] next agent · [ prev · Space fold · Esc close'
 const SOURCES = 8
 const MAX_ITEMS = 5000
 const MB = 1024 * 1024
@@ -131,14 +131,11 @@ function home(): string | undefined {
 }
 
 export class Navigator {
-  private focus: 'tree' | 'detail' = 'tree'
+  private readonly nav = new LevelNav()
   private shown: string
-  private readonly folded = new Set<string>()
-  private readonly opened = new Set<string>()
-  private selected = ''
   private trees: RunTree[] = []
   private rows: Row[] = []
-  private readonly parents = new Map<string, string>()
+  private lastWidth = 100
   private readonly caches = new Map<string, RunCache>()
   private readonly sources = new Map<string, Source>()
   private readonly modes = new Map<string, Mode>()
@@ -150,7 +147,6 @@ export class Navigator {
   private verbose?: { key: string; lines: string[] }
   private bodyHeight = 10
   private bodyLength = 0
-  private treeTop = 0
   private closed = false
   private finished = false
   private readonly timer: ReturnType<typeof setInterval>
@@ -160,8 +156,7 @@ export class Navigator {
     this.shown = deps.runId
     try {
       this.refresh()
-      this.selected = this.firstSelection()
-      this.relayout()
+      this.levelPage()
       this.pollSource()
     } catch {}
     this.timer = setInterval(() => this.tick(), Math.max(10, deps.tickMs))
@@ -211,8 +206,8 @@ export class Navigator {
     try {
       const key = this.keyOf(data)
       if (!key) return
-      if (this.focus === 'tree') this.treeKey(key)
-      else this.detailKey(key)
+      if (this.nav.detail) this.detailKey(key)
+      else this.levelKey(key)
     } catch {}
     if (this.closed) return
     this.version++
@@ -343,42 +338,38 @@ export class Navigator {
     return this.trees.find(t => t.id === this.shown)
   }
 
-  /** The newest running agent of the shown run, else its last one, else its first row. */
-  private firstSelection(): string {
-    const tree = this.shownTree()
-    const agent = tree && ([...tree.agents].reverse().find(a => a.state === 'running') ?? tree.agents.at(-1))
-    if (agent && tree) {
-      this.relayout()
-      for (const key of [agentKey(agent.session), groupKey(tree.id, agent.group)]) if (this.rows.some(r => r.key === key)) return key
-    }
-    return runKey(this.shown)
+  private get selected(): string {
+    return this.nav.detail ?? ''
   }
 
+  /** Every row of the shown run, for the detail to look its selected one up in. */
   private relayout() {
     const tree = this.shownTree()
-    const focus = tree && focusStage(tree)
-    const layout = () => visibleRows(this.trees, { run: this.shown, folded: this.folded, opened: this.opened, ...(focus !== undefined ? { focus } : {}), runs: this.trees.length > 1 ? 'list' : 'one' })
-    this.rows = layout()
-    const hidden = this.hiddenGroup()
-    if (hidden) {
-      this.opened.add(hidden)
-      this.rows = layout()
-    }
-    for (const row of this.rows) if (row.parent) this.parents.set(row.key, row.parent)
-    let key: string | undefined = this.selected
-    while (key && !this.rows.some(r => r.key === key && r.selectable)) key = this.parents.get(key)
-    this.selected = key ?? this.rows.find(r => r.selectable)?.key ?? ''
+    const opened = new Set(tree?.groups.map(g => groupKey(tree.id, g.key)) ?? [])
+    this.rows = visibleRows(this.trees, { run: this.shown, folded: new Set(), opened, runs: this.trees.length > 1 ? 'list' : 'one' })
+    if (this.nav.detail && !this.selectedRow()) this.nav.back()
     this.choose()
   }
 
-  /** A group that just folded by itself (its stage ended) over the selected row; the user did not fold it. */
-  private hiddenGroup(): string | undefined {
-    if (!this.selected || this.rows.some(r => r.key === this.selected)) return undefined
-    for (let key = this.parents.get(this.selected); key; key = this.parents.get(key)) {
-      const row = this.rows.find(r => r.key === key)
-      if (row) return row.kind === 'group' && row.folded && !this.folded.has(key) ? key : undefined
+  private levelView(tree: RunTree, width: number, height: number): LevelView {
+    const now = this.deps.now()
+    return {
+      tree,
+      trees: this.trees,
+      now,
+      width,
+      height,
+      activity: agent => {
+        const live = this.liveRole(tree.id, agent.session)?.now()
+        return live ? nowLine(live, now, agent.cwd) : undefined
+      },
     }
-    return undefined
+  }
+
+  /** Lays out the level on screen, so the keys and the first draw see its items. */
+  private levelPage() {
+    const tree = this.shownTree()
+    return tree ? this.nav.layout(this.levelView(tree, this.lastWidth, levelBody(this.height()))) : undefined
   }
 
   private selectedRow(): Row | undefined {
@@ -469,83 +460,82 @@ export class Navigator {
 
   // --- keys -------------------------------------------------------------------------------------
 
-  private select(key: string | undefined) {
-    if (!key || key === this.selected) return
-    this.selected = key
-    this.choose()
-  }
-
-  private selectable(): Row[] {
-    return this.rows.filter(r => r.selectable)
-  }
-
-  private moveBy(delta: number) {
-    const rows = this.selectable()
-    const at = rows.findIndex(r => r.key === this.selected)
-    this.select(rows[clamp(at + delta, 0, rows.length - 1)]?.key)
-  }
-
-  private agentStep(dir: 1 | -1) {
-    this.select(nextAgent(this.rows, this.selected, dir))
-  }
-
-  private treeKey(key: Key) {
-    const page = Math.max(1, this.height() - 3)
+  private levelKey(key: Key) {
+    const tree = this.shownTree()
+    const { nav } = this
+    if (!tree) {
+      if (key === 'escape' || key === 'quit') this.close()
+      return
+    }
+    this.levelPage()
+    const inRound = nav.screen.kind === 'round'
+    const page = Math.max(1, levelBody(this.height()))
     switch (key) {
       case 'up':
-        return this.moveBy(-1)
-      case 'down':
-        return this.moveBy(1)
-      case 'pageUp':
-        return this.moveBy(-page)
-      case 'pageDown':
-        return this.moveBy(page)
-      case 'home':
-        return this.select(this.selectable()[0]?.key)
-      case 'end':
-        return this.select(this.selectable().at(-1)?.key)
-      case 'enter':
-      case 'right': {
-        const row = this.selectedRow()
-        if (row?.kind === 'run' && !row.shown && key === 'enter') return this.switchRun(row.run.id)
-        this.focus = 'detail'
-        return
-      }
-      case 'space': {
-        const row = this.selectedRow()
-        if (row?.kind === 'run' && !row.shown) return this.switchRun(row.run.id)
-        return this.fold()
-      }
-      case 'tab':
-      case 'next':
-        return this.agentStep(1)
       case 'backtab':
-      case 'prev':
-        return this.agentStep(-1)
+        nav.move(-1)
+        break
+      case 'down':
+      case 'tab':
+        nav.move(1)
+        break
+      case 'pageUp':
+        nav.move(-page)
+        break
+      case 'pageDown':
+        nav.move(page)
+        break
+      case 'home':
+        nav.edge(false)
+        break
+      case 'end':
+        nav.edge(true)
+        break
       case 'left':
-        return this.select(this.selectedRow()?.parent)
+        if (inRound) nav.move(-1)
+        else nav.back()
+        break
+      case 'right':
+        if (inRound) nav.move(1)
+        else this.enter()
+        break
+      case 'enter':
+      case 'space':
+        this.enter()
+        break
+      case 'next':
+        if (inRound) nav.otherRound(tree, 1)
+        else nav.move(1)
+        break
+      case 'prev':
+        if (inRound) nav.otherRound(tree, -1)
+        else nav.move(-1)
+        break
+      case 'follow':
+        nav.findings(tree)
+        break
+      case 'log':
+        nav.log(tree)
+        break
       case 'escape':
+        if (!nav.back()) return this.close()
+        break
       case 'quit':
         return this.close()
     }
+    this.relayout()
+    this.levelPage()
+  }
+
+  private enter() {
+    const { run } = this.nav.enter()
+    if (run) this.switchRun(run)
   }
 
   private switchRun(id: string) {
     this.shown = id
+    this.nav.reset()
     this.later()
-    this.relayout()
-  }
-
-  private fold() {
-    const row = this.selectedRow()
-    if (row?.kind !== 'group' || row.folded === undefined) return
-    if (row.folded) {
-      this.folded.delete(row.key)
-      this.opened.add(row.key)
-    } else {
-      this.opened.delete(row.key)
-      this.folded.add(row.key)
-    }
     this.relayout()
   }
 
@@ -585,17 +575,26 @@ export class Navigator {
         return this.switchMode('verbose')
       case 'tab':
       case 'next':
-        return this.agentStep(1)
+        return this.stepDetail(1)
       case 'backtab':
       case 'prev':
-        return this.agentStep(-1)
+        return this.stepDetail(-1)
       case 'left':
       case 'escape':
-        this.focus = 'tree'
+        this.nav.back()
+        this.relayout()
+        this.levelPage()
         return
       case 'quit':
         return this.close()
     }
+  }
+
+  private stepDetail(dir: 1 | -1) {
+    const tree = this.shownTree()
+    if (!tree) return
+    this.nav.stepDetail(tree, dir)
+    this.relayout()
   }
 
   /** `t` and `v` turn their view on, or back to the summary when it is on. */
@@ -652,28 +651,15 @@ export class Navigator {
   }
 
   private draw(width: number, height: number): string[] {
+    this.lastWidth = width
     const tree = this.shownTree() ?? this.trees[0]
+    if (!tree) return levelFrame([{ text: 'granny · no run', tone: 'base' }], [], 'Esc close', width, height).map(r => this.paintRow(r))
     const now = this.deps.now()
-    const help: Cell[] = [{ text: this.help(), tone: 'muted' }]
-    if (!tree) return frame({ header: [{ text: 'granny · no run', tone: 'base' }], stepper: [], left: [], help, width, height }).map(r => this.paintRow(r))
-    const focus = focusStage(tree, this.selected)
-    const sizes = paneSizes(width, height, 0, true)
-    let left: Cell[]
-    let right: Cell[] | undefined
-    if (sizes.two) {
-      left = this.treePane(sizes.left.width, sizes.left.height, now)
-      right = this.detailPane(sizes.right.width, sizes.right.height, now)
-    } else left = this.focus === 'tree' ? this.treePane(sizes.left.width, sizes.left.height, now) : this.detailPane(sizes.left.width, sizes.left.height, now)
-    const rows = frame({
-      header: [{ text: headerText(tree, now, focus, width), tone: 'base' }],
-      stepper: stepperCells(stepsFor(tree, focus), width),
-      left,
-      ...(right ? { right } : {}),
-      help,
-      width,
-      height,
-    })
-    return rows.map(r => this.paintRow(r))
+    const body = levelBody(height)
+    const page = this.nav.layout(this.levelView(tree, width, body))
+    if (!this.nav.detail) return levelFrame(page.crumbs, page.rows, page.help, width, height, selectedRow(page, this.nav.selected)).map(r => this.paintRow(r))
+    const rows = this.detailPane(width, body, now).map(c => [c])
+    return levelFrame(page.crumbs, rows, this.help(), width, height).map(r => this.paintRow(r))
   }
 
   private paintRow(cells: readonly Cell[]): string {
@@ -681,20 +667,14 @@ export class Navigator {
   }
 
   private help(): string {
-    if (this.focus === 'tree') return TREE_HELP
     const row = this.selectedRow()
     const mode = row?.kind === 'agent' ? this.modeOf(row) : undefined
     const parts: string[] = []
     if (mode !== 'summary') parts.push('↑↓ PgUp/PgDn Home/End scroll', `f follow (${this.source?.follow ? 'on' : 'off'})`)
     if (mode) parts.push(`v ${mode === 'verbose' ? 'summary' : 'details'}`, `t ${mode === 'transcript' ? 'summary' : 'transcript'}`)
-    parts.push('Tab/] [ agent', '←/Esc back', 'q close')
+    if (row?.kind === 'agent' || row?.kind === 'sub') parts.push('Tab/] [ agent')
+    parts.push('←/Esc back', 'q close')
     return parts.join(' · ')
-  }
-
-  private treePane(width: number, height: number, now: number): Cell[] {
-    const { cells, top } = treeCells(this.rows, this.selected, now, width, height, this.treeTop)
-    this.treeTop = top
-    return cells
   }
 
   private detailPane(width: number, height: number, now: number): Cell[] {

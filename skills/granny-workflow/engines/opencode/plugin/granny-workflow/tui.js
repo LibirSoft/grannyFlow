@@ -287,11 +287,9 @@ function buildRunTree(run, entries, live, now, files = new Map, outline) {
     phases: phases.map(({ entries: _e, byGroup: _g, agentNodes: _a, ...phase }) => phase),
     agents,
     groups: [],
-    steps: [],
     running: []
   };
   workGroups(tree, entries, now);
-  tree.steps = stepsFor(tree, focusStage(tree));
   return tree;
 }
 var VERBS = ["resolve merge", "implement", "commit", "repair", "review", "judge", "fix", "extract"];
@@ -326,6 +324,10 @@ function actionOf(verb, rest, reviewers) {
       return verb;
   }
 }
+function roundIn(rest) {
+  const n = /^(?:fix )?r(\d+)\b/.exec(rest)?.[1];
+  return n === undefined ? {} : { round: Number(n) };
+}
 var SUBJECTS = [
   ["plan review", "plan-review"],
   ["final review", "final-review"]
@@ -348,14 +350,16 @@ function placeOf(label, stages, reviewers, pick = (n) => n[0]) {
         continue;
       const rest = tail.slice(name.length + 1);
       if (typeof target === "string") {
-        const action = actionOf(verb, rest, reviewers) ?? (target === "final-review" ? actionOf(verb, rest.replace(/^\S+ /, ""), reviewers) : undefined);
+        const plain = actionOf(verb, rest, reviewers);
+        const inRepo = rest.replace(/^\S+ /, "");
+        const action = plain ?? (target === "final-review" ? actionOf(verb, inRepo, reviewers) : undefined);
         if (action)
-          return { group: target, action };
+          return { group: target, action, ...roundIn(plain ? rest : inRepo) };
         continue;
       }
       const action = actionOf(verb, rest, reviewers);
       if (action)
-        return { group: `stage:${pick(target)}`, action };
+        return { group: `stage:${pick(target)}`, action, ...roundIn(rest) };
     }
   }
   return;
@@ -514,6 +518,8 @@ function workGroups(tree, entries, now) {
         const group = placed?.group ?? (run.length === 1 ? `stage:${run[0]}` : `other:${agent.phase}`);
         agent.group = group;
         agent.action = placed?.action ?? agent.label;
+        if (placed?.round !== undefined)
+          agent.round = placed.round;
         const g = ensure(group, stageNumber(group));
         if (g.number !== undefined && lastChecks.get(g.number)?.kind === "batch") {
           g.checks = { state: "running", failed: [], lines: g.checks?.lines ?? [], t: agent.start };
@@ -524,6 +530,20 @@ function workGroups(tree, entries, now) {
         for (const n of pendingLinks.get(agent.label) ?? [])
           agent.notes.push(n);
         pendingLinks.delete(agent.label);
+        break;
+      }
+      case "round": {
+        const round = Number(entry.round);
+        const found = Number.isInteger(round) ? logGroup(`${clean(String(entry.subject ?? ""))} r${round}`) : undefined;
+        if (!found)
+          break;
+        const results = found.group.rounds ??= [];
+        const result = { round, findings: findingViews(entry.findings) };
+        const at = results.findIndex((r) => r.round === round);
+        if (at >= 0)
+          results[at] = result;
+        else
+          results.push(result);
         break;
       }
       case "retry":
@@ -602,6 +622,8 @@ function workGroups(tree, entries, now) {
         g.note = `resumed from stage ${outline.fromStage}`;
       } else if (mark?.end !== undefined) {
         g.outcome = mark.outcome;
+        if (mark.outcome)
+          g.result = mark.outcome;
         g.state = mark.outcome === "skipped" ? "skipped" : DONE_OUTCOMES.has(mark.outcome ?? "clean") ? "done" : "failed";
         if (g.state === "done" || g.state === "skipped")
           delete g.outcome;
@@ -657,6 +679,38 @@ function workGroups(tree, entries, now) {
   tree.groups = list;
   tree.running = list.filter((g) => g.number !== undefined && g.state === "running").sort((a, b) => (a.start ?? now) - (b.start ?? now)).map((g) => g.number);
 }
+var text = (v) => typeof v === "string" && v ? { value: clean(v) } : undefined;
+function findingViews(value) {
+  if (!Array.isArray(value))
+    return [];
+  return value.flatMap((raw) => {
+    if (!raw || typeof raw !== "object")
+      return [];
+    const f = raw;
+    const id = text(f.id)?.value;
+    if (!id)
+      return [];
+    const copy = (key) => {
+      const v = text(f[key]);
+      return v ? { [key]: v.value } : {};
+    };
+    return [{
+      id,
+      sent: f.sent === true,
+      title: text(f.title)?.value ?? id,
+      ...copy("severity"),
+      ...copy("file"),
+      ...typeof f.line === "number" ? { line: f.line } : {},
+      ...copy("reviewer"),
+      ...copy("detail"),
+      ...copy("verdict"),
+      ...copy("impact"),
+      ...typeof f.priority === "number" ? { priority: f.priority } : {},
+      ...copy("reason"),
+      ...copy("why")
+    }];
+  });
+}
 var ROUND = /^ r\d+\b/;
 var CHECK_FAILED = /^check (.+?) failed \(/;
 function focusStage(tree, selectedKey) {
@@ -673,96 +727,6 @@ function focusStage(tree, selectedKey) {
     return tree.running.at(-1);
   const started = tree.groups.filter((g) => g.number !== undefined && g.start !== undefined).sort((a, b) => a.start - b.start);
   return started.at(-1)?.number;
-}
-var ORDER = { Worktree: 0, Plan: 1, "Plan review": 2, Implement: 3, Checks: 3, Review: 3, "Final review": 4, "PR ready": 5 };
-var REVIEWING = /^(review|judge|fix|extract) /;
-var IMPLEMENTING = /^implement$/;
-var JUDGE_STEPS = [["Review", "Review"], ["Tag", "Judge"], ["Report", "Report"]];
-var FAILED_STEP = { "checks-failed": "Checks", "round-cap": "Review", "review-failed": "Review", "no-changes": "Implement", "gates-red": "Implement" };
-function stepsFor(tree, focus) {
-  const { outline, status } = tree;
-  const titles = tree.phases.map((p) => p.title);
-  const seen = new Set(titles);
-  if (!outline) {
-    const unique = [...new Set(titles)];
-    return unique.map((title, i) => ({
-      title,
-      state: i < unique.length - 1 ? "done" : status === "running" ? "current" : status === "failed" ? "failed" : status === "cancelled" ? "skipped" : "done"
-    }));
-  }
-  const end = status === "failed" ? "failed" : status === "cancelled" ? "skipped" : status === "running" ? "current" : "done";
-  if (outline.kind === "judge") {
-    const last = JUDGE_STEPS.findIndex(([, phase]) => phase === titles.at(-1));
-    return JUDGE_STEPS.map(([title, phase], i) => ({
-      title,
-      state: !seen.has(phase) ? i < last || status !== "running" ? "skipped" : "upcoming" : i < last ? "done" : i === last ? end : "upcoming"
-    }));
-  }
-  const firstStage = outline.stages.find((s) => s.number >= outline.fromStage) ?? outline.stages[0];
-  const stage = outline.stages.find((s) => s.number === focus) ?? firstStage;
-  const group = tree.groups.find((g) => g.number === (focus ?? -1));
-  const run = [];
-  if (outline.worktree || seen.has("Worktree"))
-    run.push("Worktree");
-  if (outline.kind === "plan") {
-    run.push("Plan");
-    if (outline.planReview || seen.has("Plan review"))
-      run.push("Plan review");
-  } else {
-    if (outline.planReview || seen.has("Plan review"))
-      run.push("Plan review");
-    if (stage?.implement !== false)
-      run.push("Implement");
-    if (stage?.checks || group?.checks)
-      run.push("Checks");
-    if (stage?.review !== false)
-      run.push("Review");
-    if (outline.finalReview || seen.has("Final review"))
-      run.push("Final review");
-    run.push("PR ready");
-  }
-  const latest = titles.length ? ORDER[titles.at(-1)] ?? -1 : -1;
-  const stageSteps = run.filter((t) => ORDER[t] === 3);
-  const stageStates = stageStepStates(stageSteps, group, latest, end);
-  return run.map((title) => {
-    const o = ORDER[title];
-    if (o === 3)
-      return { title, state: stageStates.get(title) ?? "upcoming" };
-    return { title, state: o < latest ? "done" : o === latest ? end : "upcoming" };
-  });
-}
-function stageStepStates(steps, group, latest, end) {
-  const out = new Map;
-  const all = (state) => steps.forEach((s) => out.set(s, state));
-  if (!group || group.state === "upcoming" || latest < 3) {
-    all(latest > 3 && group?.state !== "upcoming" ? "done" : "upcoming");
-    return out;
-  }
-  if (group.state === "skipped")
-    return all("skipped"), out;
-  if (group.state === "done")
-    return all("done"), out;
-  let at;
-  let state;
-  if (group.state === "failed" && group.outcome) {
-    at = FAILED_STEP[group.outcome] ?? steps.at(-1);
-    state = "failed";
-  } else {
-    const reviewing = group.agents.some((a) => REVIEWING.test(`${a.action} `));
-    const implemented = group.agents.some((a) => IMPLEMENTING.test(a.action) && a.end !== undefined);
-    at = reviewing ? "Review" : group.checks || implemented ? "Checks" : "Implement";
-    state = group.state === "running" ? "current" : group.state === "cancelled" ? "skipped" : group.state === "failed" ? "failed" : end;
-  }
-  const order = ["Implement", "Checks", "Review"];
-  let index = steps.indexOf(at);
-  if (index < 0) {
-    const want = order.indexOf(at);
-    index = steps.findIndex((s) => order.indexOf(s) > want);
-    if (index < 0)
-      index = steps.length - 1;
-  }
-  steps.forEach((s, i) => out.set(s, i < index ? "done" : i === index ? state : "upcoming"));
-  return out;
 }
 var groupKey = (runId, key) => `group:${runId}:${key}`;
 var checksKey = (runId, n) => `checks:${runId}:${n}`;
@@ -807,68 +771,10 @@ function visibleRows(trees, view) {
   return rows;
 }
 var GROUP_MARKERS = { upcoming: "", running: "\u25CF", done: "\u2713", failed: "\u2717", skipped: "\u2298", cancelled: "\u2298" };
-var RUN_MARKERS = { running: "\u25CF", done: "\u2713", failed: "\u2717", cancelled: "\u2298" };
-var MIN_ELAPSED_WIDTH = 24;
-var MIN_NAME = 8;
-function aligned(left, right, width) {
-  if (!right || width < MIN_ELAPSED_WIDTH)
-    return fit(left, width);
-  if (!Number.isFinite(width))
-    return `${left}  ${right}`;
-  const room = width - right.length - 2;
-  return `${fit(left, room).padEnd(room)}  ${right}`;
-}
-var span = (start, end, now) => start === undefined ? undefined : duration((end ?? now) - start);
-function rowText(row, now, width = Number.POSITIVE_INFINITY) {
-  const indent = "  ".repeat(row.depth);
-  switch (row.kind) {
-    case "group": {
-      const g = row.group;
-      const name = g.number !== undefined ? `${g.number} ${g.title}` : g.title;
-      if (g.state === "upcoming")
-        return fit(`    ${name}`, width);
-      const head = `${row.folded ? "\u25B8" : "\u25BE"} ${GROUP_MARKERS[g.state]} `;
-      const right = span(g.start, g.end, now);
-      const tail = g.state === "failed" && g.outcome ? ` ${g.outcome}` : "";
-      const full = `${head}${name}${tail}`;
-      const room = !Number.isFinite(width) ? Number.POSITIVE_INFINITY : width - (right && width >= MIN_ELAPSED_WIDTH ? right.length + 2 : 0);
-      if (!tail || full.length <= room || room - head.length - tail.length < MIN_NAME)
-        return aligned(tail && full.length > room ? `${head}${name}` : full, right, width);
-      return aligned(`${head}${fit(name, room - head.length - tail.length)}${tail}`, right, width);
-    }
-    case "agent": {
-      const a = row.agent;
-      return aligned(`${indent}${AGENT_MARKERS[a.state]} ${a.action}`, span(a.start, a.end, now), width);
-    }
-    case "checks": {
-      const c = row.group.checks;
-      const text = !c ? "checks" : c.state === "running" ? "checks \u2026" : c.state === "passed" ? "checks \u2713" : `checks \u2717${c.failed.length ? ` ${c.failed.join(", ")}` : ""}`;
-      return fit(`${indent}${text}`, width);
-    }
-    case "sub":
-      return fit(`${indent}\u2514 ${AGENT_MARKERS[row.agent.state]} ${row.sub.name}`, width);
-    case "label":
-      return fit("runs", width);
-    case "run": {
-      const t = row.run;
-      if (row.details)
-        return fit("run details", width);
-      return aligned(`${RUN_MARKERS[t.status] ?? "\xB7"} ${t.id.slice(-4)} \xB7 ${t.status}${row.shown ? " (shown)" : ""}`, duration((t.end ?? now) - t.start), width);
-    }
-  }
-}
 var runKey = (id) => `run:${id}`;
 var phaseKey = (id, index) => `phase:${id}:${index}`;
 var agentKey = (session) => `agent:${session}`;
 var subKey = (session, name) => `sub:${session}:${name}`;
-function nextAgent(rows, key, dir) {
-  const from = rows.findIndex((r) => r.key === key);
-  let i = from < 0 ? dir > 0 ? -1 : rows.length : from;
-  for (i += dir;i >= 0 && i < rows.length; i += dir)
-    if (rows[i].kind === "agent")
-      return rows[i].key;
-  return;
-}
 
 // src/adapters/runview/activity.ts
 var ARG_KEYS = ["path", "file_path", "file", "pattern", "command", "query", "url", "description", "op"];
@@ -905,6 +811,25 @@ var shortOf = (name, arg, cwd, home) => {
 };
 var firstLine = (text) => clean(text).split(`
 `).map((l) => l.trim()).find(Boolean) ?? "";
+function nowLine(now, at, cwd) {
+  const took = duration(at - now.since);
+  switch (now.state) {
+    case "thinking":
+      return `\u25CF thinking ${took}${now.heading ? ` \xB7 "${oneLine(now.heading)}"` : ""}`;
+    case "writing":
+      return `\u25CF writing ${took}`;
+    case "running": {
+      const what = now.intent ? oneLine(now.intent) : now.arg ? shortArg(now.arg, cwd) : "";
+      return `\u25CF running ${now.tool ?? "a tool"}${what ? `: ${what}` : ""} ${took}`;
+    }
+    case "preparing":
+      return `\u25CF preparing a tool call ${took}`;
+    case "waiting":
+      return `\u2026 waiting for model ${took}`;
+    case "starting":
+      return `\u2026 starting ${took}`;
+  }
+}
 var TODO_MARKS = { done: "\u2713", active: "\u25CF", pending: "\xB7" };
 var todoText = (todos) => todos.map((t) => `${TODO_MARKS[t.state]} ${oneLine(t.text)}`).join("  ");
 function activityLines(items, cwd, home) {
@@ -951,7 +876,7 @@ function lineOf(item, cwd, home) {
 }
 var baseName = (path) => path.slice(path.lastIndexOf("/") + 1);
 var isRef = (arg) => arg.startsWith("skill://");
-function rowText2(row) {
+function rowText(row) {
   if (row.note !== undefined)
     return row.note;
   const mark = row.mark ? ` ${row.mark}` : "";
@@ -1084,7 +1009,7 @@ function summarise(items, at, opts = {}) {
       rows.pop();
   }
   const max = opts.max ?? MAX_ROWS;
-  const recent = rows.slice(-max).reverse().map((row) => ({ ...row.t !== undefined ? { t: row.t } : {}, tool: row.tool, text: rowText2(row), tone: row.tone }));
+  const recent = rows.slice(-max).reverse().map((row) => ({ ...row.t !== undefined ? { t: row.t } : {}, tool: row.tool, text: rowText(row), tone: row.tone }));
   const now = nowBlock(opts.end, live, opts.live?.heading ?? heading, at, cwd, home);
   return { ...now ? { now } : {}, ...todo ? { todo } : {}, recent, ...said ? { lastSaid: said } : {} };
 }
@@ -1228,88 +1153,6 @@ import { basename, join } from "path";
 var STATUS_TONES = { running: "info", done: "success", failed: "error", cancelled: "warning" };
 var AGENT_TONES = { running: "info", waiting: "muted", done: "success", failed: "error", cancelled: "warning" };
 var GROUP_TONES = { upcoming: "muted", running: "info", done: "success", failed: "error", skipped: "muted", cancelled: "warning" };
-var STAGE_PHASES = new Set(["Implement", "Checks", "Review"]);
-function headerText(tree, now, focus, width = Number.POSITIVE_INFINITY) {
-  const { outline } = tree;
-  const elapsed = duration((tree.end ?? now) - tree.start);
-  const phase = tree.phase ?? "Starting";
-  let middle;
-  if (tree.status !== "running")
-    middle = [tree.status];
-  else if (outline?.kind === "plan")
-    middle = ["planning", phase];
-  else if (outline?.kind === "judge")
-    middle = ["review only", phase];
-  else if (outline && outline.stages.length && (STAGE_PHASES.has(phase) || tree.running.length)) {
-    const total = outline.stages.length;
-    const k = tree.running.length > 1 ? undefined : focus ?? tree.running[0] ?? focusStage(tree);
-    middle = [tree.running.length > 1 ? `stages ${tree.running.join("+")}/${total}` : `stage ${k ?? 1}/${total}`, phase];
-  } else
-    middle = [phase];
-  const parts = (branch) => ["granny", ...branch && tree.branch ? [tree.branch] : [], ...middle, elapsed].join(" \xB7 ");
-  const full = parts(true);
-  if (full.length <= width)
-    return full;
-  return fit(parts(false), width);
-}
-var STEP_MARKS = { done: "\u2713", current: "\u25CF", failed: "\u2717", skipped: "\u2298", upcoming: "" };
-var STEP_TONES = { done: "success", current: "info", failed: "error", skipped: "muted", upcoming: "muted" };
-var SEPARATOR = { text: " \u203A ", tone: "muted" };
-var length = (cells) => cells.reduce((n, c) => n + c.text.length, 0);
-function stepperCells(steps, width) {
-  if (!steps.length)
-    return [];
-  const cell = (s, bare = false) => ({ text: bare ? STEP_MARKS[s.state] : `${s.title}${STEP_MARKS[s.state] ? ` ${STEP_MARKS[s.state]}` : ""}`, tone: STEP_TONES[s.state] });
-  const join = (cells) => cells.flatMap((c, i) => i ? [SEPARATOR, c] : [c]);
-  const full = join(steps.map((s) => cell(s)));
-  if (length(full) <= width)
-    return full;
-  const lastDone = steps.map((s) => s.state).lastIndexOf("done");
-  const bare = join(steps.map((s, i) => cell(s, s.state === "done" && i < lastDone)));
-  if (length(bare) <= width)
-    return bare;
-  let at = steps.findIndex((s) => s.state === "current" || s.state === "failed");
-  if (at < 0)
-    at = lastDone >= 0 ? lastDone : 0;
-  const s = steps[at];
-  const one = `${s.title}${STEP_MARKS[s.state] ? ` ${STEP_MARKS[s.state]}` : ""} (${at + 1}/${steps.length})`;
-  return [{ text: fit(one, width), tone: STEP_TONES[s.state] }];
-}
-function rowTone(row) {
-  switch (row.kind) {
-    case "group":
-      return GROUP_TONES[row.group.state];
-    case "agent":
-    case "sub":
-      return AGENT_TONES[row.agent.state];
-    case "checks": {
-      const c = row.group.checks;
-      return !c ? "muted" : c.state === "running" ? "info" : c.state === "passed" ? "success" : "error";
-    }
-    case "label":
-      return "muted";
-    case "run":
-      return row.details ? "muted" : STATUS_TONES[row.run.status] ?? "base";
-  }
-}
-function treeCells(rows, selectedKey, now, width, height, top) {
-  const at = rows.findIndex((r) => r.key === selectedKey);
-  let first = top;
-  if (at >= 0) {
-    if (at < first)
-      first = at;
-    if (at >= first + height)
-      first = at - height + 1;
-  }
-  first = Math.max(0, Math.min(first, Math.max(0, rows.length - height)));
-  const cells = rows.slice(first, first + Math.max(0, height)).map((row) => {
-    const chosen = row.key === selectedKey;
-    return { text: pad(`${chosen ? "\u203A" : " "} ${rowText(row, now, width - 2)}`, width), tone: rowTone(row), ...chosen ? { selected: true } : {} };
-  });
-  while (cells.length < height)
-    cells.push({ text: pad("", width), tone: "base" });
-  return { cells, top: first };
-}
 function wrap(text, width) {
   if (width < 1)
     return [];
@@ -1427,22 +1270,6 @@ function summaryCells(summary, width, height) {
   const shown = room > 0 ? [...head, ...recent.slice(0, room)] : [];
   return [...top, ...shown, ...bottom].slice(0, Math.max(0, height));
 }
-var WIDE = 100;
-var RULES_FROM = 16;
-var PANE_SEPARATOR = " \u2502 ";
-var clamp = (n, lo, hi) => Math.max(lo, Math.min(hi, n));
-function paneSizes(width, height, split = 0, right = true) {
-  const w = Math.max(1, Math.floor(width));
-  const h = Math.max(3, Math.floor(height));
-  const rules = h >= RULES_FROM;
-  const body = Math.max(0, h - 3 - (rules ? 2 : 0));
-  if (right && w >= WIDE) {
-    const tree = clamp(Math.round(w * 0.38), 36, 60);
-    return { two: true, rules, body, left: { width: tree, height: body }, right: { width: w - tree - PANE_SEPARATOR.length, height: body } };
-  }
-  const lower = right ? Math.min(Math.max(0, split), Math.max(0, body - 1)) : 0;
-  return { two: false, rules, body, left: { width: w, height: body - lower }, right: { width: w, height: lower } };
-}
 function fitRow(cells, width) {
   const out = [];
   let used = 0;
@@ -1462,33 +1289,6 @@ function fitRow(cells, width) {
   }
   return out;
 }
-function frame(input) {
-  const w = Math.max(1, Math.floor(input.width));
-  const sizes = paneSizes(w, input.height, input.split, input.right !== undefined);
-  const paneRows = (cells, width, height) => Array.from({ length: height }, (_, i) => {
-    const c = cells?.[i];
-    return c ? { ...c, text: pad(c.text, width) } : { text: " ".repeat(width), tone: "base" };
-  });
-  const rule = (joint) => [{ text: sizes.two ? `${"\u2500".repeat(sizes.left.width)}\u2500${joint}\u2500${"\u2500".repeat(sizes.right.width)}` : "\u2500".repeat(w), tone: "muted" }];
-  const rows = [fitRow(input.header, w), fitRow(input.stepper, w)];
-  if (sizes.rules)
-    rows.push(rule("\u252C"));
-  if (sizes.two) {
-    const left = paneRows(input.left, sizes.left.width, sizes.body);
-    const right = paneRows(input.right, sizes.right.width, sizes.body);
-    for (let i = 0;i < sizes.body; i++)
-      rows.push([left[i], { text: PANE_SEPARATOR, tone: "muted" }, right[i]]);
-  } else {
-    for (const c of paneRows(input.left, w, sizes.left.height))
-      rows.push([c]);
-    for (const c of paneRows(input.right, w, sizes.right.height))
-      rows.push([c]);
-  }
-  if (sizes.rules)
-    rows.push(rule("\u2534"));
-  rows.push(fitRow(input.help, w));
-  return rows;
-}
 
 // src/adapters/runview/outline.ts
 var isRecord2 = (v) => !!v && typeof v === "object" && !Array.isArray(v);
@@ -1503,7 +1303,7 @@ function readStage(v) {
 function readOutline(value) {
   if (!isRecord2(value))
     return;
-  const { kind, branch, worktree, planReview, finalReview, reviewers, fromStage, stages } = value;
+  const { kind, branch, worktree, planReview, finalReview, reviewers, fromStage, stages, maxRounds } = value;
   if (kind !== "plan" && kind !== "implement" && kind !== "judge")
     return;
   if (typeof branch !== "string" || typeof worktree !== "boolean" || typeof planReview !== "boolean" || typeof finalReview !== "boolean")
@@ -1513,7 +1313,7 @@ function readOutline(value) {
   const read = stages.map(readStage);
   if (read.some((s) => s === undefined))
     return;
-  return { kind, branch: clean(branch), worktree, planReview, finalReview, reviewers: reviewers.map((r) => clean(r)), fromStage, stages: read };
+  return { kind, branch: clean(branch), worktree, planReview, finalReview, reviewers: reviewers.map((r) => clean(r)), fromStage, stages: read, ...isCount(maxRounds) ? { maxRounds } : {} };
 }
 
 // src/adapters/runview/tail.ts
@@ -1865,7 +1665,7 @@ var shortId = (id) => id.slice(-4);
 var terminal = (s) => TERMINAL.has(s.status);
 var fresh = (s, now) => s.end !== undefined && now - s.end < FRESH_MS;
 var elapsed = (s, now) => duration((s.end ?? now) - s.start);
-var STAGE_PHASES2 = new Set(["Implement", "Checks", "Review"]);
+var STAGE_PHASES = new Set(["Implement", "Checks", "Review"]);
 function stageText(tree) {
   const outline = tree.outline;
   if (!outline || outline.kind !== "implement" || !outline.stages.length || tree.status !== "running")
@@ -1873,7 +1673,7 @@ function stageText(tree) {
   const total = outline.stages.length;
   if (tree.running.length > 1)
     return `stages ${tree.running.join("+")}/${total}`;
-  const k = tree.running[0] ?? (STAGE_PHASES2.has(tree.phase ?? "") ? focusStage(tree) : undefined);
+  const k = tree.running[0] ?? (STAGE_PHASES.has(tree.phase ?? "") ? focusStage(tree) : undefined);
   return k === undefined ? undefined : `stage ${k}/${total}`;
 }
 function agentLine(a, now, width) {
@@ -1941,6 +1741,617 @@ function toastFor(e, s) {
     }
   }
 }
+
+// src/adapters/runview/levels.ts
+var REVIEWING = /^(review|extract)\b/;
+var JUDGING = /^judge\b/;
+var BUSY2 = new Set(["running", "waiting"]);
+var CARD_MIN = 28;
+var MAX_CARDS = 3;
+var CARD_ROWS = 4;
+var ROUND_TONES = { running: "info", done: "success", failed: "error" };
+var ROUND_MARKS = { running: "\u25CF", done: "\u2713", failed: "\u2717" };
+var GROUP_TONES2 = { upcoming: "muted", running: "info", done: "success", failed: "error", skipped: "muted", cancelled: "warning" };
+var count = (n, one) => `${n} ${one}${n === 1 ? "" : "s"}`;
+var span = (start, end, now) => start === undefined ? "" : duration((end ?? now) - start);
+var busy = (a) => BUSY2.has(a.state);
+var isLoop = (tree, group) => {
+  if (group.key === "plan-review" || group.key === "final-review")
+    return true;
+  if (group.number === undefined)
+    return false;
+  return tree.outline?.stages.find((s) => s.number === group.number)?.review !== false;
+};
+function flowOf(group) {
+  const build = group.agents.filter((a) => a.round === undefined);
+  const numbers = [...new Set([...group.agents.flatMap((a) => a.round === undefined ? [] : [a.round]), ...(group.rounds ?? []).map((r) => r.round)])].sort((a, b) => a - b);
+  const last = numbers.at(-1);
+  const rounds = numbers.map((number) => {
+    const agents = group.agents.filter((a) => a.round === number);
+    const later = number !== last;
+    const open = !later && (agents.some(busy) || group.state === "running");
+    const failed = !later && (group.state === "failed" || group.state === "cancelled");
+    const result = group.rounds?.find((r) => r.round === number);
+    const fix = agents.filter((a) => !REVIEWING.test(a.action) && !JUDGING.test(a.action));
+    const after = group.checks?.after;
+    const checks = later && fix.length ? "passed" : after && fix.includes(after) ? group.checks.state : undefined;
+    const ends = agents.map((a) => a.end).filter((e) => e !== undefined);
+    const start = agents.length ? Math.min(...agents.map((a) => a.start)) : undefined;
+    return {
+      number,
+      state: open ? "running" : failed ? "failed" : "done",
+      review: agents.filter((a) => REVIEWING.test(a.action)),
+      judge: agents.filter((a) => JUDGING.test(a.action)),
+      fix,
+      ...result ? { result } : {},
+      ...checks ? { checks } : {},
+      ...start !== undefined ? { start } : {},
+      ...!open && ends.length ? { end: Math.max(...ends) } : {}
+    };
+  });
+  return { build, rounds };
+}
+var routed = (result) => {
+  if (!result)
+    return;
+  const sent = result.findings.filter((f) => f.sent).length;
+  return `${sent} sent back, ${result.findings.length - sent} kept`;
+};
+var findingsText = (result) => {
+  if (!result)
+    return;
+  if (!result.findings.length)
+    return "no findings";
+  return `${count(result.findings.length, "finding")}: ${routed(result)}`;
+};
+var MARK = 4;
+var TIME = 8;
+function columns(cols, width, selected) {
+  const fixed = cols.reduce((n, c) => n + (c.width ?? 0), 0);
+  const flex = Math.max(0, width - fixed);
+  return cols.map((c) => {
+    const w = c.width ?? flex;
+    const body = fit(c.text, Math.max(0, w - (c.width && !c.right ? 1 : 0)));
+    return { text: c.right ? body.padStart(w) : body.padEnd(w), tone: c.tone ?? "base", ...selected ? { selected: true } : {} };
+  });
+}
+var mark = (text, selected) => `${selected ? "\u203A" : " "} ${text}`;
+function tableRow(width, selected, marker, tone, name, middle, agents, time, nameTone = "base") {
+  const wide = width >= 96;
+  const mid = width >= 64;
+  const middleWidth = wide ? 38 : 28;
+  const cols = [
+    { text: mark(marker, selected), tone, width: MARK },
+    { text: name, tone: nameTone },
+    ...mid ? [{ text: middle, tone: "muted", width: middleWidth }] : [],
+    ...wide || width >= 56 && agents ? [{ text: agents, tone: "muted", width: wide ? 24 : 12 }] : [],
+    { text: time, tone: "muted", width: TIME, right: true }
+  ];
+  return columns(cols, width, selected);
+}
+var connector = (width) => [{ text: pad("  \u2502", width), tone: "muted" }];
+var blank = (width) => [{ text: " ".repeat(Math.max(0, width)), tone: "base" }];
+function groupMiddle(tree, group, rounds) {
+  const max = tree.outline?.maxRounds;
+  if (group.state === "upcoming")
+    return "waiting";
+  if (group.state === "skipped")
+    return group.note ?? "skipped";
+  if (group.state === "running") {
+    if (rounds.length)
+      return `round ${rounds.at(-1).number}${max ? ` of ${max}` : ""}`;
+    if (group.checks?.state === "running")
+      return "checks";
+    return lastOf(group.agents, busy)?.action ?? group.agents.at(-1)?.action ?? "";
+  }
+  const result = group.outcome ?? group.result;
+  const turns = rounds.length ? count(rounds.length, "round") : "";
+  return [result, turns].filter(Boolean).join(" \xB7 ");
+}
+function agentsText(agents, width) {
+  if (!agents.length)
+    return "";
+  const running = agents.filter((a) => a.state === "running").length;
+  if (width < 96)
+    return running ? `${running}/${agents.length} running` : count(agents.length, "agent");
+  return `${count(agents.length, "agent")}${running ? ` \xB7 ${running} running` : ""}`;
+}
+function runPage(view, selected) {
+  const { tree, trees, now, width, height } = view;
+  const rows = [];
+  const items = [];
+  const worktree = tree.phases.find((p) => p.title === "Worktree");
+  const entries = [];
+  if (worktree) {
+    const after = tree.groups.map((g) => g.start).filter((t) => t !== undefined);
+    const last = tree.phases.at(-1) === worktree && tree.status === "running" && !after.length;
+    entries.push(() => rows.push(tableRow(width, false, last ? "\u25CF" : "\u2713", last ? "info" : "success", "Worktree", "", "", span(worktree.start, worktree.end ?? (after.length ? Math.min(...after) : undefined), now), last ? "base" : "muted")));
+  }
+  for (const g of tree.groups) {
+    const key = groupKey(tree.id, g.key);
+    const { rounds } = flowOf(g);
+    const name = g.number !== undefined ? `${g.number} ${g.title}` : g.title;
+    entries.push(() => {
+      const chosen = key === selected;
+      const reached = g.state !== "upcoming" && g.state !== "skipped";
+      items.push({ key, row: rows.length, ...reached ? { open: g.agents.length ? { kind: "group", group: g.key } : { kind: "detail", key } } : {} });
+      const tone = GROUP_TONES2[g.state];
+      rows.push(tableRow(width, chosen, GROUP_MARKERS[g.state] || "\xB7", tone, name, groupMiddle(tree, g, rounds), agentsText(g.agents, width), span(g.start, g.end, now), g.state === "running" ? "base" : tone === "muted" ? "muted" : "base"));
+    });
+  }
+  const others = trees.length > 1 ? trees.length + 2 : 2;
+  const roomy = entries.length * 2 - 1 + others <= height;
+  entries.forEach((draw, i) => {
+    if (i && roomy)
+      rows.push(connector(width));
+    draw();
+  });
+  rows.push(blank(width));
+  if (trees.length > 1) {
+    rows.push([{ text: pad("  runs", width), tone: "muted" }]);
+    for (const t of trees) {
+      const key = runKey(t.id);
+      const chosen = key === selected;
+      items.push({ key, row: rows.length, ...t.id === tree.id ? { open: { kind: "detail", key } } : { run: t.id } });
+      rows.push(columns([{ text: mark(`${t.id.slice(-4)} \xB7 ${t.status}${t.id === tree.id ? " (shown)" : ""}`, chosen), tone: STATUS_TONES[t.status] ?? "base" }, { text: duration((t.end ?? now) - t.start), tone: "muted", width: TIME, right: true }], width, chosen));
+    }
+  } else {
+    const key = runKey(tree.id);
+    const chosen = key === selected;
+    items.push({ key, row: rows.length, open: { kind: "detail", key } });
+    rows.push(columns([{ text: mark("run details", chosen), tone: "muted" }], width, chosen));
+  }
+  const live = lastOf(tree.groups, (g) => g.state === "running") ?? lastOf(tree.groups, (g) => g.state !== "upcoming" && g.state !== "skipped") ?? tree.groups[0];
+  return {
+    crumbs: runCrumbs(tree, now),
+    rows,
+    items,
+    ...live ? { preferred: groupKey(tree.id, live.key) } : {},
+    help: ["\u2191\u2193 move", "Enter open", "Esc close"].join(" \xB7 ")
+  };
+}
+var roundKey = (group, n) => `round:${group}:${n}`;
+function groupPage(view, group, selected, chain) {
+  const { tree, now, width, height } = view;
+  const { build, rounds } = flowOf(group);
+  const rows = [];
+  const items = [];
+  const loop = isLoop(tree, group);
+  const stage = tree.outline?.stages.find((s) => s.number === group.number);
+  const checksRow = group.number !== undefined && (!!group.checks || stage?.checks === true) && (build.length > 0 || !!group.checks);
+  const steps = build.length + (checksRow ? 1 : 0);
+  const body = steps * 2 + (loop ? rounds.length + 4 : 0);
+  const roomy = body <= height;
+  const gap = () => {
+    if (roomy && rows.length)
+      rows.push(connector(width));
+  };
+  for (const a of build) {
+    gap();
+    const key = agentKey(a.session);
+    const chosen = key === selected;
+    items.push({ key, row: rows.length, open: { kind: "detail", key } });
+    rows.push(tableRow(width, chosen, AGENT_MARKERS[a.state], AGENT_TONES[a.state], capital(a.action), shortModel(a.model, a.effort), "1 agent", span(a.start, a.end, now)));
+  }
+  if (checksRow) {
+    gap();
+    const state = rounds.length ? "passed" : group.checks?.state;
+    const key = checksKey(tree.id, group.number);
+    const chosen = key === selected;
+    if (group.checks)
+      items.push({ key, row: rows.length, open: { kind: "detail", key } });
+    const text = state === "failed" && group.checks?.failed.length ? `failed: ${group.checks.failed.join(", ")}` : state ?? "after the implementer";
+    const tone = state === "passed" ? "success" : state === "failed" ? "error" : state === "running" ? "info" : "muted";
+    rows.push(tableRow(width, chosen, state === "passed" ? "\u2713" : state === "failed" ? "\u2717" : state === "running" ? "\u25CF" : "\xB7", tone, "Checks", text, "", "", state ? "base" : "muted"));
+  }
+  if (loop) {
+    gap();
+    const max = tree.outline?.maxRounds;
+    const inner = Math.max(1, width - 4);
+    const title = `\u250C \u21BA review loop${max ? ` \xB7 up to ${count(max, "round")}` : ""} `;
+    rows.push([{ text: `${fit(title, width - 1)}${"\u2500".repeat(Math.max(0, width - 1 - title.length))}${width > title.length ? "\u2510" : ""}`, tone: "muted" }]);
+    const boxed = (cells) => [{ text: "\u2502 ", tone: "muted" }, ...cells, { text: " \u2502", tone: "muted" }];
+    for (const r of rounds) {
+      const key = roundKey(group.key, r.number);
+      const chosen = key === selected;
+      items.push({ key, row: rows.length, open: { kind: "round", group: group.key, round: r.number } });
+      const agents = [...r.review, ...r.judge, ...r.fix];
+      const middle = findingsText(r.result) ?? (r.state === "running" ? r.fix.some(busy) ? "fixing" : r.judge.some(busy) ? "judging" : "reviewing" : "");
+      rows.push(boxed(tableRow(inner, chosen, ROUND_MARKS[r.state], ROUND_TONES[r.state], `Round ${r.number}`, middle, agentsText(agents, inner), span(r.start, r.end, now))));
+    }
+    const finished = group.state !== "running" && group.state !== "upcoming";
+    const lastRound = rounds.at(-1)?.number ?? 0;
+    if (!finished && max) {
+      const next = lastRound + 1;
+      const ahead = next < max ? [next, max] : next === max ? [max] : [];
+      for (const n of ahead) {
+        const text = n === max ? "the last one" : lastRound ? `only if round ${lastRound} sends findings back` : "after the implementer";
+        rows.push(boxed(tableRow(inner, false, "\xB7", "muted", `Round ${n}`, text, "", "", "muted")));
+      }
+    }
+    if (!rounds.length && (!max || finished))
+      rows.push(boxed([{ text: pad("no review round", inner), tone: "muted" }]));
+    rows.push([{ text: `\u2514${"\u2500".repeat(Math.max(0, width - 2))}\u2518`, tone: "muted" }]);
+  }
+  const after = tree.groups[tree.groups.indexOf(group) + 1];
+  if (after && !finishedRun(tree)) {
+    gap();
+    rows.push(tableRow(width, false, "\xB7", "muted", "Next", after.number !== undefined ? `${after.number} ${after.title}` : after.title, "", "", "muted"));
+  }
+  if (!rows.length)
+    rows.push([{ text: pad("  no agent ran here", width), tone: "muted" }]);
+  const preferred = lastOf(rounds, (r) => r.state === "running") ?? rounds.at(-1);
+  return {
+    crumbs: crumbs(view, chain),
+    rows,
+    items,
+    ...preferred ? { preferred: roundKey(group.key, preferred.number) } : items.length ? { preferred: (items.find((i) => build.some((a) => agentKey(a.session) === i.key && busy(a))) ?? items.at(-1)).key } : {},
+    help: ["\u2191\u2193 move", "Enter open", "l log", "Esc back"].join(" \xB7 ")
+  };
+}
+var finishedRun = (tree) => tree.status !== "running";
+var capital = (text) => text.charAt(0).toUpperCase() + text.slice(1);
+var cardName = (a, round) => {
+  const tail = a.label.slice(a.label.lastIndexOf(` r${round} `) + ` r${round} `.length);
+  if (a.label.lastIndexOf(` r${round} `) >= 0 && tail)
+    return a.action.startsWith("extract") ? `extract ${tail}` : tail;
+  return a.action;
+};
+var OUTCOME = /^[\u25CF\u2026]\s*/;
+function cardRows(view, agents, round, selected, items, base, indent) {
+  const { now, width } = view;
+  const room = Math.max(CARD_MIN, width - indent);
+  const across = Math.max(1, Math.min(MAX_CARDS, Math.floor((room + 2) / (CARD_MIN + 2)), agents.length));
+  const each = Math.max(8, Math.floor((room - 2 * (across - 1)) / across));
+  const out = [];
+  for (let i = 0;i < agents.length; i += across) {
+    const line = agents.slice(i, i + across);
+    const lines = Array.from({ length: CARD_ROWS }, () => [{ text: " ".repeat(indent), tone: "base" }]);
+    line.forEach((a, j) => {
+      const key = agentKey(a.session);
+      const chosen = key === selected;
+      items.push({ key, row: base + out.length + CARD_ROWS - 1, open: { kind: "detail", key } });
+      const found = round.result?.findings.filter((f) => f.reviewer !== undefined && a.label.endsWith(` ${f.reviewer}`)).length;
+      const said = view.activity?.(a)?.replace(OUTCOME, "") ?? a.activity;
+      const what = busy(a) ? said ?? shortModel(a.model, a.effort) : found !== undefined && round.result ? count(found, "finding") : shortModel(a.model, a.effort);
+      const subs = a.subagents.length ? ` \xB7 ${count(a.subagents.length, "subagent")}` : "";
+      const tone = AGENT_TONES[a.state];
+      const box = chosen ? "info" : "muted";
+      const inner = each - 4;
+      const cell = (text, t) => ({ text, tone: t, ...chosen ? { selected: true } : {} });
+      if (j)
+        for (const l of lines)
+          l.push({ text: "  ", tone: "base" });
+      lines[0].push(cell(`\u250C${"\u2500".repeat(each - 2)}\u2510`, box));
+      lines[1].push(cell("\u2502 ", box), cell(pad(`${AGENT_MARKERS[a.state]} ${cardName(a, round.number)}  ${span(a.start, a.end, now)}`, inner), tone), cell(" \u2502", box));
+      lines[2].push(cell("\u2502 ", box), cell(pad(`${what}${subs}`, inner), "base"), cell(" \u2502", box));
+      lines[3].push(cell(`\u2514${"\u2500".repeat(each - 2)}\u2518`, box));
+    });
+    out.push(...lines);
+  }
+  return out;
+}
+function stepAgents(view, agents, title, text, selected, items, rows) {
+  agents.forEach((a, i) => {
+    const key = agentKey(a.session);
+    const chosen = key === selected;
+    items.push({ key, row: rows.length, open: { kind: "detail", key } });
+    rows.push(tableRow(view.width, chosen, AGENT_MARKERS[a.state], AGENT_TONES[a.state], i ? a.action : title, (i ? undefined : text) ?? shortModel(a.model, a.effort), "", span(a.start, a.end, view.now)));
+  });
+}
+function roundPage(view, group, number, selected, chain) {
+  const { tree, width, height } = view;
+  const { rounds } = flowOf(group);
+  const round = rounds.find((r) => r.number === number);
+  const items = [];
+  const rows = [];
+  const max = tree.outline?.maxRounds;
+  if (!round)
+    return { crumbs: crumbs(view, chain), rows: [[{ text: pad("  no such round", width), tone: "muted" }]], items, help: "Esc back" };
+  const running = round.review.filter((a) => a.state === "running").length;
+  const heading = running > 1 ? `${running} agents at the same time` : findingsText(round.result)?.split(":")[0] ?? count(round.review.length, "agent");
+  const reviewTone = round.review.some(busy) ? "info" : round.review.some((a) => a.state === "failed") ? "error" : round.review.length ? "success" : "muted";
+  const reviewMark = round.review.some(busy) ? "\u25CF" : round.review.some((a) => a.state === "failed") ? "\u2717" : round.review.length ? "\u2713" : "\xB7";
+  rows.push(tableRow(width, false, reviewMark, reviewTone, "Review", heading, "", ""));
+  rows.push(...cardRows(view, round.review, round, selected, items, rows.length, MARK));
+  const closed = round.state !== "running";
+  const sentNothing = closed && round.fix.length === 0;
+  const planned = round.review.length ? 1 : 0;
+  const roomy = planned + rows.length + 8 <= height;
+  const gap = () => {
+    if (roomy)
+      rows.push(connector(width));
+  };
+  gap();
+  if (round.judge.length)
+    stepAgents(view, round.judge, "Judge", routed(round.result), selected, items, rows);
+  else if (!(sentNothing && round.result?.findings.length === 0))
+    rows.push(tableRow(width, false, "\xB7", "muted", "Judge", closed ? routed(round.result) ?? "not needed" : "after the reviewers", "", "", "muted"));
+  if (!sentNothing) {
+    gap();
+    if (round.fix.length)
+      stepAgents(view, round.fix, "Fix", undefined, selected, items, rows);
+    else
+      rows.push(tableRow(width, false, "\xB7", "muted", "Fix", "only if findings go back", "", "", "muted"));
+    if (round.checks || tree.outline?.stages.find((s) => s.number === group.number)?.checks) {
+      gap();
+      const state = round.checks;
+      if (state && group.number !== undefined) {
+        const key = checksKey(tree.id, group.number);
+        const chosen = key === selected;
+        items.push({ key, row: rows.length, open: { kind: "detail", key } });
+        rows.push(tableRow(width, chosen, state === "passed" ? "\u2713" : state === "failed" ? "\u2717" : "\u25CF", state === "passed" ? "success" : state === "failed" ? "error" : "info", "Checks", state, "", ""));
+      } else
+        rows.push(tableRow(width, false, "\xB7", "muted", "Checks", "after the fix", "", "", "muted"));
+    }
+  }
+  gap();
+  const later = rounds.some((r) => r.number > number);
+  const next = later ? `Round ${number + 1}` : closed ? group.outcome ?? group.result ?? "done" : max !== undefined && number >= max ? "the round cap: no more rounds" : `Round ${number + 1}, or the stage is done`;
+  rows.push(tableRow(width, false, later ? "\u21BA" : "\xB7", "muted", "Next", next, "", "", "muted"));
+  const live = [...round.review, ...round.judge, ...round.fix];
+  return {
+    crumbs: crumbs(view, chain),
+    rows,
+    items,
+    ...live.length ? { preferred: agentKey((live.find(busy) ?? live[0]).session) } : {},
+    help: ["\u2191\u2193\u2190\u2192 move", "Enter open agent", "[ ] other round", ...round.result?.findings.length ? ["f findings"] : [], "l log", "Esc back"].join(" \xB7 ")
+  };
+}
+var findingKey = (f) => `finding:${f.id}`;
+function findingsPage(view, group, number, selected, chain) {
+  const { width } = view;
+  const { rounds } = flowOf(group);
+  const round = rounds.find((r) => r.number === number);
+  const findings = round?.result?.findings ?? [];
+  const items = [];
+  const rows = [];
+  for (const f of findings) {
+    const key = findingKey(f);
+    const chosen = key === selected;
+    const reviewer = f.reviewer ? round.review.find((a) => a.label.endsWith(` ${f.reviewer}`)) : undefined;
+    items.push({ key, row: rows.length, ...reviewer ? { open: { kind: "detail", key: agentKey(reviewer.session) } } : {} });
+    rows.push(columns([
+      { text: mark(f.sent ? "\u21BA" : "\xB7", chosen), tone: f.sent ? "info" : "warning", width: MARK },
+      { text: f.title },
+      { text: f.sent ? "sent back" : "kept", tone: f.sent ? "info" : "warning", width: 10, right: true }
+    ], width, chosen));
+  }
+  const shown = findings.find((f) => findingKey(f) === selected) ?? findings[0];
+  if (shown) {
+    rows.push(blank(width));
+    const field = (label, text, max = 4) => {
+      if (!text)
+        return;
+      const room = Math.max(8, width - label.length - 2);
+      wrap(text.replace(/\s+/g, " "), room).slice(0, max).forEach((line, i) => rows.push([{ text: i ? "      " : `${label.padEnd(5)} `, tone: "muted" }, { text: pad(line, Math.max(0, width - 6)), tone: "base" }]));
+    };
+    field("WHERE", shown.file ? `${shown.file}${shown.line !== undefined ? `:${shown.line}` : ""}` : undefined, 1);
+    field("SAID", [shown.reviewer, shown.severity].filter(Boolean).join(" ") + (shown.detail ? `: ${shown.detail}` : ""));
+    field("JUDGE", [shown.verdict, shown.impact, shown.priority !== undefined ? `priority ${shown.priority}` : undefined].filter(Boolean).join(" \xB7 "), 1);
+    field("WHY", shown.why ?? shown.reason);
+  } else
+    rows.push([{ text: pad("  this round has no findings", width), tone: "muted" }]);
+  return { crumbs: crumbs(view, chain), rows, items, ...findings[0] ? { preferred: findingKey(findings[0]) } : {}, help: ["\u2191\u2193 move", "Enter open the agent that found it", "Esc back"].join(" \xB7 ") };
+}
+function runCrumbs(tree, now) {
+  return [
+    { text: "granny", tone: "base" },
+    ...tree.branch ? [{ text: `  ${tree.branch}`, tone: "base" }] : [],
+    { text: `  ${tree.status === "running" ? "\u25CF" : ""}${tree.status === "running" ? " " : ""}${tree.status}`, tone: STATUS_TONES[tree.status] ?? "base" },
+    { text: ` \xB7 ${duration((tree.end ?? now) - tree.start)}`, tone: "muted" }
+  ];
+}
+function screenName(view, screen) {
+  const { tree } = view;
+  const max = tree.outline?.maxRounds;
+  switch (screen.kind) {
+    case "run":
+      return "granny";
+    case "group": {
+      const g = tree.groups.find((x) => x.key === screen.group);
+      return g ? g.number !== undefined ? `${g.number} ${g.title}` : g.title : screen.group;
+    }
+    case "round":
+      return `Round ${screen.round}${max ? ` of ${max}` : ""}`;
+    case "findings":
+      return "Findings";
+    case "detail":
+      return detailName(tree, screen.key, view.subName);
+  }
+}
+function detailName(tree, key, subName = (name) => name) {
+  if (key.startsWith("agent:"))
+    return tree.agents.find((a) => agentKey(a.session) === key)?.action ?? "agent";
+  if (key.startsWith("sub:")) {
+    const agent = tree.agents.find((a) => a.subagents.some((s) => subKey(a.session, s.name) === key));
+    const sub = agent?.subagents.find((s) => subKey(agent.session, s.name) === key);
+    return sub ? subName(sub.name) : "subagent";
+  }
+  if (key.startsWith("checks:"))
+    return "Checks";
+  if (key.startsWith("group:"))
+    return "Log";
+  return "Run details";
+}
+function crumbs(view, chain) {
+  const names = chain.map((s) => screenName(view, s));
+  const parents = names.slice(0, -1).join(" \u203A ");
+  return [{ text: `${parents} \u203A `, tone: "muted" }, { text: names.at(-1) ?? "", tone: "base" }];
+}
+function detailSiblings(tree, key) {
+  const agent = tree.agents.find((a) => agentKey(a.session) === key || a.subagents.some((s) => subKey(a.session, s.name) === key));
+  if (!agent)
+    return [];
+  const group = tree.groups.find((g) => g.key === agent.group);
+  const peers = (group?.agents ?? [agent]).filter((a) => a.round === agent.round);
+  return peers.flatMap((a) => [agentKey(a.session), ...a.subagents.map((s) => subKey(a.session, s.name))]);
+}
+
+class LevelNav {
+  stack = [{ screen: { kind: "run" } }];
+  page;
+  get screen() {
+    return this.stack.at(-1).screen;
+  }
+  get detail() {
+    const s = this.screen;
+    return s.kind === "detail" ? s.key : undefined;
+  }
+  get selected() {
+    return this.detail ?? this.stack.at(-1).selected ?? "";
+  }
+  get atRoot() {
+    return this.stack.length === 1;
+  }
+  reset() {
+    this.stack = [{ screen: { kind: "run" } }];
+    this.page = undefined;
+  }
+  layout(view) {
+    const frame = this.stack.at(-1);
+    const build = () => this.build(view, frame);
+    let page = build();
+    if (frame.screen.kind !== "detail" && !page.items.some((i) => i.key === frame.selected)) {
+      const next = page.preferred ?? page.items[0]?.key;
+      if (next !== frame.selected) {
+        if (next === undefined)
+          delete frame.selected;
+        else
+          frame.selected = next;
+        page = build();
+      }
+    }
+    this.page = page;
+    return page;
+  }
+  build(view, frame) {
+    const { tree } = view;
+    const { screen } = frame;
+    const selected = frame.selected ?? "";
+    const chain = this.stack.map((f) => f.screen);
+    const missing = () => ({ crumbs: crumbs(view, chain), rows: [], items: [], help: "Esc back" });
+    switch (screen.kind) {
+      case "run":
+        return runPage(view, selected);
+      case "group": {
+        const g = tree.groups.find((x) => x.key === screen.group);
+        return g ? groupPage(view, g, selected, chain) : missing();
+      }
+      case "round": {
+        const g = tree.groups.find((x) => x.key === screen.group);
+        return g ? roundPage(view, g, screen.round, selected, chain) : missing();
+      }
+      case "findings": {
+        const g = tree.groups.find((x) => x.key === screen.group);
+        return g ? findingsPage(view, g, screen.round, selected, chain) : missing();
+      }
+      case "detail":
+        return { crumbs: crumbs(view, chain), rows: [], items: [], help: "" };
+    }
+  }
+  move(delta) {
+    const items = this.page?.items ?? [];
+    if (!items.length)
+      return;
+    const frame = this.stack.at(-1);
+    const at = items.findIndex((i) => i.key === frame.selected);
+    frame.selected = items[Math.max(0, Math.min(items.length - 1, at + delta))].key;
+  }
+  edge(last) {
+    const items = this.page?.items ?? [];
+    const item = last ? items.at(-1) : items[0];
+    if (item)
+      this.stack.at(-1).selected = item.key;
+  }
+  enter() {
+    const item = this.page?.items.find((i) => i.key === this.stack.at(-1).selected);
+    if (!item)
+      return {};
+    if (item.run)
+      return { run: item.run };
+    if (item.open)
+      this.push(item.open);
+    return {};
+  }
+  push(screen) {
+    this.stack.push({ screen });
+    this.page = undefined;
+  }
+  back() {
+    if (this.stack.length <= 1)
+      return false;
+    this.stack.pop();
+    this.page = undefined;
+    return true;
+  }
+  otherRound(tree, dir) {
+    const s = this.screen;
+    if (s.kind !== "round")
+      return;
+    const g = tree.groups.find((x) => x.key === s.group);
+    const numbers = g ? flowOf(g).rounds.map((r) => r.number) : [];
+    const next = numbers[numbers.indexOf(s.round) + dir];
+    if (next === undefined)
+      return;
+    this.stack[this.stack.length - 1] = { screen: { ...s, round: next } };
+    const parent = this.stack.at(-2);
+    if (parent)
+      parent.selected = roundKey(s.group, next);
+  }
+  findings(tree) {
+    const s = this.screen;
+    if (s.kind !== "round")
+      return;
+    const g = tree.groups.find((x) => x.key === s.group);
+    if (g?.rounds?.find((r) => r.round === s.round)?.findings.length)
+      this.push({ kind: "findings", group: s.group, round: s.round });
+  }
+  log(tree) {
+    const s = this.screen;
+    if (s.kind === "group" || s.kind === "round")
+      this.push({ kind: "detail", key: groupKey(tree.id, s.group) });
+  }
+  stepDetail(tree, dir) {
+    const key = this.detail;
+    if (!key)
+      return;
+    const peers = detailSiblings(tree, key);
+    const next = peers[peers.indexOf(key) + dir];
+    if (!next)
+      return;
+    this.stack[this.stack.length - 1] = { screen: { kind: "detail", key: next } };
+    const parent = this.stack.at(-2);
+    if (parent && next.startsWith("agent:"))
+      parent.selected = next;
+  }
+  openAt(tree, key) {
+    const agent = tree.agents.find((a) => agentKey(a.session) === key || a.subagents.some((s) => subKey(a.session, s.name) === key));
+    if (!agent)
+      return false;
+    this.stack = [{ screen: { kind: "run" }, selected: groupKey(tree.id, agent.group) }];
+    this.stack.push({ screen: { kind: "group", group: agent.group }, ...agent.round !== undefined ? { selected: roundKey(agent.group, agent.round) } : { selected: agentKey(agent.session) } });
+    if (agent.round !== undefined)
+      this.stack.push({ screen: { kind: "round", group: agent.group, round: agent.round }, selected: agentKey(agent.session) });
+    this.stack.push({ screen: { kind: "detail", key } });
+    this.page = undefined;
+    return true;
+  }
+}
+var HEAD = 2;
+function levelFrame(crumbsRow, body, help, width, height, selectedRow = 0) {
+  const w = Math.max(1, Math.floor(width));
+  const h = Math.max(3, Math.floor(height));
+  const room = Math.max(0, h - HEAD - 1);
+  const first = Math.max(0, Math.min(selectedRow - room + 1, Math.max(0, body.length - room)));
+  const rows = [fitRow(crumbsRow, w), fitRow([], w)];
+  for (let i = 0;i < room; i++)
+    rows.push(fitRow(body[first + i] ?? [], w));
+  rows.push(fitRow([{ text: help, tone: "muted" }], w));
+  return rows;
+}
+var levelBody = (height) => Math.max(0, Math.floor(height) - HEAD - 1);
+var selectedRow = (page, selected) => page.items.find((i) => i.key === selected)?.row ?? 0;
 
 // src/adapters/opencode/tui-view.ts
 var attempt = (fn) => {
@@ -2030,49 +2441,44 @@ class View {
 }
 
 // src/adapters/opencode/tui-navigator.ts
-var NARROW_DETAIL = 4;
+var MAX_WATCHED = 4;
 var UNREADABLE = "run files not readable from this TUI - showing the role sessions only";
 var BLANK = { text: "", tone: "base" };
-var clamp2 = (n, lo, hi) => Math.max(lo, Math.min(hi, n));
+var clamp = (n, lo, hi) => Math.max(lo, Math.min(hi, n));
 
 class NavModel {
   deps;
   shown;
-  selected = "";
   verbose = false;
   follow = true;
   listTop = 0;
   listRows = 0;
   listRoom = 0;
   listFor = "";
-  folded = new Set;
-  opened = new Set;
-  parents = new Map;
+  nav = new LevelNav;
   subs = new Map;
   runs = [];
   rows = [];
-  top = 0;
-  page = 10;
-  told = null;
+  trees = [];
+  shownTree;
+  lastSize = { width: 100, height: 30 };
+  told;
   constructor(deps, runId, select) {
     this.deps = deps;
     this.shown = runId;
     this.refresh();
-    this.selected = select && this.rows.some((r) => r.key === select && r.selectable) ? select : this.defaultSelection();
+    if (select && this.shownTree)
+      this.nav.openAt(this.shownTree, select);
     this.settle();
+  }
+  get selected() {
+    return this.nav.selected;
   }
   run() {
     return this.runs.find((r) => r.snapshot.id === this.shown);
   }
   tree() {
     return this.run()?.snapshot.tree;
-  }
-  defaultSelection() {
-    const tree = this.tree();
-    const agent = tree && ([...tree.agents].reverse().find((a) => a.state === "running") ?? tree.agents.at(-1));
-    if (agent)
-      return agentKey(agent.session);
-    return this.rows.find((r) => r.selectable)?.key ?? "";
   }
   refresh() {
     try {
@@ -2088,11 +2494,10 @@ class NavModel {
     const children = (sessions.length ? attempt(() => this.deps.children(sessions)) : undefined) ?? new Map;
     const trees = this.runs.map((r) => r.snapshot.id === this.shown ? this.withChildren(r.snapshot.tree, children) : r.snapshot.tree);
     const shown = trees.find((t) => t.id === this.shown);
-    const focus = shown ? focusStage(shown) : undefined;
-    this.rows = visibleRows(trees, { run: this.shown, folded: this.folded, opened: this.opened, ...focus !== undefined ? { focus } : {}, runs: trees.length > 1 ? "list" : "one" });
-    for (const row of this.rows)
-      if (row.parent)
-        this.parents.set(row.key, row.parent);
+    this.shownTree = shown;
+    this.trees = trees;
+    const opened = new Set(shown?.groups.map((g) => groupKey(shown.id, g.key)) ?? []);
+    this.rows = visibleRows(trees, { run: this.shown, folded: new Set, opened, runs: trees.length > 1 ? "list" : "one" });
   }
   withChildren(tree, children) {
     if (!children.size)
@@ -2112,24 +2517,54 @@ class NavModel {
     const groups = tree.groups.map((g) => ({ ...g, agents: g.agents.map(copy), ...g.checks ? { checks: { ...g.checks, ...g.checks.after ? { after: copy(g.checks.after) } : {} } } : {} }));
     return { ...tree, groups, agents: tree.agents.map(copy) };
   }
+  levelView(tree, width, height) {
+    const now = this.deps.now();
+    return {
+      tree,
+      trees: this.trees,
+      now,
+      width,
+      height,
+      activity: (agent) => {
+        const live = attempt(() => this.deps.activity?.(agent.session))?.now;
+        return live ? nowLine(live, now, agent.cwd) : undefined;
+      },
+      subName: (name) => clean(this.subs.get(name)?.title || name)
+    };
+  }
+  levelPage() {
+    const tree = this.shownTree;
+    return tree ? this.nav.layout(this.levelView(tree, this.lastSize.width, levelBody(this.lastSize.height))) : undefined;
+  }
   settle() {
-    let key = this.selected;
-    while (key && !this.rows.some((r) => r.key === key && r.selectable))
-      key = this.parents.get(key);
-    this.selected = key ?? this.rows.find((r) => r.selectable)?.key ?? "";
+    if (this.nav.detail && !this.selectedRow())
+      this.nav.back();
+    this.levelPage();
     if (this.selected !== this.listFor) {
       this.listFor = this.selected;
       this.follow = true;
     }
-    const row = this.selectedRow();
-    const session = row?.kind === "agent" ? row.agent.session : undefined;
-    if (session === this.told)
+    const watched = this.watched().join(`
+`);
+    if (watched === this.told)
       return;
-    this.told = session;
-    attempt(() => this.deps.onSelect?.(session));
+    this.told = watched;
+    attempt(() => this.deps.onWatch?.(this.watched()));
+  }
+  watched() {
+    const row = this.selectedRow();
+    if (this.nav.detail)
+      return row?.kind === "agent" ? [row.agent.session] : [];
+    const { screen } = this.nav;
+    if (screen.kind !== "round")
+      return [];
+    const group = this.shownTree?.groups.find((g) => g.key === screen.group);
+    const round = group && flowOf(group).rounds.find((r) => r.number === screen.round);
+    return round ? round.review.filter((a) => a.state === "running").slice(0, MAX_WATCHED).map((a) => a.session) : [];
   }
   selectedRow() {
-    return this.rows.find((r) => r.key === this.selected);
+    const key = this.nav.detail;
+    return key ? this.rows.find((r) => r.key === key) : undefined;
   }
   key(key) {
     this.refresh();
@@ -2140,31 +2575,80 @@ class NavModel {
     return action;
   }
   press(key) {
-    const selectable = this.rows.filter((r) => r.selectable);
-    const at = selectable.findIndex((r) => r.key === this.selected);
-    const move = (delta) => {
-      const next = selectable[clamp2(at + delta, 0, selectable.length - 1)];
-      if (next)
-        this.selected = next.key;
-    };
-    const listing = this.listing();
-    const listPage = Math.max(1, this.listRoom - 1);
+    if (key === "parent") {
+      const parent = this.run()?.snapshot.parent;
+      return parent ? { type: "parent", sessionID: parent } : undefined;
+    }
+    return this.nav.detail ? this.pressDetail(key) : this.pressLevel(key);
+  }
+  pressLevel(key) {
+    const { nav } = this;
+    const tree = this.shownTree;
+    const inRound = nav.screen.kind === "round";
+    const page = Math.max(1, levelBody(this.lastSize.height));
     switch (key) {
       case "up":
-        return void move(-1);
+        return void nav.move(-1);
       case "down":
-        return void move(1);
+        return void nav.move(1);
       case "pageup":
-        return void (listing ? this.scroll(-listPage) : move(-this.page));
+        return void nav.move(-page);
       case "pagedown":
-        return void (listing ? this.scroll(listPage) : move(this.page));
+        return void nav.move(page);
       case "home":
-        return void (listing ? this.scroll(-this.listRows) : this.selected = selectable[0]?.key ?? this.selected);
+        return void nav.edge(false);
       case "end":
-        return void (listing ? this.follow = true : this.selected = selectable.at(-1)?.key ?? this.selected);
+        return void nav.edge(true);
+      case "left":
+        return void (inRound ? nav.move(-1) : nav.back());
+      case "right":
+        return void (inRound ? nav.move(1) : this.enter());
+      case "return":
+      case "space":
+        return void this.enter();
       case "next":
+        return void (inRound && tree ? nav.otherRound(tree, 1) : nav.move(1));
       case "prev":
-        return void (this.selected = nextAgent(this.rows, this.selected, key === "next" ? 1 : -1) ?? this.selected);
+        return void (inRound && tree ? nav.otherRound(tree, -1) : nav.move(-1));
+      case "follow":
+        return void (tree && nav.findings(tree));
+      case "log":
+        return void (tree && nav.log(tree));
+      case "back":
+        return nav.back() ? undefined : { type: "back" };
+      default:
+        return;
+    }
+  }
+  enter() {
+    const { run } = this.nav.enter();
+    if (!run)
+      return;
+    this.shown = run;
+    this.nav.reset();
+    this.refresh();
+  }
+  pressDetail(key) {
+    const listing = this.listing();
+    const listPage = Math.max(1, this.listRoom - 1);
+    const tree = this.shownTree;
+    switch (key) {
+      case "up":
+        return void (listing && this.scroll(-1));
+      case "down":
+        return void (listing && this.scroll(1));
+      case "pageup":
+        return void (listing && this.scroll(-listPage));
+      case "pagedown":
+        return void (listing && this.scroll(listPage));
+      case "home":
+        return void (listing && this.scroll(-this.listRows));
+      case "end":
+        return void (listing && (this.follow = true));
+      case "next":
+        return void (tree && this.nav.stepDetail(tree, 1));
+      case "prev":
+        return void (tree && this.nav.stepDetail(tree, -1));
       case "verbose":
         this.verbose = !this.verbose;
         this.follow = true;
@@ -2175,22 +2659,22 @@ class NavModel {
           this.follow = !this.follow;
         }
         return;
+      case "return":
       case "space":
-        return void this.toggle();
-      case "return": {
+      case "right": {
         const row = this.selectedRow();
         if (row?.kind === "agent" && row.agent.session)
           return { type: "open", sessionID: row.agent.session };
         if (row?.kind === "sub")
           return { type: "open", sessionID: row.sub.name };
-        return void this.toggle();
+        return;
       }
-      case "parent": {
-        const parent = this.run()?.snapshot.parent;
-        return parent ? { type: "parent", sessionID: parent } : undefined;
-      }
+      case "left":
       case "back":
-        return { type: "back" };
+        this.nav.back();
+        return;
+      default:
+        return;
     }
   }
   listing() {
@@ -2198,63 +2682,34 @@ class NavModel {
   }
   scroll(delta) {
     const max = Math.max(0, this.listRows - this.listRoom);
-    this.listTop = clamp2((this.follow ? max : this.listTop) + delta, 0, max);
+    this.listTop = clamp((this.follow ? max : this.listTop) + delta, 0, max);
     if (this.listTop < max)
       this.follow = false;
   }
-  toggle() {
-    const row = this.selectedRow();
-    if (row?.kind === "run" && row.run.id !== this.shown) {
-      this.shown = row.run.id;
-      this.top = 0;
-      this.refresh();
-      this.selected = this.defaultSelection();
-      return;
-    }
-    if (row?.kind !== "group" || row.folded === undefined)
-      return;
-    if (row.folded) {
-      this.opened.add(row.key);
-      this.folded.delete(row.key);
-    } else {
-      this.folded.add(row.key);
-      this.opened.delete(row.key);
-    }
-  }
   frame(width, height) {
+    const w = Math.max(1, Math.floor(width));
+    this.lastSize = { width: w, height };
     this.refresh();
     this.settle();
     const now = this.deps.now();
-    const w = Math.max(1, Math.floor(width));
-    const sizes = paneSizes(w, height, NARROW_DETAIL);
-    const tree = this.tree();
-    const focus = tree ? focusStage(tree, this.selected) : undefined;
-    const header = [{ text: tree ? headerText(tree, now, focus, w) : "granny \xB7 no run", tone: "base" }];
-    const stepper = tree ? stepperCells(stepsFor(tree, focus), w) : [];
-    this.page = Math.max(1, sizes.left.height - 1);
-    const left = this.treePane(now, sizes.left.width, sizes.left.height);
-    const right = this.detail(now, sizes.right.width, sizes.right.height);
-    return frame({ header, stepper, left, right, help: [{ text: this.help(), tone: "muted" }], width: w, height, split: NARROW_DETAIL });
-  }
-  treePane(now, width, height) {
-    const { cells, top } = treeCells(this.rows, this.selected, now, width, height, this.top);
-    this.top = top;
-    return cells.map((cell, i) => {
-      const row = this.rows[top + i];
-      if (row?.kind !== "sub")
-        return cell;
-      const child = this.subs.get(row.sub.name);
-      const text = `${"  ".repeat(row.depth)}\u2514 ${child?.running ? "\u25CF" : "\u2713"} ${clean(child?.title || row.sub.name)}`;
-      return { ...cell, text: pad(`${cell.selected ? "\u203A" : " "} ${fit(text, width - 2)}`, width), tone: child?.running ? "info" : "muted" };
-    });
+    const body = levelBody(height);
+    const page = this.levelPage();
+    if (!page)
+      return levelFrame([{ text: "granny \xB7 no run", tone: "base" }], [{ text: "no granny run here", tone: "muted" }].map((c) => [c]), "Esc close", w, height);
+    if (!this.nav.detail) {
+      const readable = this.run()?.snapshot.readable !== false;
+      const rows = readable ? page.rows : [[{ text: UNREADABLE, tone: "warning" }], ...page.rows];
+      return levelFrame(page.crumbs, rows, page.help, w, height, selectedRow(page, this.nav.selected) + (readable ? 0 : 1));
+    }
+    return levelFrame(page.crumbs, this.detail(now, w, body).map((c) => [c]), this.help(), w, height);
   }
   help() {
     const row = this.selectedRow();
-    const enter = row?.kind === "agent" || row?.kind === "sub" ? "Enter open session" : row?.kind === "group" && row.folded !== undefined ? "Enter fold" : row?.kind === "run" && row.run.id !== this.shown ? "Enter switch run" : undefined;
+    const session = row?.kind === "agent" || row?.kind === "sub";
+    const open = session ? "Enter open session" : undefined;
     if (this.listing())
-      return ["\u2191\u2193 move", "PgUp/PgDn scroll", `f follow ${this.follow ? "on" : "off"}`, "v summary", enter, "Tab next agent", "p parent", "Esc close"].join(" \xB7 ");
-    const verbose = row?.kind === "agent" ? "v details" : undefined;
-    return ["\u2191\u2193 move", enter, "Tab next agent", "Space fold", verbose, "p parent", "Esc close"].filter(Boolean).join(" \xB7 ");
+      return ["PgUp/PgDn scroll", `f follow ${this.follow ? "on" : "off"}`, "v summary", open, "Tab next agent", "p parent", "Esc back"].filter(Boolean).join(" \xB7 ");
+    return [open, row?.kind === "agent" ? "v details" : undefined, session ? "Tab next agent" : undefined, "p parent", "Esc back"].filter(Boolean).join(" \xB7 ");
   }
   detail(now, width, height) {
     if (height <= 0)
@@ -2304,7 +2759,7 @@ class NavModel {
       this.listRows = lines.length;
       this.listRoom = room;
       const max = Math.max(0, lines.length - room);
-      const top = this.follow ? max : clamp2(this.listTop, 0, max);
+      const top = this.follow ? max : clamp(this.listTop, 0, max);
       const body = lines.length ? lines.slice(top, top + room).map((text) => ({ text, tone: "base" })) : [{ text: "no activity yet", tone: "muted" }];
       return [...head, BLANK, ...body];
     }
@@ -2352,17 +2807,20 @@ var FETCH_LIMIT = 20;
 var NAV_KEYS = [
   ["up,k", "up", "up"],
   ["down,j", "down", "down"],
+  ["left", "back or the agent before", "left"],
+  ["right", "open or the next agent", "right"],
   ["pageup", "page up", "pageup"],
   ["pagedown", "page down", "pagedown"],
   ["home", "first", "home"],
   ["end", "last", "end"],
-  ["return", "open the session or fold", "return"],
-  ["space", "fold or unfold", "space"],
-  ["tab,]", "next agent", "next"],
-  ["[", "previous agent", "prev"],
+  ["return", "open", "return"],
+  ["space", "open", "space"],
+  ["tab,]", "next", "next"],
+  ["[", "previous", "prev"],
   ["p", "parent session", "parent"],
   ["v", "details or summary", "verbose"],
-  ["f", "follow the details", "follow"],
+  ["f", "findings, or follow the details", "follow"],
+  ["l", "log", "log"],
   ["escape,q", "back", "back"]
 ];
 var NO_RUN = "granny: no granny run in this session yet - role sessions appear once the run starts its first agent.";
@@ -2406,7 +2864,7 @@ class Hub {
   hidden;
   unsubscribe = [];
   disposed = false;
-  watched;
+  watched = [];
   activities = new Map;
   synced = new Set;
   fetched = new Map;
@@ -2623,9 +3081,15 @@ class Hub {
     return this.activities.get(session);
   }
   readActivity() {
-    const session = this.watched;
-    if (this.mounted <= 0 || !session)
+    if (this.mounted <= 0)
       return false;
+    let changed = false;
+    for (const session of this.watched)
+      if (this.readSession(session))
+        changed = true;
+    return changed;
+  }
+  readSession(session) {
     const store = attempt(() => this.ctx.data.session.message);
     if (!store || typeof store.list !== "function") {
       this.fetch(session);
@@ -2788,8 +3252,8 @@ class Hub {
         return info ? typeof info.parentID === "string" && info.parentID.length > 0 : undefined;
       },
       activity: (session) => this.activity(session),
-      onSelect: (session) => {
-        this.watched = session;
+      onWatch: (sessions) => {
+        this.watched = sessions;
       },
       ...this.home ? { home: this.home } : {},
       now: this.now

@@ -10,10 +10,13 @@ export const oneLine = (text: unknown) => String(text ?? '').replace(/\s+/g, ' '
 /** A reviewer's failure note as one bounded line, in the report and in a host's finish message. */
 export const noteLine = (note: unknown) => oneLine(note).slice(0, NOTE_LENGTH)
 
-/** The reviewer's own heading: its P number, and P2 for a severity without one. */
+const SEVERITY_WORDS: Record<string, (typeof P_HEADINGS)[number]> = { critical: 'P0', high: 'P1', medium: 'P2', low: 'P3' }
+
+/** The reviewer's own heading: its P number or the word for it, as the loop reads them, and P2 for anything else. */
 export function severityOf(f: Pick<Finding, 'severity'>): (typeof P_HEADINGS)[number] {
-  const n = /^\s*p([0-3])\b/i.exec(String(f.severity ?? ''))?.[1]
-  return n === undefined ? 'P2' : P_HEADINGS[Number(n)]!
+  const said = /^\s*(p[0-3]|critical|high|medium|low)\b/i.exec(String(f.severity ?? ''))?.[1]?.toLowerCase()
+  if (said === undefined) return 'P2'
+  return SEVERITY_WORDS[said] ?? P_HEADINGS[Number(said[1])]!
 }
 
 export const isJudged = (f: Pick<Finding, 'impact'>) => f.impact !== undefined
@@ -67,13 +70,31 @@ function tags(f: Finding): string {
   return [...place, ...judged, reviewer, from].join(' · ')
 }
 
+/** Agents' text inside a finding: it may not add a heading to the report, nor swallow what follows in an open code fence. */
+function body(text: string): string {
+  let open = ''
+  const lines = text.split('\n').map(line => {
+    const [, marker = '', rest = ''] = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(line) ?? []
+    if (open) {
+      if (marker[0] === open[0] && marker.length >= open.length && !rest.trim()) open = ''
+      return line
+    }
+    if (marker && !(marker[0] === '`' && rest.includes('`'))) {
+      open = marker
+      return line
+    }
+    return /^ {0,3}(#{1,6}(\s|$)|=+\s*$|-+\s*$)/.test(line) ? `\\${line.trimStart()}` : line
+  })
+  return (open ? [...lines, open] : lines).join('\n')
+}
+
 function section(f: Finding): string {
   return [
     `### ${oneLine(f.title) || '(no title)'}`,
     tags(f),
-    ...(String(f.detail ?? '').trim() ? [String(f.detail).trim()] : []),
-    ...(f.evidence ? [`**Evidence:** ${f.evidence}`] : []),
-    ...(f.reason?.trim() ? [`**Judge:** ${f.reason.trim()}`] : []),
+    ...(String(f.detail ?? '').trim() ? [body(String(f.detail).trim())] : []),
+    ...(f.evidence ? [`**Evidence:** ${body(f.evidence)}`] : []),
+    ...(f.reason?.trim() ? [`**Judge:** ${body(f.reason.trim())}`] : []),
   ].join('\n\n')
 }
 

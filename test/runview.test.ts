@@ -108,6 +108,7 @@ describe('runOutline', () => {
       finalReview: true,
       reviewers: ['reviewer'],
       fromStage: 1,
+      maxRounds: 4,
       stages: [
         { number: 1, name: 'one', implement: true, review: true, checks: true },
         { number: 2, name: 'stage 2', implement: true, review: true, checks: false },

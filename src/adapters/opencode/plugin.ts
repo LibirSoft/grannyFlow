@@ -286,6 +286,7 @@ export const createGrannyPlugin = ({ delays = DEFAULT_DELAYS, sleep = pause, kil
         log: message => journal('log', { message }),
         phase: title => journal('phase', { title }),
         stage: ({ number, name, event, outcome }) => journal('stage', { number, name, event, ...(outcome ? { outcome } : {}) }),
+        round: event => journal('round', { ...event }),
       }
 
       const notify = async (text: string) => {

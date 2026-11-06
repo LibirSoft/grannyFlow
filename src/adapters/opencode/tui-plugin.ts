@@ -48,17 +48,20 @@ const FETCH_LIMIT = 20
 const NAV_KEYS: Array<[string, string, NavKey]> = [
   ['up,k', 'up', 'up'],
   ['down,j', 'down', 'down'],
+  ['left', 'back or the agent before', 'left'],
+  ['right', 'open or the next agent', 'right'],
   ['pageup', 'page up', 'pageup'],
   ['pagedown', 'page down', 'pagedown'],
   ['home', 'first', 'home'],
   ['end', 'last', 'end'],
-  ['return', 'open the session or fold', 'return'],
-  ['space', 'fold or unfold', 'space'],
-  ['tab,]', 'next agent', 'next'],
-  ['[', 'previous agent', 'prev'],
+  ['return', 'open', 'return'],
+  ['space', 'open', 'space'],
+  ['tab,]', 'next', 'next'],
+  ['[', 'previous', 'prev'],
   ['p', 'parent session', 'parent'],
   ['v', 'details or summary', 'verbose'],
-  ['f', 'follow the details', 'follow'],
+  ['f', 'findings, or follow the details', 'follow'],
+  ['l', 'log', 'log'],
   ['escape,q', 'back', 'back'],
 ]
 
@@ -117,8 +120,8 @@ export class Hub {
   private hidden: { get(): boolean; set(off: boolean): void }
   private readonly unsubscribe: Array<() => void> = []
   private disposed = false
-  /** The navigator's selected agent: the one role session whose messages the tick reads. */
-  private watched?: string
+  /** The role sessions the navigator shows the activity of: the only ones whose messages the tick reads. */
+  private watched: readonly string[] = []
   private readonly activities = new Map<string, MessageActivity>()
   private readonly synced = new Set<string>()
   private readonly fetched = new Map<string, number>()
@@ -346,12 +349,17 @@ export class Hub {
   }
 
   /**
-   * Reads the selected agent's messages from the TUI store, once a tick and only while the navigator shows,
+   * Reads the watched agents' messages from the TUI store, once a tick and only while the navigator shows,
    * so streamed deltas never redraw the page by themselves; true when they changed.
    */
   private readActivity(): boolean {
-    const session = this.watched
-    if (this.mounted <= 0 || !session) return false
+    if (this.mounted <= 0) return false
+    let changed = false
+    for (const session of this.watched) if (this.readSession(session)) changed = true
+    return changed
+  }
+
+  private readSession(session: string): boolean {
     const store = attempt(() => this.ctx.data.session.message)
     if (!store || typeof store.list !== 'function') {
       this.fetch(session)
@@ -522,8 +530,8 @@ export class Hub {
           return info ? typeof info.parentID === 'string' && info.parentID.length > 0 : undefined
         },
         activity: session => this.activity(session),
-        onSelect: session => {
-          this.watched = session
+        onWatch: sessions => {
+          this.watched = sessions
         },
         ...(this.home ? { home: this.home } : {}),
         now: this.now,

@@ -517,9 +517,14 @@ const isHeartbeat = (line: string): boolean => {
 
 /** The last `count` journal lines that are not heartbeats, parsing from the end only as far as it takes. */
 function journalTail(journal: string, count: number): string {
-  const lines = journal.trim().split('\n')
   const tail: string[] = []
-  for (let i = lines.length - 1; i >= 0 && tail.length < count; i--) if (!isHeartbeat(lines[i]!)) tail.push(lines[i]!)
+  let end = journal.trimEnd().length
+  while (end > 0 && tail.length < count) {
+    const start = journal.lastIndexOf('\n', end - 1)
+    const line = journal.slice(start + 1, end)
+    if (!isHeartbeat(line)) tail.push(line)
+    end = Math.max(start, 0)
+  }
   return tail.reverse().join('\n')
 }
 

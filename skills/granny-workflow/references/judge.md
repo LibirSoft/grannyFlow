@@ -85,6 +85,6 @@ The heading is the tagging agent's call, through its classification and not the 
 
 - The four P headings always appear, with `None.` when empty. `Dismissed by the judge` appears only when it has entries, with the judge's reason on each.
 - Without a `path:line` in its evidence a finding is `unverified` and drops one class.
-- A finding the judge left unclassified, also after its one retry, stays under the reviewer's severity (one without a P number counts as `P2`) with the tag `not judged`, and the top of the report says so.
+- A finding the judge left unclassified, also after its one retry, stays under the reviewer's severity (critical, high, medium and low are `P0` to `P3`, anything else counts as `P2`) with the tag `not judged`, and the top of the report says so.
 - Every finding carries its tags: verdict, impact, likelihood, fix cost and scope, the priority, and `reviewer: Pn`. A finding the judge placed lower than the reviewer did also has `demoted`. A normal run never lets a judge lower a P0 or P1 and a cheap judge can be wrong, so say how many of those were demoted.
 - A reviewer that failed twice does not stop the review while another one ran: the top of the report names it.

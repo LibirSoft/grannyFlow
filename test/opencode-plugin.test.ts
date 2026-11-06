@@ -717,6 +717,7 @@ describe('opencode plugin', () => {
     expect(JSON.parse(readRun(dir, 'status.json'))).toMatchObject({ id, status: 'done', parent: 'parent', watch: 'full' })
     expect(JSON.parse(readRun(dir, 'status.json')).outline).toEqual({
       kind: 'implement',
+      maxRounds: 4,
       branch: 'feat/x',
       worktree: true,
       planReview: false,

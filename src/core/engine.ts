@@ -50,6 +50,7 @@ import type {
   CheckRun,
   FinalReport,
   Finding,
+  RoundFinding,
   Host,
   Implementation,
   JudgeOutcome,
@@ -147,6 +148,27 @@ interface RepoState {
 const saidSomething = (d: unknown): string | undefined =>
   typeof d === 'string' && d.trim() && !/^\s*(none|n\/a|-|no deviations)?\.?\s*$/i.test(d) ? d : undefined
 const slug = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'stage'
+const ROUND_DETAIL = 2000
+
+/** What a run view keeps of a finding: the text bounded, so a journal line stays small. */
+function roundFinding(f: Finding, sent: boolean): RoundFinding {
+  return {
+    id: f.id,
+    sent,
+    ...(f.severity ? { severity: f.severity } : {}),
+    ...(f.title ? { title: f.title } : {}),
+    ...(f.file ? { file: f.file } : {}),
+    ...(f.line !== undefined ? { line: f.line } : {}),
+    ...(f.reviewer ? { reviewer: f.reviewer } : {}),
+    ...(f.detail ? { detail: String(f.detail).slice(0, ROUND_DETAIL) } : {}),
+    ...(f.verdict ? { verdict: f.verdict } : {}),
+    ...(f.impact ? { impact: f.impact } : {}),
+    ...(f.priority !== undefined ? { priority: f.priority } : {}),
+    ...(f.reason ? { reason: String(f.reason).slice(0, ROUND_DETAIL) } : {}),
+    ...(f.decision?.why ? { why: f.decision.why } : {}),
+  }
+}
+
 const trimPath = (s: string) => s.replace(/\/+$/, '') || '/'
 const repoPathOf = (r: RepoInput): unknown => (typeof r === 'string' ? r : r && typeof r === 'object' ? r.repo : undefined)
 const baseName = (path: string) => path.slice(path.lastIndexOf('/') + 1)
@@ -706,6 +728,7 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
       }
       if (!found.length) {
         host.log(`${name} r${round}: clean`)
+        host.round?.({ subject: name, round, findings: [] })
         return { outcome: 'clean', rounds: round, residual: kept(), unresolved: [], history }
       }
 
@@ -758,6 +781,7 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
       host.log(`${name} r${round}: ${findings.length} finding(s)`)
 
       const { accepted, residual } = triage(findings)
+      host.round?.({ subject: name, round, findings: findings.map(f => roundFinding(f, accepted.includes(f))) })
       const entry: EarlierRound = { round, sent: accepted, ...(residual.length ? { residual } : {}) }
       const recorded = record ? { ...entry, loop: record.loop } : undefined
       if (recorded) record!.into.push(recorded)
@@ -1335,7 +1359,7 @@ export async function runJudge(host: Host, input: JudgeInput): Promise<JudgeResu
     ? dirty.map(l => l.trim().replace(/^\S+\s+/, ''))
     : [`the working tree status could not be read (${dirty.unreadable.replace(/\s+/g, ' ')})`]
   const finish = (outcome: JudgeOutcome, rest: Partial<JudgeResult> = {}): JudgeResult => ({
-    repo: input.repo,
+    repo,
     branch,
     base,
     head,

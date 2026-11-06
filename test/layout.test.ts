@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'bun:test'
 import { summarise } from '../src/adapters/runview/activity'
 import { clock } from '../src/adapters/runview/format'
-import { agentEnd, agentHead, type Cell, checksDetail, frame, groupDetail, headerText, runDetail, stepperCells, summaryCells, treeCells } from '../src/adapters/runview/layout'
+import { agentEnd, agentHead, checksDetail, groupDetail, runDetail, summaryCells } from '../src/adapters/runview/layout'
 import type { RunOutline } from '../src/adapters/runview/outline'
-import { buildRunTree, type JournalEntry, type Step, visibleRows } from '../src/adapters/runview/tree'
+import { buildRunTree, type JournalEntry } from '../src/adapters/runview/tree'
 import { at, SCREEN, WT } from './activity-fixture'
 
 const BASE = Date.parse('2026-11-05T20:30:25.000Z')
@@ -20,107 +20,6 @@ const NOW = BASE + 100 * S
 const live = (...sessions: string[]) => new Map(sessions.map(s => [s, { active: true }]))
 
 const firstStage = () => buildRunTree(RUN, [j(0, 'phase', { title: 'Worktree' }), j(0, 'stage', { number: 1, name: S1, event: 'start' }), j(0, 'phase', { title: 'Implement' }), implement(0, S1, 'ses_impl')], live('ses_impl'), NOW, new Map(), outline())
-
-describe('headerText', () => {
-  it('names the branch, the stage of how many, the phase and the time, and no run id or status while running', () => {
-    expect(headerText(firstStage(), NOW)).toBe('granny · feat/pause · stage 1/2 · Implement · 1m40s')
-  })
-
-  it('names every running stage of a parallel run', () => {
-    const tree = buildRunTree(
-      RUN,
-      [j(0, 'stage', { number: 1, name: S1, event: 'start' }), j(0, 'stage', { number: 2, name: S2, event: 'start' }), j(0, 'phase', { title: 'Implement' }), implement(0, S1, 'a'), implement(1, S2, 'b')],
-      live('a', 'b'),
-      NOW,
-      new Map(),
-      outline({ stages: [stage(1, S1), stage(2, S2), stage(3, 'Docs')] }),
-    )
-    expect(headerText(tree, NOW)).toBe('granny · feat/pause · stages 1+2/3 · Implement · 1m40s')
-  })
-
-  it('says planning in a planning run, leaves the stage out outside the stages, and the outcome once the run ended', () => {
-    const plan = buildRunTree(RUN, [j(0, 'phase', { title: 'Plan' })], new Map(), NOW, new Map(), outline({ kind: 'plan', stages: [] }))
-    expect(headerText(plan, NOW)).toBe('granny · feat/pause · planning · Plan · 1m40s')
-    const final = buildRunTree(RUN, [j(0, 'stage', { number: 1, name: S1, event: 'start' }), j(50, 'stage', { number: 1, name: S1, event: 'end', outcome: 'clean' }), j(60, 'phase', { title: 'Final review' })], new Map(), NOW, new Map(), outline())
-    expect(headerText(final, NOW)).toBe('granny · feat/pause · Final review · 1m40s')
-    const done = buildRunTree({ ...RUN, status: 'done', endedAt: BASE + 3723 * S }, [j(0, 'phase', { title: 'PR ready' })], new Map(), NOW, new Map(), outline())
-    expect(headerText(done, NOW)).toBe('granny · feat/pause · done · 1h02m')
-  })
-
-  it('reads a run written before the outline from its phase and branch', () => {
-    const tree = buildRunTree(RUN, [j(0, 'phase', { title: 'Implement' })], new Map(), NOW)
-    expect(headerText(tree, NOW)).toBe('granny · feat/pause · Implement · 1m40s')
-  })
-
-  it('drops the branch first, then cuts the rest', () => {
-    expect(headerText(firstStage(), NOW, undefined, 40)).toBe('granny · stage 1/2 · Implement · 1m40s')
-    expect(headerText(firstStage(), NOW, undefined, 30)).toBe('granny · stage 1/2 · Implemen…')
-  })
-})
-
-describe('stepperCells', () => {
-  const steps: Step[] = [
-    { title: 'Worktree', state: 'done' },
-    { title: 'Plan review', state: 'done' },
-    { title: 'Implement', state: 'done' },
-    { title: 'Checks', state: 'current' },
-    { title: 'Review', state: 'upcoming' },
-    { title: 'Final review', state: 'upcoming' },
-    { title: 'PR ready', state: 'upcoming' },
-  ]
-  const text = (cells: Cell[]) => cells.map(c => c.text).join('')
-
-  it('marks done, current and upcoming steps in their tones, joined by ›', () => {
-    const cells = stepperCells(steps, 120)
-    expect(text(cells)).toBe('Worktree ✓ › Plan review ✓ › Implement ✓ › Checks ● › Review › Final review › PR ready')
-    expect(cells.filter(c => c.text !== ' › ').map(c => c.tone)).toEqual(['success', 'success', 'success', 'info', 'muted', 'muted', 'muted'])
-    expect(text(stepperCells([{ title: 'Checks', state: 'failed' }, { title: 'Review', state: 'skipped' }], 120))).toBe('Checks ✗ › Review ⊘')
-  })
-
-  it('narrows to bare ✓ for the done steps before the last, then to the current step alone, then cuts', () => {
-    expect(text(stepperCells(steps, 70))).toBe('✓ › ✓ › Implement ✓ › Checks ● › Review › Final review › PR ready')
-    expect(text(stepperCells(steps, 50))).toBe('Checks ● (4/7)')
-    expect(text(stepperCells(steps, 20))).toBe('Checks ● (4/7)')
-    expect(text(stepperCells(steps, 8))).toBe('Checks …')
-  })
-})
-
-describe('frame', () => {
-  const cells = (n: number, text: string): Cell[] => Array.from({ length: n }, (_, i) => ({ text: `${text} ${i} ${'x'.repeat(200)}`, tone: 'base' }))
-  for (const width of [60, 99, 100, 160]) {
-    for (const height of [10, 30]) {
-      it(`fills ${width}×${height} exactly, with the help line last`, () => {
-        const rows = frame({ header: [{ text: 'granny · feat/pause', tone: 'base' }], stepper: [{ text: 'Worktree ✓', tone: 'success' }, { text: ' › ', tone: 'muted' }, { text: 'Implement ●', tone: 'info' }], left: cells(50, 'tree'), right: cells(50, 'detail'), help: [{ text: '↑↓ move · Esc close', tone: 'muted' }], width, height })
-        expect(rows).toHaveLength(height)
-        for (const row of rows) expect(row.map(c => c.text).join('')).toHaveLength(width)
-        expect(rows.at(-1)!.map(c => c.text).join('').trimEnd()).toBe('↑↓ move · Esc close')
-        const ruled = rows.filter(r => r.length === 1 && /^─+[┬┴]?─*$/.test(r[0]!.text))
-        expect(ruled).toHaveLength(height >= 16 ? 2 : 0)
-        const two = rows.some(r => r.some(c => c.text === ' │ '))
-        expect(two).toBe(width >= 100)
-        if (width >= 100 && height >= 16) expect(rows[2]![0]!.text).toContain('┬')
-      })
-    }
-  }
-
-  it('shows the last rows of the detail under the tree below 100 columns when asked', () => {
-    const rows = frame({ header: [], stepper: [], left: cells(50, 'tree'), right: cells(50, 'detail'), help: [], width: 80, height: 10, split: 3 })
-    expect(rows.slice(2, -1).map(r => r[0]!.text.split(' ')[0])).toEqual(['tree', 'tree', 'tree', 'tree', 'detail', 'detail', 'detail'])
-  })
-})
-
-describe('treeCells', () => {
-  it('marks the selected row and scrolls so it shows', () => {
-    const tree = firstStage()
-    const rows = visibleRows([tree], { run: RUN.id, folded: new Set(), opened: new Set(), runs: 'one' })
-    const { cells, top } = treeCells(rows, 'agent:ses_impl', NOW, 40, 2, 0)
-    expect(top).toBe(0)
-    expect(cells.map(c => c.text)).toEqual([`  ▾ ● 1 Server pause domain, lif…  1m40s`, `›   ● implement                    1m40s`])
-    expect(cells[1]).toMatchObject({ selected: true, tone: 'info' })
-    expect(treeCells(rows, `run:${RUN.id}`, NOW, 40, 2, 0).top).toBe(rows.length - 2)
-    for (const c of treeCells(rows, 'agent:ses_impl', NOW, 40, 10, 0).cells) expect(c.text).toHaveLength(40)
-  })
-})
 
 describe('agentHead', () => {
   const tree = firstStage()

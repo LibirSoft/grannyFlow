@@ -12,7 +12,7 @@ import type { ActivityItem } from '../src/adapters/runview/activity'
 import { fit } from '../src/adapters/runview/format'
 import type { RunOutline } from '../src/adapters/runview/outline'
 import { at, SCREEN, WT } from './activity-fixture'
-import { buildRunTree, type JournalEntry, nextAgent, phaseRowText as rowText, phaseRows as visibleRows } from '../src/adapters/runview/tree'
+import { buildRunTree, type JournalEntry, phaseRowText as rowText, phaseRows as visibleRows } from '../src/adapters/runview/tree'
 import { subagentFiles } from '../src/adapters/omp/subagents'
 
 let tmp: string
@@ -471,18 +471,6 @@ describe('buildRunTree / visibleRows', () => {
     expect(folded.some(l => l.includes('judge plan review'))).toBe(false)
   })
 
-  it('moves to the next and previous agent across phases, skipping groups, phases and subagents', () => {
-    const { entries, sess } = fixture()
-    const rows = visibleRows([buildRunTree({ id: 'R', status: 'running', startedAt: BASE }, entries, new Map(), NOW)], new Set(), 'R')
-    expect(nextAgent(rows, `agent:${sess.plan}`, 1)).toBe(`agent:${sess['review plan review r1 terra']}`)
-    expect(nextAgent(rows, `agent:${sess['review plan review r2 terra']}`, 1)).toBe(`agent:${sess['implement one']}`)
-    expect(nextAgent(rows, `agent:${sess['implement one']}`, -1)).toBe(`agent:${sess['review plan review r2 terra']}`)
-    expect(nextAgent(rows, `sub:${sess.plan}:BaselineGates`, 1)).toBe(`agent:${sess['review plan review r1 terra']}`)
-    expect(nextAgent(rows, 'run:R', 1)).toBe(`agent:${sess.plan}`)
-    expect(nextAgent(rows, `agent:${sess.plan}`, -1)).toBeUndefined()
-    expect(nextAgent(rows, `agent:${sess['pr-ready check']}`, 1)).toBeUndefined()
-  })
-
   it('drops the provider prefix of a model when the row is narrow, then the role and model', () => {
     const { entries } = fixture()
     const rows = visibleRows([buildRunTree({ id: 'R', status: 'running', startedAt: BASE }, entries, new Map(), NOW)], new Set(), 'R')
@@ -550,7 +538,7 @@ describe('Navigator', () => {
   const T0 = Date.parse('2026-11-05T17:00:00.000Z')
   const iso = (sec: number) => new Date(T0 + sec * 1000).toISOString()
   const line = (value: unknown) => `${JSON.stringify(value)}\n`
-  const TREE_HELP = '↑↓ move · Enter/→ open · Tab/] next agent · [ prev · Space fold · Esc close'
+  const LEVEL_HELP = '↑↓ move · Enter open · Esc close'
   const SUMMARY_HELP = 'v details · t transcript · Tab/] [ agent · ←/Esc back · q close'
   const OUTLINE: RunOutline = {
     kind: 'implement',
@@ -560,6 +548,7 @@ describe('Navigator', () => {
     finalReview: true,
     reviewers: ['terra'],
     fromStage: 1,
+    maxRounds: 4,
     stages: [
       { number: 1, name: 'one', implement: true, review: true, checks: false },
       { number: 2, name: 'two', implement: true, review: true, checks: false },
@@ -655,7 +644,7 @@ describe('Navigator', () => {
     })
     const text = (width = 160) => nav.render(width).join('\n')
     const selected = (width = 160) => nav.render(width).find(l => l.startsWith('›'))
-    const detail = (width = 160) => nav.render(width).map(l => (l.includes(' │ ') ? l.slice(l.indexOf(' │ ') + 3).trimEnd() : l.trimEnd()))
+    const detail = (width = 160) => nav.render(width).map(l => l.trimEnd())
     return { dir, plan, impl, run, live, clock, renders, nav, text, selected, detail, closed: () => closed, implRole }
   }
 
@@ -666,10 +655,16 @@ describe('Navigator', () => {
     nav = s.nav
     return s
   }
-  /** The plan group opened, so the finished plan agent is in reach of the agent keys. */
-  const openPlan = (s: ReturnType<typeof setup>) => {
-    s.nav.handleInput('\x1b[H')
-    s.nav.handleInput(' ')
+  /** From the stages down to the running implementer. */
+  const toImpl = (s: ReturnType<typeof setup>) => {
+    s.nav.handleInput('\r')
+    s.nav.handleInput('\r')
+  }
+  /** From the stages down to the finished planner. */
+  const toPlan = (s: ReturnType<typeof setup>) => {
+    s.nav.handleInput('\x1b[A')
+    s.nav.handleInput('\r')
+    s.nav.handleInput('\r')
   }
 
   it('lists a judge run with the steps review, tag and report, and its agents selectable', () => {
@@ -695,16 +690,16 @@ describe('Navigator', () => {
     time.t = T0 + 40_000
     live.start(live.role({ label: 'tag feat/x', role: 'judge', session: tag, phase: 'Judge', cwd: '/repo' }))
     nav = new Navigator({ runs: () => [{ id: 'J1', dir, status: 'running', live, branch: 'feat/x', outline }], runId: 'J1', tui: { requestRender: () => {}, terminal: { rows: 30 } }, theme: {}, keys: { matches: () => false }, done: () => {}, now: () => time.t, tickMs: 60_000 })
-    const lines = nav.render(160)
-    expect(lines[0]!.trimEnd()).toBe('granny · feat/x · review only · Judge · 40s')
-    expect(lines[1]!.trimEnd()).toBe('Review ✓ › Tag ● › Report')
-    const tree = lines.slice(3, -2).map(l => l.split(' │ ')[0]!.trimEnd())
-    expect(tree[0]).toStartWith('  ▸ ✓ Review')
-    expect(tree[1]).toStartWith('  ▾ ● Tag')
-    expect(tree[2]).toStartWith('›   ● tag')
-    expect(tree[3]).toBe('      Report')
+    const lines = nav.render(160).map(l => l.trimEnd())
+    expect(lines[0]).toBe('granny  feat/x  ● running · 40s')
+    expect(lines.slice(2, 7).map(l => l.replace(/ {2,}/g, '  '))).toEqual(['  ✓ Review  1 agent  31s', '  │', '› ● Tag  tag  1 agent · 1 running  9s', '  │', '  · Report  waiting'])
     expect(lines.join('\n')).not.toContain('Implement')
-    expect(lines.map(l => l.slice(l.indexOf(' │ ') + 3)).join('\n')).toContain('judge · haiku')
+    nav.handleInput('\r')
+    expect(nav.render(160)[0]!.trimEnd()).toBe('granny › Tag')
+    expect(nav.render(160).join('\n')).toContain('› ● Tag')
+    nav.handleInput('\r')
+    expect(nav.render(160)[0]!.trimEnd()).toBe('granny › Tag › tag')
+    expect(nav.render(160).join('\n')).toContain('judge · haiku')
   })
 
   it('keeps no heartbeat in its journal cache, and still reads the entries after them', () => {
@@ -722,24 +717,42 @@ describe('Navigator', () => {
     expect(cache().at(-1)).toMatchObject({ type: 'log', message: 'after the beats' })
   })
 
-  it('opens on the running agent: header, stepper, stage groups, and the agent\'s summary, with the tree key help last', () => {
+  it('opens on the stages with the running one selected, and the key help last', () => {
     const s = open()
     const lines = s.nav.render(160)
     expect(lines).toHaveLength(30)
-    expect(lines[0]).toBe('granny · feat/x · stage 1/2 · Implement · 1m30s'.padEnd(160))
-    expect(lines[1]).toStartWith('Worktree ✓ › Implement ● › Review › Final review › PR ready')
-    expect(lines[2]).toStartWith('─'.repeat(60) + '─┬─')
-    const tree = lines.slice(3, -2).map(l => l.split(' │ ')[0]!.trimEnd())
-    expect(tree.slice(0, 7)).toEqual([
-      `${'  ▸ ✓ Plan'.padEnd(55)}1m01s`,
-      `${'  ▾ ● 1 one'.padEnd(57)}29s`,
-      `${'›   ● implement'.padEnd(57)}28s`,
-      '      2 two',
-      '      Final review',
-      '      PR ready',
-      '  run details',
+    expect(lines[0]).toBe('granny  feat/x  ● running · 1m30s'.padEnd(160))
+    expect(lines[1]).toBe(' '.repeat(160))
+    expect(lines.slice(2, 14).map(l => l.trimEnd().replace(/ {2,}/g, '  '))).toEqual([
+      '  ✓ Worktree  0s',
+      '  │',
+      '  ✓ Plan  1 agent  1m01s',
+      '  │',
+      '› ● 1 one  implement  1 agent · 1 running  29s',
+      '  │',
+      '  · 2 two  waiting',
+      '  │',
+      '  · Final review  waiting',
+      '  │',
+      '  · PR ready  waiting',
+      '',
     ])
-    expect(s.detail().slice(3, 10)).toEqual([
+    expect(lines.at(-1)).toBe(LEVEL_HELP.padEnd(160))
+    expect(lines.filter(l => l.includes('R1'))).toEqual([])
+  })
+
+  it('goes down to the agent with Enter or →, and back up with Esc or ←, closing once at the top', () => {
+    const s = open()
+    s.nav.handleInput('\r')
+    let lines = s.nav.render(160).map(l => l.trimEnd())
+    expect(lines[0]).toBe('granny › 1 one')
+    expect(s.selected()).toStartWith('› ● Implement')
+    expect(lines.at(-1)).toBe('↑↓ move · Enter open · l log · Esc back')
+    s.nav.handleInput('\x1b[C')
+    s.nav.tick()
+    lines = s.nav.render(160).map(l => l.trimEnd())
+    expect(lines[0]).toBe('granny › 1 one › implement')
+    expect(lines.slice(2, 9)).toEqual([
       'implementer · gpt-x · 28s',
       '',
       'NOW   ● thinking 10s',
@@ -748,69 +761,14 @@ describe('Navigator', () => {
       'RECENT',
       ` ${clock(T0 + 64_000)}  read   Reading the plan`,
     ])
-    expect(lines.at(-2)).toStartWith('─'.repeat(60) + '─┴─')
-    expect(lines.at(-1)).toBe(TREE_HELP.padEnd(160))
-    expect(lines.filter(l => l.includes('R1'))).toEqual([])
-    expect(s.text()).not.toContain('[tree]')
-  })
-
-  it('keeps every row exactly the width and shows one pane below 100 columns', () => {
-    const s = open()
-    for (const width of [20, 60, 99, 100, 160]) {
-      const lines = s.nav.render(width)
-      expect(lines.every(l => l.length === width)).toBe(true)
-      expect(lines.some(l => l.includes(' │ '))).toBe(width >= 100)
-    }
-    const narrow = s.nav.render(60).join('\n')
-    expect(narrow).toContain('● implement')
-    expect(narrow).not.toContain('NOW')
-    s.nav.handleInput('\r')
-    const detail = s.nav.render(60).join('\n')
-    expect(detail).toContain('NOW   ● thinking 10s')
-    expect(detail).not.toContain('● implement ')
-    expect(s.nav.render(60).at(-1)).toBe(fit(SUMMARY_HELP, 60))
-  })
-
-  it('moves the selection with the arrows, Home, End and the page keys, and previews a group\'s journal lines', () => {
-    const s = open()
-    s.nav.handleInput('\x1b[A')
-    expect(s.selected()).toStartWith('› ▾ ● 1 one')
-    s.nav.tick()
-    expect(s.detail()).toContain('stage 1/2 · one')
-    expect(s.detail()).toContain('running · 29s')
-    expect(s.text()).toContain('one: implementing stage one')
-    expect(s.text()).toContain('▸ implement started')
-    s.nav.handleInput('k')
-    expect(s.selected()).toStartWith('› ▸ ✓ Plan')
-    s.nav.handleInput('\x1b[B')
-    s.nav.handleInput('\x1b[B')
-    s.nav.handleInput('\x1b[B')
-    expect(s.selected()).toStartWith('›     2 two')
-    expect(s.detail()).toContain('stage 2/2 · two')
-    expect(s.text()).toContain('upcoming')
-    s.nav.handleInput('\x1b[H')
-    expect(s.selected()).toStartWith('› ▸ ✓ Plan')
-    s.nav.handleInput('\x1b[F')
-    expect(s.selected()).toStartWith('› run details')
-    s.nav.handleInput('\x1b[5~')
-    expect(s.selected()).toStartWith('› ▸ ✓ Plan')
-    s.nav.handleInput('\x1b[6~')
-    expect(s.selected()).toStartWith('› run details')
-    s.nav.handleInput('j')
-    expect(s.selected()).toStartWith('› run details')
-  })
-
-  it('opens the detail with Enter or →, goes back with Esc, closes once with Esc again or q', () => {
-    const s = open()
-    s.nav.handleInput('\r')
-    let lines = s.nav.render(160)
-    expect(lines.at(-1)!.trimEnd()).toBe(SUMMARY_HELP)
+    expect(lines.at(-1)).toBe(SUMMARY_HELP)
     s.nav.handleInput('\x1b')
-    lines = s.nav.render(160)
-    expect(lines.at(-1)!.trimEnd()).toBe(TREE_HELP)
-    s.nav.handleInput('\x1b[C')
-    expect(s.nav.render(160).at(-1)!.trimEnd()).toBe(SUMMARY_HELP)
+    expect(s.nav.render(160)[0]!.trimEnd()).toBe('granny › 1 one')
     s.nav.handleInput('\x1b[D')
+    expect(s.nav.render(160)[0]!.trimEnd()).toBe('granny  feat/x  ● running · 1m30s')
+    expect(s.selected()).toStartWith('› ● 1 one')
+    s.nav.handleInput('\x1b[D')
+    expect(s.closed()).toBe(0)
     s.nav.handleInput('\x1b')
     expect(s.closed()).toBe(1)
     expect(s.nav.disposed).toBe(true)
@@ -822,19 +780,52 @@ describe('Navigator', () => {
     expect(s.renders.count).toBe(before)
 
     const t = open()
-    t.nav.handleInput('\r')
+    toImpl(t)
     t.nav.handleInput('q')
     expect(t.closed()).toBe(1)
   })
 
-  it('switches agents from the detail with Tab, ] and [, across groups, staying in the detail', () => {
+  it('keeps every row exactly the width on every level', () => {
     const s = open()
-    openPlan(s)
-    s.nav.handleInput('\x1b[F')
+    const widths = [20, 60, 99, 100, 160]
+    const fits = () => {
+      for (const width of widths) expect(s.nav.render(width).every(l => l.length === width)).toBe(true)
+    }
+    fits()
     s.nav.handleInput('\r')
-    s.nav.handleInput('[')
-    expect(s.detail()).toContain('implementer · gpt-x · 28s')
-    s.nav.handleInput('[')
+    fits()
+    s.nav.handleInput('\r')
+    fits()
+    expect(s.nav.render(60).join('\n')).toContain('NOW   ● thinking 10s')
+    expect(s.nav.render(60).at(-1)).toBe(fit(SUMMARY_HELP, 60))
+  })
+
+  it('moves the selection with the arrows, Home, End and the page keys', () => {
+    const s = open()
+    s.nav.handleInput('\x1b[A')
+    expect(s.selected()).toStartWith('› ✓ Plan')
+    s.nav.handleInput('k')
+    expect(s.selected()).toStartWith('› ✓ Plan')
+    s.nav.handleInput('\x1b[B')
+    s.nav.handleInput('\x1b[B')
+    expect(s.selected()).toStartWith('› · 2 two')
+    s.nav.handleInput('\r')
+    expect(s.nav.render(160)[0]!.trimEnd()).toBe('granny  feat/x  ● running · 1m30s')
+    s.nav.handleInput('\x1b[H')
+    expect(s.selected()).toStartWith('› ✓ Plan')
+    s.nav.handleInput('\x1b[F')
+    expect(s.selected()).toStartWith('› run details')
+    s.nav.handleInput('\x1b[5~')
+    expect(s.selected()).toStartWith('› ✓ Plan')
+    s.nav.handleInput('\x1b[6~')
+    expect(s.selected()).toStartWith('› run details')
+    s.nav.handleInput('j')
+    expect(s.selected()).toStartWith('› run details')
+  })
+
+  it('goes from an agent to its subagents with Tab, ] and [, staying in the detail', () => {
+    const s = open()
+    toPlan(s)
     s.nav.tick()
     let detail = s.detail()
     expect(detail).toContain('planner · gpt-x/high · ✓ 59s')
@@ -842,20 +833,24 @@ describe('Navigator', () => {
     expect(detail).toContain(` ${clock(T0 + 10_000)}  read   docs/spec.md`)
     expect(s.nav.render(160).at(-1)!.trimEnd()).toBe(SUMMARY_HELP)
     s.nav.handleInput(']')
-    expect(s.detail()).toContain('implementer · gpt-x · 28s')
-    s.nav.handleInput('\x1b[Z')
+    s.nav.tick()
+    expect(s.detail()).toContain('BaselineGates · subagent of plan')
+    expect(s.nav.render(160)[0]!.trimEnd()).toBe('granny › Plan › BaselineGates')
+    s.nav.handleInput('[')
     expect(s.detail()).toContain('planner · gpt-x/high · ✓ 59s')
     s.nav.handleInput('\t')
-    detail = s.detail()
-    expect(detail).toContain('implementer · gpt-x · 28s')
-    expect(s.nav.render(160).at(-1)!.trimEnd()).toBe(SUMMARY_HELP)
-    s.nav.handleInput('\t')
-    expect(s.detail()).toContain('implementer · gpt-x · 28s')
+    expect(s.detail()).toContain('BaselineGates · subagent of plan')
+    s.nav.handleInput('\x1b[Z')
+    expect(s.detail()).toContain('planner · gpt-x/high · ✓ 59s')
+    s.nav.handleInput('\x1b[Z')
+    expect(s.detail()).toContain('planner · gpt-x/high · ✓ 59s')
+    s.nav.handleInput('\x1b')
+    expect(s.selected()).toStartWith('› ✓ Plan')
   })
 
   it('shows every event with v, follows new ones, holds the view after scrolling up, and follows again with f', () => {
     const s = open({ rows: 20 })
-    s.nav.handleInput('\r')
+    toImpl(s)
     s.nav.handleInput('v')
     s.nav.tick()
     expect(s.text()).toContain(`${clock(T0 + 64_000)}  ▸ read   Reading the plan · plan.md`)
@@ -867,24 +862,24 @@ describe('Navigator', () => {
     s.nav.tick()
     expect(s.nav.bytesRead - read0).toBe(Buffer.byteLength(batch))
     let lines = s.nav.render(160)
-    expect(lines.at(-3)!.trimEnd()).toEndWith('» step 39')
+    expect(lines.at(-2)!.trimEnd()).toEndWith('» step 39')
     s.nav.handleInput('\x1b[A')
     lines = s.nav.render(160)
-    expect(lines.at(-3)!.trimEnd()).toEndWith('» step 38')
+    expect(lines.at(-2)!.trimEnd()).toEndWith('» step 38')
     expect(lines.at(-1)).toContain('f follow (off)')
     const held = s.detail()
     appendFileSync(events, line({ t: iso(200), type: 'heading', text: 'step 40' }))
     s.clock.t += 1000
     s.nav.tick()
-    expect(s.detail().slice(4, -2)).toEqual(held.slice(4, -2))
+    expect(s.detail().slice(4, -1)).toEqual(held.slice(4, -1))
     s.nav.handleInput('f')
     lines = s.nav.render(160)
-    expect(lines.at(-3)!.trimEnd()).toEndWith('» step 40')
+    expect(lines.at(-2)!.trimEnd()).toEndWith('» step 40')
     expect(lines.at(-1)).toContain('f follow (on)')
     s.nav.handleInput('\x1b[H')
     expect(s.text()).not.toContain('step 40')
     s.nav.handleInput('\x1b[F')
-    expect(s.nav.render(160).at(-3)!.trimEnd()).toEndWith('» step 40')
+    expect(s.nav.render(160).at(-2)!.trimEnd()).toEndWith('» step 40')
     s.nav.handleInput('v')
     expect(s.text()).toContain('NOW   ● thinking')
     expect(s.text()).not.toContain('» step 39')
@@ -893,13 +888,10 @@ describe('Navigator', () => {
 
   it('shows a finished agent\'s summary with its outcome, its transcript with t, and a subagent\'s file', () => {
     const s = open()
-    openPlan(s)
-    s.nav.handleInput('\x1b[B')
-    expect(s.selected()).toStartWith('›   ✓ plan')
+    toPlan(s)
     s.nav.tick()
     expect(s.text()).toContain('NOW   ✓ done in 59s')
     expect(s.text()).not.toContain('▶ prompt')
-    s.nav.handleInput('\r')
     s.nav.handleInput('t')
     s.nav.tick()
     expect(s.text()).toContain('▶ prompt')
@@ -912,8 +904,7 @@ describe('Navigator', () => {
     s.nav.handleInput('v')
     s.nav.tick()
     expect(s.text()).toContain('» Drafting the stages')
-    s.nav.handleInput('\x1b')
-    s.nav.handleInput('\x1b[B')
+    s.nav.handleInput(']')
     s.nav.tick()
     expect(s.detail()).toContain('BaselineGates · subagent of plan')
     expect(s.text()).toContain('✎ Gates are green.')
@@ -923,24 +914,25 @@ describe('Navigator', () => {
     const s = open()
     const session = join(s.plan, '2026-11-05T17-00-01-000Z_u.jsonl')
     appendFileSync(session, Array.from({ length: 100 }, (_, i) => line({ type: 'message', timestamp: iso(60), message: { role: 'assistant', content: [{ type: 'text', text: `line ${i}` }] } })).join(''))
-    openPlan(s)
-    s.nav.handleInput(']')
-    s.nav.handleInput('\x1b[C')
+    toPlan(s)
     s.nav.handleInput('t')
     expect(s.text()).toContain('(reading …)')
     s.nav.render(160)
     s.nav.tick()
     const lines = s.nav.render(160)
-    expect(lines.at(-3)!.trimEnd()).toEndWith('✎ line 99')
+    expect(lines.at(-2)!.trimEnd()).toEndWith('✎ line 99')
     expect(lines.join('\n')).not.toContain('▶ prompt')
   })
 
-  it('keeps a group\'s journal lines at their end as they arrive until the view is scrolled', () => {
+  it('shows a stage\'s journal lines with l, keeping them at their end as they arrive', () => {
     const s = open({ rows: 12 })
-    s.nav.handleInput('\x1b[A')
+    s.nav.handleInput('\r')
+    s.nav.handleInput('l')
     s.nav.render(160)
     s.nav.tick()
-    s.nav.render(160)
+    expect(s.nav.render(160)[0]!.trimEnd()).toBe('granny › 1 one › Log')
+    expect(s.text()).toContain('stage 1/2 · one')
+    expect(s.text()).toContain('one: implementing stage one')
     appendFileSync(join(s.dir, 'journal.jsonl'), Array.from({ length: 20 }, (_, i) => line({ t: iso(70 + i), type: 'log', message: `one: note ${i}` })).join(''))
     s.nav.tick()
     expect(s.nav.render(160).at(-2)!.trimEnd()).toEndWith('one: note 19')
@@ -950,7 +942,7 @@ describe('Navigator', () => {
     const s = open({ rows: 12 })
     const events = join(s.impl, 'events.jsonl')
     const steps = (from: number) => Array.from({ length: 20 }, (_, i) => line({ t: iso(70 + from + i), type: 'heading', text: `step ${from + i}` })).join('')
-    s.nav.handleInput('\r')
+    toImpl(s)
     s.nav.handleInput('v')
     appendFileSync(events, steps(0))
     s.nav.tick()
@@ -962,13 +954,12 @@ describe('Navigator', () => {
     appendFileSync(events, steps(20))
     s.nav.tick()
     const after = s.nav.render(160)
-    expect(after.slice(2, -1).map(l => l.slice(l.indexOf(' │ ') + 3))).toEqual(before.slice(2, -1).map(l => l.slice(l.indexOf(' │ ') + 3)))
+    expect(after.slice(3, -1)).toEqual(before.slice(3, -1))
   })
 
-  it('reads a newly selected source right after the key, outside the key handler', async () => {
+  it('reads a newly opened source right after the key, outside the key handler', async () => {
     const s = open()
-    openPlan(s)
-    s.nav.handleInput(']')
+    toPlan(s)
     expect(s.text()).toContain('(reading …)')
     await Bun.sleep(20)
     expect(s.text()).not.toContain('(reading …)')
@@ -978,6 +969,7 @@ describe('Navigator', () => {
   it('shows the run detail - the only place with the run id - and the run\'s result once it ends', () => {
     const s = open()
     s.nav.handleInput('\x1b[F')
+    s.nav.handleInput('\r')
     s.nav.tick()
     const detail = s.detail()
     expect(detail).toContain('run R1')
@@ -986,6 +978,7 @@ describe('Navigator', () => {
     expect(detail).toContain('branch   feat/x')
     expect(detail).toContain(`result   ${join(s.dir, 'result.json')}`)
     expect(s.text()).not.toContain('[granny] Run R1 finished.')
+    expect(s.nav.render(160)[0]!.trimEnd()).toBe('granny › Run details')
     s.run.status = 'done'
     s.run.reply = '[granny] Run R1 finished.\n- one: clean'
     s.live.stop(s.implRole)
@@ -993,23 +986,29 @@ describe('Navigator', () => {
     s.nav.tick()
     expect(s.text()).toContain('[granny] Run R1 finished.')
     expect(s.text()).toContain('- one: clean')
-    expect(s.nav.render(160)[0]!.trimEnd()).toBe('granny · feat/x · done · 1m02s')
+    s.nav.handleInput('\x1b')
+    expect(s.nav.render(160)[0]!.trimEnd()).toBe('granny  feat/x  done · 1m02s')
   })
 
   it('draws event text, journal lines and the run reply without control characters', () => {
     const s = open()
     appendFileSync(join(s.impl, 'events.jsonl'), line({ t: iso(70), type: 'text', text: '\x1b[31mred answer\x1b[0m\r\nbell\x07 line' }))
     appendFileSync(join(s.dir, 'journal.jsonl'), line({ t: iso(71), type: 'log', message: 'one: log \x1b[32mgreen\x1b[0m\r\x07' }))
+    toImpl(s)
     s.nav.tick()
     expect(s.text()).toContain('LAST SAID  "red answer bell line"')
-    s.nav.handleInput('\x1b[A')
+    s.nav.handleInput('\x1b')
+    s.nav.handleInput('l')
     s.nav.tick()
     expect(s.text()).toContain('one: log green')
     s.run.status = 'done'
     s.run.reply = '[granny] Run R1 \x1b[1mfinished\x1b[0m.\r\n- one: clean\x07'
     s.live.stop(s.implRole)
     s.implRole.outcome = 'done'
+    s.nav.handleInput('\x1b')
+    s.nav.handleInput('\x1b')
     s.nav.handleInput('\x1b[F')
+    s.nav.handleInput('\r')
     s.nav.tick()
     expect(s.text()).toContain('[granny] Run R1 finished.')
     expect(s.text()).toContain('- one: clean')
@@ -1019,6 +1018,7 @@ describe('Navigator', () => {
   it('redraws once per tick however much was written, at once on a key, and never reads files in render', () => {
     const s = open()
     const events = join(s.impl, 'events.jsonl')
+    toImpl(s)
     s.nav.tick()
     let before = s.renders.count
     for (let i = 0; i < 50; i++) appendFileSync(events, line({ t: iso(70), type: 'heading', text: `n${i}` }))
@@ -1026,9 +1026,8 @@ describe('Navigator', () => {
     s.nav.tick()
     expect(s.renders.count).toBe(before + 1)
     before = s.renders.count
-    s.nav.handleInput('\x1b[A')
+    s.nav.handleInput('\t')
     expect(s.renders.count).toBe(before + 1)
-    s.nav.handleInput('\x1b[B')
     s.nav.tick()
     const first = s.nav.render(160)
     expect(s.nav.render(160)).toBe(first)
@@ -1041,97 +1040,94 @@ describe('Navigator', () => {
   it('consults the named key bindings and captures exactly the keys it handles', () => {
     const s = open({ matches: (data, name) => data === 'X!' && name === 'tui.select.up' })
     s.nav.handleInput('X!')
-    expect(s.selected()).toStartWith('› ▾ ● 1 one')
-    for (const key of ['\x1b[D', 'f', 't', 'v', '[', ']', '\t', '\x1b[Z', ' ', 'q', '\x1b', '\r', 'j', 'k', '\x1b[5~', 'X!']) expect(s.nav.capturesInput(key)).toBe(true)
+    expect(s.selected()).toStartWith('› ✓ Plan')
+    for (const key of ['\x1b[D', 'f', 'l', 't', 'v', '[', ']', '\t', '\x1b[Z', ' ', 'q', '\x1b', '\r', 'j', 'k', '\x1b[5~', 'X!']) expect(s.nav.capturesInput(key)).toBe(true)
     for (const key of ['x', 'c', 'b', '\x1b[1;5C']) expect(s.nav.capturesInput(key)).toBe(false)
   })
 
   it('lists every run in a runs section and switches the page to another with Enter or Space', () => {
     const s = open({ twoRuns: true })
-    let tree = s.nav.render(160).map(l => l.split(' │ ')[0]!.trimEnd())
-    const runs = tree.indexOf('  runs')
+    const page = () => s.nav.render(160).map(l => l.trimEnd())
+    const runs = page().indexOf('  runs')
     expect(runs).toBeGreaterThan(0)
-    expect(tree[runs + 1]).toMatch(/^ {2}✓ R0 · done +2m00s$/)
-    expect(tree[runs + 2]).toMatch(/^ {2}● R1 · running \(shown\) +1m30s$/)
+    expect(page()[runs + 1]).toMatch(/^ {2}R0 · done +2m00s$/)
+    expect(page()[runs + 2]).toMatch(/^ {2}R1 · running \(shown\) +1m30s$/)
     s.nav.handleInput('\x1b[F')
     s.nav.handleInput('k')
-    expect(s.selected()).toStartWith('› ✓ R0 · done')
+    expect(s.selected()).toStartWith('› R0 · done')
     s.nav.handleInput('\r')
     s.nav.tick()
-    const lines = s.nav.render(160)
-    expect(lines[0]!.trimEnd()).toBe('granny · done · 2m00s')
-    tree = lines.map(l => l.split(' │ ')[0]!.trimEnd())
-    expect(tree.slice(3, 5).map(l => l.replace(/ +/g, ' '))).toEqual([' ▸ ✓ Plan 2m00s', ' ▸ ✓ PR ready 0s'])
-    expect(tree.some(l => /^› ✓ R0 · done \(shown\)/.test(l))).toBe(true)
-    expect(s.text()).toContain('R0 finished.')
+    expect(page()[0]).toBe('granny  done · 2m00s')
+    expect(page().some(l => /^ {2}R0 · done \(shown\)/.test(l))).toBe(true)
+    expect(page().join('\n')).toContain('✓ Plan')
     s.nav.handleInput('\x1b[F')
-    expect(s.selected()).toStartWith('› ● R1 · running')
+    s.nav.handleInput('k')
+    s.nav.handleInput('\r')
+    expect(s.text()).toContain('R0 finished.')
+    s.nav.handleInput('\x1b')
+    s.nav.handleInput('\x1b[F')
     s.nav.handleInput(' ')
-    expect(s.nav.render(160)[0]).toStartWith('granny · feat/x · stage 1/2 · Implement')
-    expect(s.text()).toContain('● implement')
+    expect(page()[0]).toStartWith('granny  feat/x  ● running')
   })
 
-  it('folds a group with Space and jumps to the parent with ←', () => {
+  it('shows a stage\'s rounds, a round\'s agents side by side, and the round\'s findings, from the journal', () => {
     const s = open()
-    s.nav.handleInput('\x1b[D')
-    expect(s.selected()).toStartWith('› ▾ ● 1 one')
-    s.nav.handleInput(' ')
-    expect(s.selected()).toStartWith('› ▸ ● 1 one')
-    expect(s.text()).not.toContain('● implement')
-    s.nav.tick()
-    expect(s.text()).not.toContain('● implement')
-    s.nav.handleInput(' ')
-    expect(s.text()).toContain('● implement')
-  })
-
-  it('opens a finished stage with Space for good, and draws the stepper for the stage of the selected row', () => {
-    const s = open()
-    const impl2 = join(s.dir, 'sessions', '3-implement-two')
-    mkdirSync(impl2, { recursive: true })
+    const session = (name: string) => join(s.dir, 'sessions', name)
     s.live.stop(s.implRole)
     s.implRole.outcome = 'done'
-    const two = s.live.role({ label: 'implement two', role: 'implementer', session: impl2, phase: 'Implement' })
-    s.live.start(two)
+    const terra = s.live.role({ label: 'review one r2 terra', role: 'reviewer', session: session('terra2'), phase: 'Review', cwd: '/wt' })
+    s.live.start(terra)
+    terra.state = 'thinking'
+    terra.since = T0 + 85_000
+    const finding = { id: 'terra-F1', sent: true, severity: 'P1', title: 'Pause timer survives a reconnect', file: 'src/a.ts', line: 3, reviewer: 'terra', detail: 'It never stops.', why: 'P0/P1' }
+    const kept = { id: 'sol-F1', sent: false, severity: 'P3', title: 'Hard-coded text', reviewer: 'sol', verdict: 'confirmed', impact: 'minor', priority: 42, why: 'priority is not above 70' }
     appendFileSync(
       join(s.dir, 'journal.jsonl'),
       [
-        { t: iso(80), type: 'agent-end', label: 'implement one', session: s.impl, outcome: 'done' },
-        { t: iso(81), type: 'phase', title: 'Review' },
-        { t: iso(81), type: 'agent', label: 'review one r1 terra', role: 'reviewer', phase: 'Review', session: join(s.dir, 'sessions', 'x-review'), model: null },
-        { t: iso(84), type: 'agent-end', label: 'review one r1 terra', session: join(s.dir, 'sessions', 'x-review'), outcome: 'done' },
-        { t: iso(85), type: 'stage', number: 1, name: 'one', event: 'end', outcome: 'clean' },
-        { t: iso(85), type: 'stage', number: 2, name: 'two', event: 'start' },
-        { t: iso(85), type: 'phase', title: 'Implement' },
-        { t: iso(86), type: 'agent', label: 'implement two', role: 'implementer', phase: 'Implement', session: impl2, model: 'openai/gpt-x' },
+        { t: iso(70), type: 'agent-end', label: 'implement one', session: s.impl, outcome: 'done' },
+        { t: iso(71), type: 'phase', title: 'Review' },
+        { t: iso(71), type: 'agent', label: 'review one r1 terra', role: 'reviewer', phase: 'Review', session: session('terra1'), model: 'openai/gpt-x' },
+        { t: iso(71), type: 'agent', label: 'review one r1 sol', role: 'reviewer', phase: 'Review', session: session('sol1'), model: 'openai/gpt-y' },
+        { t: iso(75), type: 'agent-end', label: 'review one r1 terra', session: session('terra1'), outcome: 'done' },
+        { t: iso(75), type: 'agent-end', label: 'review one r1 sol', session: session('sol1'), outcome: 'done' },
+        { t: iso(75), type: 'agent', label: 'judge one r1', role: 'judge', phase: 'Review', session: session('judge1'), model: 'openai/gpt-j' },
+        { t: iso(76), type: 'agent-end', label: 'judge one r1', session: session('judge1'), outcome: 'done' },
+        { t: iso(76), type: 'round', subject: 'one', round: 1, findings: [finding, kept] },
+        { t: iso(76), type: 'agent', label: 'fix one r1', role: 'implementer', phase: 'Review', session: session('fix1'), model: 'openai/gpt-x' },
+        { t: iso(80), type: 'agent-end', label: 'fix one r1', session: session('fix1'), outcome: 'done' },
+        { t: iso(81), type: 'agent', label: 'review one r2 terra', role: 'reviewer', phase: 'Review', session: session('terra2'), model: 'openai/gpt-x', cwd: '/wt' },
       ]
         .map(line)
         .join(''),
     )
     s.nav.tick()
-    let lines = s.nav.render(160)
-    let tree = lines.map(l => l.split(' │ ')[0]!.trimEnd())
-    expect(s.selected()).toStartWith('›   ✓ implement')
-    expect(tree.some(l => /^ {2}▾ ✓ 1 one +24s$/.test(l))).toBe(true)
-    expect(lines[0]!.trimEnd()).toBe('granny · feat/x · stage 1/2 · Implement · 1m30s')
-    expect(lines[1]!.trimEnd()).toBe('Worktree ✓ › Implement ✓ › Review ✓ › Final review › PR ready')
-    s.nav.handleInput('\t')
-    expect(s.selected()).toStartWith('›   ✓ review r1')
-    s.nav.handleInput('\t')
-    expect(s.selected()).toStartWith('›   ● implement')
-    lines = s.nav.render(160)
-    expect(lines[0]!.trimEnd()).toBe('granny · feat/x · stage 2/2 · Implement · 1m30s')
-    expect(lines[1]!.trimEnd()).toBe('Worktree ✓ › Implement ● › Review › Final review › PR ready')
-
-    s.nav.handleInput('\x1b[H')
-    expect(s.selected()).toStartWith('› ▸ ✓ Plan')
-    s.nav.handleInput(' ')
-    s.nav.tick()
-    s.nav.tick()
-    tree = s.nav.render(160).map(l => l.split(' │ ')[0]!.trimEnd())
-    expect(tree[3]).toMatch(/^› ▾ ✓ Plan +1m01s$/)
-    expect(tree[4]).toMatch(/^ {4}✓ plan +59s$/)
-    s.nav.handleInput(' ')
-    expect(s.text()).not.toContain('✓ plan ')
+    const page = () => s.nav.render(120).map(l => l.trimEnd())
+    const flat = () => page().map(l => l.replace(/ {2,}/g, '  '))
+    expect(flat().join('\n')).toContain('› ● 1 one  round 2 of 4  6 agents · 1 running')
+    s.nav.handleInput('\r')
+    expect(flat()).toContain('│  ✓ Round 1  2 findings: 1 sent back, 1 kept  4 agents  9s │')
+    expect(flat().join('\n')).toContain('› ● Round 2  reviewing  1 agent · 1 running')
+    expect(flat().join('\n')).toContain('· Round 3  only if round 2 sends findings back')
+    expect(flat().join('\n')).toContain('· Round 4  the last one')
+    s.nav.handleInput('\r')
+    expect(page()[0]).toBe('granny › 1 one › Round 2 of 4')
+    expect(page().join('\n')).toContain('terra  9s')
+    expect(page().join('\n')).toContain('thinking 5s')
+    expect(flat().join('\n')).toContain('Fix  only if findings go back')
+    s.nav.handleInput('[')
+    expect(page()[0]).toBe('granny › 1 one › Round 1 of 4')
+    expect(page().join('\n')).toContain('1 finding')
+    expect(flat().join('\n')).toContain('✓ Judge  1 sent back, 1 kept')
+    expect(page().at(-1)).toContain('f findings')
+    s.nav.handleInput('f')
+    expect(page()[0]).toBe('granny › 1 one › Round 1 of 4 › Findings')
+    expect(flat().join('\n')).toContain('› ↺ Pause timer survives a reconnect  sent back')
+    expect(flat().join('\n')).toContain('· Hard-coded text  kept')
+    expect(flat().join('\n')).toContain('WHERE src/a.ts:3')
+    expect(flat().join('\n')).toContain('SAID  terra P1: It never stops.')
+    s.nav.handleInput('\x1b[B')
+    expect(flat().join('\n')).toContain('JUDGE confirmed · minor · priority 42')
+    expect(flat().join('\n')).toContain('WHY  priority is not above 70')
   })
 
   it('summarises a busy agent like the 24a screen: NOW, TODO, RECENT newest first with relative paths, LAST SAID', () => {
@@ -1172,11 +1168,13 @@ describe('Navigator', () => {
     time.t = at(157)
     role.event({ type: 'tool_execution_start', toolCallId: 'b4', toolName: 'bash', args: { command: `cd ${WT} && bun run build && bun test` }, intent: 'Checking integrated build and full behavioral suite' }, at(150))
     nav = new Navigator({ runs: () => [{ id: 'S', dir, status: 'running', live, branch: 'chore/auth', outline }], runId: 'S', tui: { requestRender: () => {}, terminal: { rows: 40 } }, theme: {}, done: () => {}, now: () => time.t, tickMs: 60_000 })
+    nav.handleInput('\r')
+    nav.handleInput('\r')
     nav.tick()
-    const detail = nav.render(160).map(l => l.slice(l.indexOf(' │ ') + 3).trimEnd())
+    const detail = nav.render(97).map(l => l.trimEnd())
     const from = detail.indexOf('implementer · gpt-6.1-sol/xhigh · 2m37s')
     expect(from).toBeGreaterThan(0)
-    expect(detail.slice(from, from + 21)).toEqual([
+    expect(detail.slice(from, from + 19)).toEqual([
       'implementer · gpt-6.1-sol/xhigh · 2m37s',
       '',
       'NOW   ● bash · 7s',
@@ -1196,15 +1194,12 @@ describe('Navigator', () => {
       '',
       'LAST SAID  "Stage 1 foundation is green; resuming the auth cutover from the recovery branch where',
       '           the interrupted run stopped. Next I check the build."',
-      '',
-      '',
     ])
     for (const width of [60, 100, 160]) {
       const lines = nav.render(width)
       expect(lines.every(l => l.length === width)).toBe(true)
       expect(lines.join('\n')).not.toContain('/home/u')
     }
-    nav.handleInput('\r')
     const narrow = nav.render(60).map(l => l.trimEnd())
     expect(narrow).toContain('NOW   ● bash · 7s')
     expect(narrow).toContain(fit('      Checking integrated build and full behavioral suite', 60))
@@ -1242,19 +1237,20 @@ describe('Navigator', () => {
       },
     })
     const lines = t.nav.render(160)
-    expect(lines[0]).toStartWith('granny · feat/x · stage 1/2 · Implement')
-    expect(t.selected()).toStartWith('›   ● implement')
+    expect(lines[0]).toStartWith('granny  feat/x  ● running')
+    expect(t.selected()).toStartWith('› ● 1 one')
   })
 
   it('colours each cell through the theme by its tone without changing its text', () => {
     const theme = { fg: (c: string, x: string) => `<${c}>${x}</>`, bg: (c: string, x: string) => `[${c}]${x}[/]`, bold: (x: string) => x }
     const s = open({ theme })
     const lines = s.nav.render(160)
-    expect(lines[0]).toStartWith('<text>granny · feat/x')
-    expect(lines[1]).toStartWith('<success>Worktree ✓</><muted> › </><accent>Implement ●</><muted> › </><muted>Review</>')
-    expect(lines.some(l => l.startsWith('[selectedBg]›   ● implement'))).toBe(true)
-    expect(lines.some(l => l.startsWith('<success>  ▸ ✓ Plan'))).toBe(true)
-    expect(lines.some(l => l.includes('<accent>NOW   ● thinking 10s'))).toBe(true)
-    expect(lines.at(-1)).toStartWith(`<muted>${TREE_HELP}`)
+    expect(lines[0]).toStartWith('<text>granny</><text>  feat/x</><accent>  ● running</><muted> · 1m30s')
+    expect(lines.some(l => l.startsWith('[selectedBg]› ● [/][selectedBg]1 one'))).toBe(true)
+    expect(lines.some(l => l.startsWith('<success>  ✓ </><text>Plan'))).toBe(true)
+    expect(lines.at(-1)).toStartWith(`<muted>${LEVEL_HELP}`)
+    s.nav.handleInput('\r')
+    s.nav.handleInput('\r')
+    expect(s.nav.render(160).some(l => l.includes('<accent>NOW   ● thinking 10s'))).toBe(true)
   })
 })

@@ -282,7 +282,7 @@ export type ExtensionOptions = HostOptions & LiveOptions
 const STATUS_KEEP_MS = 60_000
 
 const WATCH_HELP =
-  "granny-workflow: watch granny runs - /granny (or alt+w) opens the run navigator: a stepper of the run's steps, its stage groups with their agents, and what the selected agent is doing now (or its transcript); /granny <runId> opens it on that run; /granny off|on hides or shows the run panel in this session"
+  "granny-workflow: watch granny runs - /granny (or alt+w) opens the run navigator: the run's stages, a stage's review rounds, a round's agents side by side, and what an agent is doing now (or its transcript); /granny <runId> opens it on that run; /granny off|on hides or shows the run panel in this session"
 
 const NAVIGATOR_HINT = '/granny or alt+w: agents'
 const NAVIGATOR_SENTENCE = '\nTell the user: /granny or alt+w opens the run navigator (stages, agents, live activity).'
@@ -512,6 +512,7 @@ export const createGrannyExtension =
           live.setPhase(title)
         },
         stage: ({ number, name, event, outcome }) => journal('stage', { number, name, event, ...(outcome ? { outcome } : {}) }),
+        round: event => journal('round', { ...event }),
       }
 
       const notify = (content: string) => {

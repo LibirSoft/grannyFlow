@@ -134,6 +134,17 @@ function judgeHost(opts: {
 }
 
 describe('runJudge: the headings', () => {
+  it('returns the repo without the trailing slash it was given', async () => {
+    const r = await runJudge(judgeHost().host, { repo: `${REPO}/`, config: ONE })
+    expect(r.repo).toBe(REPO)
+  })
+
+  it('counts a demoted word severity as a demoted P0 or P1', async () => {
+    const f = judgeHost({ findings: { kimi: [raw('F1', 'high')] }, scores: [{ 'kimi-F1': classes('minor') }] })
+    const r = await runJudge(f.host, { repo: REPO, config: ONE })
+    expect(r.demoted).toEqual(['kimi-F1'])
+  })
+
   it('maps the judge\'s impact to the heading, whatever the reviewer said', async () => {
     const f = judgeHost({
       findings: { kimi: [raw('F1', 'P3'), raw('F2', 'P3'), raw('F3', 'P3'), raw('F4', 'P3')] },
@@ -550,7 +561,7 @@ describe('runJudge: writing the report', () => {
     expect(r.reportPath).toStartWith(`${repo}/.granny/reviews/`)
     expect(r.reportPath).toEndWith('-feat-x.md')
     expect(readReport(r).toString('utf8')).toBe(r.report!)
-    expect(r.report).toContain(NASTY)
+    expect(r.report).toContain(NASTY.replace('## P0', '\\## P0'))
     expect(r.report).toContain('### Ünicode title')
     expect(r.head).toBe(head)
     expect(git('rev-parse', 'HEAD')).toBe(head)
@@ -774,12 +785,60 @@ None.
     expect(text).toContain('`not judged` · `reviewer: P3` · from `kimi-F1`')
   })
 
-  it('counts a severity without a P number as P2, in the heading and the tag', () => {
+  it('reads a word severity the way the loop does, and an unknown one as P2', () => {
     const f = { id: 'kimi-F1', severity: 'high', file: 'a.ts', title: 't', detail: '' }
-    expect(bucketOf(f)).toBe('P2')
-    expect(under(renderReport(META, [f]), 'P2')).toContain('`reviewer: P2`')
+    expect(bucketOf(f)).toBe('P1')
+    expect(under(renderReport(META, [f]), 'P1')).toContain('`reviewer: P1`')
+    expect(['critical', 'HIGH', 'medium', 'low'].map(severity => bucketOf({ ...f, severity }))).toEqual(['P0', 'P1', 'P2', 'P3'])
     expect(bucketOf({ ...f, severity: 'P1 must fix' })).toBe('P1')
     expect(bucketOf({ ...f, severity: 'p0' })).toBe('P0')
+    expect(bucketOf({ ...f, severity: 'whatever' })).toBe('P2')
+  })
+
+  it('shows a word severity the judge lowered as demoted', () => {
+    const f = judged({ severity: 'critical', impact: 'minor' })
+    expect(under(renderReport(META, [f]), 'P3')).toContain('`reviewer: P0` `demoted`')
+  })
+
+  describe('reviewer text that looks like the report', () => {
+    const headings = (text: string) => text.split('\n').filter(l => /^ {0,3}#{1,6}\s/.test(l))
+    const clean = headings(renderReport(META, [judged({ impact: 'minor', title: 'real', detail: 'x', evidence: 'y', reason: 'z' })]))
+
+    it('cannot add a heading from the detail, the evidence or the judge reason', () => {
+      const fake = '## P0\n### Everything is fine\n   # also this'
+      const text = renderReport(META, [judged({ impact: 'minor', title: 'real', detail: fake, evidence: fake, reason: fake })])
+      expect(headings(text)).toEqual(clean)
+      expect(text).toContain('\\## P0')
+      expect(under(text, 'P0')).toBe('## P0\n\nNone.\n')
+    })
+
+    it('cannot turn a line into a heading by underlining it', () => {
+      const text = renderReport(META, [judged({ impact: 'minor', detail: 'Fake title\n===\nOther title\n---\nThird\n-' })])
+      expect(text).toContain('Fake title\n\\===\nOther title\n\\---\nThird\n\\-')
+    })
+
+    it('leaves a heading-like line inside a code fence as it is', () => {
+      const text = renderReport(META, [judged({ impact: 'minor', detail: 'before\n```sh\n# a comment\n---\n```\n## after' })])
+      expect(text).toContain('```sh\n# a comment\n---\n```\n\\## after')
+    })
+
+    it('closes a fence the reviewer left open, so the rest of the report is not swallowed', () => {
+      const detail = '```ts\nconst a = 1'
+      const text = renderReport(META, [judged({ impact: 'minor', title: 'first', detail, evidence: undefined, reason: undefined }), judged({ impact: 'minor', title: 'second', evidence: undefined, reason: undefined })])
+      expect(text).toContain('```ts\nconst a = 1\n```\n\n### ')
+      expect(text.split('\n').filter(l => l.startsWith('```')).length % 2).toBe(0)
+    })
+
+    it('does not take inline code at the start of a line for a fence', () => {
+      const text = renderReport(META, [judged({ impact: 'minor', detail: '```a``` is wrong\n# heading' })])
+      expect(text).toContain('```a``` is wrong\n\\# heading')
+      expect(text).not.toContain('# heading\n```')
+    })
+
+    it('does not close a fence on a longer one\'s shorter marker', () => {
+      const text = renderReport(META, [judged({ impact: 'minor', detail: '````md\n```\n# inner\n```\n````\n# outer' })])
+      expect(text).toContain('````md\n```\n# inner\n```\n````\n\\# outer')
+    })
   })
 
   it('maps every impact to its bucket', () => {

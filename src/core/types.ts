@@ -58,6 +58,30 @@ export interface StageEvent {
   outcome?: StageOutcome
 }
 
+/** One finding of a review round, as a run view shows it. */
+export interface RoundFinding {
+  id: string
+  sent: boolean
+  severity?: string
+  title?: string
+  file?: string
+  line?: number
+  reviewer?: string
+  detail?: string
+  verdict?: string
+  impact?: string
+  priority?: number
+  reason?: string
+  why?: string
+}
+
+/** How a review round of `subject` (a stage's name, `plan review`, `final review`) was routed. */
+export interface RoundEvent {
+  subject: string
+  round: number
+  findings: RoundFinding[]
+}
+
 export interface Host {
   readonly name: HostName
   agent(request: AgentRequest): Promise<any | null>
@@ -68,6 +92,8 @@ export interface Host {
   phase(title: string): void
   /** A stage started or ended; a stage that never starts gets one `end` with outcome `skipped`. */
   stage?(event: StageEvent): void
+  /** A review round was routed: clean, or each finding sent back or kept. */
+  round?(event: RoundEvent): void
 }
 
 export interface Finding {

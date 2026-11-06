@@ -240,7 +240,7 @@ describe('skill docs', () => {
   })
 
   it('describes the run navigator page, its detail and its keys on omp and opencode', () => {
-    const page = ['granny · <branch> · stage <k>/<n> · <phase> · <elapsed>', 'Worktree ✓ › Implement ● › Checks › Review › Final review › PR ready', 'checks ✓', '`run details`', 'NOW', 'TODO', 'RECENT', 'LAST SAID', '✓ done in', '`v`', '`f`', 'short model']
+    const page = ['granny  feat/pause  ● running', '↺ review loop · up to 4 rounds', '2 agents at the same time', 'granny › 2 Client pause UI › Round 2 of 4', '`run details`', 'NOW', 'TODO', 'RECENT', 'LAST SAID', '✓ done in', '`v`', '`f`', 'short model']
     for (const file of ['references/omp.md', 'references/opencode.md']) {
       const text = read(file)
       expect({ file, missing: page.filter(piece => !text.includes(piece)) }).toEqual({ file, missing: [] })
@@ -253,12 +253,12 @@ describe('skill docs', () => {
     const opencode = read('references/opencode.md')
     expect(opencode).toContain('`data.session.message`')
     expect(opencode).toContain('granny · stage <k>/<n> · <phase> · <n> running · <time>')
-    expect(opencode).toContain('Enter opens the session')
+    expect(opencode).toContain('Enter opens its opencode session')
   })
 
   it("tells the final check to rewrite the PR body's review section from the run's outcomes, by hand on Cursor too", () => {
     expect(read('references/prompts.md')).toContain("Rewrite the PR body's review and status section from this list")
-    expect(read('references/cursor.md')).toContain("rewrite the PR body's review section from it")
+    expect(read('references/cursor.md')).toContain("rewrite the PR body's review section from them")
     expect(read('references/config.md')).toContain("rewrite the PR body's review section from them")
   })
 

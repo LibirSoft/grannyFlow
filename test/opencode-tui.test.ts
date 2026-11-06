@@ -483,7 +483,8 @@ describe('opencode TUI plugin: sidebar, chip and toasts', () => {
 })
 
 describe('opencode TUI plugin: the /granny navigator', () => {
-  const HELP = '↑↓ move · Enter open session · Tab next agent · Space fold · v details · p parent · Esc close'
+  const HELP = '↑↓ move · Enter open · Esc close'
+  const AGENT_HELP = 'Enter open session · v details · Tab next agent · p parent · Esc back'
 
   function view(m: ReturnType<typeof mount>, data: unknown) {
     const node = m.fc.routes.get('granny')!.render({ data })
@@ -492,10 +493,9 @@ describe('opencode TUI plugin: the /granny navigator', () => {
       node,
       lines: () => texts(node),
       text: () => texts(node).join('\n'),
-      left: () => texts(node).map(l => l.split(' │ ')[0]!).join('\n'),
       rows: () => render(node),
       key: (bind: string) => m.fc.bound(bind)!.run(),
-      selected: () => render(node).find(r => r.parts?.some(p => p.bg !== undefined))?.text ?? '',
+      selected: () => render(node).flatMap(r => (r.parts ?? []).filter(p => p.bg !== undefined).map(p => p.text)).join(''),
     }
   }
 
@@ -515,85 +515,98 @@ describe('opencode TUI plugin: the /granny navigator', () => {
     expect(m.fc.routes.has('granny')).toBe(true)
   })
 
-  it('opens on the running agent with one header, the groups and the agent detail', () => {
+  it('opens on the stages with the running one selected, and the run details last', () => {
     const v = open()
-    const lines = v.lines()
-    expect(lines[0]!.trimEnd()).toBe('granny · feat/x · Plan review · 33m00s')
-    expect(lines[1]!.trimEnd()).toBe('Plan ✓ › Plan review ●')
-    expect(lines.at(-1)!.trimEnd()).toBe(HELP)
-    expect(v.selected()).toMatch(/^› +● review r2 terra /)
+    const lines = v.lines().map(l => l.trimEnd())
+    expect(lines[0]).toBe('granny  feat/x  ● running · 33m00s')
+    expect(lines.at(-1)).toBe(HELP)
+    expect(v.selected()).toMatch(/^› ● Plan review +round 2 +2 agents · 1 running/)
     const text = v.text()
-    expect(text).toContain('▸ ✓ Plan')
-    expect(text).toContain('▾ ● Plan review')
-    expect(text).toContain('… review r2 codex')
-    expect(text).toContain('reviewer · kimi-k3.1-pro · 1m59s')
-    expect(text).toContain('NOW   … waiting for model 1m59s')
+    expect(text).toContain('✓ Plan')
     expect(text).toContain('run details')
-    for (const noise of ['ses_', 'linked', RUN, 'Enter open session · p parent session']) expect(text.split('\n').slice(0, -1).join('\n')).not.toContain(noise)
+    for (const noise of ['ses_', 'linked', RUN]) expect(text).not.toContain(noise)
   })
 
-  it('fits every row to the width and splits the panes from 100 columns', () => {
+  it('fits every row to the width on every level', () => {
     for (const width of [60, 99, 100, 160]) {
       const v = open({}, { width, height: 24 })
-      const lines = v.lines()
-      expect(lines.length).toBe(24)
-      for (const l of lines) expect(l.length).toBeLessThanOrEqual(width)
-      expect(lines.some(l => l.includes(' │ '))).toBe(width >= 100)
+      const fits = () => {
+        const lines = v.lines()
+        expect(lines.length).toBe(24)
+        for (const l of lines) expect(l.length).toBeLessThanOrEqual(width)
+      }
+      fits()
+      v.key('return')
+      fits()
+      v.key('return')
+      fits()
+      v.key('return')
+      fits()
       expect(v.text()).toContain('reviewer · kimi-k3.1-pro')
       v.m.cleanup()
       rmSync(join(dir, 'journal.jsonl'))
     }
   })
 
-  it('moves with the keys and the detail follows', () => {
+  it('moves with the keys on a level', () => {
     const v = open()
-    v.key('down,j')
-    expect(v.selected()).toContain('review r2 codex')
-    expect(v.text()).toContain('reviewer · gpt-5.5 · ')
     v.key('up,k')
-    expect(v.selected()).toContain('review r2 terra')
-    v.key('up,k')
-    expect(v.selected()).toContain('▾ ● Plan review')
-    expect(v.text()).toContain('running · 2m00s')
+    expect(v.selected()).toContain('✓ Plan')
     v.key('down,j')
-    v.key('[')
-    expect(v.selected()).toContain('review r2 terra')
+    expect(v.selected()).toContain('● Plan review')
     v.key('tab,]')
-    expect(v.selected()).toContain('review r2 codex')
+    expect(v.selected()).toContain('run details')
+    v.key('[')
+    expect(v.selected()).toContain('● Plan review')
     v.key('home')
-    expect(v.selected()).toContain('▸ ✓ Plan')
+    expect(v.selected()).toContain('✓ Plan')
     v.key('end')
     expect(v.selected()).toContain('run details')
     v.key('pageup')
-    expect(v.selected()).toContain('▸ ✓ Plan')
+    expect(v.selected()).toContain('✓ Plan')
     v.key('pagedown')
     expect(v.selected()).toContain('run details')
   })
 
-  it('opens and folds a group with Space and Enter, and the choice holds across ticks', () => {
+  it('goes down from the stage to its rounds, a round\'s agents side by side and one agent, and back up with Esc', () => {
     const v = open()
-    v.key('home')
-    v.key('space')
-    expect(v.selected()).toContain('▾ ✓ Plan')
-    expect(v.left()).toContain('✓ plan')
-    v.m.now += S
-    v.m.timers.tick()
-    expect(v.left()).toContain('✓ plan')
     v.key('return')
-    expect(v.selected()).toContain('▸ ✓ Plan')
-    expect(v.left()).not.toContain('✓ plan ')
-    v.key('down,j')
-    expect(v.lines().at(-1)!.trimEnd()).toBe('↑↓ move · Enter fold · Tab next agent · Space fold · p parent · Esc close')
+    expect(v.lines()[0]!.trimEnd()).toBe('granny › Plan review')
+    expect(v.selected()).toMatch(/● Round 2 +reviewing +2 agents · 1 running/)
+    expect(v.text()).toContain('↺ review loop')
+    v.key('right')
+    expect(v.lines()[0]!.trimEnd()).toBe('granny › Plan review › Round 2')
+    const cards = v.lines().find(l => l.includes('terra'))!
+    expect(cards).toContain('● terra')
+    expect(cards).toContain('… codex')
+    expect(v.text()).toContain('Judge')
+    expect(v.selected()).toContain('terra')
+    v.key('right')
+    expect(v.selected()).toContain('codex')
+    v.key('left')
+    expect(v.selected()).toContain('terra')
     v.key('return')
-    expect(v.selected()).toContain('▸ ● Plan review')
-    expect(v.left()).not.toContain('review r2 terra')
-    expect(v.text()).toContain('▸ review r2 terra started')
-    v.key('space')
-    expect(v.left()).toContain('review r2 terra')
+    expect(v.lines()[0]!.trimEnd()).toBe('granny › Plan review › Round 2 › review r2 terra')
+    expect(v.text()).toContain('reviewer · kimi-k3.1-pro · 1m59s')
+    expect(v.text()).toContain('NOW   … waiting for model 1m59s')
+    expect(v.lines().at(-1)!.trimEnd()).toBe(AGENT_HELP)
+    v.key('tab,]')
+    expect(v.text()).toContain('reviewer · gpt-5.5 · ')
+    v.key('[')
+    v.key('escape,q')
+    expect(v.selected()).toContain('terra')
+    v.key('escape,q')
+    expect(v.selected()).toContain('Round 2')
+    v.key('left')
+    expect(v.selected()).toContain('Plan review')
   })
 
-  it('opens the role session with Enter, comes back to it, and goes to the parent with p and back with Esc', () => {
+  it('opens the role session with Enter on the agent, comes back to it, and goes to the parent with p and back with Esc', () => {
     const v = open()
+    v.key('return')
+    v.key('return')
+    v.key('return')
+    expect(v.m.fc.navigations.at(-1)).toMatchObject({ type: 'plugin' })
     v.key('return')
     expect(v.m.fc.navigations.at(-1)).toEqual({ type: 'session', sessionID: 'ses_r' })
     v.m.fc.route = { type: 'session', sessionID: 'parent' }
@@ -605,10 +618,15 @@ describe('opencode TUI plugin: the /granny navigator', () => {
     const data = (v.m.fc.navigations.at(-1) as any).data
     expect(data).toEqual({ runId: RUN, select: 'agent:ses_c' })
     const node = v.m.fc.routes.get('granny')!.render({ data })
-    expect(render(node).find(r => r.parts?.some(p => p.bg !== undefined))?.text).toContain('review r2 codex')
+    expect(texts(node).join('\n')).toContain('reviewer · gpt-5.5 · ')
+    expect(texts(node)[0]!.trimEnd()).toBe('granny › Plan review › Round 2 › review r2 codex')
 
     v.m.fc.bound('p')!.run()
     expect(v.m.fc.navigations.at(-1)).toEqual({ type: 'session', sessionID: 'parent' })
+    v.m.fc.bound('escape,q')!.run()
+    v.m.fc.bound('escape,q')!.run()
+    v.m.fc.bound('escape,q')!.run()
+    expect(texts(node)[0]!.trimEnd()).toBe('granny  feat/x  ● running · 33m00s')
     v.m.fc.bound('escape,q')!.run()
     expect(v.m.fc.navigations.at(-1)).toEqual({ type: 'session', sessionID: 'ses_c' })
   })
@@ -622,16 +640,19 @@ describe('opencode TUI plugin: the /granny navigator', () => {
     expect(m.fc.navigations.at(-1)).toEqual({ type: 'session', sessionID: 'parent' })
   })
 
-  it("lists a role session's own child sessions as subagents by title and opens them", () => {
+  it("counts a role session's own child sessions on its card, and goes through them by title with Tab", () => {
     const sessions = [...familySessions(), { id: 'ses_sub', parentID: 'ses_r', title: 'Analyze pause architecture risks' }]
     const v = open({ sessions, running: ['ses_r', 'ses_sub'] })
-    expect(v.text()).toContain('└ ● Analyze pause architecture risks')
-    v.key('down,j')
-    expect(v.selected()).toContain('Analyze pause architecture risks')
+    v.key('return')
+    v.key('return')
+    expect(v.text()).toContain('1 subagent')
+    v.key('return')
+    v.key('tab,]')
     const text = v.text()
+    expect(text).toContain('Analyze pause architecture risks')
     expect(text).toContain('subagent of review r2 terra')
     expect(text).not.toContain('ses_sub')
-    expect(v.lines().at(-1)!.trimEnd()).toBe('↑↓ move · Enter open session · Tab next agent · Space fold · p parent · Esc close')
+    expect(v.lines().at(-1)!.trimEnd()).toBe('Enter open session · Tab next agent · p parent · Esc back')
     v.key('return')
     expect(v.m.fc.navigations.at(-1)).toEqual({ type: 'session', sessionID: 'ses_sub' })
   })
@@ -648,16 +669,22 @@ describe('opencode TUI plugin: the /granny navigator', () => {
     for (const id of more) v.m.fc.sessions.set(id, role(id, { label: `review plan review r2 ${id}`, role: 'reviewer', phase: 'Plan review' }))
     journal(...more.map((id, i) => line(33 * M + i, 'agent', { label: `review plan review r2 ${id}`, role: 'reviewer', session: id, model: kimi, phase: 'Plan review', linked: true })))
     v.m.timers.tick()
-    expect(v.text()).toContain('review r2 ses_z')
+    v.key('home')
+    v.key('down,j')
+    v.key('return')
+    v.key('return')
+    expect(v.text()).toContain('ses_z')
     expect(perKey()).toBe(few)
     expect(few).toBeLessThanOrEqual(2)
   })
 
   it('shows a new agent after a journal append and a tick, and re-renders without reading files', () => {
     const v = open()
+    v.key('return')
+    v.key('return')
     journal(line(33 * M, 'agent', { label: 'review plan review r2 zeta', role: 'reviewer', session: 'ses_z', model: kimi, phase: 'Plan review', linked: true }))
     v.m.timers.tick()
-    expect(v.text()).toContain('review r2 zeta')
+    expect(v.text()).toContain('zeta')
     const before = { ...v.m.counts }
     const first = v.lines()
     expect(v.lines()).toEqual(first)
@@ -678,6 +705,7 @@ describe('opencode TUI plugin: the /granny navigator', () => {
   it('shows the run detail with its files and the degraded note when the files are unreadable', () => {
     const v = open()
     v.key('end')
+    v.key('return')
     const text = v.text()
     expect(text).toContain(`run ${RUN}`)
     expect(text).toContain('repo     /repo')
@@ -716,15 +744,13 @@ describe('opencode TUI plugin: the /granny navigator', () => {
     m.timers.tick()
     m.fc.command('granny.open').run('')
     const v = view(m, (m.fc.navigations.at(-1) as { data: unknown }).data)
-    const lines = v.lines().map(l => l.trimEnd())
-    expect(lines[0]).toBe('granny · feat/x · review only · Judge · 40s')
-    expect(lines[1]).toBe('Review ✓ › Tag ● › Report')
-    expect(v.selected()).toMatch(/^› +● tag /)
-    const left = v.lines().slice(3, -2).map(l => l.split(' │ ')[0]!.trimEnd())
-    expect(left[0]).toStartWith('  ▸ ✓ Review')
-    expect(left[1]).toStartWith('  ▾ ● Tag')
-    expect(left[3]).toBe('      Report')
+    const lines = v.lines().map(l => l.trimEnd().replace(/ {2,}/g, '  '))
+    expect(lines[0]).toBe('granny  feat/x  ● running · 40s')
+    expect(lines.slice(2, 7)).toEqual(['  ✓ Review  1 agent  31s', '  │', '› ● Tag  tag  1 agent · 1 running  9s', '  │', '  · Report  waiting'])
     expect(v.text()).not.toContain('Implement')
+    v.key('return')
+    v.key('return')
+    expect(v.lines()[0]!.trimEnd()).toBe('granny › Tag › tag')
     expect(v.text()).toContain('judge · kimi-k3.1-pro')
   })
 
@@ -767,22 +793,37 @@ describe('opencode TUI plugin: the /granny navigator', () => {
       return v
     }
 
-    it('draws the header, the stepper, the stage groups and the agent summary from the store', () => {
+    /** The staged run, down at its running implementer. */
+    function inAgent(...args: Parameters<typeof staged>) {
+      const v = staged(...args)
+      v.key('return')
+      v.key('return')
+      v.m.timers.tick()
+      return v
+    }
+
+    it('draws the stages, and the agent summary from the store', () => {
       const v = staged()
       const lines = v.lines().map(l => l.trimEnd())
-      expect(lines[0]).toBe('granny · feat/pause · stage 1/2 · Implement · 1m40s')
-      expect(lines[1]).toBe('Worktree ✓ › Implement ● › Checks › Review › Final review › PR ready')
-      expect(lines[2]).toMatch(/^─+┬─+$/)
-      const left = v.lines().slice(3, -2).map(l => l.split(' │ ')[0]!.trimEnd())
-      expect(left.slice(0, 5)).toEqual([
-        '  ▾ ● 1 Server pause domain, lifecycle, and real-soc…  1m40s',
-        '›   ● implement                                        1m40s',
-        '      2 Client pause UI and e2e',
-        '      Final review',
-        '      PR ready',
+      expect(lines[0]).toBe('granny  feat/pause  ● running · 1m40s')
+      expect(lines.slice(2, 11).map(l => l.replace(/ {2,}/g, '  '))).toEqual([
+        '  ✓ Worktree  0s',
+        '  │',
+        `› ● 1 ${S1}  implement  1 agent · 1 running  1m40s`,
+        '  │',
+        `  · 2 ${S2}  waiting`,
+        '  │',
+        '  · Final review  waiting',
+        '  │',
+        '  · PR ready  waiting',
       ])
-      const right = v.lines().slice(3, -2).map(l => l.split(' │ ')[1]!.trimEnd())
-      expect(right.slice(0, 11)).toEqual([
+      expect(lines.at(-1)).toBe(HELP)
+      v.key('return')
+      v.key('return')
+      v.m.timers.tick()
+      const detail = v.lines().map(l => l.trimEnd())
+      expect(detail[0]).toBe(`granny › 1 ${S1} › implement`)
+      expect(detail.slice(2, 13)).toEqual([
         'implementer · k3.1-pro · 1m40s',
         '',
         'NOW   ● shell · 12s',
@@ -795,15 +836,14 @@ describe('opencode TUI plugin: the /granny navigator', () => {
         'LAST SAID  "Added pause/resume messages to the protocol. more"',
         '',
       ])
-      expect(lines.at(-2)).toMatch(/^─+┴─+$/)
-      expect(lines.at(-1)).toBe(HELP)
+      expect(detail.at(-1)).toBe(AGENT_HELP)
       const text = v.text()
       for (const noise of ['ses_', 'linked', 'kimi-code-plan-global', '#default', RUN]) expect(text).not.toContain(noise)
     })
 
     it('fits every row to the width at 60, 99, 100 and 160 columns', () => {
       for (const width of [60, 99, 100, 160]) {
-        const v = staged({}, { width, height: 30 })
+        const v = inAgent({}, { width, height: 30 })
         const lines = v.lines()
         expect(lines).toHaveLength(30)
         for (const l of lines) expect(l.length).toBe(width)
@@ -814,7 +854,7 @@ describe('opencode TUI plugin: the /granny navigator', () => {
     })
 
     it('shows a new tool call once it reaches the store and the hub ticks', () => {
-      const v = staged()
+      const v = inAgent()
       const last = v.m.fc.messages.get('ses_impl')!.at(-1) as any
       last.content.push(tool('t4', 'read', { path: `${WT}/src/x.ts` }, 'running', { created: at(99), ran: at(99) }))
       expect(v.text()).not.toContain('src/x.ts')
@@ -826,7 +866,7 @@ describe('opencode TUI plugin: the /granny navigator', () => {
     })
 
     it('changes its version only when the store changed, once for many streamed deltas', () => {
-      const v = staged()
+      const v = inAgent()
       const version = v.m.fr.signal('granny.version')!
       const sets = version.sets
       v.m.timers.tick()
@@ -839,8 +879,8 @@ describe('opencode TUI plugin: the /granny navigator', () => {
       expect(v.text()).toContain('NOW   ● thinking 1s')
     })
 
-    it('reads only the selected agent, and syncs a session the store has nothing for once', () => {
-      const v = staged({ messages: {} })
+    it('reads only the agent on screen, and syncs a session the store has nothing for once', () => {
+      const v = inAgent({ messages: {} })
       expect(v.m.fc.syncCalls).toEqual(['ses_impl'])
       v.m.timers.tick()
       v.m.timers.tick()
@@ -851,8 +891,8 @@ describe('opencode TUI plugin: the /granny navigator', () => {
       expect(v.text()).toContain('NOW   ● shell · 12s')
     })
 
-    it('fetches the selected session through the client every 3 seconds when the TUI has no message store', async () => {
-      const v = staged({ noMessageStore: true })
+    it('fetches the session on screen through the client every 3 seconds when the TUI has no message store', async () => {
+      const v = inAgent({ noMessageStore: true })
       expect(v.m.fc.fetchCalls).toEqual([{ sessionID: 'ses_impl', limit: 20, order: 'desc' }])
       await Bun.sleep(0)
       expect(v.text()).toContain('NOW   ● shell · 12s')
@@ -869,7 +909,7 @@ describe('opencode TUI plugin: the /granny navigator', () => {
 
     it('shows the head and the journal notes when every message read throws', async () => {
       for (const options of [{ throwMessages: true }, { throwMessages: true, noMessageStore: true }]) {
-        const v = staged(options, undefined, [line(30 * S, 'retry', { label: `implement ${S1}`, attempt: 1, reason: 'rate limited\nmore' })])
+        const v = inAgent(options, undefined, [line(30 * S, 'retry', { label: `implement ${S1}`, attempt: 1, reason: 'rate limited\nmore' })])
         await Bun.sleep(0)
         expect(() => v.m.timers.tick()).not.toThrow()
         const text = v.text()
@@ -887,10 +927,11 @@ describe('opencode TUI plugin: the /granny navigator', () => {
       ]
       const review = [msg('r1', at(51), [tool('g1', 'grep', { pattern: 'pause', path: `${WT}/src` }, 'completed', { created: at(52), completed: at(53) })], at(54)), msg('r2', at(60), [{ type: 'text', text: 'No findings.' }], at(69))]
       const v = staged({ messages: { ses_impl: implMessages(), ses_rev: review } }, undefined, ended)
-      expect(v.text()).toContain('✓ review r1')
-      v.key('down,j')
-      expect(v.selected()).toContain('✓ review r1')
+      v.key('return')
+      v.key('return')
+      expect(v.selected()).toContain('✓ a')
       expect(v.m.fc.messageReads).not.toContain('ses_rev')
+      v.key('return')
       v.m.timers.tick()
       expect(v.m.fc.messageReads.at(-1)).toBe('ses_rev')
       const text = v.text()
@@ -903,14 +944,14 @@ describe('opencode TUI plugin: the /granny navigator', () => {
     })
 
     it('toggles the verbose list with v', () => {
-      const v = staged()
+      const v = inAgent()
       v.key('v')
       const text = v.text()
       expect(text).toContain(`${clock(at(6))}  ▸ read   src/services/GameService.ts`)
       expect(text).toContain(`${clock(at(40))}  ✎ "Added pause/resume messages to the protocol."`)
       expect(text).toContain(`${clock(at(87))}  ▸ shell  bun test test/GameService.test.ts`)
       expect(text).not.toContain('RECENT')
-      expect(v.lines().at(-1)!.trimEnd()).toBe('↑↓ move · PgUp/PgDn scroll · f follow on · v summary · Enter open session · Tab next agent · p parent · Esc close')
+      expect(v.lines().at(-1)!.trimEnd()).toBe('PgUp/PgDn scroll · f follow on · v summary · Enter open session · Tab next agent · p parent · Esc back')
       v.key('v')
       expect(v.text()).toContain('RECENT')
     })
@@ -930,7 +971,10 @@ describe('opencode TUI plugin: the /granny navigator', () => {
       timers.tick()
       fc.routes.get('granny')!.render({ data: { runId: RUN } })
       timers.tick()
+      fc.bound('return')!.run()
       fc.bound('home')!.run()
+      fc.bound('return')!.run()
+      timers.tick()
       for (const _ of ids) {
         fc.bound('tab,]')!.run()
         timers.tick()
@@ -940,9 +984,9 @@ describe('opencode TUI plugin: the /granny navigator', () => {
     })
 
     it('keeps the newest events of the verbose list when the pane is short', () => {
-      const v = staged({}, { width: 160, height: 8 })
+      const v = inAgent({}, { width: 160, height: 8 })
       v.key('v')
-      const right = v.lines().slice(2, -1).map(l => l.split(' │ ')[1]!.trimEnd())
+      const right = v.lines().slice(2, -1).map(l => l.trimEnd())
       expect(right).toEqual([
         'implementer · k3.1-pro · 1m40s',
         '',
@@ -960,9 +1004,9 @@ describe('opencode TUI plugin: the /granny navigator', () => {
       const LATER = `${clock(at(90))}  ▸ read   src/later.ts`
 
       function short(options: FakeCtxOptions = {}, journalled: string[] = []) {
-        const v = staged(options, { width: 160, height: 8 }, journalled)
+        const v = inAgent(options, { width: 160, height: 8 }, journalled)
         v.key('v')
-        const rows = () => v.lines().slice(4, -1).map(l => l.split(' │ ')[1]!.trimEnd())
+        const rows = () => v.lines().slice(4, -1).map(l => l.trimEnd())
         rows()
         const grow = () => {
           ;(v.m.fc.messages.get('ses_impl')!.at(-1) as any).content.push(tool('t9', 'read', { path: `${WT}/src/later.ts` }, 'completed', { created: at(90), completed: at(90) }))
@@ -971,15 +1015,13 @@ describe('opencode TUI plugin: the /granny navigator', () => {
         return { v, rows, grow }
       }
 
-      it('scrolls back with PgUp and forward with PgDn, leaving the tree selection where it is', () => {
+      it('scrolls back with PgUp and forward with PgDn', () => {
         const { v, rows } = short()
-        const selected = v.selected()
         expect(rows()).toEqual([EDIT, SAID, SHELL])
         v.key('pageup')
         expect(rows()).toEqual([READ, EDIT, SAID])
         v.key('pagedown')
         expect(rows()).toEqual([EDIT, SAID, SHELL])
-        expect(v.selected()).toBe(selected)
       })
 
       it('goes to the first event with Home and back to the newest with End', () => {
@@ -1020,7 +1062,7 @@ describe('opencode TUI plugin: the /granny navigator', () => {
       })
 
       it('keeps following when a list that fits the pane has nowhere to scroll', () => {
-        const v = staged()
+        const v = inAgent()
         v.key('v')
         v.lines()
         v.key('pageup')
@@ -1029,8 +1071,8 @@ describe('opencode TUI plugin: the /granny navigator', () => {
 
       it('starts at the newest events again on another agent and after leaving the list', () => {
         const ended = [
-          line(50 * S, 'agent', { label: `review ${S1} r1 a`, role: 'reviewer', session: 'ses_rev', model: K3, phase: 'Review', cwd: WT, linked: false }),
-          line(70 * S, 'agent-end', { label: `review ${S1} r1 a`, session: 'ses_rev', outcome: 'done' }),
+          line(50 * S, 'agent', { label: `commit ${S1} implement`, role: 'implementer', session: 'ses_rev', model: K3, phase: 'Implement', cwd: WT, linked: false }),
+          line(70 * S, 'agent-end', { label: `commit ${S1} implement`, session: 'ses_rev', outcome: 'done' }),
         ]
         const review = Array.from({ length: 6 }, (_, i) => msg(`r${i}`, at(51 + i), [{ type: 'text', text: `said ${i}` }], at(52 + i)))
         const { v, rows } = short({ messages: { ses_impl: implMessages(), ses_rev: review } }, ended)
@@ -1048,35 +1090,14 @@ describe('opencode TUI plugin: the /granny navigator', () => {
         expect(rows()).toEqual([EDIT, SAID, SHELL])
       })
 
-      it('leaves the page keys and f to the tree in the summary view', () => {
-        const v = staged()
-        expect(v.selected()).toContain('implement')
-        v.key('pagedown')
-        expect(v.selected()).not.toContain('implement')
+      it('leaves the summary view as it is on the page keys and f', () => {
+        const v = inAgent()
         const before = v.text()
+        v.key('pagedown')
         v.key('f')
         expect(v.text()).toBe(before)
         expect(v.lines().at(-1)).not.toContain('follow')
       })
-
-      it('leaves the page keys to the tree on a row that has no list', () => {
-        const v = staged()
-        v.key('v')
-        v.key('down,j')
-        expect(v.selected()).toContain('2 Client pause UI and e2e')
-        expect(v.lines().at(-1)).not.toContain('follow')
-        v.key('pageup')
-        expect(v.selected()).not.toContain('2 Client pause UI and e2e')
-      })
-    })
-
-    it('moves the stepper and the header with the selected stage', () => {
-      const v = staged()
-      v.key('down,j')
-      expect(v.selected()).toContain('2 Client pause UI and e2e')
-      expect(v.lines()[0]!.trimEnd()).toBe('granny · feat/pause · stage 2/2 · Implement · 1m40s')
-      expect(v.lines()[1]!.trimEnd()).toBe('Worktree ✓ › Implement › Checks › Review › Final review › PR ready')
-      expect(v.text()).toContain('stage 2/2 · Client pause UI and e2e')
     })
 
     it('lists every known run at the bottom and switches the page to another with Enter', () => {
@@ -1087,24 +1108,20 @@ describe('opencode TUI plugin: the /granny navigator', () => {
       appendFileSync(join(dir2, 'journal.jsonl'), line(30 * S, 'phase', { title: 'Plan' }) + line(31 * S, 'agent', { label: 'plan', role: 'planner', session: 'ses_other', model: kimi, phase: 'Plan', linked: true }))
       const sessions = [{ id: 'parent', title: 'main' }, implRole(), role('ses_other', { run: other, dir: dir2 })]
       const v = staged({ sessions })
-      expect(v.lines()[0]!.trimEnd()).toBe('granny · feat/other · Plan · 1m10s')
-      const left = v.left()
-      expect(left).toContain('  runs')
-      expect(left).toMatch(/● 523r · running +1m40s/)
-      expect(left).toMatch(/● 9zzz · running \(shown\) +1m10s/)
-      expect(left).not.toContain(other)
+      expect(v.lines()[0]!.trimEnd()).toBe('granny  feat/other  ● running · 1m10s')
+      const text = v.text()
+      expect(text).toContain('  runs')
+      expect(text).toMatch(/523r · running +1m40s/)
+      expect(text).toMatch(/9zzz · running \(shown\) +1m10s/)
+      expect(text).not.toContain(other)
       v.key('end')
       expect(v.selected()).toContain('9zzz')
-      expect(v.lines().at(-1)!.trimEnd()).toBe('↑↓ move · Tab next agent · Space fold · p parent · Esc close')
       v.key('up,k')
       expect(v.selected()).toContain('523r')
-      expect(v.lines().at(-1)!.trimEnd()).toBe('↑↓ move · Enter switch run · Tab next agent · Space fold · p parent · Esc close')
-      expect(v.text()).toContain(`run ${RUN}`)
       v.key('return')
-      expect(v.lines()[0]!.trimEnd()).toBe('granny · feat/pause · stage 1/2 · Implement · 1m40s')
-      expect(v.selected()).toContain('● implement')
-      expect(v.left()).toMatch(/523r · running \(shown\)/)
-      expect(v.left()).not.toContain('… plan')
+      expect(v.lines()[0]!.trimEnd()).toBe('granny  feat/pause  ● running · 1m40s')
+      expect(v.selected()).toContain(`● 1 ${S1}`)
+      expect(v.text()).toMatch(/523r · running \(shown\)/)
     })
   })
 })
