@@ -3,10 +3,11 @@ import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync } from
 import { homedir } from 'node:os'
 import { isAbsolute, join } from 'node:path'
 import { isCancelled } from '../core/cancel'
-import { type ConfigRole, type GrannyConfig, type ModelSpec, planReviewWarning, resolveConfig, resolveModel } from '../core/config'
+import { type ConfigRole, type GrannyConfig, judgeConfigGaps, type ModelSpec, planReviewWarning, resolveConfig, resolveModel } from '../core/config'
 export { planReviewWarning } from '../core/config'
-import type { RunInput } from '../core/engine'
-import type { CommandResult, HostName, PlanResult, Recheck, ResultKind, RunResult } from '../core/types'
+import { checkJudgeInput, type JudgeInput, type RunInput } from '../core/engine'
+import type { RunOutline } from './runview/outline'
+import type { CommandResult, Host, HostName, JudgeResult, PlanResult, Recheck, ResultKind, RunResult } from '../core/types'
 
 // Shared by the in-process host adapters (opencode, omp): config files, preflight, run ids,
 // the completion summary, the granny_run input schema, the retry and cancel defaults and the command runner.
@@ -125,6 +126,27 @@ export function summarize(result: RunResult, worktree: boolean): string {
   return lines.join('\n')
 }
 
+const oneLine = (text: string) => text.replace(/\s+/g, ' ').trim()
+
+/** The finish message of a judge run: the report path first, and what to do with it last. */
+export function summarizeJudge(result: JudgeResult): string {
+  const didNotRun = result.failedReviewers.map(r => `- did not run: ${r.name}: ${oneLine(r.note).slice(0, 300)}`)
+  if (result.outcome !== 'reviewed') {
+    const why = result.outcome === 'no-changes' ? oneLine(result.note ?? 'nothing to review') : 'no reviewer ran, also on a retry'
+    return [`- no report: ${why}`, ...didNotRun, 'Nothing was fixed or committed. Tell the user; do not fix anything unless they ask.'].join('\n')
+  }
+  const { P0, P1, P2, P3, dismissed } = result.counts
+  return [
+    result.written ? `- report: ${result.reportPath}` : `- report NOT written to ${result.reportPath}: its text is in the run's result.json (granny_status), under report`,
+    `- counts: P0 ${P0}, P1 ${P1}, P2 ${P2}, P3 ${P3}, dismissed ${dismissed}`,
+    `- reviewer P0/P1 findings the judge placed lower: ${result.demoted.length}${result.demoted.length ? ` (${result.demoted.join(', ')})` : ''}`,
+    ...(result.uncommitted.length ? [`- not reviewed, uncommitted: ${result.uncommitted.join(', ')}`] : []),
+    ...didNotRun,
+    ...(result.notJudged.length ? [`- not judged, under the reviewer's severity: ${result.notJudged.join(', ')}`] : []),
+    'Nothing was fixed or committed. Give the user the report path and the counts; do not fix anything unless they ask.',
+  ].join('\n')
+}
+
 /** The start reply's plan review warning, for a run that will review a plan; empty otherwise. */
 export function planReviewNotice(input: RunInput, config: { planReview: boolean; maxRounds: number }): string {
   const reviewsPlan = config.planReview && (input.plan !== undefined || input.goal !== undefined) && !((input.fromStage ?? 1) > 1)
@@ -146,6 +168,8 @@ export function sameModelNotice(input: RunInput, config: GrannyConfig, host: Exc
 export const layerSources = (repo: string): string[] => [globalConfigPath(), join(repo, 'granny.config.json'), "the run's config"]
 
 const AGENT_ROLES: ConfigRole[] = ['granny', 'helper', 'planner', 'implementer', 'judge']
+/** The roles a judge run uses, besides its reviewers: `granny` is the extraction agent. */
+export const JUDGE_ROLES: ConfigRole[] = ['granny', 'judge']
 const isObject = (v: unknown): v is Record<string, any> => !!v && typeof v === 'object' && !Array.isArray(v)
 
 /**
@@ -158,6 +182,7 @@ export function hostModelErrors(
   host: Exclude<HostName, 'claude-code'>,
   problem: (model: string, keyed: boolean) => string | undefined,
   sources: string[],
+  checked: ConfigRole[] = AGENT_ROLES,
 ): string[] {
   const from = (set: (layer: Record<string, any>) => boolean) => {
     for (let i = layers.length - 1; i >= 0; i--) {
@@ -173,7 +198,7 @@ export function hostModelErrors(
     const claude = typeof spec === 'string' ? spec : (spec?.['claude-code'] ?? model)
     return [`${what} "${model}"${where} - ${wrong}; give a host-keyed model, e.g. { "claude-code": "${claude}", "${host}": "<provider/model>" }`]
   }
-  const roles = AGENT_ROLES.flatMap(role =>
+  const roles = checked.flatMap(role =>
     check(`roles.${role}.model:`, config.roles[role].model, from(l => isObject(l.roles) && isObject(l.roles[role]) && l.roles[role].model !== undefined)),
   )
   const reviewers = config.reviewers.flatMap((rv, i) => (rv.engine === 'agent' ? check(`reviewers[${i}] "${rv.name}": model`, rv.model, from(l => Array.isArray(l.reviewers))) : []))
@@ -229,7 +254,7 @@ const isEmpty = (v: unknown) => v === '' || (Array.isArray(v) && !v.length) || (
  * Drops those placeholders where empty has no meaning of its own; stages[].checks and stages[].after keep
  * theirs, since [] there means "no checks" and "start at once".
  */
-export function dropPlaceholders(input: RunInput): RunInput {
+export function dropPlaceholders<T extends RunInput | JudgeInput>(input: T): T {
   if (!input || typeof input !== 'object') return input
   const out: Record<string, unknown> = { ...input }
   for (const key of ['base', 'goal', 'context', 'plan', 'repos', 'config']) if (isEmpty(out[key])) delete out[key]
@@ -242,7 +267,7 @@ export function dropPlaceholders(input: RunInput): RunInput {
       return st
     })
   }
-  return out as unknown as RunInput
+  return out as unknown as T
 }
 
 export const RUN_INPUT_SCHEMA = {
@@ -305,6 +330,79 @@ export const RUN_INPUT_SCHEMA = {
     },
   },
   required: ['repo', 'branch'],
+}
+
+/** What differs between a full run and a judge run; the rest of a run's life is `launch`. */
+export interface Launch<R> {
+  input: { repo: string }
+  layers: unknown[]
+  config: GrannyConfig
+  branch: string
+  outline: RunOutline
+  engine: (host: Host) => Promise<R>
+  /** The finish message after its first line. */
+  finished: (result: R, id: string) => string
+  /** The start reply. */
+  started: (id: string, journalPath: string) => string
+}
+
+export const JUDGE_TOOL_DESCRIPTION = `granny-workflow: a review-only run ("granny judge"), in the background. One review of the checkout's <base>...HEAD and one tagging of its findings by another agent, saved as a markdown report under <workDir>/reviews/ (default .granny/reviews/). It changes nothing else: no fix, commit, push, branch or worktree. The reviewers and the judge model must be in the user's config files; when they are not, it refuses, and you ask the user as the skill's references/judge.md says - never choose a model yourself. Send only the fields you set. ${USER_SETTINGS}`
+
+export const JUDGE_INPUT_SCHEMA = {
+  type: 'object',
+  properties: {
+    repo: { type: 'string', description: 'Absolute path of the checkout to review, on the branch to review; the run files and the report go to <repo>/<workDir>/' },
+    base: { type: 'string', description: 'The branch to diff against; defaults to config.base' },
+    context: { type: 'string', description: 'What the user wants looked at, or a plan to check against' },
+    config: {
+      type: 'object',
+      additionalProperties: true,
+      description: `Per-run overrides of granny.config.json (same shape). They do not answer a refusal: what is missing goes to the config files, from the user. ${USER_SETTINGS}`,
+    },
+  },
+  required: ['repo'],
+}
+
+const ASK_FOR_MODELS = "Ask the user for these per the skill's references/judge.md and write them to the config. Do not choose a model yourself."
+
+export interface JudgeLaunch {
+  layers: unknown[]
+  config: GrannyConfig
+  /** What the views call the checkout: its branch, or the short SHA the engine names a detached HEAD by. */
+  branch: string
+}
+
+/**
+ * What a judge run starts with, or why it may not start. Only the config files answer the gate: the run's own
+ * config comes from the parent agent, which is not to choose the models. There is no preflight: a dirty tree is
+ * allowed and no branch is required.
+ */
+export function prepareJudge(
+  input: JudgeInput,
+  host: Exclude<HostName, 'claude-code'>,
+  problem: (model: string, keyed: boolean) => string | undefined,
+): JudgeLaunch | { refused: string } {
+  const refused = (problems: string[], end = '') => ({ refused: `granny_judge refused:\n- ${problems.join('\n- ')}${end}` })
+  const problems = checkJudgeInput(input)
+  if (problems.length) return refused(problems)
+  const files = [readJson(globalConfigPath()), readJson(join(input.repo, 'granny.config.json'))]
+  const layers = [...files, input.config]
+  const gaps = [...new Set([...judgeConfigGaps(files, host), ...judgeConfigGaps(layers, host)])]
+  if (gaps.length) return refused(gaps, `\n${ASK_FOR_MODELS}`)
+  const config = resolveConfig(layers, host)
+  const badModels = hostModelErrors(config, layers, host, problem, layerSources(input.repo), JUDGE_ROLES)
+  if (badModels.length) return refused(badModels)
+  try {
+    return { layers, config, branch: git(input.repo, ['branch', '--show-current']) || git(input.repo, ['rev-parse', 'HEAD']).slice(0, 8) }
+  } catch (e) {
+    return refused([(e as Error).message])
+  }
+}
+
+/** The first line of a judge run's start reply. */
+export function judgeStartLine(id: string, input: JudgeInput, branch: string, config: GrannyConfig, host: HostName): string {
+  const reviews = `${input.base ?? config.base}...HEAD by ${reviewersText(config.reviewers, host)}, tagged by ${resolveModel(config.roles.judge.model, host)}`
+  return `granny judge run ${id} started on ${input.repo} (${branch}): one review of ${reviews}. Nothing will be changed: no fix, commit, push, branch or worktree, only a report under ${config.workDir.replace(/\/+$/, '')}/reviews/. Uncommitted files are not reviewed.`
 }
 
 export interface RetryPolicy {

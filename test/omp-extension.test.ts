@@ -727,15 +727,16 @@ describe('omp extension in the user session (parent mode)', () => {
   it('registers granny_run, granny_status, granny_wait and granny_cancel as essential tools, and no submit tool', async () => {
     const f = fakePi()
     await extension(f.pi as any)
-    expect([...f.tools.keys()].sort()).toEqual(['granny_cancel', 'granny_run', 'granny_status', 'granny_wait'])
+    expect([...f.tools.keys()].sort()).toEqual(['granny_cancel', 'granny_judge', 'granny_run', 'granny_status', 'granny_wait'])
     expect(f.tools.get('granny_wait').parameters.required).toEqual(['runId'])
     expect(f.tools.get('granny_wait').interruptible).toBe(true)
-    for (const name of ['granny_run', 'granny_status', 'granny_cancel']) expect(f.tools.get(name).interruptible).toBeUndefined()
+    for (const name of ['granny_run', 'granny_judge', 'granny_status', 'granny_cancel']) expect(f.tools.get(name).interruptible).toBeUndefined()
     for (const tool of f.tools.values()) {
       expect(tool.loadMode).toBe('essential')
       expect(tool.label).toBeString()
     }
     expect(f.tools.get('granny_run').parameters.required).toEqual(['repo', 'branch'])
+    expect(f.tools.get('granny_judge').parameters.required).toEqual(['repo'])
     expect(f.handlers).toEqual([])
     expect([...f.commands.keys()]).toEqual(['granny'])
     expect([...f.shortcuts.keys()]).toEqual(['alt+w'])
@@ -1315,6 +1316,245 @@ describe('omp extension in the user session (parent mode)', () => {
     await exec(f.tools.get('granny_cancel'), { runId: id })
     await finished(dir)
     expect(waitsJournalled(dir)).toEqual([])
+  })
+
+  describe('granny_judge', () => {
+    const MODELS = { reviewers: [{ name: 'reviewer', engine: 'agent', model: { omp: 'prov/review' } }], roles: { judge: { model: { omp: 'prov/tag' } } } }
+    const ASK = "Ask the user for these per the skill's references/judge.md and write them to the config. Do not choose a model yourself."
+    const configure = (config: unknown) => {
+      writeFileSync(join(repo, 'granny.config.json'), JSON.stringify(config))
+      git(repo, 'add', 'granny.config.json')
+      git(repo, 'commit', '-qm', 'cfg')
+    }
+    const call = async (f: ReturnType<typeof fakePi>, params: Record<string, unknown> = {}, ctx: unknown = CTX) => textOf(await exec(f.tools.get('granny_judge'), { repo, ...params }, ctx))
+    const tool = async () => {
+      const f = fakePi()
+      await createGrannyExtension({ killGraceMs: 100 })(f.pi as any)
+      return f
+    }
+    const launch = async (f: ReturnType<typeof fakePi>, params: Record<string, unknown> = {}, ctx: unknown = CTX) => {
+      const started = await call(f, params, ctx)
+      const id = /granny judge run (\S+) started/.exec(started)?.[1]
+      if (!id) throw new Error(started)
+      return { id, started, dir: join(repo, '.granny/runs', id) }
+    }
+
+    it('refuses without config, naming every gap and telling the agent to ask the user, before anything runs', async () => {
+      const f = await tool()
+      const reply = await call(f)
+      expect(reply.split('\n')).toEqual(['granny_judge refused:', '- reviewers: no config sets who reviews', '- roles.judge.model: no model for omp', ASK])
+      expect(calls()).toEqual([])
+      expect(existsSync(join(repo, '.granny/runs'))).toBe(false)
+    })
+
+    it('refuses an agent reviewer with no model for omp', async () => {
+      const f = await tool()
+      configure({ ...MODELS, reviewers: [{ name: 'kimi', engine: 'agent', model: { opencode: 'a/b' } }] })
+      expect((await call(f)).split('\n')).toEqual(['granny_judge refused:', '- reviewers[0] (kimi): no model for omp', ASK])
+    })
+
+    it('refuses no judge model for omp', async () => {
+      const f = await tool()
+      configure({ reviewers: MODELS.reviewers })
+      expect((await call(f)).split('\n')).toEqual(['granny_judge refused:', '- roles.judge.model: no model for omp', ASK])
+    })
+
+    it('does not let the run\'s own config answer the gate, so the agent cannot pick the models itself', async () => {
+      const f = await tool()
+      const reply = await call(f, { config: MODELS })
+      expect(reply).toStartWith('granny_judge refused:')
+      expect(reply).toContain('- reviewers: no config sets who reviews')
+      expect(reply).toEndWith(ASK)
+    })
+
+    it('still names a gap the run\'s own config opens', async () => {
+      const f = await tool()
+      configure(MODELS)
+      const reply = await call(f, { config: { reviewers: [{ name: 'bare', engine: 'agent' }] } })
+      expect(reply.split('\n')).toEqual(['granny_judge refused:', '- reviewers[0] (bare): no model for omp', ASK])
+    })
+
+    it('refuses a model omp cannot run, in a reviewer, the judge and the extraction agent', async () => {
+      const f = await tool()
+      configure({ reviewers: [{ name: 'r', engine: 'agent', model: 'sonnet' }], roles: { judge: { model: 'haiku' }, granny: { model: 'opus' } } })
+      const reply = await call(f)
+      expect(reply).toStartWith('granny_judge refused:')
+      expect(reply).toContain('roles.judge.model: "haiku"')
+      expect(reply).toContain('roles.granny.model: "opus"')
+      expect(reply).toContain('reviewers[0] "r": model "sonnet"')
+      expect(reply).not.toContain(ASK)
+      expect(calls()).toEqual([])
+    })
+
+    it('does not refuse a bad implementer model, which a judge run never uses', async () => {
+      behave({ wait: ['review-feat-x-r1-reviewer'] })
+      const f = await tool()
+      configure({ ...MODELS, roles: { ...MODELS.roles, implementer: { model: 'sonnet' }, planner: { model: 'opus' } } })
+      const { id, dir } = await launch(f)
+      await exec(f.tools.get('granny_cancel'), { runId: id })
+      await finished(dir)
+    })
+
+    it('refuses a relative repo and a directory that is not a git repository', async () => {
+      const f = await tool()
+      expect(await call(f, { repo: 'relative/path' })).toBe('granny_judge refused:\n- repo must be an absolute path')
+      const plain = mkdtempSync(join(tmpdir(), 'granny-plain-'))
+      writeFileSync(join(plain, 'granny.config.json'), JSON.stringify(MODELS))
+      const reply = await call(f, { repo: plain })
+      rmSync(plain, { recursive: true, force: true })
+      expect(reply).toStartWith('granny_judge refused:')
+      expect(reply).toContain('not a git repository')
+    })
+
+    it('ends with the report on disk, the exact bytes, read-only agents, and the path and counts in the finish message', async () => {
+      const f = await tool()
+      configure(MODELS)
+      const head = git(repo, 'rev-parse', 'HEAD')
+      const { id, dir } = await launch(f)
+      const result = await finished(dir)
+      expect(result).toMatchObject({ outcome: 'reviewed', branch: 'feat/x', base: 'main', written: true, counts: { P0: 1, P1: 0, P2: 0, P3: 0, dismissed: 0 } })
+      expect(result.reportPath).toMatch(new RegExp(`^${repo}/\\.granny/reviews/\\d{8}-\\d{6}-feat-x\\.md$`))
+      expect(readFileSync(result.reportPath)).toEqual(Buffer.from(result.report))
+      expect(result.report).toContain('## P0\n\n### Real issue')
+      expect(JSON.parse(readRun(dir, 'status.json'))).toMatchObject({ status: 'done', branch: 'feat/x', outline: { kind: 'judge', branch: 'feat/x', worktree: false, reviewers: ['reviewer'], stages: [] } })
+      for (const c of calls()) expect(c.child.access).toBe('read-only')
+      expect(calls().map(c => c.slug)).toEqual(['review-feat-x-r1-reviewer', 'tag-feat-x'])
+      expect(calls().find(c => c.slug === 'tag-feat-x').argv).toContain('prov/tag')
+      expect(git(repo, 'rev-parse', 'HEAD')).toBe(head)
+      expect(git(repo, 'branch', '--show-current')).toBe('feat/x')
+      expect(git(repo, 'status', '--short')).toBe('')
+      expect(git(repo, 'worktree', 'list').split('\n')).toHaveLength(1)
+      await waitFor(() => f.sent.length > 0)
+      const notice = f.sent[0]!.message.content
+      expect(notice).toStartWith(`[granny] Run ${id} finished.\n- report: ${result.reportPath}\n- counts: P0 1, P1 0, P2 0, P3 0, dismissed 0\n`)
+      expect(notice).toEndWith('Nothing was fixed or committed. Give the user the report path and the counts; do not fix anything unless they ask.')
+    })
+
+    it('names the reviewers and the judge model in the start reply, says nothing will change, and keeps the wait sentence and the overrides', async () => {
+      behave({ wait: ['review-feat-x-r1-reviewer'] })
+      const f = await tool()
+      configure(MODELS)
+      const { id, dir, started } = await launch(f, { config: { language: 'Turkish' } })
+      expect(started).toContain(`granny judge run ${id} started on ${repo} (feat/x)`)
+      expect(started).toContain('main...HEAD by reviewer (agent, prov/review)')
+      expect(started).toContain('tagged by prov/tag')
+      expect(started).toContain('Nothing will be changed: no fix, commit, push, branch or worktree')
+      expect(started).toContain('.granny/reviews/')
+      expect(started).toContain(`Journal: ${join(dir, 'journal.jsonl')}`)
+      expect(started).toContain(`To wait in this turn, call granny_wait { runId: "${id}" }`)
+      expect(started).toContain('\noverrides: language Turkish')
+      expect(started).not.toContain('threshold')
+      expect(started).not.toContain('reviewers share')
+      await exec(f.tools.get('granny_cancel'), { runId: id })
+      await finished(dir)
+    })
+
+    it('starts on a dirty tree and lists what it did not review', async () => {
+      const f = await tool()
+      configure(MODELS)
+      writeFileSync(join(repo, 'dirty.txt'), 'x')
+      const { dir } = await launch(f)
+      const result = await finished(dir)
+      expect(result.outcome).toBe('reviewed')
+      expect(result.uncommitted).toEqual(['dirty.txt'])
+      expect(result.report).toContain('- Not reviewed: dirty.txt')
+      await waitFor(() => f.sent.length > 0)
+      expect(f.sent[0]!.message.content).toContain('- not reviewed, uncommitted: dirty.txt')
+      expect(readFileSync(join(repo, 'dirty.txt'), 'utf8')).toBe('x')
+    })
+
+    it('takes placeholders for the optional fields', async () => {
+      behave({ wait: ['review-feat-x-r1-reviewer'] })
+      const f = await tool()
+      configure(MODELS)
+      const { id, dir, started } = await launch(f, { base: '', context: '', config: {} })
+      expect(started).not.toContain('overrides:')
+      await exec(f.tools.get('granny_cancel'), { runId: id })
+      await finished(dir)
+    })
+
+    it('names a detached HEAD by its short SHA in the views', async () => {
+      const f = await tool()
+      configure(MODELS)
+      git(repo, 'checkout', '-q', '--detach')
+      const head = git(repo, 'rev-parse', 'HEAD').slice(0, 8)
+      const { dir, started } = await launch(f)
+      expect(started).toContain(`(${head})`)
+      const result = await finished(dir)
+      expect(result.branch).toBe(head)
+      expect(JSON.parse(readRun(dir, 'status.json')).outline.branch).toBe(head)
+    })
+
+    it('granny_wait returns the report path and counts', async () => {
+      behave({ hold: ['tag-feat-x'] })
+      const f = await tool()
+      configure(MODELS)
+      const { id, dir } = await launch(f)
+      const waiting = exec(f.tools.get('granny_wait'), { runId: id })
+      await waitFor(() => callsTo('tag-feat-x').length > 0)
+      writeFileSync(join(fake, 'release-tag-feat-x'), '')
+      const reply = textOf(await waiting)
+      const result = await finished(dir)
+      expect(reply).toContain(`- report: ${result.reportPath}`)
+      expect(reply).toContain('- counts: P0 1, P1 0, P2 0, P3 0, dismissed 0')
+      expect(f.sent).toEqual([])
+    })
+
+    it('granny_cancel stops it, with no report', async () => {
+      behave({ wait: ['tag-feat-x'] })
+      const f = await tool()
+      configure(MODELS)
+      const { id, dir } = await launch(f)
+      await waitFor(() => callsTo('tag-feat-x').length > 0)
+      await exec(f.tools.get('granny_cancel'), { runId: id })
+      expect(await finished(dir)).toMatchObject({ status: 'cancelled' })
+      expect(JSON.parse(readRun(dir, 'status.json')).status).toBe('cancelled')
+      expect(existsSync(join(repo, '.granny/reviews'))).toBe(false)
+    })
+
+    it('shows a judge run in granny_status', async () => {
+      const f = await tool()
+      configure(MODELS)
+      const { id, dir } = await launch(f)
+      const result = await finished(dir)
+      const status = textOf(await exec(f.tools.get('granny_status'), { runId: id }))
+      expect(status).toContain('"kind": "judge"')
+      expect(status).toContain(result.reportPath)
+    })
+
+    it('reports no-changes with no agent and no report', async () => {
+      process.env.GRANNY_CONFIG = join(fake, 'config.json')
+      writeFileSync(process.env.GRANNY_CONFIG, JSON.stringify(MODELS))
+      git(repo, 'checkout', '-q', 'main')
+      const f = await tool()
+      const { dir } = await launch(f)
+      expect(await finished(dir)).toMatchObject({ outcome: 'no-changes', written: false })
+      expect(calls()).toEqual([])
+      await waitFor(() => f.sent.length > 0)
+      expect(f.sent[0]!.message.content).toContain('- no report: main..HEAD has no commits')
+    })
+
+    it('reports review-failed when no reviewer ran, with no report', async () => {
+      behave({ errors: [{ slug: 'review-feat-x-r1-reviewer', message: 'model not found', times: 9 }, { slug: 'review-feat-x-r1-reviewer-2', message: 'model not found', times: 9 }] })
+      const f = await tool()
+      configure(MODELS)
+      const { dir } = await launch(f)
+      expect(await finished(dir)).toMatchObject({ outcome: 'review-failed', written: false })
+      expect(existsSync(join(repo, '.granny/reviews'))).toBe(false)
+      await waitFor(() => f.sent.length > 0)
+      expect(f.sent[0]!.message.content).toContain('- no report: no reviewer ran, also on a retry')
+    })
+
+    it('points to the navigator and keeps the outline for it', async () => {
+      behave({ wait: ['review-feat-x-r1-reviewer'] })
+      const f = await tool()
+      configure({ ...MODELS, watch: 'full' })
+      const { id, dir, started } = await launch(f)
+      expect(started).toContain('/granny or alt+w')
+      expect(ompState().runs.get(id).outline.kind).toBe('judge')
+      await exec(f.tools.get('granny_cancel'), { runId: id })
+      await finished(dir)
+    })
   })
 
   it('granny_wait points to granny_status for a run this process does not know', async () => {

@@ -2,9 +2,10 @@ import { describe, expect, it } from 'bun:test'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { dropPlaceholders, HEARTBEAT_MS, hostModelErrors, overridesNotice, planReviewWarning, RUN_INPUT_SCHEMA, RUN_TOOL_DESCRIPTION, runStatus, SAME_MODEL_HINT, sameModelNotice, withHeartbeat } from '../src/adapters/common'
+import { dropPlaceholders, HEARTBEAT_MS, hostModelErrors, JUDGE_INPUT_SCHEMA, JUDGE_ROLES, JUDGE_TOOL_DESCRIPTION, overridesNotice, planReviewWarning, RUN_INPUT_SCHEMA, RUN_TOOL_DESCRIPTION, runStatus, SAME_MODEL_HINT, sameModelNotice, summarizeJudge, withHeartbeat } from '../src/adapters/common'
 import { resolveConfig } from '../src/core/config'
-import { checkInput, type RunInput } from '../src/core/engine'
+import { checkInput, type JudgeInput, type RunInput } from '../src/core/engine'
+import type { JudgeResult } from '../src/core/types'
 
 // The granny_run arguments gpt-5.6-luna sent through omp for a plain one-stage run: every optional
 // field filled with an empty placeholder. checkInput refused them ("goal must be a non-empty string").
@@ -220,5 +221,84 @@ describe('runStatus journal tail', () => {
   it('keeps an entry that only mentions a heartbeat, and a line that does not parse', () => {
     const mention = entry('log', { message: '"type":"heartbeat"' })
     expect(tailOf([mention, '{not json', beat])).toEqual([mention, '{not json'])
+  })
+})
+
+describe('the granny_judge tool', () => {
+  it('needs only repo, and says it changes nothing and asks the user for missing models', () => {
+    expect(JUDGE_INPUT_SCHEMA.required).toEqual(['repo'])
+    expect(Object.keys(JUDGE_INPUT_SCHEMA.properties).sort()).toEqual(['base', 'config', 'context', 'repo'])
+    expect(JUDGE_TOOL_DESCRIPTION).toContain('references/judge.md')
+    expect(JUDGE_TOOL_DESCRIPTION).toContain('.granny/reviews/')
+    expect(JUDGE_TOOL_DESCRIPTION).toContain('no fix, commit, push, branch or worktree')
+  })
+
+  it('drops the placeholders of a judge call', () => {
+    const clean = dropPlaceholders({ repo: '/r', base: '', context: '', config: {} } as JudgeInput)
+    expect(clean).toEqual({ repo: '/r' })
+  })
+
+  it('checks only the roles a judge run uses, when given them', () => {
+    const layer = { roles: { implementer: { model: 'bad' }, judge: { model: 'bad' }, granny: { model: 'bad' } }, reviewers: [{ name: 'r', engine: 'agent', model: 'bad' }] }
+    const config = resolveConfig([layer], 'omp')
+    const errors = hostModelErrors(config, [layer], 'omp', () => 'wrong', ['file'], JUDGE_ROLES)
+    expect(errors.map(e => e.split(' "')[0])).toEqual(['roles.granny.model:', 'roles.judge.model:', 'reviewers[0]'])
+    expect(hostModelErrors(config, [layer], 'omp', () => 'wrong', ['file']).map(e => e.split(' "')[0])).toContain('roles.implementer.model:')
+  })
+})
+
+describe('summarizeJudge', () => {
+  const result: JudgeResult = {
+    repo: '/r',
+    branch: 'feat/x',
+    base: 'main',
+    head: 'a'.repeat(40),
+    outcome: 'reviewed',
+    counts: { P0: 1, P1: 2, P2: 3, P3: 0, dismissed: 1 },
+    demoted: ['codex-F1', 'codex-F2'],
+    findings: [],
+    failedReviewers: [],
+    notJudged: [],
+    uncommitted: [],
+    reportPath: '/r/.granny/reviews/20261106-101010-feat-x.md',
+    written: true,
+    report: '# report',
+  }
+  const END = 'Nothing was fixed or committed. Give the user the report path and the counts; do not fix anything unless they ask.'
+
+  it('gives the report path first, then the counts and the demoted count, and ends with what to do', () => {
+    const lines = summarizeJudge(result).split('\n')
+    expect(lines[0]).toBe('- report: /r/.granny/reviews/20261106-101010-feat-x.md')
+    expect(lines[1]).toBe('- counts: P0 1, P1 2, P2 3, P3 0, dismissed 1')
+    expect(lines[2]).toBe('- reviewer P0/P1 findings the judge placed lower: 2 (codex-F1, codex-F2)')
+    expect(lines.at(-1)).toBe(END)
+    expect(lines).toHaveLength(4)
+  })
+
+  it('says none were demoted', () => {
+    expect(summarizeJudge({ ...result, demoted: [] })).toContain('- reviewer P0/P1 findings the judge placed lower: 0\n')
+  })
+
+  it('names what was not reviewed, the reviewers that did not run and what the judge left', () => {
+    const text = summarizeJudge({ ...result, uncommitted: ['a.ts', 'b.ts'], failedReviewers: [{ name: 'codex', note: 'exit 1\nlong' }], notJudged: ['kimi-F1'] })
+    expect(text).toContain('- not reviewed, uncommitted: a.ts, b.ts')
+    expect(text).toContain('- did not run: codex: exit 1 long')
+    expect(text).toContain('- not judged, under the reviewer\'s severity: kimi-F1')
+    expect(text.split('\n').at(-1)).toBe(END)
+  })
+
+  it('says where the report is when it could not be written', () => {
+    const lines = summarizeJudge({ ...result, written: false }).split('\n')
+    expect(lines[0]).toBe('- report NOT written to /r/.granny/reviews/20261106-101010-feat-x.md: its text is in the run\'s result.json (granny_status), under report')
+    expect(lines.at(-1)).toBe(END)
+  })
+
+  it('says there is no report after no-changes and review-failed', () => {
+    const none = summarizeJudge({ ...result, outcome: 'no-changes', reportPath: undefined, report: undefined, written: false, note: 'main..HEAD has no commits, so there was nothing to review' })
+    expect(none.split('\n')[0]).toBe('- no report: main..HEAD has no commits, so there was nothing to review')
+    expect(none.split('\n').at(-1)).toBe('Nothing was fixed or committed. Tell the user; do not fix anything unless they ask.')
+    const failed = summarizeJudge({ ...result, outcome: 'review-failed', reportPath: undefined, report: undefined, written: false, failedReviewers: [{ name: 'codex', note: 'exit 1' }] })
+    expect(failed.split('\n').slice(0, 2)).toEqual(['- no report: no reviewer ran, also on a retry', '- did not run: codex: exit 1'])
+    expect(failed.split('\n').at(-1)).toBe('Nothing was fixed or committed. Tell the user; do not fix anything unless they ask.')
   })
 })

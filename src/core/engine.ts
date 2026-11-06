@@ -1282,7 +1282,7 @@ export interface JudgeInput {
   config?: unknown | unknown[]
 }
 
-function checkJudgeInput(input: JudgeInput): string[] {
+export function checkJudgeInput(input: JudgeInput): string[] {
   if (!input || typeof input !== 'object') return ['input must be an object']
   const errors: string[] = []
   if (typeof input.repo !== 'string' || !input.repo.startsWith('/')) errors.push('repo must be an absolute path')

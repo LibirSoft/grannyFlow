@@ -121,6 +121,14 @@ function resolveConfig(layers, host) {
 - `)}`);
   return config;
 }
+function judgeConfigGaps(layers, host) {
+  const reviewersSet = layers.some((layer) => isObject(layer) && layer.reviewers !== undefined);
+  const config = resolveConfig(layers, host);
+  return [
+    ...reviewersSet ? config.reviewers.flatMap((rv, i) => rv.engine === "agent" && !resolveModel(rv.model, host) ? [`reviewers[${i}] (${rv.name}): no model for ${host}`] : []) : ["reviewers: no config sets who reviews"],
+    ...resolveModel(config.roles.judge.model, host) ? [] : [`roles.judge.model: no model for ${host}`]
+  ];
+}
 function modelErrors(path, spec) {
   if (spec === undefined)
     return [];
@@ -595,6 +603,14 @@ function declinedOf(value, sent) {
 function shellQuote(value) {
   return /^[\w@%+=:,./-]+$/.test(value) ? value : `'${value.replaceAll("'", `'\\''`)}'`;
 }
+function heredocWriteScript(path, text) {
+  let end = "GRANNY_REPORT_END";
+  while (text.includes(end))
+    end += "_";
+  return `mkdir -p ${shellQuote(path.slice(0, path.lastIndexOf("/")) || "/")} && cat > ${shellQuote(path)} <<'${end}'
+${text}${end}
+`;
+}
 
 // src/core/prompts.ts
 var roundLabel = (round, f, loop) => `${loop ? `${loop.id}/` : ""}r${round}/${f.id}`;
@@ -777,6 +793,13 @@ function worktreeCommandPrompt(repo, branch, script) {
 function gitCommandPrompt(repo, step, script) {
   return oneCommand(`git command for the "${step}" step`, `Repo ${repo}.`, "Run exactly this:", script);
 }
+var ONE_SHOT_NOTE = "This is a one-shot review: nobody fixes anything in this run, so report every problem you can confirm in the code.";
+function judgeStepPrompt(repo, step, script) {
+  return oneCommand(`shell command for the "${step}" step of a review-only run`, `Repo ${repo}.`, "Run exactly this:", script);
+}
+function reportWritePrompt(repo, step, script) {
+  return oneCommand(`shell command for the "${step}" step of a review-only run, which saves the review report (the one file this run writes),`, `Repo ${repo}.`, "Run exactly this, as one command with its line breaks and every character kept, down to its last line:", script);
+}
 function timeoutProbePrompt(repo, step, script) {
   return oneCommand(`shell command for the "${step}" step: it prints the name of the timeout command the checks run in, or nothing`, `Install nothing. Repo ${repo}.`, "Run exactly this:", script);
 }
@@ -894,6 +917,18 @@ ${judgeHistory(earlier)}
 REVIEW:
 ${JSON.stringify(findings)}`;
 }
+function tagPrompt(p, reviewBase, findings) {
+  return `You are the JUDGE tagging the findings of a one-shot code review. Repo ${p.repo}, branch ${p.branch}, diff \`${shellQuote(reviewBase)}...HEAD\`. Do not edit anything.
+${p.context ? `Design context:
+` + p.context + `
+` : ""}
+Nobody fixes anything in this run. Your classification decides under which heading of the user's report each finding goes, so classify every finding on its merits: the reviewer's severity does not bind you, in either direction.
+For each finding, open the cited code and check that it is real and correctly described. Use scope in-scope or pre-existing only. ${JUDGE_DUPES}
+${rubric("what the change set out to do")}
+
+REVIEW:
+${JSON.stringify(findings)}`;
+}
 var RETRY_ASK = "Answer again for every finding, every field set to an allowed value and the evidence filled in";
 function judgeRetryNote(problems) {
   return problems ? `RETRY: your last answer left these findings unclassified. ${RETRY_ASK}:
@@ -956,8 +991,86 @@ First read ${branchLog(p)} and \`git log --oneline HEAD..${shellQuote(lane)}\`. 
 }
 
 // src/core/report.ts
+var HEADINGS = { critical: "P0", major: "P1", moderate: "P2", minor: "P3" };
 var P_HEADINGS = ["P0", "P1", "P2", "P3"];
 var ORDER = [...P_HEADINGS, "dismissed"];
+var NOTE_LENGTH = 300;
+var oneLine = (text) => String(text ?? "").replace(/\s+/g, " ").trim();
+function severityOf(f) {
+  const n = /^\s*p([0-3])\b/i.exec(String(f.severity ?? ""))?.[1];
+  return n === undefined ? "P2" : P_HEADINGS[Number(n)];
+}
+var isJudged = (f) => f.impact !== undefined;
+function bucketOf(f) {
+  if (f.impact === undefined)
+    return severityOf(f);
+  return f.verdict === "refuted" || f.impact === "none" ? "dismissed" : HEADINGS[f.impact];
+}
+var isDemoted = (f) => ORDER.indexOf(bucketOf(f)) > ORDER.indexOf(severityOf(f));
+function countsOf(findings) {
+  const counts = { P0: 0, P1: 0, P2: 0, P3: 0, dismissed: 0 };
+  for (const f of findings)
+    counts[bucketOf(f)]++;
+  return counts;
+}
+function utf8Length(text) {
+  let bytes = 0;
+  for (const ch of text) {
+    const c = ch.codePointAt(0);
+    bytes += c < 128 ? 1 : c < 2048 ? 2 : c < 65536 ? 3 : 4;
+  }
+  return bytes;
+}
+var code = (text) => `\`${text}\``;
+function tags(f) {
+  const reviewer = `${code(`reviewer: ${severityOf(f)}`)}${isDemoted(f) ? ` ${code("demoted")}` : ""}`;
+  const place = f.file ? [code(f.line === undefined ? f.file : `${f.file}:${f.line}`)] : [];
+  const judged = isJudged(f) ? [[f.verdict, f.impact, f.likelihood, f.fixCost, f.scope].map(code).join(" "), `priority ${f.priority}`] : [code("not judged")];
+  const from = `from ${[f.id, ...f.duplicates ?? []].map(code).join(", ")}`;
+  return [...place, ...judged, reviewer, from].join(" \xB7 ");
+}
+function section(f) {
+  return [
+    `### ${oneLine(f.title) || "(no title)"}`,
+    tags(f),
+    ...String(f.detail ?? "").trim() ? [String(f.detail).trim()] : [],
+    ...f.evidence ? [`**Evidence:** ${f.evidence}`] : [],
+    ...f.reason?.trim() ? [`**Judge:** ${f.reason.trim()}`] : []
+  ].join(`
+
+`);
+}
+var byPriority = (a, b) => (b.priority ?? -1) - (a.priority ?? -1) || (a.file === b.file ? 0 : a.file < b.file ? -1 : 1) || (a.line ?? 0) - (b.line ?? 0);
+function heading(title, findings) {
+  return [`## ${title}`, ...findings.length ? [...findings].sort(byPriority).map(section) : ["None."]].join(`
+
+`);
+}
+function renderReport(meta, findings) {
+  const of = (bucket) => findings.filter((f) => bucketOf(f) === bucket);
+  const c = countsOf(findings);
+  const unjudged = findings.filter((f) => !isJudged(f)).length;
+  const reviewer = (r) => `${r.name} (${r.engine}${r.model ? `, ${r.model}` : ""})`;
+  const header = [
+    `- Reviewed: ${code(`${meta.base}...HEAD`)} at ${meta.head}, ${meta.commits} commit(s), in ${meta.repo}`,
+    `- When: ${meta.when}`,
+    `- Reviewers: ${meta.reviewers.map(reviewer).join(", ")} \xB7 Judge: ${meta.judge ?? "none"}`,
+    `- Totals: P0 ${c.P0}, P1 ${c.P1}, P2 ${c.P2}, P3 ${c.P3}, dismissed ${c.dismissed}`,
+    ...meta.uncommitted.length ? [`- Not reviewed: ${meta.uncommitted.join(", ")}`] : [],
+    ...meta.failed.map((r) => `- Did not run: ${r.name}: ${oneLine(r.note).slice(0, NOTE_LENGTH)}`),
+    ...unjudged ? [`- Not judged: the judge left ${unjudged} finding(s) unclassified; they stay under the reviewer's severity`] : []
+  ];
+  return [
+    `# Granny judge - ${meta.branch}`,
+    header.join(`
+`),
+    ...P_HEADINGS.map((p) => heading(p, of(p))),
+    ...c.dismissed ? [heading("Dismissed by the judge", of("dismissed"))] : []
+  ].join(`
+
+`) + `
+`;
+}
 
 // src/core/reviewer.ts
 var SAID = "[granny] reviewer: ";
@@ -1241,6 +1354,8 @@ var DRAFT_PHASE = "Plan";
 var FINAL_REVIEW_PHASE = "Final review";
 var CHECKS_PHASE = "Checks";
 var REVIEW_PHASE = "Review";
+var JUDGE_PHASE = "Judge";
+var REPORT_PHASE = "Report";
 var TIMEOUT_PROBE = "if command -v timeout >/dev/null; then echo timeout; elif command -v gtimeout >/dev/null; then echo gtimeout; else exit 1; fi";
 var TIMEOUT_MISSING = /(^|[\s:])g?timeout: (command )?not found|command not found: g?timeout$/m;
 var EXIT_MARK = /\[granny\] exit=(\d+)[ \t]*(?:\r?\n|$)/g;
@@ -2397,6 +2512,190 @@ ${note}` : note } : result;
     ...finals.length > 1 ? { repos: finals } : {}
   };
 }
+function checkJudgeInput(input) {
+  if (!input || typeof input !== "object")
+    return ["input must be an object"];
+  const errors = [];
+  if (typeof input.repo !== "string" || !input.repo.startsWith("/"))
+    errors.push("repo must be an absolute path");
+  if (input.base !== undefined && (typeof input.base !== "string" || !input.base))
+    errors.push("base must be a non-empty string");
+  if (input.context !== undefined && typeof input.context !== "string")
+    errors.push("context must be a string");
+  return errors;
+}
+var TAG_POLICY = { threshold: 100, alwaysFix: [] };
+var DATE_STAMP = /^\d{8}-\d{6}$/;
+var BRANCH_LINE = /^\S+$/;
+async function runJudge(host, input) {
+  const inputErrors = checkJudgeInput(input);
+  if (inputErrors.length)
+    throw new Error(`Invalid granny judge input:
+- ${inputErrors.join(`
+- `)}`);
+  const layers = configLayers(input);
+  const gaps = judgeConfigGaps(layers, host.name);
+  if (gaps.length)
+    throw new Error(`granny judge needs models: ${gaps.join("; ")}`);
+  const config = resolveConfig(layers, host.name);
+  const { call, shell, readHead, uncommitted, reviewAll, judgeAnswers } = engineParts(host, config);
+  const repo = trimPath(input.repo);
+  const base = input.base ?? config.base;
+  host.phase(REVIEW_PHASE);
+  const excluded = await shell("exclude", REVIEW_PHASE, excludeScript(config), repo, judgeStepPrompt);
+  if (!excluded.ran)
+    host.log(`could not add ${config.workDir}/ to the git excludes, so the report may show as untracked (exit ${excluded.code}): ${excluded.output.slice(-300)}`);
+  const needed = async (label, script, ask) => {
+    const r = await shell(label, REVIEW_PHASE, script, repo, ask);
+    if (!r.ran)
+      throw new Error(`granny judge could not read the ${label} in ${repo} (exit ${r.code}): ${r.output.slice(-500)}`);
+    return r.output;
+  };
+  const date = lineShaped(await needed("date", "date +%Y%m%d-%H%M%S", judgeStepPrompt), DATE_STAMP);
+  if (!date)
+    throw new Error("granny judge could not read the date");
+  const current = lineShaped(await needed("branch", "git branch --show-current"), BRANCH_LINE);
+  const read = await readHead("head", REVIEW_PHASE, repo);
+  if (!read.sha)
+    throw new Error(`granny judge could not read HEAD in ${repo} (exit ${read.code}): ${read.output.slice(-500)}`);
+  const head = read.sha;
+  const branch = current ?? short(head);
+  const count = await shell("commits", REVIEW_PHASE, `git rev-list --count ${shellQuote(base)}..HEAD`, repo);
+  const commits = count.ran ? lineShaped(count.output, COUNT) : undefined;
+  if (commits === undefined) {
+    throw new Error(`granny judge could not count the commits in ${base}..HEAD in ${repo} (exit ${count.code}): ${count.output.slice(-500)} - ${base} may not be this repo's base; it may use another one such as master, so pass base`);
+  }
+  const dirty = await uncommitted("status", REVIEW_PHASE, repo);
+  const notReviewed = Array.isArray(dirty) ? dirty.map((l) => l.trim().replace(/^\S+\s+/, "")) : [`the working tree status could not be read (${dirty.unreadable.replace(/\s+/g, " ")})`];
+  const finish = (outcome, rest = {}) => ({
+    repo: input.repo,
+    branch,
+    base,
+    head,
+    outcome,
+    counts: countsOf([]),
+    demoted: [],
+    findings: [],
+    failedReviewers: [],
+    notJudged: [],
+    uncommitted: notReviewed,
+    written: false,
+    ...rest
+  });
+  if (Number(commits) === 0) {
+    const note = `${base}..HEAD has no commits, so there was nothing to review${notReviewed.length ? `; uncommitted files are not reviewed: ${notReviewed.join(", ")}` : ""}`;
+    host.log(`no-changes - ${note}`);
+    return finish("no-changes", { note });
+  }
+  const p = { repo, branch, base, config, ...input.context ? { context: input.context } : {} };
+  const lane = { repo, base, branch, cwd: repo, p };
+  const note = `${ONE_SHOT_NOTE}${current ? "" : ` HEAD is detached at ${branch}, so that is the "branch" named here.`}`;
+  const results = await reviewAll(lane, config.reviewers, branch, { kind: "diff", base, note }, 1);
+  const failedReviewers = results.filter((r) => !r.ran).map((r) => ({ name: r.reviewer.name, note: r.note ?? "no output" }));
+  if (failedReviewers.length === results.length) {
+    const notes = failedReviewers.map((r) => `${r.name}: ${r.note}`).join(`
+`);
+    host.log(`review-failed - no reviewer ran, also on a retry, so there is no report:
+${notes}`);
+    return finish("review-failed", { failedReviewers, note: notes });
+  }
+  for (const r of failedReviewers)
+    host.log(`${r.name} did not run, also on a retry - going on without it: ${r.note}`);
+  const found = results.filter((r) => r.ran).flatMap((r) => r.findings);
+  const tag = async () => {
+    host.phase(JUDGE_PHASE);
+    const ids = new Set(found.map((f) => f.id));
+    const label = `tag ${branch}`;
+    const { per, decided } = await judgeAnswers({
+      at: label,
+      label,
+      prompt: tagPrompt(p, base, found),
+      ids,
+      ask: async (l, text) => {
+        try {
+          return await call("judge", "judge", l, JUDGE_PHASE, text, "read-only", config.roles.judge, repo);
+        } catch (e) {
+          if (isCancelled(e))
+            throw e;
+          host.log(`${l}: the judge call failed: ${String(e?.message ?? e)}`);
+          return null;
+        }
+      },
+      apply: (per) => found.map((f) => decide(f, per.find((x) => x.id === f.id), TAG_POLICY, () => true)),
+      leftTo: "under the reviewer's severity, not judged"
+    });
+    const duplicateOf = new Map(per.filter((x) => ids.has(x.id) && typeof x.duplicateOf === "string" && ids.has(x.duplicateOf)).map((x) => [x.id, x.duplicateOf]));
+    const placed = decided.map((f) => ({ ...f, decision: { ...f.decision, action: isJudged(f) && bucketOf(f) !== "dismissed" ? "fix" : "residual" } }));
+    const { findings, merged } = mergeDuplicates(placed, duplicateOf);
+    for (const m of merged)
+      host.log(`${label}: judge merged ${m.id} into ${m.into} (duplicate)`);
+    const severity = new Map(found.map((f) => [f.id, f.severity]));
+    return findings.map(({ decision: _decision, ...f }) => ({
+      ...f,
+      severity: (f.duplicates ?? []).map((id) => severity.get(id)).reduce((worst, s) => severityOf({ severity: s }) < severityOf({ severity: worst }) ? s : worst, f.severity)
+    }));
+  };
+  const findings = found.length ? await tag() : [];
+  const counts = countsOf(findings);
+  const demoted = findings.filter((f) => isDemoted(f) && (severityOf(f) === "P0" || severityOf(f) === "P1")).map((f) => f.id);
+  const notJudged = findings.filter((f) => !isJudged(f)).map((f) => f.id);
+  if (demoted.length)
+    host.log(`the judge placed ${demoted.length} reviewer P0/P1 finding(s) lower: ${demoted.join(", ")}`);
+  host.phase(REPORT_PHASE);
+  const meta = {
+    branch,
+    base,
+    head: short(head),
+    commits: Number(commits),
+    repo,
+    when: date,
+    reviewers: config.reviewers.map((rv) => {
+      const model = resolveModel(rv.model, host.name);
+      return { name: rv.name, engine: rv.engine, ...model ? { model } : {} };
+    }),
+    judge: resolveModel(config.roles.judge.model, host.name),
+    uncommitted: notReviewed,
+    failed: failedReviewers
+  };
+  const report = renderReport(meta, findings);
+  const reportPath = `${repo}/${workOf(config)}/reviews/${date}-${branchSlug(branch)}.md`;
+  const save = async () => {
+    const want = utf8Length(report);
+    for (let n = 1;n <= 2; n++) {
+      const w = await shell(n === 1 ? "write report" : "write report retry", REPORT_PHASE, heredocWriteScript(reportPath, report), repo, reportWritePrompt);
+      if (!w.ran) {
+        host.log(`writing the report failed (exit ${w.code}): ${w.output.slice(-300)}`);
+        return false;
+      }
+      const size = await shell("report size", REPORT_PHASE, `wc -c < ${shellQuote(reportPath)}`, repo, judgeStepPrompt);
+      const got = size.ran ? lineShaped(size.output, COUNT) : undefined;
+      if (got !== undefined && Number(got) === want)
+        return true;
+      host.log(`${reportPath} holds ${got ?? "an unknown number of"} bytes, not ${want}${n === 1 ? " - writing it once more" : ""}`);
+    }
+    return false;
+  };
+  let written = false;
+  try {
+    written = await save();
+  } catch (e) {
+    if (isCancelled(e))
+      throw e;
+    host.log(`writing the report failed: ${String(e?.message ?? e)}`);
+  }
+  host.log(written ? `report written: ${reportPath}` : `report not written: ${reportPath} - the result holds its text`);
+  return finish("reviewed", {
+    counts,
+    demoted,
+    findings,
+    failedReviewers,
+    notJudged,
+    reportPath,
+    written,
+    report,
+    ...written ? {} : { note: `the report could not be written to ${reportPath}; it is in this result` }
+  });
+}
 
 // src/adapters/common.ts
 import { spawn, spawnSync } from "child_process";
@@ -2522,6 +2821,26 @@ function summarize(result, worktree) {
   return lines.join(`
 `);
 }
+var oneLine2 = (text) => text.replace(/\s+/g, " ").trim();
+function summarizeJudge(result) {
+  const didNotRun = result.failedReviewers.map((r) => `- did not run: ${r.name}: ${oneLine2(r.note).slice(0, 300)}`);
+  if (result.outcome !== "reviewed") {
+    const why = result.outcome === "no-changes" ? oneLine2(result.note ?? "nothing to review") : "no reviewer ran, also on a retry";
+    return [`- no report: ${why}`, ...didNotRun, "Nothing was fixed or committed. Tell the user; do not fix anything unless they ask."].join(`
+`);
+  }
+  const { P0, P1, P2, P3, dismissed } = result.counts;
+  return [
+    result.written ? `- report: ${result.reportPath}` : `- report NOT written to ${result.reportPath}: its text is in the run's result.json (granny_status), under report`,
+    `- counts: P0 ${P0}, P1 ${P1}, P2 ${P2}, P3 ${P3}, dismissed ${dismissed}`,
+    `- reviewer P0/P1 findings the judge placed lower: ${result.demoted.length}${result.demoted.length ? ` (${result.demoted.join(", ")})` : ""}`,
+    ...result.uncommitted.length ? [`- not reviewed, uncommitted: ${result.uncommitted.join(", ")}`] : [],
+    ...didNotRun,
+    ...result.notJudged.length ? [`- not judged, under the reviewer's severity: ${result.notJudged.join(", ")}`] : [],
+    "Nothing was fixed or committed. Give the user the report path and the counts; do not fix anything unless they ask."
+  ].join(`
+`);
+}
 function planReviewNotice(input, config) {
   const reviewsPlan = config.planReview && (input.plan !== undefined || input.goal !== undefined) && !((input.fromStage ?? 1) > 1);
   return reviewsPlan ? `
@@ -2539,8 +2858,9 @@ ${SAME_MODEL_HINT}. Mention this to the user in your next message; do not change
 }
 var layerSources = (repo) => [globalConfigPath(), join(repo, "granny.config.json"), "the run's config"];
 var AGENT_ROLES = ["granny", "helper", "planner", "implementer", "judge"];
+var JUDGE_ROLES = ["granny", "judge"];
 var isObject2 = (v) => !!v && typeof v === "object" && !Array.isArray(v);
-function hostModelErrors(config, layers, host, problem, sources) {
+function hostModelErrors(config, layers, host, problem, sources, checked = AGENT_ROLES) {
   const from = (set) => {
     for (let i = layers.length - 1;i >= 0; i--) {
       const layer = layers[i];
@@ -2557,7 +2877,7 @@ function hostModelErrors(config, layers, host, problem, sources) {
     const claude = typeof spec === "string" ? spec : spec?.["claude-code"] ?? model;
     return [`${what} "${model}"${where} - ${wrong}; give a host-keyed model, e.g. { "claude-code": "${claude}", "${host}": "<provider/model>" }`];
   };
-  const roles = AGENT_ROLES.flatMap((role) => check(`roles.${role}.model:`, config.roles[role].model, from((l) => isObject2(l.roles) && isObject2(l.roles[role]) && l.roles[role].model !== undefined)));
+  const roles = checked.flatMap((role) => check(`roles.${role}.model:`, config.roles[role].model, from((l) => isObject2(l.roles) && isObject2(l.roles[role]) && l.roles[role].model !== undefined)));
   const reviewers = config.reviewers.flatMap((rv, i) => rv.engine === "agent" ? check(`reviewers[${i}] "${rv.name}": model`, rv.model, from((l) => Array.isArray(l.reviewers))) : []);
   return [...roles, ...reviewers];
 }
@@ -2687,6 +3007,49 @@ var RUN_INPUT_SCHEMA = {
   },
   required: ["repo", "branch"]
 };
+var JUDGE_TOOL_DESCRIPTION = `granny-workflow: a review-only run ("granny judge"), in the background. One review of the checkout's <base>...HEAD and one tagging of its findings by another agent, saved as a markdown report under <workDir>/reviews/ (default .granny/reviews/). It changes nothing else: no fix, commit, push, branch or worktree. The reviewers and the judge model must be in the user's config files; when they are not, it refuses, and you ask the user as the skill's references/judge.md says - never choose a model yourself. Send only the fields you set. ${USER_SETTINGS}`;
+var JUDGE_INPUT_SCHEMA = {
+  type: "object",
+  properties: {
+    repo: { type: "string", description: "Absolute path of the checkout to review, on the branch to review; the run files and the report go to <repo>/<workDir>/" },
+    base: { type: "string", description: "The branch to diff against; defaults to config.base" },
+    context: { type: "string", description: "What the user wants looked at, or a plan to check against" },
+    config: {
+      type: "object",
+      additionalProperties: true,
+      description: `Per-run overrides of granny.config.json (same shape). They do not answer a refusal: what is missing goes to the config files, from the user. ${USER_SETTINGS}`
+    }
+  },
+  required: ["repo"]
+};
+var ASK_FOR_MODELS = "Ask the user for these per the skill's references/judge.md and write them to the config. Do not choose a model yourself.";
+function prepareJudge(input, host, problem) {
+  const refused = (problems, end = "") => ({ refused: `granny_judge refused:
+- ${problems.join(`
+- `)}${end}` });
+  const problems = checkJudgeInput(input);
+  if (problems.length)
+    return refused(problems);
+  const files = [readJson(globalConfigPath()), readJson(join(input.repo, "granny.config.json"))];
+  const layers = [...files, input.config];
+  const gaps = [...new Set([...judgeConfigGaps(files, host), ...judgeConfigGaps(layers, host)])];
+  if (gaps.length)
+    return refused(gaps, `
+${ASK_FOR_MODELS}`);
+  const config = resolveConfig(layers, host);
+  const badModels = hostModelErrors(config, layers, host, problem, layerSources(input.repo), JUDGE_ROLES);
+  if (badModels.length)
+    return refused(badModels);
+  try {
+    return { layers, config, branch: git(input.repo, ["branch", "--show-current"]) || git(input.repo, ["rev-parse", "HEAD"]).slice(0, 8) };
+  } catch (e) {
+    return refused([e.message]);
+  }
+}
+function judgeStartLine(id, input, branch, config, host) {
+  const reviews = `${input.base ?? config.base}...HEAD by ${reviewersText(config.reviewers, host)}, tagged by ${resolveModel(config.roles.judge.model, host)}`;
+  return `granny judge run ${id} started on ${input.repo} (${branch}): one review of ${reviews}. Nothing will be changed: no fix, commit, push, branch or worktree, only a report under ${config.workDir.replace(/\/+$/, "")}/reviews/. Uncommitted files are not reviewed.`;
+}
 var HEARTBEAT_MS = 60000;
 var intervals = {
   setInterval: (fn, ms) => setInterval(fn, ms),
@@ -2839,6 +3202,9 @@ function runOutline(input, config) {
     stages
   };
 }
+function judgeOutline(branch, config) {
+  return { kind: "judge", branch: clean(branch), worktree: false, planReview: false, finalReview: false, reviewers: config.reviewers.map((r) => clean(r.name)), fromStage: 1, stages: [] };
+}
 
 // src/adapters/opencode/plugin.ts
 var modelText = (model) => model ? `${model.providerID}/${model.id}${model.variant ? `#${model.variant}` : ""}` : null;
@@ -2906,31 +3272,7 @@ function isTransient(error) {
 var createGrannyPlugin = ({ delays = DEFAULT_DELAYS, sleep = pause, killGraceMs = KILL_GRACE_MS, heartbeatMs = HEARTBEAT_MS } = {}) => ({
   id: "granny-workflow",
   async setup(ctx) {
-    const startRun = async (input, parentSession) => {
-      const problems = checkInput(input);
-      if (problems.length)
-        return `granny_run refused:
-- ${problems.join(`
-- `)}`;
-      const layers = [readJson(globalConfigPath()), readJson(join2(input.repo, "granny.config.json")), input.config];
-      const config = resolveConfig(layers, "opencode");
-      const unknownChecks = stageCheckErrors(input.stages, config.checks);
-      if (unknownChecks.length)
-        return `granny_run refused:
-- ${unknownChecks.join(`
-- `)}`;
-      const badModels = hostModelErrors(config, layers, "opencode", opencodeModelProblem, layerSources(input.repo));
-      if (badModels.length)
-        return `granny_run refused:
-- ${badModels.join(`
-- `)}`;
-      const blockers = preflight(input.repo, input.branch, config.workDir, config.worktree);
-      for (const repo of stageRepos(input))
-        blockers.push(...preflight(repo, input.branch, config.workDir, config.worktree).map((b) => `${repo}: ${b}`));
-      if (blockers.length)
-        return `granny_run refused:
-- ${blockers.join(`
-- `)}`;
+    const launch = async ({ input, layers, config, branch, outline, engine, finished, started }, parentSession) => {
       const id = runId();
       const dir = join2(input.repo, config.workDir, "runs", id);
       mkdirSync2(dir, { recursive: true });
@@ -2949,8 +3291,7 @@ var createGrannyPlugin = ({ delays = DEFAULT_DELAYS, sleep = pause, killGraceMs 
       runs.set(id, run);
       const journal = (type, data) => appendFileSync2(join2(dir, "journal.jsonl"), JSON.stringify({ t: stamp(), type, ...data }) + `
 `);
-      const outline = runOutline(input, config);
-      const writeStatus = (extra = {}) => writeFileSync(join2(dir, "status.json"), JSON.stringify({ id, status: run.status, repo: input.repo, branch: input.branch, parent: parentSession, watch: config.watch, outline, ...extra }, null, 2));
+      const writeStatus = (extra = {}) => writeFileSync(join2(dir, "status.json"), JSON.stringify({ id, status: run.status, repo: input.repo, branch, parent: parentSession, watch: config.watch, outline, ...extra }, null, 2));
       writeFileSync(join2(dir, "input.json"), JSON.stringify({ ...input, config: layers }, null, 2));
       writeStatus({ startedAt: stamp() });
       let parentModel;
@@ -3113,13 +3454,12 @@ When done, call the \`${tool}\` tool exactly once with your result. That call is
           journal("notify-failed", { error: String(e) });
         }
       };
-      runGranny(host, { ...input, config: layers }).then(async (result) => {
+      engine(host).then(async (result) => {
         run.status = "done";
         writeFileSync(join2(dir, "result.json"), JSON.stringify(result, null, 2));
         writeStatus({ finishedAt: stamp() });
         await notify(`[granny] Run ${id} finished.
-${summarize(result, config.worktree)}
-Call granny_status with runId "${id}" for the full result, verify load-bearing claims yourself, report to the user and wait. Do not push.`);
+${finished(result, id)}`);
       }).catch(async (error) => {
         run.status = run.cancelled ? "cancelled" : "failed";
         writeStatus({ finishedAt: stamp(), error: statusError(error, run.cancelled) });
@@ -3128,10 +3468,67 @@ Call granny_status with runId "${id}" for the full result, verify load-bearing c
           await notify(`[granny] Run ${id} failed: ${String(error?.message ?? error)}
 Call granny_status with runId "${id}" and report to the user.`);
       });
-      return `granny run ${id} started on ${input.repo} (${input.branch}), ${input.goal !== undefined ? "planning only" : `${input.stages?.length ?? 0} stage(s)${config.parallel ? `, up to ${config.maxParallel} in parallel` : ""}`}, threshold ${config.threshold}, maxRounds ${config.maxRounds}.
-Journal: ${join2(dir, "journal.jsonl")}
-You will receive a message when it finishes. Use granny_status { runId: "${id}" } to check progress and granny_cancel to stop it. Do not poll in a loop.${config.watch === "full" ? `
-${NAVIGATOR_HINT}` : ""}${planReviewNotice(input, config)}${sameModelNotice(input, config, "opencode")}${overridesNotice(layers, "opencode")}`;
+      return started(id, join2(dir, "journal.jsonl"));
+    };
+    const notifySentence = (id) => `You will receive a message when it finishes. Use granny_status { runId: "${id}" } to check progress and granny_cancel to stop it. Do not poll in a loop.`;
+    const startRun = async (input, parentSession) => {
+      const problems = checkInput(input);
+      if (problems.length)
+        return `granny_run refused:
+- ${problems.join(`
+- `)}`;
+      const layers = [readJson(globalConfigPath()), readJson(join2(input.repo, "granny.config.json")), input.config];
+      const config = resolveConfig(layers, "opencode");
+      const unknownChecks = stageCheckErrors(input.stages, config.checks);
+      if (unknownChecks.length)
+        return `granny_run refused:
+- ${unknownChecks.join(`
+- `)}`;
+      const badModels = hostModelErrors(config, layers, "opencode", opencodeModelProblem, layerSources(input.repo));
+      if (badModels.length)
+        return `granny_run refused:
+- ${badModels.join(`
+- `)}`;
+      const blockers = preflight(input.repo, input.branch, config.workDir, config.worktree);
+      for (const repo of stageRepos(input))
+        blockers.push(...preflight(repo, input.branch, config.workDir, config.worktree).map((b) => `${repo}: ${b}`));
+      if (blockers.length)
+        return `granny_run refused:
+- ${blockers.join(`
+- `)}`;
+      return launch({
+        input,
+        layers,
+        config,
+        branch: input.branch,
+        outline: runOutline(input, config),
+        engine: (host) => runGranny(host, { ...input, config: layers }),
+        finished: (result, id) => `${summarize(result, config.worktree)}
+Call granny_status with runId "${id}" for the full result, verify load-bearing claims yourself, report to the user and wait. Do not push.`,
+        started: (id, journalPath) => `granny run ${id} started on ${input.repo} (${input.branch}), ${input.goal !== undefined ? "planning only" : `${input.stages?.length ?? 0} stage(s)${config.parallel ? `, up to ${config.maxParallel} in parallel` : ""}`}, threshold ${config.threshold}, maxRounds ${config.maxRounds}.
+Journal: ${journalPath}
+${notifySentence(id)}${config.watch === "full" ? `
+${NAVIGATOR_HINT}` : ""}${planReviewNotice(input, config)}${sameModelNotice(input, config, "opencode")}${overridesNotice(layers, "opencode")}`
+      }, parentSession);
+    };
+    const startJudge = async (input, parentSession) => {
+      const ready = prepareJudge(input, "opencode", opencodeModelProblem);
+      if ("refused" in ready)
+        return ready.refused;
+      const { layers, config, branch } = ready;
+      return launch({
+        input,
+        layers,
+        config,
+        branch,
+        outline: judgeOutline(branch, config),
+        engine: (host) => runJudge(host, { ...input, config: layers }),
+        finished: (result) => summarizeJudge(result),
+        started: (id, journalPath) => `${judgeStartLine(id, input, branch, config, "opencode")}
+Journal: ${journalPath}
+${notifySentence(id)}${config.watch === "full" ? `
+${NAVIGATOR_HINT}` : ""}${overridesNotice(layers, "opencode")}`
+      }, parentSession);
     };
     await ctx.tool.transform((editor) => {
       for (const [kind, name] of Object.entries(SUBMIT)) {
@@ -3154,6 +3551,18 @@ ${NAVIGATOR_HINT}` : ""}${planReviewNotice(input, config)}${sameModelNotice(inpu
             return { content: await startRun(dropPlaceholders(value), context.sessionID) };
           } catch (e) {
             return { content: `granny_run failed to start: ${e.message}` };
+          }
+        }
+      });
+      editor.add({
+        name: "granny_judge",
+        description: JUDGE_TOOL_DESCRIPTION,
+        input: JUDGE_INPUT_SCHEMA,
+        execute: async (value, context) => {
+          try {
+            return { content: await startJudge(dropPlaceholders(value), context.sessionID) };
+          } catch (e) {
+            return { content: `granny_judge failed to start: ${e.message}` };
           }
         }
       });
