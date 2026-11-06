@@ -410,15 +410,31 @@ export function runDir(runs: Map<string, { dir: string }>, runIdArg?: string, re
   return pick && ids.includes(pick) ? join(root, pick) : undefined
 }
 
+const isHeartbeat = (line: string): boolean => {
+  try {
+    return JSON.parse(line)?.type === 'heartbeat'
+  } catch {
+    return false
+  }
+}
+
+/** The last `count` journal lines that are not heartbeats, parsing from the end only as far as it takes. */
+function journalTail(journal: string, count: number): string {
+  const lines = journal.trim().split('\n')
+  const tail: string[] = []
+  for (let i = lines.length - 1; i >= 0 && tail.length < count; i--) if (!isHeartbeat(lines[i]!)) tail.push(lines[i]!)
+  return tail.reverse().join('\n')
+}
+
 export function runStatus(runs: Map<string, { dir: string }>, runIdArg?: string, repo?: string): string {
   const dir = runDir(runs, runIdArg, repo)
   if (!dir) return 'No such granny run. Pass runId, or repo to see the latest run in that repo.'
   const read = (f: string) => (existsSync(join(dir!, f)) ? readFileSync(join(dir!, f), 'utf8') : '')
-  const tail = read('journal.jsonl').trim().split('\n').slice(-40).join('\n')
+  const tail = journalTail(read('journal.jsonl'), 40)
   const result = read('result.json')
   return [
     `status: ${read('status.json')}`,
-    `journal (last 40 lines):\n${tail}`,
+    `journal (last 40 lines, without heartbeats):\n${tail}`,
     result ? `result (${join(dir, 'result.json')}):\n${result.length > 30000 ? result.slice(0, 30000) + '\n...truncated, read the file' : result}` : '',
   ].filter(Boolean).join('\n\n')
 }

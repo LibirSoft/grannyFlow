@@ -798,6 +798,20 @@ describe('omp extension in the user session (parent mode)', () => {
     await finished(dir)
   })
 
+  it('leaves the heartbeats out of granny_status, so a long command does not push out the real entries', async () => {
+    behave({ wait: ['implement-one'] })
+    const f = fakePi()
+    await createGrannyExtension({ killGraceMs: 100 })(f.pi as any)
+    const run = await start(f)
+    await waitFor(() => callsTo('implement-one').length > 0)
+    fs.appendFileSync(join(run.dir, 'journal.jsonl'), Array.from({ length: 60 }, () => `${JSON.stringify({ t: 'now', type: 'heartbeat', command: 'bun test' })}\n`).join(''))
+    const status = textOf(await exec(f.tools.get('granny_status'), { runId: run.id }))
+    expect(status).toContain('"type":"phase"')
+    expect(status).not.toContain('"type":"heartbeat"')
+    await exec(f.tools.get('granny_cancel'), { runId: run.id })
+    await finished(run.dir)
+  })
+
   it('journals a heartbeat while a long command runs, and none after it ends', async () => {
     behave({})
     const f = fakePi()

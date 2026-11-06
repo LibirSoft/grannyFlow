@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test'
 import { spawnSync } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { SAME_MODEL_HINT } from '../src/adapters/common'
@@ -583,6 +583,19 @@ describe('opencode plugin', () => {
     expect(status.content).toContain('"status": "done"')
     expect(status.content).toContain('"outcome": "clean"')
     expect(git(repo, 'status', '--porcelain')).toBe('')
+  })
+
+  it('leaves the heartbeats out of granny_status, so a long command does not push out the real entries', async () => {
+    const f = fakeContext({ hangUntilInterrupted: title => title === 'granny · implement one' })
+    await plugin.setup(f.ctx)
+    const run = await startRun(repo, f)
+    await waitFor(() => f.prompts.length > 0)
+    appendFileSync(join(run.dir, 'journal.jsonl'), Array.from({ length: 60 }, () => `${JSON.stringify({ t: 'now', type: 'heartbeat', command: 'bun test' })}\n`).join(''))
+    const status = (await f.tools.get('granny_status').execute({ runId: run.id })).content
+    expect(status).toContain('"type":"phase"')
+    expect(status).not.toContain('"type":"heartbeat"')
+    await f.tools.get('granny_cancel').execute({ runId: run.id })
+    await waitFor(() => readRun(run.dir, 'status.json').includes('"status": "cancelled"'))
   })
 
   it('journals a heartbeat while a long command runs, and none after it ends', async () => {

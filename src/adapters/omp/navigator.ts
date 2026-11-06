@@ -288,7 +288,8 @@ export class Navigator {
     for (const line of lines) {
       if (!line.trim()) continue
       try {
-        cache.entries.push(JSON.parse(line))
+        const entry = JSON.parse(line)
+        if (entry?.type !== 'heartbeat') cache.entries.push(entry)
       } catch {}
     }
     cache.read = true

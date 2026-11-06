@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'bun:test'
-import { dropPlaceholders, HEARTBEAT_MS, hostModelErrors, overridesNotice, planReviewWarning, RUN_INPUT_SCHEMA, RUN_TOOL_DESCRIPTION, SAME_MODEL_HINT, sameModelNotice, withHeartbeat } from '../src/adapters/common'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { dropPlaceholders, HEARTBEAT_MS, hostModelErrors, overridesNotice, planReviewWarning, RUN_INPUT_SCHEMA, RUN_TOOL_DESCRIPTION, runStatus, SAME_MODEL_HINT, sameModelNotice, withHeartbeat } from '../src/adapters/common'
 import { resolveConfig } from '../src/core/config'
 import { checkInput, type RunInput } from '../src/core/engine'
 
@@ -186,5 +189,36 @@ describe('sameModelNotice', () => {
 
   it('gives no hint on a planning run, which writes no code to review', () => {
     expect(notice({}, 'omp', { repo: '/r', branch: 'b', goal: 'build it' })).toBe('')
+  })
+})
+
+describe('runStatus journal tail', () => {
+  const entry = (type: string, data: Record<string, unknown> = {}) => JSON.stringify({ t: '2026-11-06T10:00:00.000Z', type, ...data })
+  const beat = entry('heartbeat', { command: 'bun test' })
+  const tailOf = (lines: string[]) => {
+    const dir = mkdtempSync(join(tmpdir(), 'granny-status-'))
+    try {
+      writeFileSync(join(dir, 'journal.jsonl'), lines.join('\n') + '\n')
+      const status = runStatus(new Map([['R', { dir }]]), 'R')
+      return status.slice(status.indexOf('journal (')).split('\n').slice(1).filter(Boolean)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }
+
+  it('shows the real entries before 60 trailing heartbeats', () => {
+    const real = [entry('phase', { title: 'Checks' }), entry('command', { command: 'bun test' })]
+    expect(tailOf([...real, ...Array.from({ length: 60 }, () => beat)])).toEqual(real)
+  })
+
+  it('keeps the bound of 40 lines, counted without the heartbeats', () => {
+    const real = Array.from({ length: 50 }, (_, i) => entry('log', { message: `line ${i}` }))
+    const mixed = real.flatMap(line => [line, beat])
+    expect(tailOf(mixed)).toEqual(real.slice(-40))
+  })
+
+  it('keeps an entry that only mentions a heartbeat, and a line that does not parse', () => {
+    const mention = entry('log', { message: '"type":"heartbeat"' })
+    expect(tailOf([mention, '{not json', beat])).toEqual([mention, '{not json'])
   })
 })

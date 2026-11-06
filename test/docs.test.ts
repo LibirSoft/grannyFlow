@@ -217,6 +217,7 @@ describe('skill docs', () => {
       expect({ file, missing: pieces.filter(piece => !text.includes(piece)) }).toEqual({ file, missing: [] })
     }
     expect(read('references/omp.md')).toContain('{ type: "todo", todos }')
+    for (const file of ['references/omp.md', 'references/opencode.md']) expect({ file, text: read(file).includes("`granny_status`'s journal tail leaves it out") }).toEqual({ file, text: true })
   })
 
   it("states the model refusal and the rule on the user's models in both host references", () => {

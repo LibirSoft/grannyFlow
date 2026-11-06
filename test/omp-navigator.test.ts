@@ -672,6 +672,21 @@ describe('Navigator', () => {
     s.nav.handleInput(' ')
   }
 
+  it('keeps no heartbeat in its journal cache, and still reads the entries after them', () => {
+    const s = open()
+    const cache = () => (s.nav as any).caches.get('R1').entries as Array<{ type: string }>
+    s.nav.render(160)
+    const before = cache().length
+    expect(before).toBeGreaterThan(0)
+    for (let i = 0; i < 60; i++) appendFileSync(join(s.dir, 'journal.jsonl'), line({ t: iso(100 + i), type: 'heartbeat', command: 'bun test' }))
+    ;(s.nav as any).refresh()
+    expect(cache()).toHaveLength(before)
+    appendFileSync(join(s.dir, 'journal.jsonl'), line({ t: iso(200), type: 'log', message: 'after the beats' }))
+    ;(s.nav as any).refresh()
+    expect(cache()).toHaveLength(before + 1)
+    expect(cache().at(-1)).toMatchObject({ type: 'log', message: 'after the beats' })
+  })
+
   it('opens on the running agent: header, stepper, stage groups, and the agent\'s summary, with the tree key help last', () => {
     const s = open()
     const lines = s.nav.render(160)

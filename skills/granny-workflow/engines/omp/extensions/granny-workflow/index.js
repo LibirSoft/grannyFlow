@@ -2744,18 +2744,33 @@ function runDir(runs, runIdArg, repo) {
   const pick = runIdArg ?? ids.at(-1);
   return pick && ids.includes(pick) ? join(root, pick) : undefined;
 }
+var isHeartbeat = (line) => {
+  try {
+    return JSON.parse(line)?.type === "heartbeat";
+  } catch {
+    return false;
+  }
+};
+function journalTail(journal, count) {
+  const lines = journal.trim().split(`
+`);
+  const tail = [];
+  for (let i = lines.length - 1;i >= 0 && tail.length < count; i--)
+    if (!isHeartbeat(lines[i]))
+      tail.push(lines[i]);
+  return tail.reverse().join(`
+`);
+}
 function runStatus(runs, runIdArg, repo) {
   const dir = runDir(runs, runIdArg, repo);
   if (!dir)
     return "No such granny run. Pass runId, or repo to see the latest run in that repo.";
   const read = (f) => existsSync(join(dir, f)) ? readFileSync(join(dir, f), "utf8") : "";
-  const tail = read("journal.jsonl").trim().split(`
-`).slice(-40).join(`
-`);
+  const tail = journalTail(read("journal.jsonl"), 40);
   const result = read("result.json");
   return [
     `status: ${read("status.json")}`,
-    `journal (last 40 lines):
+    `journal (last 40 lines, without heartbeats):
 ${tail}`,
     result ? `result (${join(dir, "result.json")}):
 ${result.length > 30000 ? result.slice(0, 30000) + `
@@ -5026,7 +5041,9 @@ class Navigator {
       if (!line.trim())
         continue;
       try {
-        cache.entries.push(JSON.parse(line));
+        const entry = JSON.parse(line);
+        if (entry?.type !== "heartbeat")
+          cache.entries.push(entry);
       } catch {}
     }
     cache.read = true;
