@@ -2,7 +2,7 @@ import { describe, expect, it } from 'bun:test'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { dropPlaceholders, HEARTBEAT_MS, hostModelErrors, JUDGE_INPUT_SCHEMA, JUDGE_ROLES, JUDGE_TOOL_DESCRIPTION, overridesNotice, planReviewWarning, RUN_INPUT_SCHEMA, RUN_TOOL_DESCRIPTION, runStatus, SAME_MODEL_HINT, sameModelNotice, summarizeJudge, withHeartbeat } from '../src/adapters/common'
+import { dropPlaceholders, HEARTBEAT_MS, hostModelErrors, JUDGE_INPUT_SCHEMA, JUDGE_ROLES, JUDGE_TOOL_DESCRIPTION, overridesNotice, planReviewWarning, RUN_INPUT_SCHEMA, summarize, RUN_TOOL_DESCRIPTION, runStatus, SAME_MODEL_HINT, sameModelNotice, summarizeJudge, withHeartbeat } from '../src/adapters/common'
 import { resolveConfig } from '../src/core/config'
 import { checkInput, type JudgeInput, type RunInput } from '../src/core/engine'
 import { noteLine, renderReport } from '../src/core/report'
@@ -245,6 +245,23 @@ describe('the granny_judge tool', () => {
     const errors = hostModelErrors(config, [layer], 'omp', () => 'wrong', ['file'], JUDGE_ROLES)
     expect(errors.map(e => e.split(' "')[0])).toEqual(['roles.granny.model:', 'roles.judge.model:', 'reviewers[0]'])
     expect(hostModelErrors(config, [layer], 'omp', () => 'wrong', ['file']).map(e => e.split(' "')[0])).toContain('roles.implementer.model:')
+  })
+})
+
+describe('summarize of a planning run', () => {
+  const planned = (questions?: string) => summarize({ repo: '/r', branch: 'b', base: 'main', worktree: '/w', stages: [], final: null, draft: { files: ['/r/plan.md'], stages: [{ name: 'one', task: 't' }], summary: 's', ...(questions ? { questions } : {}) } } as any, true)
+
+  it('carries the open questions and tells the agent to ask them with its question tool', () => {
+    const text = planned('1. Which database?\n2. Which port?\n')
+    expect(text).toContain('ask the user these with your question tool (`ask` on omp, `question` on opencode), do not just write them out')
+    expect(text).toContain('without such a tool, ask in one numbered message:\n1. Which database?\n2. Which port?')
+    expect(text).toContain('show the user the plan and the stages, and wait for their approval')
+  })
+
+  it('says nothing of questions when the planner has none', () => {
+    const text = planned()
+    expect(text).not.toContain('question')
+    expect(text).toContain('wait for their approval')
   })
 })
 

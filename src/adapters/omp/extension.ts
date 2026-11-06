@@ -72,6 +72,8 @@ interface RunState {
   reply?: string
   /** Pending granny_wait calls; set at the moment the run ends, so a run reports either to them or by notice. */
   waiters: Set<(reply: string) => void>
+  /** Esc stopped a granny_wait for it: omp then starts no turn by itself. */
+  waitStopped?: boolean
   live: LiveRun
   watch: WatchMode
   branch: string
@@ -285,6 +287,35 @@ const WATCH_HELP =
   "granny-workflow: watch granny runs - /granny (or alt+w) opens the run navigator: the run's stages, a stage's review rounds, a round's agents side by side, and what an agent is doing now (or its transcript); /granny <runId> opens it on that run; /granny off|on hides or shows the run panel in this session"
 
 const NAVIGATOR_HINT = '/granny or alt+w: agents'
+const ESCAPE_GUARD_MS = 500
+const ESCAPES = new Set(['\x1b', '\x1b[27u'])
+
+/**
+ * Esc goes up the navigator's levels, so it is pressed several times to leave. One press too many would reach omp
+ * and stop the turn, so for a moment after the navigator closes Esc does nothing; each press holds that moment open.
+ */
+function swallowStrayEscape(ctx: any) {
+  try {
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const off = ctx?.ui?.onTerminalInput?.((data: string) => {
+      if (!ESCAPES.has(data)) return undefined
+      hold()
+      return { consume: true }
+    })
+    if (typeof off !== 'function') return
+    const hold = () => {
+      if (timer) clearTimeout(timer)
+      timer = setTimeout(() => {
+        try {
+          off()
+        } catch {}
+      }, ESCAPE_GUARD_MS)
+      timer.unref?.()
+    }
+    hold()
+  } catch {}
+}
+
 const NAVIGATOR_SENTENCE = '\nTell the user: /granny or alt+w opens the run navigator (stages, agents, live activity).'
 
 const OVERLAY = { width: '100%', maxHeight: '100%', margin: 0, fullscreen: true, mouseTracking: false }
@@ -534,7 +565,14 @@ export const createGrannyExtension =
         run.waiters.clear()
         for (const deliver of waiting) deliver(reply)
         if (waiting.length) journal('notified-via-wait', { waits: waiting.length })
-        else if (notice) notify(notice)
+        else if (notice) {
+          notify(notice)
+          if (run.waitStopped && ctx?.hasUI === true) {
+            try {
+              ctx.ui.notify(`granny: run ${id} finished. If omp does not go on by itself (it stays paused after Esc), send it a message.`, 'info')
+            } catch {}
+          }
+        }
       }
 
       void engine(host)
@@ -688,7 +726,10 @@ ${waitSentence(id)}${config.watch === 'full' ? NAVIGATOR_SENTENCE : ''}${overrid
         }
         if (run.reply !== undefined) return text(run.reply)
         const stopped = `Stopped waiting; run ${run.id} is still running.`
-        if (signal?.aborted) return text(stopped)
+        if (signal?.aborted) {
+          run.waitStopped = true
+          return text(stopped)
+        }
         const seconds = waitSeconds(params.timeoutSeconds)
         return new Promise<ToolResult>(resolve => {
           const done = (reply: string) => {
@@ -697,7 +738,10 @@ ${waitSentence(id)}${config.watch === 'full' ? NAVIGATOR_SENTENCE : ''}${overrid
             run.waiters.delete(done)
             resolve(text(reply))
           }
-          const onAbort = () => done(stopped)
+          const onAbort = () => {
+            run.waitStopped = true
+            done(stopped)
+          }
           const timer = setTimeout(
             () => done(`Run ${run.id} is still running after ${seconds} s. Call granny_wait again to keep waiting, or end your turn - the finish message will start a new one.`),
             seconds * 1000,
@@ -754,6 +798,7 @@ ${waitSentence(id)}${config.watch === 'full' ? NAVIGATOR_SENTENCE : ''}${overrid
       } finally {
         navigator?.dispose()
         shared.navigating = false
+        swallowStrayEscape(ctx)
       }
     }
 

@@ -2840,7 +2840,10 @@ function summarize(result, worktree) {
     lines.push(`- plan written: ${result.draft.files.join(", ")} - ${result.draft.stages.length} proposed stage(s)${result.draft.questions ? ", open questions for the user" : ""}`);
     if (result.plan)
       lines.push(line(result.plan, "plan review"));
-    lines.push("- stopped after planning, nothing was implemented: show the user the plan, the stages and the questions, and wait for their approval");
+    if (result.draft.questions)
+      lines.push(`- open questions: ask the user these with your question tool (\`ask\` on omp, \`question\` on opencode), do not just write them out; without such a tool, ask in one numbered message:
+${result.draft.questions.trim()}`);
+    lines.push("- stopped after planning, nothing was implemented: show the user the plan and the stages, and wait for their approval");
   } else if (result.plan) {
     const stopped = result.plan.outcome === "round-cap" || result.plan.outcome === "review-failed";
     lines.unshift(`${line(result.plan, "plan review")}${stopped ? " - stopped before stage 1, nothing was implemented" : ""}`);
@@ -6684,6 +6687,32 @@ function isTransient(message) {
 var STATUS_KEEP_MS = 60000;
 var WATCH_HELP = "granny-workflow: watch granny runs - /granny (or alt+w) opens the run navigator: the run's stages, a stage's review rounds, a round's agents side by side, and what an agent is doing now (or its transcript); /granny <runId> opens it on that run; /granny off|on hides or shows the run panel in this session";
 var NAVIGATOR_HINT = "/granny or alt+w: agents";
+var ESCAPE_GUARD_MS = 500;
+var ESCAPES = new Set(["\x1B", "\x1B[27u"]);
+function swallowStrayEscape(ctx) {
+  try {
+    let timer;
+    const off = ctx?.ui?.onTerminalInput?.((data) => {
+      if (!ESCAPES.has(data))
+        return;
+      hold();
+      return { consume: true };
+    });
+    if (typeof off !== "function")
+      return;
+    const hold = () => {
+      if (timer)
+        clearTimeout(timer);
+      timer = setTimeout(() => {
+        try {
+          off();
+        } catch {}
+      }, ESCAPE_GUARD_MS);
+      timer.unref?.();
+    };
+    hold();
+  } catch {}
+}
 var NAVIGATOR_SENTENCE = `
 Tell the user: /granny or alt+w opens the run navigator (stages, agents, live activity).`;
 var OVERLAY = { width: "100%", maxHeight: "100%", margin: 0, fullscreen: true, mouseTracking: false };
@@ -6935,8 +6964,14 @@ When done, call the \`${tool}\` tool exactly once with your result. That call is
         deliver(reply);
       if (waiting.length)
         journal("notified-via-wait", { waits: waiting.length });
-      else if (notice)
+      else if (notice) {
         notify(notice);
+        if (run.waitStopped && ctx?.hasUI === true) {
+          try {
+            ctx.ui.notify(`granny: run ${id} finished. If omp does not go on by itself (it stays paused after Esc), send it a message.`, "info");
+          } catch {}
+        }
+      }
     };
     engine(host).then((result) => {
       run.status = "done";
@@ -7095,8 +7130,10 @@ ${run.live.lines(Number.POSITIVE_INFINITY).join(`
       if (run.reply !== undefined)
         return text3(run.reply);
       const stopped = `Stopped waiting; run ${run.id} is still running.`;
-      if (signal?.aborted)
+      if (signal?.aborted) {
+        run.waitStopped = true;
         return text3(stopped);
+      }
       const seconds = waitSeconds(params.timeoutSeconds);
       return new Promise((resolve) => {
         const done = (reply) => {
@@ -7105,7 +7142,10 @@ ${run.live.lines(Number.POSITIVE_INFINITY).join(`
           run.waiters.delete(done);
           resolve(text3(reply));
         };
-        const onAbort = () => done(stopped);
+        const onAbort = () => {
+          run.waitStopped = true;
+          done(stopped);
+        };
         const timer = setTimeout(() => done(`Run ${run.id} is still running after ${seconds} s. Call granny_wait again to keep waiting, or end your turn - the finish message will start a new one.`), seconds * 1000);
         run.waiters.add(done);
         signal?.addEventListener("abort", onAbort, { once: true });
@@ -7162,6 +7202,7 @@ ${run.live.lines(Number.POSITIVE_INFINITY).join(`
     } finally {
       navigator?.dispose();
       shared.navigating = false;
+      swallowStrayEscape(ctx);
     }
   };
   pi.registerCommand?.("granny", {

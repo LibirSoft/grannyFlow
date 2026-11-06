@@ -106,7 +106,8 @@ export function summarize(result: RunResult, worktree: boolean): string {
   if (result.draft) {
     lines.push(`- plan written: ${result.draft.files.join(', ')} - ${result.draft.stages.length} proposed stage(s)${result.draft.questions ? ', open questions for the user' : ''}`)
     if (result.plan) lines.push(line(result.plan, 'plan review'))
-    lines.push('- stopped after planning, nothing was implemented: show the user the plan, the stages and the questions, and wait for their approval')
+    if (result.draft.questions) lines.push(`- open questions: ask the user these with your question tool (\`ask\` on omp, \`question\` on opencode), do not just write them out; without such a tool, ask in one numbered message:\n${result.draft.questions.trim()}`)
+    lines.push('- stopped after planning, nothing was implemented: show the user the plan and the stages, and wait for their approval')
   } else if (result.plan) {
     const stopped = result.plan.outcome === 'round-cap' || result.plan.outcome === 'review-failed'
     lines.unshift(`${line(result.plan, 'plan review')}${stopped ? ' - stopped before stage 1, nothing was implemented' : ''}`)

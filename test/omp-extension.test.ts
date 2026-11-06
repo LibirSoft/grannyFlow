@@ -1298,6 +1298,33 @@ describe('omp extension in the user session (parent mode)', () => {
     expect(waitsJournalled(dir)).toEqual([])
   })
 
+  const pausedNotes = async (stop: boolean) => {
+    behave({ hold: ['implement-one'] })
+    const f = fakePi()
+    const notes: string[] = []
+    const ctx = { ...CTX, hasUI: true, mode: 'tui', ui: { ...fakeUi().ui, notify: (message: string) => void notes.push(message) } }
+    await createGrannyExtension({ killGraceMs: 100, renderEveryMs: 10 })(f.pi as any)
+    const { id, dir } = await start(f, {}, ctx)
+    if (stop) {
+      const esc = new AbortController()
+      esc.abort()
+      await wait(f, { runId: id }, esc.signal)
+    }
+    writeFileSync(join(fake, 'release-implement-one'), '')
+    await finished(dir)
+    await waitFor(() => f.sent.length > 0)
+    return { id, paused: notes.filter(n => n.includes('stays paused after Esc')) }
+  }
+
+  it('says omp may stay paused when Esc stopped a granny_wait and the run ends later', async () => {
+    const { id, paused } = await pausedNotes(true)
+    expect(paused).toEqual([`granny: run ${id} finished. If omp does not go on by itself (it stays paused after Esc), send it a message.`])
+  })
+
+  it('says nothing of a pause when no granny_wait was stopped', async () => {
+    expect((await pausedNotes(false)).paused).toEqual([])
+  })
+
   it('granny_wait stops on abort and leaves the run going', async () => {
     behave({ wait: ['implement-one'] })
     const f = fakePi()
@@ -2014,6 +2041,38 @@ describe('omp extension in the user session (parent mode)', () => {
     expect(printed.options).toEqual({ triggerTurn: false })
     expect(printed.message).toMatchObject({ customType: 'granny-workflow', display: true })
     expect(printed.message.content).toBe(`granny run ${id} - event log per role:\n  implement one (implementer): ${join(dir, 'sessions', fs.readdirSync(join(dir, 'sessions'))[0]!, 'events.jsonl')}`)
+    writeFileSync(join(fake, 'release-implement-one'), '')
+    await finished(dir)
+  })
+
+  it('lets a stray Esc after the navigator closes do nothing for a moment, then lets go', async () => {
+    behave({ hold: ['implement-one'] })
+    const c = commandUi()
+    const listeners = new Set<(data: string) => { consume?: boolean } | undefined>()
+    ;(c.ui as any).onTerminalInput = (handler: (data: string) => { consume?: boolean } | undefined) => {
+      listeners.add(handler)
+      return () => void listeners.delete(handler)
+    }
+    const f = fakePi()
+    await createGrannyExtension({ renderEveryMs: 10 })(f.pi as any)
+    const { dir } = await start(f, {}, c.ctx)
+    await waitFor(() => existsSync(join(dir, 'sessions')))
+    const opened = f.commands.get('granny').handler('', c.ctx)
+    await waitFor(() => c.views.length === 1)
+    expect(listeners.size).toBe(0)
+    press(c.views[0]!.view, '\x1b')
+    await opened
+    expect(listeners.size).toBe(1)
+    const [listener] = [...listeners]
+    expect(listener!('\x1b')).toEqual({ consume: true })
+    expect(listener!('\x1b[27u')).toEqual({ consume: true })
+    expect(listener!('a')).toBeUndefined()
+    await Bun.sleep(300)
+    expect(listener!('\x1b')).toEqual({ consume: true })
+    await Bun.sleep(300)
+    expect(listeners.size).toBe(1)
+    await Bun.sleep(300)
+    expect(listeners.size).toBe(0)
     writeFileSync(join(fake, 'release-implement-one'), '')
     await finished(dir)
   })
