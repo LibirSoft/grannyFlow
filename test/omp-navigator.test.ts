@@ -672,6 +672,41 @@ describe('Navigator', () => {
     s.nav.handleInput(' ')
   }
 
+  it('lists a judge run with the steps review, tag and report, and its agents selectable', () => {
+    const dir = join(tmp, 'runs', 'J1')
+    mkdirSync(dir, { recursive: true })
+    const review = join(dir, 'sessions', '1-review')
+    const tag = join(dir, 'sessions', '2-tag')
+    const outline: RunOutline = { kind: 'judge', branch: 'feat/x', worktree: false, planReview: false, finalReview: false, reviewers: ['terra'], fromStage: 1, stages: [] }
+    writeFileSync(
+      join(dir, 'journal.jsonl'),
+      [
+        { t: iso(0), type: 'phase', title: 'Review' },
+        { t: iso(1), type: 'agent', label: 'review feat/x r1 terra', role: 'reviewer', phase: 'Review', session: review, model: 'openai/gpt-x', cwd: '/repo' },
+        { t: iso(30), type: 'agent-end', label: 'review feat/x r1 terra', session: review, outcome: 'done' },
+        { t: iso(31), type: 'phase', title: 'Judge' },
+        { t: iso(32), type: 'agent', label: 'tag feat/x', role: 'judge', phase: 'Judge', session: tag, model: 'anthropic/haiku', cwd: '/repo' },
+      ]
+        .map(line)
+        .join(''),
+    )
+    const time = { t: T0 }
+    const live = new LiveRun('J1', undefined, { now: () => time.t, renderEveryMs: 1000 })
+    time.t = T0 + 40_000
+    live.start(live.role({ label: 'tag feat/x', role: 'judge', session: tag, phase: 'Judge', cwd: '/repo' }))
+    nav = new Navigator({ runs: () => [{ id: 'J1', dir, status: 'running', live, branch: 'feat/x', outline }], runId: 'J1', tui: { requestRender: () => {}, terminal: { rows: 30 } }, theme: {}, keys: { matches: () => false }, done: () => {}, now: () => time.t, tickMs: 60_000 })
+    const lines = nav.render(160)
+    expect(lines[0]!.trimEnd()).toBe('granny · feat/x · review only · Judge · 40s')
+    expect(lines[1]!.trimEnd()).toBe('Review ✓ › Tag ● › Report')
+    const tree = lines.slice(3, -2).map(l => l.split(' │ ')[0]!.trimEnd())
+    expect(tree[0]).toStartWith('  ▸ ✓ Review')
+    expect(tree[1]).toStartWith('  ▾ ● Tag')
+    expect(tree[2]).toStartWith('›   ● tag')
+    expect(tree[3]).toBe('      Report')
+    expect(lines.join('\n')).not.toContain('Implement')
+    expect(lines.map(l => l.slice(l.indexOf(' │ ') + 3)).join('\n')).toContain('judge · haiku')
+  })
+
   it('keeps no heartbeat in its journal cache, and still reads the entries after them', () => {
     const s = open()
     const cache = () => (s.nav as any).caches.get('R1').entries as Array<{ type: string }>

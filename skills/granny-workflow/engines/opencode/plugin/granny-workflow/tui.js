@@ -360,13 +360,15 @@ function placeOf(label, stages, reviewers, pick = (n) => n[0]) {
   }
   return;
 }
-var FIXED_GROUPS = { plan: "Plan", "plan-review": "Plan review", "final-review": "Final review", "pr-ready": "PR ready" };
+var FIXED_GROUPS = { plan: "Plan", "plan-review": "Plan review", "final-review": "Final review", "pr-ready": "PR ready", review: "Review", tag: "Tag", report: "Report" };
 var PHASE_GROUPS = { Plan: "plan", "Plan review": "plan-review", "Final review": "final-review", "PR ready": "pr-ready" };
+var JUDGE_PHASE_GROUPS = { Review: "review", Judge: "tag", Report: "report" };
+var JUDGE_RANKS = { review: 0, tag: 1, report: 2 };
 var DONE_OUTCOMES = new Set(["clean", "residual-only", "review-skipped"]);
 var MAX_GROUP_LINES = 200;
 var MAX_CHECK_LINES = 50;
 var BUSY = new Set(["running", "waiting"]);
-var rankOf = (key, number) => key === "plan" ? 0 : key === "plan-review" ? 1 : number !== undefined ? 2 + number / 1e6 : key === "final-review" ? 3 : key === "pr-ready" ? 4 : 5;
+var rankOf = (key, number) => JUDGE_RANKS[key] ?? (key === "plan" ? 0 : key === "plan-review" ? 1 : number !== undefined ? 2 + number / 1e6 : key === "final-review" ? 3 : key === "pr-ready" ? 4 : 5);
 var stageNumber = (key) => key.startsWith("stage:") ? Number(key.slice("stage:".length)) : undefined;
 function stageNames(entries, outline) {
   const names = new Map;
@@ -384,6 +386,14 @@ function stageNames(entries, outline) {
   }
   return [...names].map(([number, name]) => ({ number, name })).sort((a, b) => a.number - b.number);
 }
+function judgePlace(agent, reviewers) {
+  const tag = /^tag \S+( retry)?$/.exec(agent.label);
+  const review = /^(review|extract) \S+ (r\d+ .+)$/.exec(agent.label);
+  return {
+    group: JUDGE_PHASE_GROUPS[agent.phase] ?? `other:${agent.phase}`,
+    action: tag ? `tag${tag[1] ?? ""}` : review ? actionOf(review[1], review[2], reviewers) ?? agent.label : agent.label
+  };
+}
 function workGroups(tree, entries, now) {
   const { outline } = tree;
   const stages = stageNames(entries, outline);
@@ -398,6 +408,11 @@ function workGroups(tree, entries, now) {
     }
     return g;
   };
+  const judging = outline?.kind === "judge";
+  const phaseGroups = judging ? JUDGE_PHASE_GROUPS : PHASE_GROUPS;
+  if (judging)
+    for (const key of Object.values(JUDGE_PHASE_GROUPS))
+      ensure(key);
   if (outline?.kind === "plan")
     ensure("plan");
   if (outline?.planReview)
@@ -449,6 +464,7 @@ function workGroups(tree, entries, now) {
   };
   let agentIndex = 0;
   let lastTime = tree.start;
+  let judgePhase;
   for (const entry of entries) {
     const t = (entry.t ? Date.parse(entry.t) : Number.NaN) || lastTime;
     lastTime = Math.max(lastTime, t);
@@ -471,8 +487,9 @@ function workGroups(tree, entries, now) {
       }
       case "phase": {
         const title = String(entry.title ?? "");
-        const key = PHASE_GROUPS[title];
+        const key = phaseGroups[title];
         if (key) {
+          judgePhase = key;
           reached.add(key);
           const g = ensure(key);
           g.start ??= t;
@@ -492,7 +509,7 @@ function workGroups(tree, entries, now) {
         const agent = tree.agents[agentIndex++];
         if (!agent)
           break;
-        const placed = placeOf(agent.label, stages, reviewers, pick);
+        const placed = judging ? judgePlace(agent, reviewers) : placeOf(agent.label, stages, reviewers, pick);
         const run = runningNow();
         const group = placed?.group ?? (run.length === 1 ? `stage:${run[0]}` : `other:${agent.phase}`);
         agent.group = group;
@@ -531,7 +548,7 @@ function workGroups(tree, entries, now) {
       }
       case "log": {
         const message = clean(String(entry.message ?? ""));
-        const found = logGroup(message);
+        const found = judging ? judgePhase ? { group: ensure(judgePhase) } : undefined : logGroup(message);
         if (!found)
           break;
         const { group: g, rest } = found;
@@ -566,7 +583,7 @@ function workGroups(tree, entries, now) {
   const { status } = tree;
   const ended = status === "failed" || status === "cancelled";
   const lastPhase = tree.phases.at(-1)?.title;
-  const currentKey = lastPhase ? PHASE_GROUPS[lastPhase] : undefined;
+  const currentKey = lastPhase ? phaseGroups[lastPhase] : undefined;
   const list = [...groups.values()].sort((a, b) => rankOf(a.key, a.number) - rankOf(b.key, b.number));
   for (const g of list) {
     for (const a of g.agents)
@@ -602,7 +619,7 @@ function workGroups(tree, entries, now) {
           g.end = Math.max(...ends);
       }
     } else {
-      const phases = tree.phases.filter((p) => PHASE_GROUPS[p.title] === g.key);
+      const phases = tree.phases.filter((p) => phaseGroups[p.title] === g.key);
       const was = reached.has(g.key) || g.agents.length > 0;
       if (was) {
         g.start = Math.min(...[...phases.map((p) => p.start), ...starts]);
@@ -621,6 +638,8 @@ function workGroups(tree, entries, now) {
       g.state = "done";
       g.end ??= tree.end;
     }
+    if (judging && g.state === "upcoming" && status !== "running")
+      g.state = "skipped";
     if (g.checks && g.checks.state === "running" && g.state !== "running")
       delete g.checks;
     if (g.checks) {
@@ -658,6 +677,7 @@ function focusStage(tree, selectedKey) {
 var ORDER = { Worktree: 0, Plan: 1, "Plan review": 2, Implement: 3, Checks: 3, Review: 3, "Final review": 4, "PR ready": 5 };
 var REVIEWING = /^(review|judge|fix|extract) /;
 var IMPLEMENTING = /^implement$/;
+var JUDGE_STEPS = [["Review", "Review"], ["Tag", "Judge"], ["Report", "Report"]];
 var FAILED_STEP = { "checks-failed": "Checks", "round-cap": "Review", "review-failed": "Review", "no-changes": "Implement", "gates-red": "Implement" };
 function stepsFor(tree, focus) {
   const { outline, status } = tree;
@@ -668,6 +688,14 @@ function stepsFor(tree, focus) {
     return unique.map((title, i) => ({
       title,
       state: i < unique.length - 1 ? "done" : status === "running" ? "current" : status === "failed" ? "failed" : status === "cancelled" ? "skipped" : "done"
+    }));
+  }
+  const end = status === "failed" ? "failed" : status === "cancelled" ? "skipped" : status === "running" ? "current" : "done";
+  if (outline.kind === "judge") {
+    const last = JUDGE_STEPS.findIndex(([, phase]) => phase === titles.at(-1));
+    return JUDGE_STEPS.map(([title, phase], i) => ({
+      title,
+      state: !seen.has(phase) ? i < last || status !== "running" ? "skipped" : "upcoming" : i < last ? "done" : i === last ? end : "upcoming"
     }));
   }
   const firstStage = outline.stages.find((s) => s.number >= outline.fromStage) ?? outline.stages[0];
@@ -694,7 +722,6 @@ function stepsFor(tree, focus) {
     run.push("PR ready");
   }
   const latest = titles.length ? ORDER[titles.at(-1)] ?? -1 : -1;
-  const end = status === "failed" ? "failed" : status === "cancelled" ? "skipped" : status === "running" ? "current" : "done";
   const stageSteps = run.filter((t) => ORDER[t] === 3);
   const stageStates = stageStepStates(stageSteps, group, latest, end);
   return run.map((title) => {
@@ -1211,6 +1238,8 @@ function headerText(tree, now, focus, width = Number.POSITIVE_INFINITY) {
     middle = [tree.status];
   else if (outline?.kind === "plan")
     middle = ["planning", phase];
+  else if (outline?.kind === "judge")
+    middle = ["review only", phase];
   else if (outline && outline.stages.length && (STAGE_PHASES.has(phase) || tree.running.length)) {
     const total = outline.stages.length;
     const k = tree.running.length > 1 ? undefined : focus ?? tree.running[0] ?? focusStage(tree);
@@ -1475,7 +1504,7 @@ function readOutline(value) {
   if (!isRecord2(value))
     return;
   const { kind, branch, worktree, planReview, finalReview, reviewers, fromStage, stages } = value;
-  if (kind !== "plan" && kind !== "implement")
+  if (kind !== "plan" && kind !== "implement" && kind !== "judge")
     return;
   if (typeof branch !== "string" || typeof worktree !== "boolean" || typeof planReview !== "boolean" || typeof finalReview !== "boolean")
     return;

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'bun:test'
 import { clock, fit, pad, shortArg, shortModel } from '../src/adapters/runview/format'
-import { readOutline, runOutline } from '../src/adapters/runview/outline'
+import { judgeOutline, readOutline, runOutline } from '../src/adapters/runview/outline'
 import { resolveConfig } from '../src/core/config'
 import type { RunInput } from '../src/core/engine'
 import { buildRunTree, type JournalEntry, type LiveView, phaseRowText as rowText, phaseRows as visibleRows } from '../src/adapters/runview/tree'
@@ -139,6 +139,12 @@ describe('readOutline', () => {
 
   it('reads back what runOutline wrote', () => {
     expect(readOutline(JSON.parse(JSON.stringify(good)))).toEqual(good)
+  })
+
+  it('reads back what judgeOutline wrote', () => {
+    const judge = judgeOutline('feat/x', resolveConfig([]))
+    expect(judge.kind).toBe('judge')
+    expect(readOutline(JSON.parse(JSON.stringify(judge)))).toEqual(judge)
   })
 
   it('rejects anything malformed', () => {

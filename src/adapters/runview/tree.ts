@@ -92,7 +92,7 @@ export interface ChecksNode {
 }
 
 export interface WorkGroup {
-  /** `plan`, `plan-review`, `stage:<n>`, `final-review`, `pr-ready` or `other:<phase>`. */
+  /** `plan`, `plan-review`, `stage:<n>`, `final-review`, `pr-ready`, `other:<phase>`; in a judge run `review`, `tag` or `report`. */
   key: string
   title: string
   number?: number
@@ -466,15 +466,17 @@ export function placeOf(label: string, stages: readonly StageName[], reviewers?:
   return undefined
 }
 
-const FIXED_GROUPS: Record<string, string> = { plan: 'Plan', 'plan-review': 'Plan review', 'final-review': 'Final review', 'pr-ready': 'PR ready' }
+const FIXED_GROUPS: Record<string, string> = { plan: 'Plan', 'plan-review': 'Plan review', 'final-review': 'Final review', 'pr-ready': 'PR ready', review: 'Review', tag: 'Tag', report: 'Report' }
 const PHASE_GROUPS: Record<string, string> = { Plan: 'plan', 'Plan review': 'plan-review', 'Final review': 'final-review', 'PR ready': 'pr-ready' }
+const JUDGE_PHASE_GROUPS: Record<string, string> = { Review: 'review', Judge: 'tag', Report: 'report' }
+const JUDGE_RANKS: Record<string, number> = { review: 0, tag: 1, report: 2 }
 const DONE_OUTCOMES = new Set(['clean', 'residual-only', 'review-skipped'])
 const MAX_GROUP_LINES = 200
 const MAX_CHECK_LINES = 50
 const BUSY = new Set<AgentState>(['running', 'waiting'])
 
 const rankOf = (key: string, number?: number) =>
-  key === 'plan' ? 0 : key === 'plan-review' ? 1 : number !== undefined ? 2 + number / 1e6 : key === 'final-review' ? 3 : key === 'pr-ready' ? 4 : 5
+  JUDGE_RANKS[key] ?? (key === 'plan' ? 0 : key === 'plan-review' ? 1 : number !== undefined ? 2 + number / 1e6 : key === 'final-review' ? 3 : key === 'pr-ready' ? 4 : 5)
 
 const stageNumber = (key: string) => (key.startsWith('stage:') ? Number(key.slice('stage:'.length)) : undefined)
 
@@ -490,6 +492,16 @@ function stageNames(entries: readonly JournalEntry[], outline?: RunOutline): Sta
     }
   }
   return [...names].map(([number, name]) => ({ number, name })).sort((a, b) => a.number - b.number)
+}
+
+/** A judge run's agent: its group is its phase's, its action the label without the branch. */
+function judgePlace(agent: AgentNode, reviewers: number | undefined): Placement {
+  const tag = /^tag \S+( retry)?$/.exec(agent.label)
+  const review = /^(review|extract) \S+ (r\d+ .+)$/.exec(agent.label)
+  return {
+    group: JUDGE_PHASE_GROUPS[agent.phase] ?? `other:${agent.phase}`,
+    action: tag ? `tag${tag[1] ?? ''}` : review ? (actionOf(review[1] as Verb, review[2]!, reviewers) ?? agent.label) : agent.label,
+  }
 }
 
 interface StageMark {
@@ -516,6 +528,9 @@ function workGroups(tree: RunTree, entries: readonly JournalEntry[], now: number
     }
     return g
   }
+  const judging = outline?.kind === 'judge'
+  const phaseGroups = judging ? JUDGE_PHASE_GROUPS : PHASE_GROUPS
+  if (judging) for (const key of Object.values(JUDGE_PHASE_GROUPS)) ensure(key)
   if (outline?.kind === 'plan') ensure('plan')
   if (outline?.planReview) ensure('plan-review')
   for (const st of stages) ensure(`stage:${st.number}`, st.number)
@@ -556,6 +571,7 @@ function workGroups(tree: RunTree, entries: readonly JournalEntry[], now: number
   }
   let agentIndex = 0
   let lastTime = tree.start
+  let judgePhase: string | undefined
   for (const entry of entries) {
     const t = (entry.t ? Date.parse(entry.t) : Number.NaN) || lastTime
     lastTime = Math.max(lastTime, t)
@@ -575,8 +591,9 @@ function workGroups(tree: RunTree, entries: readonly JournalEntry[], now: number
       }
       case 'phase': {
         const title = String(entry.title ?? '')
-        const key = PHASE_GROUPS[title]
+        const key = phaseGroups[title]
         if (key) {
+          judgePhase = key
           reached.add(key)
           const g = ensure(key)
           g.start ??= t
@@ -595,7 +612,7 @@ function workGroups(tree: RunTree, entries: readonly JournalEntry[], now: number
       case 'agent': {
         const agent = tree.agents[agentIndex++]
         if (!agent) break
-        const placed = placeOf(agent.label, stages, reviewers, pick)
+        const placed = judging ? judgePlace(agent, reviewers) : placeOf(agent.label, stages, reviewers, pick)
         const run = runningNow()
         const group = placed?.group ?? (run.length === 1 ? `stage:${run[0]}` : `other:${agent.phase}`)
         agent.group = group
@@ -629,7 +646,7 @@ function workGroups(tree: RunTree, entries: readonly JournalEntry[], now: number
       }
       case 'log': {
         const message = clean(String(entry.message ?? ''))
-        const found = logGroup(message)
+        const found = judging ? (judgePhase ? { group: ensure(judgePhase) } : undefined) : logGroup(message)
         if (!found) break
         const { group: g, rest } = found
         push(g, t, message)
@@ -662,7 +679,7 @@ function workGroups(tree: RunTree, entries: readonly JournalEntry[], now: number
   const { status } = tree
   const ended = status === 'failed' || status === 'cancelled'
   const lastPhase = tree.phases.at(-1)?.title
-  const currentKey = lastPhase ? PHASE_GROUPS[lastPhase] : undefined
+  const currentKey = lastPhase ? phaseGroups[lastPhase] : undefined
   const list = [...groups.values()].sort((a, b) => rankOf(a.key, a.number) - rankOf(b.key, b.number))
   for (const g of list) {
     for (const a of g.agents) if (a.state !== 'running' && a.state !== 'waiting') push(g, a.end, `■ ${a.action} ${a.state}${a.end === undefined ? '' : ` ${duration(a.end - a.start)}`}`)
@@ -694,7 +711,7 @@ function workGroups(tree: RunTree, entries: readonly JournalEntry[], now: number
         if (!busy && ends.length) g.end = Math.max(...ends)
       }
     } else {
-      const phases = tree.phases.filter(p => PHASE_GROUPS[p.title] === g.key)
+      const phases = tree.phases.filter(p => phaseGroups[p.title] === g.key)
       const was = reached.has(g.key) || g.agents.length > 0
       if (was) {
         g.start = Math.min(...[...phases.map(p => p.start), ...starts])
@@ -712,6 +729,7 @@ function workGroups(tree: RunTree, entries: readonly JournalEntry[], now: number
       g.state = 'done'
       g.end ??= tree.end
     }
+    if (judging && g.state === 'upcoming' && status !== 'running') g.state = 'skipped'
     if (g.checks && g.checks.state === 'running' && g.state !== 'running') delete g.checks
     if (g.checks) {
       const t = g.checks.t
@@ -753,6 +771,7 @@ export function focusStage(tree: RunTree, selectedKey?: string): number | undefi
 const ORDER: Record<string, number> = { Worktree: 0, Plan: 1, 'Plan review': 2, Implement: 3, Checks: 3, Review: 3, 'Final review': 4, 'PR ready': 5 }
 const REVIEWING = /^(review|judge|fix|extract) /
 const IMPLEMENTING = /^implement$/
+const JUDGE_STEPS: Array<[title: string, phase: string]> = [['Review', 'Review'], ['Tag', 'Judge'], ['Report', 'Report']]
 const FAILED_STEP: Record<string, string> = { 'checks-failed': 'Checks', 'round-cap': 'Review', 'review-failed': 'Review', 'no-changes': 'Implement', 'gates-red': 'Implement' }
 
 /** The steps of the run in order with their state, the stage steps for stage `focus`. */
@@ -765,6 +784,14 @@ export function stepsFor(tree: RunTree, focus?: number): Step[] {
     return unique.map((title, i) => ({
       title,
       state: i < unique.length - 1 ? 'done' : status === 'running' ? 'current' : status === 'failed' ? 'failed' : status === 'cancelled' ? 'skipped' : 'done',
+    }))
+  }
+  const end: StepState = status === 'failed' ? 'failed' : status === 'cancelled' ? 'skipped' : status === 'running' ? 'current' : 'done'
+  if (outline.kind === 'judge') {
+    const last = JUDGE_STEPS.findIndex(([, phase]) => phase === titles.at(-1))
+    return JUDGE_STEPS.map(([title, phase], i) => ({
+      title,
+      state: !seen.has(phase) ? (i < last || status !== 'running' ? 'skipped' : 'upcoming') : i < last ? 'done' : i === last ? end : 'upcoming',
     }))
   }
   const firstStage = outline.stages.find(s => s.number >= outline.fromStage) ?? outline.stages[0]
@@ -784,7 +811,6 @@ export function stepsFor(tree: RunTree, focus?: number): Step[] {
     run.push('PR ready')
   }
   const latest = titles.length ? ORDER[titles.at(-1)!] ?? -1 : -1
-  const end: StepState = status === 'failed' ? 'failed' : status === 'cancelled' ? 'skipped' : status === 'running' ? 'current' : 'done'
   const stageSteps = run.filter(t => ORDER[t] === 3)
   const stageStates = stageStepStates(stageSteps, group, latest, end)
   return run.map(title => {

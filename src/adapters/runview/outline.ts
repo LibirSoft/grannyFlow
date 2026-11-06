@@ -13,7 +13,7 @@ export interface StageOutline {
 }
 
 export interface RunOutline {
-  kind: 'plan' | 'implement'
+  kind: 'plan' | 'implement' | 'judge'
   branch: string
   worktree: boolean
   planReview: boolean
@@ -47,6 +47,11 @@ export function runOutline(input: RunInput, config: GrannyConfig): RunOutline {
   }
 }
 
+/** A review-only run: no stages and no worktree, on what the checkout has checked out. */
+export function judgeOutline(branch: string, config: GrannyConfig): RunOutline {
+  return { kind: 'judge', branch: clean(branch), worktree: false, planReview: false, finalReview: false, reviewers: config.reviewers.map(r => clean(r.name)), fromStage: 1, stages: [] }
+}
+
 const isRecord = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v)
 const isCount = (v: unknown): v is number => typeof v === 'number' && Number.isInteger(v) && v >= 1
 
@@ -60,7 +65,7 @@ function readStage(v: unknown): StageOutline | undefined {
 export function readOutline(value: unknown): RunOutline | undefined {
   if (!isRecord(value)) return undefined
   const { kind, branch, worktree, planReview, finalReview, reviewers, fromStage, stages } = value
-  if (kind !== 'plan' && kind !== 'implement') return undefined
+  if (kind !== 'plan' && kind !== 'implement' && kind !== 'judge') return undefined
   if (typeof branch !== 'string' || typeof worktree !== 'boolean' || typeof planReview !== 'boolean' || typeof finalReview !== 'boolean') return undefined
   if (!Array.isArray(reviewers) || !reviewers.every(r => typeof r === 'string') || !isCount(fromStage) || !Array.isArray(stages)) return undefined
   const read = stages.map(readStage)

@@ -699,6 +699,35 @@ describe('opencode TUI plugin: the /granny navigator', () => {
     expect(() => v.key('escape,q')).not.toThrow()
   })
 
+  it('lists a judge run with the steps review, tag and report, and its agents selectable', () => {
+    const outline = { kind: 'judge', branch: 'feat/x', worktree: false, planReview: false, finalReview: false, reviewers: ['terra'], fromStage: 1, stages: [] }
+    status({ outline })
+    journal(
+      line(0, 'phase', { title: 'Review' }),
+      line(1 * S, 'agent', { label: 'review feat/x r1 terra', role: 'reviewer', session: 'ses_r', model: kimi, phase: 'Review', linked: true }),
+      line(30 * S, 'agent-end', { label: 'review feat/x r1 terra', session: 'ses_r', outcome: 'done' }),
+      line(31 * S, 'phase', { title: 'Judge' }),
+      line(32 * S, 'agent', { label: 'tag feat/x', role: 'judge', session: 'ses_t', model: kimi, phase: 'Judge', linked: true }),
+    )
+    const fr = fakeRuntime({ width: 160, height: 30 })
+    const m = mount({ sessions: [{ id: 'parent', title: 'main' }, role('ses_r', { label: 'review feat/x r1 terra', role: 'reviewer', phase: 'Review' }), role('ses_t', { label: 'tag feat/x', role: 'judge', phase: 'Judge' })], running: ['ses_t'] }, fr)
+    m.now = BASE + 40 * S
+    m.app()
+    m.timers.tick()
+    m.fc.command('granny.open').run('')
+    const v = view(m, (m.fc.navigations.at(-1) as { data: unknown }).data)
+    const lines = v.lines().map(l => l.trimEnd())
+    expect(lines[0]).toBe('granny · feat/x · review only · Judge · 40s')
+    expect(lines[1]).toBe('Review ✓ › Tag ● › Report')
+    expect(v.selected()).toMatch(/^› +● tag /)
+    const left = v.lines().slice(3, -2).map(l => l.split(' │ ')[0]!.trimEnd())
+    expect(left[0]).toStartWith('  ▸ ✓ Review')
+    expect(left[1]).toStartWith('  ▾ ● Tag')
+    expect(left[3]).toBe('      Report')
+    expect(v.text()).not.toContain('Implement')
+    expect(v.text()).toContain('judge · kimi-k3.1-pro')
+  })
+
   describe('a staged run with live activity', () => {
     const S1 = 'Server pause domain, lifecycle, and real-socket proof'
     const S2 = 'Client pause UI and e2e'

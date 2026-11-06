@@ -27,6 +27,7 @@ export function headerText(tree: RunTree, now: number, focus?: number, width = N
   let middle: string[]
   if (tree.status !== 'running') middle = [tree.status]
   else if (outline?.kind === 'plan') middle = ['planning', phase]
+  else if (outline?.kind === 'judge') middle = ['review only', phase]
   else if (outline && outline.stages.length && (STAGE_PHASES.has(phase) || tree.running.length)) {
     const total = outline.stages.length
     const k = tree.running.length > 1 ? undefined : (focus ?? tree.running[0] ?? focusStage(tree))
