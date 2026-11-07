@@ -6,7 +6,7 @@ import { join } from 'node:path'
 import { buildClaudeCode } from '../scripts/build'
 import { GrannyCancelled } from '../src/core/cancel'
 import { judgeConfigGaps } from '../src/core/config'
-import { runJudge, type JudgeInput } from '../src/core/engine'
+import { runGranny, runJudge, type JudgeInput } from '../src/core/engine'
 import { bucketOf, renderReport, utf8Length, type ReportMeta } from '../src/core/report'
 import { SCHEMAS } from '../src/core/schemas'
 import { heredocWriteScript } from '../src/core/shell'
@@ -383,7 +383,7 @@ describe('runJudge: what is reviewed', () => {
     expect(rv.prompt).toContain('look at the auth')
     expect(rv.phase).toBe('Review')
     expect(rv.cwd).toBe(REPO)
-    expect(f.phases).toEqual(['Review', 'Report'])
+    expect(f.phases).toEqual(['Review', 'Save report'])
   })
 
   it('names the short SHA on a detached HEAD, for the report and its file', async () => {
@@ -500,7 +500,7 @@ describe('runJudge: hands off', () => {
     const f = judgeHost({ findings: { kimi: [raw('F1', 'P0'), raw('F2', 'P3')] }, scores: [{ 'kimi-F1': classes('major'), 'kimi-F2': classes('minor') }] })
     await runJudge(f.host, { repo: REPO, config: [ONE, { roles: { judge: { model: 'j', effort: 'high' } } }] })
     const j = f.calls.find(c => c.kind === 'judge')!
-    expect(j).toMatchObject({ role: 'judge', label: 'tag feat/x', phase: 'Judge', access: 'read-only', model: 'j', effort: 'high', cwd: REPO })
+    expect(j).toMatchObject({ role: 'judge', label: 'tag feat/x', phase: 'Tagging', access: 'read-only', model: 'j', effort: 'high', cwd: REPO })
     expect(j.schema).toBe(SCHEMAS.judge)
     expect(j.prompt).toContain('"id":"kimi-F1"')
     expect(j.prompt).toContain('"id":"kimi-F2"')
@@ -510,7 +510,7 @@ describe('runJudge: hands off', () => {
     expect(j.prompt).not.toContain('EARLIER DECISIONS')
     expect(j.prompt).not.toContain('go to the implementer')
     expect(j.prompt).not.toContain('TASK')
-    expect(f.phases).toEqual(['Review', 'Judge', 'Report'])
+    expect(f.phases).toEqual(['Review', 'Tagging', 'Save report'])
   })
 
   it('starts no judge on a clean review, and writes the same file with every heading None.', async () => {
@@ -688,7 +688,7 @@ describe('runJudge: writing the report', () => {
     const write = f.requests.find(c => c.label === 'write report')!
     expect(write.prompt).toContain('the one file this run writes')
     expect(write.prompt).toContain('line breaks')
-    expect(write.phase).toBe('Report')
+    expect(write.phase).toBe('Save report')
   })
 })
 
@@ -863,6 +863,23 @@ describe('heredocWriteScript', () => {
   })
 })
 
+describe('a normal run', () => {
+  it('keeps the judge in the review it serves, and enters no phase of a judge run', async () => {
+    const f = fakeHost({
+      scores: [{ 'kimi-F1': 90 }, { 'kimi-F1': 90 }],
+      override: req => (req.label === 'review one r1 kimi' || req.label === 'review final review r1 kimi' ? { findings: [raw('F1', 'P2')] } : undefined),
+    })
+    await runGranny(f.host, { repo: REPO, branch: 'feat/x', base: 'main', stages: [{ name: 'one', task: 'WP-01' }, { name: 'two', task: 'WP-02' }], config: ONE })
+    const phaseOf = (label: string) => f.calls.find(c => c.label === label)!.phase
+    expect(phaseOf('review one r1 kimi')).toBe('Review')
+    expect(phaseOf('judge one r1')).toBe('Review')
+    expect(phaseOf('review final review r1 kimi')).toBe('Final review')
+    expect(phaseOf('judge final review r1')).toBe('Final review')
+    expect(f.phases).toContain('Final review')
+    for (const phase of ['Tagging', 'Save report', 'Judge', 'Report']) expect(f.phases).not.toContain(phase)
+  })
+})
+
 describe('Claude Code entry', () => {
   const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor
   const load = (script: string) => new AsyncFunction('agent', 'log', 'phase', 'args', script.replace(/^export const meta/, 'const meta'))
@@ -893,7 +910,7 @@ describe('Claude Code entry', () => {
       return say('')
     }
     const result = await load(script)(agent, () => {}, (t: string) => phases.push(t), { judge: true, repo: '/r', config: [ONE] })
-    expect(phases).toEqual(['Review', 'Judge', 'Report'])
+    expect(phases).toEqual(['Review', 'Tagging', 'Save report'])
     expect(result).toMatchObject({ outcome: 'reviewed', written: true, demoted: ['kimi-F1'], counts: { P1: 1 } })
     expect(agents.some(a => /worktree/.test(a.opts.label))).toBe(false)
     expect(script).not.toContain('TextEncoder')
@@ -913,11 +930,10 @@ describe('Claude Code entry', () => {
     await expect(run).rejects.toThrow('Invalid granny input')
   })
 
-  it('names the judge phases and mode in the meta', async () => {
+  it('lists a normal run\'s phases up to PR ready in the meta, then the two only a judge run has, and names the mode', async () => {
     const script = await buildClaudeCode()
     const meta = script.slice(0, script.indexOf('\n}\n') + 2)
-    expect(meta).toContain("{ title: 'Judge' }")
-    expect(meta).toContain("{ title: 'Report' }")
+    expect([...meta.matchAll(/\{ title: '([^']+)' \}/g)].map(m => m[1])).toEqual(['Worktree', 'Plan', 'Plan review', 'Implement', 'Checks', 'Review', 'Final review', 'PR ready', 'Tagging', 'Save report'])
     expect(meta).toMatch(/description: '.*review-only/)
     expect(meta).toMatch(/whenToUse: '.*judge: true/)
   })

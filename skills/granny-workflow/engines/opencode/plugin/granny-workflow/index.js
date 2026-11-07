@@ -1377,8 +1377,8 @@ var DRAFT_PHASE = "Plan";
 var FINAL_REVIEW_PHASE = "Final review";
 var CHECKS_PHASE = "Checks";
 var REVIEW_PHASE = "Review";
-var JUDGE_PHASE = "Judge";
-var REPORT_PHASE = "Report";
+var TAGGING_PHASE = "Tagging";
+var REPORT_PHASE = "Save report";
 var TIMEOUT_PROBE = "if command -v timeout >/dev/null; then echo timeout; elif command -v gtimeout >/dev/null; then echo gtimeout; else exit 1; fi";
 var TIMEOUT_MISSING = /(^|[\s:])g?timeout: (command )?not found|command not found: g?timeout$/m;
 var EXIT_MARK = /\[granny\] exit=(\d+)[ \t]*(?:\r?\n|$)/g;
@@ -2646,7 +2646,7 @@ ${notes}`);
     host.log(`${r.name} did not run, also on a retry - going on without it: ${r.note}`);
   const found = results.filter((r) => r.ran).flatMap((r) => r.findings);
   const tag = async () => {
-    host.phase(JUDGE_PHASE);
+    host.phase(TAGGING_PHASE);
     const ids = new Set(found.map((f) => f.id));
     const label = `tag ${branch}`;
     const { per, decided } = await judgeAnswers({
@@ -2656,7 +2656,7 @@ ${notes}`);
       ids,
       ask: async (l, text) => {
         try {
-          return await call("judge", "judge", l, JUDGE_PHASE, text, "read-only", config.roles.judge, repo);
+          return await call("judge", "judge", l, TAGGING_PHASE, text, "read-only", config.roles.judge, repo);
         } catch (e) {
           if (isCancelled(e))
             throw e;
