@@ -231,7 +231,7 @@ describe('the levels', () => {
     const plan = buildRunTree(RUN, [j(0, 'phase', { title: 'Plan' }), agent(1, 'plan', 'planner')], live('plan'), NOW, new Map(), planning)
     expect(row(plan, 'Plan')).toBe('› ● Plan  1 agent · 1 running  1m40s')
     const judge: RunOutline = { ...planning, kind: 'judge' }
-    const tag = buildRunTree(RUN, [j(0, 'phase', { title: 'Judge' }), { ...agent(1, 'tag feat/x', 'judge'), phase: 'Judge' }], live('tag feat/x'), NOW, new Map(), judge)
+    const tag = buildRunTree(RUN, [j(0, 'phase', { title: 'Tagging' }), { ...agent(1, 'tag feat/x', 'judge'), phase: 'Tagging' }], live('tag feat/x'), NOW, new Map(), judge)
     expect(row(tag, 'Tag')).toBe('› ● Tag  1 agent · 1 running  1m40s')
     const building = [j(1, 'stage', { number: 1, name: 'Server', event: 'start' }), agent(1, 'implement Server', 'implementer')]
     expect(row(buildRunTree(RUN, building, live('implement Server'), NOW, new Map(), OUTLINE), '1 Server')).toBe('› ● 1 Server  implement  1 agent · 1 running  1m39s')

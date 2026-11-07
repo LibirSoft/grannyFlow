@@ -440,12 +440,12 @@ describe('a judge run', () => {
   const outline = judgeOutline('feat/pause', resolveConfig([{ reviewers: [{ name: 'a', engine: 'agent' }, { name: 'b', engine: 'agent' }] }]))
   const running = { ...RUN, status: 'running' }
 
-  function reviewed() {
+  function reviewed(tagging = 'Tagging') {
     n = 0
     const ra = agent(1, 'review feat/pause r1 a', 'reviewer', 'Review')
     const rb = agent(1, 'review feat/pause r1 b', 'reviewer', 'Review')
     const extract = agent(20, 'extract feat/pause r1 b', 'granny', 'Review')
-    const tag = agent(40, 'tag feat/pause', 'judge', 'Judge')
+    const tag = agent(40, 'tag feat/pause', 'judge', tagging)
     return { ra, rb, extract, tag }
   }
 
@@ -458,14 +458,17 @@ describe('a judge run', () => {
     expect(tree.groups.map(g => [g.title, g.state])).toEqual([['Review', 'upcoming'], ['Tag', 'upcoming'], ['Report', 'upcoming']])
   })
 
-  it('moves through the steps, with the agents under their group by their short action', () => {
-    const { ra, rb, extract, tag } = reviewed()
+  it.each([
+    ['its phases', 'Tagging', 'Save report'],
+    ['the phases of a journal from before their rename', 'Judge', 'Report'],
+  ])('moves through the steps under %s, with the agents under their group by their short action', (_, tagging, saving) => {
+    const { ra, rb, extract, tag } = reviewed(tagging)
     const review = [j(0, 'phase', { title: 'Review' }), ra.entry, rb.entry, ended(10, ra), ended(20, rb), extract.entry]
     const atReview = buildRunTree(running, review, new Map([[extract.session, { active: true }]]), NOW, new Map(), outline)
     expect(atReview.groups[0]).toMatchObject({ key: 'review', state: 'running' })
     expect(atReview.groups[0]!.agents.map(a => a.action)).toEqual(['review r1 a', 'review r1 b', 'extract r1 b'])
 
-    const judging = [...review, ended(30, extract), j(39, 'phase', { title: 'Judge' }), tag.entry]
+    const judging = [...review, ended(30, extract), j(39, 'phase', { title: tagging }), tag.entry]
     const atTag = buildRunTree(running, judging, new Map([[tag.session, { active: true }]]), NOW, new Map(), outline)
     expect(atTag.groups.map(g => [g.title, g.state, g.agents.map(a => a.action)])).toEqual([
       ['Review', 'done', ['review r1 a', 'review r1 b', 'extract r1 b']],
@@ -473,7 +476,7 @@ describe('a judge run', () => {
       ['Report', 'upcoming', []],
     ])
 
-    const done = [...judging, ended(50, tag), j(51, 'phase', { title: 'Report' }), j(52, 'command', { command: 'mkdir -p .granny/reviews' }), j(53, 'log', { message: 'report written: /r/.granny/reviews/x.md' })]
+    const done = [...judging, ended(50, tag), j(51, 'phase', { title: saving }), j(52, 'command', { command: 'mkdir -p .granny/reviews' }), j(53, 'log', { message: 'report written: /r/.granny/reviews/x.md' })]
     const atReport = buildRunTree(running, done, new Map(), NOW, new Map(), outline)
     expect(atReport.groups[2]).toMatchObject({ key: 'report', state: 'running' })
     expect(atReport.groups[2]!.lines.at(-1)).toEndWith('report written: /r/.granny/reviews/x.md')
@@ -485,15 +488,15 @@ describe('a judge run', () => {
   it('names a retried reviewer and a retried tagging', () => {
     n = 0
     const again = agent(1, 'review feat/pause r1 a #2', 'reviewer', 'Review')
-    const tag = agent(2, 'tag feat/pause retry', 'judge', 'Judge')
-    const tree = buildRunTree(running, [j(0, 'phase', { title: 'Review' }), again.entry, j(2, 'phase', { title: 'Judge' }), tag.entry], new Map(), NOW, new Map(), outline)
+    const tag = agent(2, 'tag feat/pause retry', 'judge', 'Tagging')
+    const tree = buildRunTree(running, [j(0, 'phase', { title: 'Review' }), again.entry, j(2, 'phase', { title: 'Tagging' }), tag.entry], new Map(), NOW, new Map(), outline)
     expect(tree.groups.map(g => g.agents.map(a => a.action))).toEqual([['review r1 a #2'], ['tag retry'], []])
   })
 
   it('skips the tagging of a review without findings, and everything after a review with no changes or no reviewer', () => {
     n = 0
     const ra = agent(1, 'review feat/pause r1 a', 'reviewer', 'Review')
-    const clean = [j(0, 'phase', { title: 'Review' }), ra.entry, ended(5, ra), j(6, 'phase', { title: 'Report' })]
+    const clean = [j(0, 'phase', { title: 'Review' }), ra.entry, ended(5, ra), j(6, 'phase', { title: 'Save report' })]
     const noFindings = buildRunTree({ ...RUN, status: 'done', endedAt: BASE + 7 * S }, clean, new Map(), NOW, new Map(), outline)
     expect(noFindings.groups.map(g => g.state)).toEqual(['done', 'skipped', 'done'])
 
@@ -503,7 +506,7 @@ describe('a judge run', () => {
 
   it('marks where a cancelled or failed run stopped', () => {
     const { ra, tag } = reviewed()
-    const entries = [j(0, 'phase', { title: 'Review' }), ra.entry, ended(5, ra), j(6, 'phase', { title: 'Judge' }), tag.entry]
+    const entries = [j(0, 'phase', { title: 'Review' }), ra.entry, ended(5, ra), j(6, 'phase', { title: 'Tagging' }), tag.entry]
     const cancelled = buildRunTree({ ...RUN, status: 'cancelled', endedAt: BASE + 7 * S }, entries, new Map(), NOW, new Map(), outline)
     expect(cancelled.groups.map(g => g.state)).toEqual(['done', 'cancelled', 'skipped'])
     const failed = buildRunTree({ ...RUN, status: 'failed', endedAt: BASE + 7 * S }, entries, new Map(), NOW, new Map(), outline)
