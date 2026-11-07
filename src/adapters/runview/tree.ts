@@ -494,7 +494,8 @@ export function placeOf(label: string, stages: readonly StageName[], reviewers?:
 
 const FIXED_GROUPS: Record<string, string> = { plan: 'Plan', 'plan-review': 'Plan review', 'final-review': 'Final review', 'pr-ready': 'PR ready', review: 'Review', tag: 'Tag', report: 'Report' }
 const PHASE_GROUPS: Record<string, string> = { Plan: 'plan', 'Plan review': 'plan-review', 'Final review': 'final-review', 'PR ready': 'pr-ready' }
-const JUDGE_PHASE_GROUPS: Record<string, string> = { Review: 'review', Judge: 'tag', Report: 'report' }
+// `Judge` and `Report` are what journals written before the rename to `Tagging` and `Save report` carry.
+const JUDGE_PHASE_GROUPS: Record<string, string> = { Review: 'review', Tagging: 'tag', 'Save report': 'report', Judge: 'tag', Report: 'report' }
 const JUDGE_RANKS: Record<string, number> = { review: 0, tag: 1, report: 2 }
 const DONE_OUTCOMES = new Set(['clean', 'residual-only', 'review-skipped'])
 const MAX_GROUP_LINES = 200

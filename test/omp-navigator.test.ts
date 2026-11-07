@@ -679,8 +679,8 @@ describe('Navigator', () => {
         { t: iso(0), type: 'phase', title: 'Review' },
         { t: iso(1), type: 'agent', label: 'review feat/x r1 terra', role: 'reviewer', phase: 'Review', session: review, model: 'openai/gpt-x', cwd: '/repo' },
         { t: iso(30), type: 'agent-end', label: 'review feat/x r1 terra', session: review, outcome: 'done' },
-        { t: iso(31), type: 'phase', title: 'Judge' },
-        { t: iso(32), type: 'agent', label: 'tag feat/x', role: 'judge', phase: 'Judge', session: tag, model: 'anthropic/haiku', cwd: '/repo' },
+        { t: iso(31), type: 'phase', title: 'Tagging' },
+        { t: iso(32), type: 'agent', label: 'tag feat/x', role: 'judge', phase: 'Tagging', session: tag, model: 'anthropic/haiku', cwd: '/repo' },
       ]
         .map(line)
         .join(''),
@@ -688,7 +688,7 @@ describe('Navigator', () => {
     const time = { t: T0 }
     const live = new LiveRun('J1', undefined, { now: () => time.t, renderEveryMs: 1000 })
     time.t = T0 + 40_000
-    live.start(live.role({ label: 'tag feat/x', role: 'judge', session: tag, phase: 'Judge', cwd: '/repo' }))
+    live.start(live.role({ label: 'tag feat/x', role: 'judge', session: tag, phase: 'Tagging', cwd: '/repo' }))
     nav = new Navigator({ runs: () => [{ id: 'J1', dir, status: 'running', live, branch: 'feat/x', outline }], runId: 'J1', tui: { requestRender: () => {}, terminal: { rows: 30 } }, theme: {}, keys: { matches: () => false }, done: () => {}, now: () => time.t, tickMs: 60_000 })
     const lines = nav.render(160).map(l => l.trimEnd())
     expect(lines[0]).toBe('granny  feat/x  ● running · 40s')

@@ -9,8 +9,9 @@ export const meta = {
     { title: 'Implement' },
     { title: 'Checks' },
     { title: 'Review' },
-    { title: 'Judge' },
-    { title: 'Report' },
+    { title: 'Final review' },
     { title: 'PR ready' },
+    { title: 'Tagging' },
+    { title: 'Save report' },
   ],
 }

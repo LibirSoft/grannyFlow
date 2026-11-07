@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- Claude Code: a normal run's phase list has no empty "Judge" row, and Final review is listed in order, before PR ready. The last two phases of a `granny judge` run are "Tagging" and "Save report", listed after PR ready.
+
 ## 1.6.0
 
 ### Added

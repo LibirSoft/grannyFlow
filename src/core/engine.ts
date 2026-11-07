@@ -77,8 +77,8 @@ const DRAFT_PHASE = 'Plan'
 const FINAL_REVIEW_PHASE = 'Final review'
 const CHECKS_PHASE = 'Checks'
 const REVIEW_PHASE = 'Review'
-const JUDGE_PHASE = 'Judge'
-const REPORT_PHASE = 'Report'
+const TAGGING_PHASE = 'Tagging'
+const REPORT_PHASE = 'Save report'
 const TIMEOUT_PROBE = 'if command -v timeout >/dev/null; then echo timeout; elif command -v gtimeout >/dev/null; then echo gtimeout; else exit 1; fi'
 const TIMEOUT_MISSING = /(^|[\s:])g?timeout: (command )?not found|command not found: g?timeout$/m
 
@@ -1394,7 +1394,7 @@ export async function runJudge(host: Host, input: JudgeInput): Promise<JudgeResu
   const found = results.filter(r => r.ran).flatMap(r => r.findings)
 
   const tag = async (): Promise<Finding[]> => {
-    host.phase(JUDGE_PHASE)
+    host.phase(TAGGING_PHASE)
     const ids = new Set(found.map(f => f.id))
     const label = `tag ${branch}`
     const { per, decided } = await judgeAnswers({
@@ -1404,7 +1404,7 @@ export async function runJudge(host: Host, input: JudgeInput): Promise<JudgeResu
       ids,
       ask: async (l, text) => {
         try {
-          return await call('judge', 'judge', l, JUDGE_PHASE, text, 'read-only', config.roles.judge, repo)
+          return await call('judge', 'judge', l, TAGGING_PHASE, text, 'read-only', config.roles.judge, repo)
         } catch (e) {
           if (isCancelled(e)) throw e
           host.log(`${l}: the judge call failed: ${String((e as Error)?.message ?? e)}`)

@@ -727,7 +727,7 @@ describe('opencode TUI plugin: the /granny navigator', () => {
     expect(() => v.key('escape,q')).not.toThrow()
   })
 
-  it('lists a judge run with the steps review, tag and report, and its agents selectable', () => {
+  it('lists a judge run from before its phases were renamed with the steps review, tag and report, and its agents selectable', () => {
     const outline = { kind: 'judge', branch: 'feat/x', worktree: false, planReview: false, finalReview: false, reviewers: ['terra'], fromStage: 1, stages: [] }
     status({ outline })
     journal(

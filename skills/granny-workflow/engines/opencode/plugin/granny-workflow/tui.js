@@ -366,7 +366,7 @@ function placeOf(label, stages, reviewers, pick = (n) => n[0]) {
 }
 var FIXED_GROUPS = { plan: "Plan", "plan-review": "Plan review", "final-review": "Final review", "pr-ready": "PR ready", review: "Review", tag: "Tag", report: "Report" };
 var PHASE_GROUPS = { Plan: "plan", "Plan review": "plan-review", "Final review": "final-review", "PR ready": "pr-ready" };
-var JUDGE_PHASE_GROUPS = { Review: "review", Judge: "tag", Report: "report" };
+var JUDGE_PHASE_GROUPS = { Review: "review", Tagging: "tag", "Save report": "report", Judge: "tag", Report: "report" };
 var JUDGE_RANKS = { review: 0, tag: 1, report: 2 };
 var DONE_OUTCOMES = new Set(["clean", "residual-only", "review-skipped"]);
 var MAX_GROUP_LINES = 200;

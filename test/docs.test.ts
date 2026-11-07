@@ -201,8 +201,7 @@ describe('skill docs', () => {
       expect(readme.indexOf('## Review only: `granny judge`')).toBeLessThan(readme.indexOf('## How it works'))
       expect(readme).toContain('.granny/reviews/')
       expect(readme).toMatch(MAPPING)
-      const unreleased = readRoot('CHANGELOG.md').split('\n## ')[1]!
-      expect(unreleased).toContain('`granny_judge`')
+      expect(readRoot('CHANGELOG.md')).toContain('`granny_judge`')
       expect(read('engines/opencode/agents/granny.md')).toContain('granny judge')
     })
   })
