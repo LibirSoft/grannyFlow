@@ -1140,6 +1140,22 @@ ${note}` : ""}` : missing };
     const sha = r.ran ? lineShaped(r.output, SHA) : undefined;
     return { sha, code: r.code, output: r.output };
   };
+  const writeChecked = async (o) => {
+    const want = utf8Length(o.text);
+    for (let n = 1;n <= 2; n++) {
+      const w = await shell(n === 1 ? o.labels.write : o.labels.retry, o.phase, heredocWriteScript(o.path, o.text), o.cwd, o.ask);
+      if (!w.ran) {
+        host.log(`writing ${o.what} failed (exit ${w.code}): ${w.output.slice(-300)}`);
+        return false;
+      }
+      const size = await shell(o.labels.size, o.phase, `wc -c < ${shellQuote(o.path)}`, o.cwd, o.sizeAsk ?? o.ask);
+      const got = size.ran ? lineShaped(size.output, COUNT) : undefined;
+      if (got !== undefined && Number(got) === want)
+        return true;
+      host.log(`${o.path} holds ${got ?? "an unknown number of"} bytes, not ${want}${n === 1 ? " - writing it once more" : ""}`);
+    }
+    return false;
+  };
   const work = workOf(config);
   const uncommitted = async (label, phase, cwd, plans = []) => {
     const keep = plans.map((f) => shellQuote(`:(exclude,literal)${f.slice(trimPath(cwd).length + 1)}`));
@@ -1286,7 +1302,7 @@ ${judgeRetryNote(problems)}`);
     }
     return { per, decided };
   };
-  return { call, shell, readHead, uncommitted, reviewAll, judgeAnswers };
+  return { call, shell, readHead, writeChecked, uncommitted, reviewAll, judgeAnswers };
 }
 function checkJudgeInput(input) {
   if (!input || typeof input !== "object")
@@ -1314,7 +1330,7 @@ async function runJudge(host, input) {
   if (gaps.length)
     throw new Error(`granny judge needs models: ${gaps.join("; ")}`);
   const config = resolveConfig(layers, host.name);
-  const { call, shell, readHead, uncommitted, reviewAll, judgeAnswers } = engineParts(host, config);
+  const { call, shell, readHead, writeChecked, uncommitted, reviewAll, judgeAnswers } = engineParts(host, config);
   const repo = trimPath(input.repo);
   const base = input.base ?? config.base;
   host.phase(REVIEW_PHASE);
@@ -1435,22 +1451,16 @@ ${notes}`);
   };
   const report = renderReport(meta, findings);
   const reportPath = `${repo}/${workOf(config)}/reviews/${date}-${branchSlug(branch)}.md`;
-  const save = async () => {
-    const want = utf8Length(report);
-    for (let n = 1;n <= 2; n++) {
-      const w = await shell(n === 1 ? "write report" : "write report retry", REPORT_PHASE, heredocWriteScript(reportPath, report), repo, reportWritePrompt);
-      if (!w.ran) {
-        host.log(`writing the report failed (exit ${w.code}): ${w.output.slice(-300)}`);
-        return false;
-      }
-      const size = await shell("report size", REPORT_PHASE, `wc -c < ${shellQuote(reportPath)}`, repo, judgeStepPrompt);
-      const got = size.ran ? lineShaped(size.output, COUNT) : undefined;
-      if (got !== undefined && Number(got) === want)
-        return true;
-      host.log(`${reportPath} holds ${got ?? "an unknown number of"} bytes, not ${want}${n === 1 ? " - writing it once more" : ""}`);
-    }
-    return false;
-  };
+  const save = () => writeChecked({
+    path: reportPath,
+    text: report,
+    cwd: repo,
+    phase: REPORT_PHASE,
+    what: "the report",
+    labels: { write: "write report", retry: "write report retry", size: "report size" },
+    ask: reportWritePrompt,
+    sizeAsk: judgeStepPrompt
+  });
   let written = false;
   try {
     written = await save();

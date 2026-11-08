@@ -602,6 +602,14 @@ function declinedOf(value, sent) {
 function shellQuote(value) {
   return /^[\w@%+=:,./-]+$/.test(value) ? value : `'${value.replaceAll("'", `'\\''`)}'`;
 }
+function heredocWriteScript(path, text) {
+  let end = "GRANNY_REPORT_END";
+  while (text.includes(end))
+    end += "_";
+  return `mkdir -p ${shellQuote(path.slice(0, path.lastIndexOf("/")) || "/")} && cat > ${shellQuote(path)} <<'${end}'
+${text}${end}
+`;
+}
 
 var roundLabel = (round, f, loop) => `${loop ? `${loop.id}/` : ""}r${round}/${f.id}`;
 var judgeRouting = (findings) => findings.some(isBlocker) ? "P0/P1 findings are here only because a fixer declined findings in an earlier round: classify them like the rest. A P0/P1 goes to the implementer whatever you classify, unless its repeatOf names a finding the fixer declined - then your classification decides it." : "P0/P1 findings are not in this list: they go to the implementer without you.";
@@ -963,6 +971,14 @@ First read ${branchLog(p)} and \`git log --oneline HEAD..${shellQuote(lane)}\`. 
 
 var P_HEADINGS = ["P0", "P1", "P2", "P3"];
 var ORDER = [...P_HEADINGS, "dismissed"];
+function utf8Length(text) {
+  let bytes = 0;
+  for (const ch of text) {
+    const c = ch.codePointAt(0);
+    bytes += c < 128 ? 1 : c < 2048 ? 2 : c < 65536 ? 3 : 4;
+  }
+  return bytes;
+}
 
 var SAID = "[granny] reviewer: ";
 var BACKEND_LINE2 = /^\[granny\] reviewer: (.*)$/m;
@@ -1392,6 +1408,22 @@ ${note}` : ""}` : missing };
     const sha = r.ran ? lineShaped(r.output, SHA) : undefined;
     return { sha, code: r.code, output: r.output };
   };
+  const writeChecked = async (o) => {
+    const want = utf8Length(o.text);
+    for (let n = 1;n <= 2; n++) {
+      const w = await shell(n === 1 ? o.labels.write : o.labels.retry, o.phase, heredocWriteScript(o.path, o.text), o.cwd, o.ask);
+      if (!w.ran) {
+        host.log(`writing ${o.what} failed (exit ${w.code}): ${w.output.slice(-300)}`);
+        return false;
+      }
+      const size = await shell(o.labels.size, o.phase, `wc -c < ${shellQuote(o.path)}`, o.cwd, o.sizeAsk ?? o.ask);
+      const got = size.ran ? lineShaped(size.output, COUNT) : undefined;
+      if (got !== undefined && Number(got) === want)
+        return true;
+      host.log(`${o.path} holds ${got ?? "an unknown number of"} bytes, not ${want}${n === 1 ? " - writing it once more" : ""}`);
+    }
+    return false;
+  };
   const work = workOf(config);
   const uncommitted = async (label, phase, cwd, plans = []) => {
     const keep = plans.map((f) => shellQuote(`:(exclude,literal)${f.slice(trimPath(cwd).length + 1)}`));
@@ -1538,7 +1570,7 @@ ${judgeRetryNote(problems)}`);
     }
     return { per, decided };
   };
-  return { call, shell, readHead, uncommitted, reviewAll, judgeAnswers };
+  return { call, shell, readHead, writeChecked, uncommitted, reviewAll, judgeAnswers };
 }
 async function runGranny(host, input) {
   const inputErrors = checkInput(input);
