@@ -1,4 +1,5 @@
 import type { GrannyConfig } from './config'
+import { trimSlashes, workOf } from './paths'
 import type { Declined, Finding, Implementation, TrailFinding, TrailFix, TrailOutcome, TrailReviewer, TrailRound } from './types'
 
 const FINDING_KEYS = [
@@ -40,9 +41,7 @@ export interface RoundFacts {
   note?: string
 }
 
-const trimmed = (path: string) => path.replace(/\/+$/, '')
-
-export const trailDir = (config: Pick<GrannyConfig, 'workDir'>, cwd: string) => `${trimmed(cwd)}/${trimmed(config.workDir)}/trail`
+export const trailDir = (config: Pick<GrannyConfig, 'workDir'>, cwd: string) => `${trimSlashes(cwd)}/${workOf(config)}/trail`
 
 export const trailId = (loop: string, round: number) => `${loop}-r${round}`
 

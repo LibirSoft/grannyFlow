@@ -1,3 +1,4 @@
+import { trimSlashes } from '../core/paths'
 import type { TrailFinding, TrailRound } from '../core/types'
 import { type Hunks, onChangedLine, parseHunks } from './hunks'
 import { byTrailOrder, trailProblem } from './records'
@@ -118,7 +119,7 @@ function anchorOf(io: PosterIo, r: TrailRound, pr: PrInfo): { commit: string; no
 }
 
 function relative(file: string, toplevel: string): string {
-  const root = `${toplevel.replace(/\/+$/, '')}/`
+  const root = `${trimSlashes(toplevel)}/`
   return (file.startsWith(root) ? file.slice(root.length) : file).replace(/^(\.\/)+/, '')
 }
 
@@ -163,7 +164,7 @@ export function postTrail(argv: string[], io: PosterIo): number {
   let dir = options.trail
   if (dir === undefined) {
     try {
-      dir = `${toplevel}/${io.workDir(toplevel).replace(/\/+$/, '')}/trail`
+      dir = `${toplevel}/${trimSlashes(io.workDir(toplevel))}/trail`
     } catch (e) {
       io.print(`${(e as Error).message}\npass the trail directory with --trail <dir>`)
       return 1

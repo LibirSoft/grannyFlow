@@ -328,6 +328,10 @@ function resolveModel(spec, host) {
   return spec[host];
 }
 
+var trimSlashes = (path) => path.replace(/\/+$/, "");
+var trimPath = (path) => trimSlashes(path) || "/";
+var workOf = (config) => trimSlashes(config.workDir);
+
 var MARKER = /^\s*[-*]\s*\[(P[0-3]|[A-Za-z]+)\](.*)$/;
 var WORD_SEVERITY = new Map([["critical", "P0"], ["high", "P1"], ["medium", "P2"], ["low", "P3"]]);
 var LOCATION = /^(.+?)(?::(\d+)(?:-\d+)?)?$/;
@@ -1073,7 +1077,6 @@ function exitMarked(output) {
   return { code: Number(last[1]), output: output.slice(0, last.index) + output.slice(last.index + last[0].length) };
 }
 var slug = (s) => s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "stage";
-var trimPath = (s) => s.replace(/\/+$/, "") || "/";
 var lineShaped = (output, shape) => output.split(`
 `).map((l) => l.trim()).find((l) => shape.test(l));
 var SHA = /^[0-9a-f]{7,64}$/i;
@@ -1081,7 +1084,6 @@ var COUNT = /^\d+$/;
 var short = (sha) => sha.slice(0, 8);
 var STATUS_LINE = /^\s*[MADRCUT?!]{1,2}\s+\S/;
 var entriesOf = (answer) => Array.isArray(answer?.perFinding) ? answer.perFinding.filter((x) => x && typeof x === "object" && typeof x.id === "string") : [];
-var workOf = (c) => c.workDir.replace(/\/+$/, "");
 var phaseOf = (subject) => subject.kind === "plan" ? PLAN_PHASE : subject.note === WHOLE_BRANCH_NOTE ? FINAL_REVIEW_PHASE : REVIEW_PHASE;
 var reviewerMeta = (rv, host) => {
   const model = resolveModel(rv.model, host.name);

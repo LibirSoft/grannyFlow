@@ -1,5 +1,6 @@
 import { GrannyCancelled, isCancelled } from './cancel'
 import { judgeConfigGaps, planReviewWarning, resolveConfig, resolveModel, type CheckConfig, type GrannyConfig, type ReviewerConfig, type RoleConfig } from './config'
+import { trimPath, workOf } from './paths'
 import {
   agentPlanReviewPrompt,
   agentReviewPrompt,
@@ -174,7 +175,6 @@ function roundFinding(f: Finding, sent: boolean): RoundFinding {
   }
 }
 
-const trimPath = (s: string) => s.replace(/\/+$/, '') || '/'
 const repoPathOf = (r: RepoInput): unknown => (typeof r === 'string' ? r : r && typeof r === 'object' ? r.repo : undefined)
 const baseName = (path: string) => path.slice(path.lastIndexOf('/') + 1)
 const lineShaped = (output: string, shape: RegExp) => output.split('\n').map(l => l.trim()).find(l => shape.test(l))
@@ -188,7 +188,6 @@ const listed = (status: string[]) => status.map(l => l.trim()).join(', ')
 type JudgeEntry = Record<string, unknown> & { id: string; duplicateOf?: unknown; repeatOf?: unknown }
 const entriesOf = (answer: any): JudgeEntry[] =>
   Array.isArray(answer?.perFinding) ? answer.perFinding.filter((x: unknown) => x && typeof x === 'object' && typeof (x as { id?: unknown }).id === 'string') : []
-const workOf = (c: GrannyConfig) => c.workDir.replace(/\/+$/, '')
 const phaseOf = (subject: Subject) => (subject.kind === 'plan' ? PLAN_PHASE : subject.note === WHOLE_BRANCH_NOTE ? FINAL_REVIEW_PHASE : REVIEW_PHASE)
 
 const reviewerMeta = (rv: ReviewerConfig, host: Host): TrailReviewer => {

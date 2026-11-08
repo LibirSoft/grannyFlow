@@ -317,6 +317,9 @@ function metricErrors(at, m) {
   return errors;
 }
 
+// src/core/paths.ts
+var trimSlashes = (path) => path.replace(/\/+$/, "");
+
 // src/pr/hunks.ts
 var HUNK = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/;
 function unquote(path) {
@@ -676,7 +679,7 @@ function anchorOf(io, r, pr) {
   return { commit, notInPr: !inPr, hunks: diff?.code === 0 ? parseHunks(diff.stdout) : new Map };
 }
 function relative(file, toplevel) {
-  const root = `${toplevel.replace(/\/+$/, "")}/`;
+  const root = `${trimSlashes(toplevel)}/`;
   return (file.startsWith(root) ? file.slice(root.length) : file).replace(/^(\.\/)+/, "");
 }
 var plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
@@ -721,7 +724,7 @@ ${USAGE}`);
   let dir = options.trail;
   if (dir === undefined) {
     try {
-      dir = `${toplevel}/${io.workDir(toplevel).replace(/\/+$/, "")}/trail`;
+      dir = `${toplevel}/${trimSlashes(io.workDir(toplevel))}/trail`;
     } catch (e) {
       io.print(`${e.message}
 pass the trail directory with --trail <dir>`);

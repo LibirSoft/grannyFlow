@@ -327,6 +327,10 @@ function resolveModel(spec, host) {
   return spec[host];
 }
 
+var trimSlashes = (path) => path.replace(/\/+$/, "");
+var trimPath = (path) => trimSlashes(path) || "/";
+var workOf = (config) => trimSlashes(config.workDir);
+
 var MARKER = /^\s*[-*]\s*\[(P[0-3]|[A-Za-z]+)\](.*)$/;
 var WORD_SEVERITY = new Map([["critical", "P0"], ["high", "P1"], ["medium", "P2"], ["low", "P3"]]);
 var LOCATION = /^(.+?)(?::(\d+)(?:-\d+)?)?$/;
@@ -1212,8 +1216,7 @@ var FINDING_KEYS = [
   "duplicates",
   "repeatOf"
 ];
-var trimmed = (path) => path.replace(/\/+$/, "");
-var trailDir = (config, cwd) => `${trimmed(cwd)}/${trimmed(config.workDir)}/trail`;
+var trailDir = (config, cwd) => `${trimSlashes(cwd)}/${workOf(config)}/trail`;
 var trailId = (loop, round) => `${loop}-r${round}`;
 var trailPath = (config, cwd, loop, round) => `${trailDir(config, cwd)}/${trailId(loop, round)}.json`;
 function trailFinding(f, r, sent) {
@@ -1335,7 +1338,6 @@ function roundFinding(f, sent) {
     ...f.decision?.why ? { why: f.decision.why } : {}
   };
 }
-var trimPath = (s) => s.replace(/\/+$/, "") || "/";
 var repoPathOf = (r) => typeof r === "string" ? r : r && typeof r === "object" ? r.repo : undefined;
 var baseName = (path) => path.slice(path.lastIndexOf("/") + 1);
 var lineShaped = (output, shape) => output.split(`
@@ -1346,7 +1348,6 @@ var short = (sha) => sha.slice(0, 8);
 var STATUS_LINE = /^\s*[MADRCUT?!]{1,2}\s+\S/;
 var listed = (status) => status.map((l) => l.trim()).join(", ");
 var entriesOf = (answer) => Array.isArray(answer?.perFinding) ? answer.perFinding.filter((x) => x && typeof x === "object" && typeof x.id === "string") : [];
-var workOf = (c) => c.workDir.replace(/\/+$/, "");
 var phaseOf = (subject) => subject.kind === "plan" ? PLAN_PHASE : subject.note === WHOLE_BRANCH_NOTE ? FINAL_REVIEW_PHASE : REVIEW_PHASE;
 var reviewerMeta = (rv, host) => {
   const model = resolveModel(rv.model, host.name);
