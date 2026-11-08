@@ -88,6 +88,10 @@ export async function buildOmp(): Promise<string> {
   return BANNER + (await bundle('src/adapters/omp/extension.ts', 'bun'))
 }
 
+export async function buildPrComments(): Promise<string> {
+  return BANNER + (await bundle('src/pr/cli.ts', 'node'))
+}
+
 export function renderPrompts(): string {
   const p = {
     repo: '<repo>',
@@ -214,5 +218,6 @@ if (import.meta.main) {
   write(join(engines, 'opencode/plugin/granny-workflow/index.js'), await buildOpencode())
   write(join(engines, 'opencode/plugin/granny-workflow/tui.js'), await buildOpencodeTui())
   write(join(engines, 'omp/extensions/granny-workflow/index.js'), await buildOmp())
+  write(join(skill, 'scripts/pr-comments.mjs'), await buildPrComments())
   write(join(skill, 'references/prompts.md'), renderPrompts())
 }
