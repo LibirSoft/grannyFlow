@@ -33,6 +33,7 @@ var DEFAULT_CONFIG = {
   worktree: true,
   planReview: false,
   finalReview: true,
+  trail: true,
   parallel: true,
   maxParallel: 3,
   language: "English",
@@ -235,6 +236,8 @@ function validate(c) {
     errors.push("planReview must be a boolean");
   if (typeof c.finalReview !== "boolean")
     errors.push("finalReview must be a boolean");
+  if (typeof c.trail !== "boolean")
+    errors.push("trail must be a boolean");
   if (typeof c.parallel !== "boolean")
     errors.push("parallel must be a boolean");
   if (!Number.isInteger(c.maxParallel) || c.maxParallel < 1)

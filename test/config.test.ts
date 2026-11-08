@@ -238,6 +238,19 @@ describe('finalReview', () => {
   })
 })
 
+describe('trail', () => {
+  it('is on by default and takes a boolean from any layer', () => {
+    expect(DEFAULT_CONFIG.trail).toBe(true)
+    expect(resolveConfig([]).trail).toBe(true)
+    expect(resolveConfig([{ trail: false }]).trail).toBe(false)
+    expect(resolveConfig([{ trail: false }, { trail: true }]).trail).toBe(true)
+  })
+
+  it('rejects a trail that is not a boolean', () => {
+    expect(() => resolveConfig([{ trail: 'no' }])).toThrow('trail must be a boolean')
+  })
+})
+
 describe('resolveModel', () => {
   it('uses a plain string on every host and picks the host key from an object', () => {
     expect(resolveModel('sonnet', 'claude-code')).toBe('sonnet')
