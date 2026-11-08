@@ -2,7 +2,7 @@
 // @bun
 // src/adapters/opencode/plugin.ts
 import { appendFileSync as appendFileSync2, mkdirSync as mkdirSync2, writeFileSync } from "fs";
-import { join as join2 } from "path";
+import { join as join3 } from "path";
 
 // src/core/types.ts
 var HOSTS = ["claude-code", "opencode", "omp"];
@@ -2916,17 +2916,13 @@ ${notes}`);
 
 // src/adapters/common.ts
 import { spawn, spawnSync } from "child_process";
-import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync } from "fs";
+import { appendFileSync, existsSync as existsSync2, mkdirSync, readdirSync, readFileSync as readFileSync2 } from "fs";
+import { isAbsolute, join as join2 } from "path";
+
+// src/adapters/config-files.ts
+import { existsSync, readFileSync } from "fs";
 import { homedir } from "os";
-import { isAbsolute, join } from "path";
-var SUBMIT = {
-  implementation: "granny_submit_implementation",
-  draft: "granny_submit_plan",
-  planFix: "granny_submit_plan_fix",
-  findings: "granny_submit_findings",
-  judge: "granny_submit_judgement",
-  final: "granny_submit_final"
-};
+import { join } from "path";
 function globalConfigPath() {
   if (process.env.GRANNY_CONFIG)
     return process.env.GRANNY_CONFIG;
@@ -2941,6 +2937,15 @@ function readJson(path) {
     throw new Error(`${path}: invalid JSON (${e.message})`);
   }
 }
+// src/adapters/common.ts
+var SUBMIT = {
+  implementation: "granny_submit_implementation",
+  draft: "granny_submit_plan",
+  planFix: "granny_submit_plan_fix",
+  findings: "granny_submit_findings",
+  judge: "granny_submit_judgement",
+  final: "granny_submit_final"
+};
 function git(repo, args) {
   const r = spawnSync("git", ["-C", repo, ...args], { encoding: "utf8" });
   if (r.status !== 0)
@@ -2965,12 +2970,12 @@ ${dirty.join(`
 `)}`);
   if (!problems.length) {
     const commonDir = git(repo, ["rev-parse", "--git-common-dir"]);
-    const exclude = join(isAbsolute(commonDir) ? commonDir : join(repo, commonDir), "info", "exclude");
+    const exclude = join2(isAbsolute(commonDir) ? commonDir : join2(repo, commonDir), "info", "exclude");
     const entry = `/${workDir}/`;
-    const text = existsSync(exclude) ? readFileSync(exclude, "utf8") : "";
+    const text = existsSync2(exclude) ? readFileSync2(exclude, "utf8") : "";
     if (!text.split(`
 `).includes(entry)) {
-      mkdirSync(join(exclude, ".."), { recursive: true });
+      mkdirSync(join2(exclude, ".."), { recursive: true });
       appendFileSync(exclude, `${text && !text.endsWith(`
 `) ? `
 ` : ""}${entry}
@@ -3075,7 +3080,7 @@ function sameModelNotice(input, config, host) {
   return shared ? `
 ${SAME_MODEL_HINT}. Mention this to the user in your next message; do not change a model unless the user asks.` : "";
 }
-var layerSources = (repo) => [globalConfigPath(), join(repo, "granny.config.json"), "the run's config"];
+var layerSources = (repo) => [globalConfigPath(), join2(repo, "granny.config.json"), "the run's config"];
 var AGENT_ROLES = ["granny", "helper", "planner", "implementer", "judge"];
 var JUDGE_ROLES = ["granny", "judge"];
 var isObject2 = (v) => !!v && typeof v === "object" && !Array.isArray(v);
@@ -3249,7 +3254,7 @@ function prepareJudge(input, host, problem) {
   const problems = checkJudgeInput(input);
   if (problems.length)
     return refused(problems);
-  const files = [readJson(globalConfigPath()), readJson(join(input.repo, "granny.config.json"))];
+  const files = [readJson(globalConfigPath()), readJson(join2(input.repo, "granny.config.json"))];
   const layers = [...files, input.config];
   const gaps = [...new Set([...judgeConfigGaps(files, host), ...judgeConfigGaps(layers, host)])];
   if (gaps.length)
@@ -3343,11 +3348,11 @@ function runDir(runs, runIdArg, repo) {
     return runs.get(runIdArg).dir;
   if (!repo)
     return;
-  const config = resolveConfig([readJson(globalConfigPath()), readJson(join(repo, "granny.config.json"))]);
-  const root = join(repo, config.workDir, "runs");
-  const ids = existsSync(root) ? readdirSync(root).sort() : [];
+  const config = resolveConfig([readJson(globalConfigPath()), readJson(join2(repo, "granny.config.json"))]);
+  const root = join2(repo, config.workDir, "runs");
+  const ids = existsSync2(root) ? readdirSync(root).sort() : [];
   const pick = runIdArg ?? ids.at(-1);
-  return pick && ids.includes(pick) ? join(root, pick) : undefined;
+  return pick && ids.includes(pick) ? join2(root, pick) : undefined;
 }
 var isHeartbeat = (line) => {
   try {
@@ -3374,14 +3379,14 @@ function runStatus(runs, runIdArg, repo) {
   const dir = runDir(runs, runIdArg, repo);
   if (!dir)
     return "No such granny run. Pass runId, or repo to see the latest run in that repo.";
-  const read = (f) => existsSync(join(dir, f)) ? readFileSync(join(dir, f), "utf8") : "";
+  const read = (f) => existsSync2(join2(dir, f)) ? readFileSync2(join2(dir, f), "utf8") : "";
   const tail = journalTail(read("journal.jsonl"), 40);
   const result = read("result.json");
   return [
     `status: ${read("status.json")}`,
     `journal (last 40 lines, without heartbeats):
 ${tail}`,
-    result ? `result (${join(dir, "result.json")}):
+    result ? `result (${join2(dir, "result.json")}):
 ${result.length > 30000 ? result.slice(0, 30000) + `
 ...truncated, read the file` : result}` : ""
   ].filter(Boolean).join(`
@@ -3498,7 +3503,7 @@ var createGrannyPlugin = ({ delays = DEFAULT_DELAYS, sleep = pause, killGraceMs 
   async setup(ctx) {
     const launch = async ({ input, layers, config, branch, outline, engine, finished, started }, parentSession) => {
       const id = runId();
-      const dir = join2(input.repo, config.workDir, "runs", id);
+      const dir = join3(input.repo, config.workDir, "runs", id);
       mkdirSync2(dir, { recursive: true });
       const run = {
         id,
@@ -3513,10 +3518,10 @@ var createGrannyPlugin = ({ delays = DEFAULT_DELAYS, sleep = pause, killGraceMs 
         active: new Map
       };
       runs.set(id, run);
-      const journal = (type, data) => appendFileSync2(join2(dir, "journal.jsonl"), JSON.stringify({ t: stamp(), type, ...data }) + `
+      const journal = (type, data) => appendFileSync2(join3(dir, "journal.jsonl"), JSON.stringify({ t: stamp(), type, ...data }) + `
 `);
-      const writeStatus = (extra = {}) => writeFileSync(join2(dir, "status.json"), JSON.stringify({ id, status: run.status, repo: input.repo, branch, parent: parentSession, watch: config.watch, outline, ...extra }, null, 2));
-      writeFileSync(join2(dir, "input.json"), JSON.stringify({ ...input, config: layers }, null, 2));
+      const writeStatus = (extra = {}) => writeFileSync(join3(dir, "status.json"), JSON.stringify({ id, status: run.status, repo: input.repo, branch, parent: parentSession, watch: config.watch, outline, ...extra }, null, 2));
+      writeFileSync(join3(dir, "input.json"), JSON.stringify({ ...input, config: layers }, null, 2));
       writeStatus({ startedAt: stamp() });
       let parentModel;
       try {
@@ -3681,7 +3686,7 @@ When done, call the \`${tool}\` tool exactly once with your result. That call is
       };
       engine(host).then(async (result) => {
         run.status = "done";
-        writeFileSync(join2(dir, "result.json"), JSON.stringify(result, null, 2));
+        writeFileSync(join3(dir, "result.json"), JSON.stringify(result, null, 2));
         writeStatus({ finishedAt: stamp() });
         await notify(`[granny] Run ${id} finished.
 ${finished(result, id)}`);
@@ -3693,7 +3698,7 @@ ${finished(result, id)}`);
           await notify(`[granny] Run ${id} failed: ${String(error?.message ?? error)}
 Call granny_status with runId "${id}" and report to the user.`);
       });
-      return started(id, join2(dir, "journal.jsonl"));
+      return started(id, join3(dir, "journal.jsonl"));
     };
     const notifySentence = (id) => `You will receive a message when it finishes. Use granny_status { runId: "${id}" } to check progress and granny_cancel to stop it. Do not poll in a loop.`;
     const startRun = async (input, parentSession) => {
@@ -3702,7 +3707,7 @@ Call granny_status with runId "${id}" and report to the user.`);
         return `granny_run refused:
 - ${problems.join(`
 - `)}`;
-      const layers = [readJson(globalConfigPath()), readJson(join2(input.repo, "granny.config.json")), input.config];
+      const layers = [readJson(globalConfigPath()), readJson(join3(input.repo, "granny.config.json")), input.config];
       const config = resolveConfig(layers, "opencode");
       const unknownChecks = stageCheckErrors(input.stages, config.checks);
       if (unknownChecks.length)

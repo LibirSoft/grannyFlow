@@ -2,8 +2,8 @@
 // @bun
 // src/adapters/omp/extension.ts
 import { spawn as spawn2 } from "child_process";
-import { appendFileSync as appendFileSync3, existsSync as existsSync2, mkdirSync as mkdirSync2, readFileSync as readFileSync3, rmSync, writeFileSync } from "fs";
-import { basename, dirname, join as join4 } from "path";
+import { appendFileSync as appendFileSync3, existsSync as existsSync3, mkdirSync as mkdirSync2, readFileSync as readFileSync4, rmSync, writeFileSync } from "fs";
+import { basename, dirname, join as join5 } from "path";
 import { fileURLToPath } from "url";
 
 // src/core/types.ts
@@ -2918,17 +2918,13 @@ ${notes}`);
 
 // src/adapters/common.ts
 import { spawn, spawnSync } from "child_process";
-import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync } from "fs";
+import { appendFileSync, existsSync as existsSync2, mkdirSync, readdirSync, readFileSync as readFileSync2 } from "fs";
+import { isAbsolute, join as join2 } from "path";
+
+// src/adapters/config-files.ts
+import { existsSync, readFileSync } from "fs";
 import { homedir } from "os";
-import { isAbsolute, join } from "path";
-var SUBMIT = {
-  implementation: "granny_submit_implementation",
-  draft: "granny_submit_plan",
-  planFix: "granny_submit_plan_fix",
-  findings: "granny_submit_findings",
-  judge: "granny_submit_judgement",
-  final: "granny_submit_final"
-};
+import { join } from "path";
 function globalConfigPath() {
   if (process.env.GRANNY_CONFIG)
     return process.env.GRANNY_CONFIG;
@@ -2943,6 +2939,15 @@ function readJson(path) {
     throw new Error(`${path}: invalid JSON (${e.message})`);
   }
 }
+// src/adapters/common.ts
+var SUBMIT = {
+  implementation: "granny_submit_implementation",
+  draft: "granny_submit_plan",
+  planFix: "granny_submit_plan_fix",
+  findings: "granny_submit_findings",
+  judge: "granny_submit_judgement",
+  final: "granny_submit_final"
+};
 function git(repo, args) {
   const r = spawnSync("git", ["-C", repo, ...args], { encoding: "utf8" });
   if (r.status !== 0)
@@ -2967,12 +2972,12 @@ ${dirty.join(`
 `)}`);
   if (!problems.length) {
     const commonDir = git(repo, ["rev-parse", "--git-common-dir"]);
-    const exclude = join(isAbsolute(commonDir) ? commonDir : join(repo, commonDir), "info", "exclude");
+    const exclude = join2(isAbsolute(commonDir) ? commonDir : join2(repo, commonDir), "info", "exclude");
     const entry = `/${workDir}/`;
-    const text = existsSync(exclude) ? readFileSync(exclude, "utf8") : "";
+    const text = existsSync2(exclude) ? readFileSync2(exclude, "utf8") : "";
     if (!text.split(`
 `).includes(entry)) {
-      mkdirSync(join(exclude, ".."), { recursive: true });
+      mkdirSync(join2(exclude, ".."), { recursive: true });
       appendFileSync(exclude, `${text && !text.endsWith(`
 `) ? `
 ` : ""}${entry}
@@ -3077,7 +3082,7 @@ function sameModelNotice(input, config, host) {
   return shared ? `
 ${SAME_MODEL_HINT}. Mention this to the user in your next message; do not change a model unless the user asks.` : "";
 }
-var layerSources = (repo) => [globalConfigPath(), join(repo, "granny.config.json"), "the run's config"];
+var layerSources = (repo) => [globalConfigPath(), join2(repo, "granny.config.json"), "the run's config"];
 var AGENT_ROLES = ["granny", "helper", "planner", "implementer", "judge"];
 var JUDGE_ROLES = ["granny", "judge"];
 var isObject2 = (v) => !!v && typeof v === "object" && !Array.isArray(v);
@@ -3251,7 +3256,7 @@ function prepareJudge(input, host, problem) {
   const problems = checkJudgeInput(input);
   if (problems.length)
     return refused(problems);
-  const files = [readJson(globalConfigPath()), readJson(join(input.repo, "granny.config.json"))];
+  const files = [readJson(globalConfigPath()), readJson(join2(input.repo, "granny.config.json"))];
   const layers = [...files, input.config];
   const gaps = [...new Set([...judgeConfigGaps(files, host), ...judgeConfigGaps(layers, host)])];
   if (gaps.length)
@@ -3345,11 +3350,11 @@ function runDir(runs, runIdArg, repo) {
     return runs.get(runIdArg).dir;
   if (!repo)
     return;
-  const config = resolveConfig([readJson(globalConfigPath()), readJson(join(repo, "granny.config.json"))]);
-  const root = join(repo, config.workDir, "runs");
-  const ids = existsSync(root) ? readdirSync(root).sort() : [];
+  const config = resolveConfig([readJson(globalConfigPath()), readJson(join2(repo, "granny.config.json"))]);
+  const root = join2(repo, config.workDir, "runs");
+  const ids = existsSync2(root) ? readdirSync(root).sort() : [];
   const pick = runIdArg ?? ids.at(-1);
-  return pick && ids.includes(pick) ? join(root, pick) : undefined;
+  return pick && ids.includes(pick) ? join2(root, pick) : undefined;
 }
 var isHeartbeat = (line) => {
   try {
@@ -3376,14 +3381,14 @@ function runStatus(runs, runIdArg, repo) {
   const dir = runDir(runs, runIdArg, repo);
   if (!dir)
     return "No such granny run. Pass runId, or repo to see the latest run in that repo.";
-  const read = (f) => existsSync(join(dir, f)) ? readFileSync(join(dir, f), "utf8") : "";
+  const read = (f) => existsSync2(join2(dir, f)) ? readFileSync2(join2(dir, f), "utf8") : "";
   const tail = journalTail(read("journal.jsonl"), 40);
   const result = read("result.json");
   return [
     `status: ${read("status.json")}`,
     `journal (last 40 lines, without heartbeats):
 ${tail}`,
-    result ? `result (${join(dir, "result.json")}):
+    result ? `result (${join2(dir, "result.json")}):
 ${result.length > 30000 ? result.slice(0, 30000) + `
 ...truncated, read the file` : result}` : ""
   ].filter(Boolean).join(`
@@ -4089,9 +4094,9 @@ class LiveRun {
 }
 
 // src/adapters/omp/navigator.ts
-import { readdirSync as readdirSync3, readFileSync as readFileSync2 } from "fs";
+import { readdirSync as readdirSync3, readFileSync as readFileSync3 } from "fs";
 import { homedir as homedir2 } from "os";
-import { join as join3 } from "path";
+import { join as join4 } from "path";
 
 // src/adapters/runview/layout.ts
 var STATUS_TONES = { running: "info", done: "success", failed: "error", cancelled: "warning" };
@@ -5700,7 +5705,7 @@ function eventLine(line) {
 
 // src/adapters/omp/subagents.ts
 import { readdirSync as readdirSync2 } from "fs";
-import { join as join2 } from "path";
+import { join as join3 } from "path";
 function subagentFiles(session) {
   const out = new Map;
   try {
@@ -5708,9 +5713,9 @@ function subagentFiles(session) {
       if (!dir.isDirectory())
         continue;
       try {
-        for (const file of readdirSync2(join2(session, dir.name), { withFileTypes: true })) {
+        for (const file of readdirSync2(join3(session, dir.name), { withFileTypes: true })) {
           if (file.isFile() && file.name.endsWith(".jsonl"))
-            out.set(file.name.slice(0, -".jsonl".length), join2(session, dir.name, file.name));
+            out.set(file.name.slice(0, -".jsonl".length), join3(session, dir.name, file.name));
         }
       } catch {}
     }
@@ -6064,7 +6069,7 @@ class Navigator {
   cacheOf(run) {
     let cache = this.caches.get(run.id);
     if (!cache) {
-      cache = { reader: new TailReader(join3(run.dir, "journal.jsonl")), entries: [], files: new Map, read: false };
+      cache = { reader: new TailReader(join4(run.dir, "journal.jsonl")), entries: [], files: new Map, read: false };
       this.caches.set(run.id, cache);
     }
     return cache;
@@ -6109,7 +6114,7 @@ class Navigator {
       const build = () => buildRunTree(info, cache.entries, live, now, cache.files, run.outline);
       if (this.selected === runKey(run.id) && cache.status?.for !== run.status) {
         try {
-          cache.status = { for: run.status, data: JSON.parse(readFileSync2(join3(run.dir, "status.json"), "utf8")) };
+          cache.status = { for: run.status, data: JSON.parse(readFileSync3(join4(run.dir, "status.json"), "utf8")) };
         } catch {}
       }
       const tree = build();
@@ -6176,7 +6181,7 @@ class Navigator {
     if (row.kind === "agent") {
       const agent = row.agent;
       const live = isLive(row);
-      spec = this.modeOf(row) === "transcript" ? { kind: "transcript", dir: agent.session, relist: live, follow: live } : { kind: "events", file: join3(agent.session, "events.jsonl"), relist: false, follow: live };
+      spec = this.modeOf(row) === "transcript" ? { kind: "transcript", dir: agent.session, relist: live, follow: live } : { kind: "events", file: join4(agent.session, "events.jsonl"), relist: false, follow: live };
     } else if (row.kind === "sub")
       spec = { kind: "transcript", ...row.sub.path ? { file: row.sub.path } : {}, relist: false, follow: false };
     else
@@ -6215,7 +6220,7 @@ class Navigator {
         names = readdirSync3(source.dir).filter((n) => n.endsWith(".jsonl") && n !== "events.jsonl").sort();
       } catch {}
       for (const name of names) {
-        const path = join3(source.dir, name);
+        const path = join4(source.dir, name);
         if (!source.readers.has(path))
           source.readers.set(path, new TailReader(path));
       }
@@ -6902,10 +6907,10 @@ function turnError(turn) {
   return;
 }
 function readSubmission(path) {
-  if (!existsSync2(path))
+  if (!existsSync3(path))
     return;
   try {
-    return JSON.parse(readFileSync3(path, "utf8"));
+    return JSON.parse(readFileSync4(path, "utf8"));
   } catch {
     return;
   }
@@ -6947,7 +6952,7 @@ var createGrannyExtension = ({ delays = DEFAULT_DELAYS, sleep = pause, killGrace
     return registerChild(pi, JSON.parse(child));
   const launch = ({ input, layers, config, branch, outline, engine, finished, started }, ctx) => {
     const id = runId();
-    const dir = join4(input.repo, config.workDir, "runs", id);
+    const dir = join5(input.repo, config.workDir, "runs", id);
     mkdirSync2(dir, { recursive: true });
     shared.clearStatus?.();
     shared.clearStatus = undefined;
@@ -6955,10 +6960,10 @@ var createGrannyExtension = ({ delays = DEFAULT_DELAYS, sleep = pause, killGrace
     const live = new LiveRun(id, watch !== "off" && ctx?.hasUI === true ? ctx.ui : undefined, { now, renderEveryMs, ...watch === "full" ? { hint: NAVIGATOR_HINT } : {} }, !shared.hidden);
     const run = { id, dir, status: "running", cancelled: false, abort: new AbortController, children: new Set, agents: 0, waiters: new Set, live, watch, branch, outline };
     runs.set(id, run);
-    const journal = (type, data) => appendFileSync3(join4(dir, "journal.jsonl"), JSON.stringify({ t: stamp(), type, ...data }) + `
+    const journal = (type, data) => appendFileSync3(join5(dir, "journal.jsonl"), JSON.stringify({ t: stamp(), type, ...data }) + `
 `);
-    const writeStatus = (extra = {}) => writeFileSync(join4(dir, "status.json"), JSON.stringify({ id, status: run.status, repo: input.repo, branch, outline, ...extra }, null, 2));
-    writeFileSync(join4(dir, "input.json"), JSON.stringify({ ...input, config: layers }, null, 2));
+    const writeStatus = (extra = {}) => writeFileSync(join5(dir, "status.json"), JSON.stringify({ id, status: run.status, repo: input.repo, branch, outline, ...extra }, null, 2));
+    writeFileSync(join5(dir, "input.json"), JSON.stringify({ ...input, config: layers }, null, 2));
     writeStatus({ startedAt: stamp() });
     const parentModel = ctx?.model?.provider && ctx?.model?.id ? `${ctx.model.provider}/${ctx.model.id}` : undefined;
     const bin = process.env.GRANNY_OMP_BIN ?? "omp";
@@ -7067,9 +7072,9 @@ When done, call the \`${tool}\` tool exactly once with your result. That call is
         if (!tool)
           throw new Error(`no submit tool for result kind "${req.kind}"`);
         const model = req.model ?? parentModel;
-        const session = join4(dir, "sessions", `${++run.agents}-${slug2(req.label)}`);
+        const session = join5(dir, "sessions", `${++run.agents}-${slug2(req.label)}`);
         mkdirSync2(session, { recursive: true });
-        const spec = { tool, kind: req.kind, out: join4(session, "submission.json"), access: req.access };
+        const spec = { tool, kind: req.kind, out: join5(session, "submission.json"), access: req.access };
         const args = [
           "--mode",
           "json",
@@ -7085,7 +7090,7 @@ When done, call the \`${tool}\` tool exactly once with your result. That call is
           ...req.effort ? ["--thinking", req.effort] : []
         ];
         journal("agent", { label: req.label, role: req.role, phase: req.phase, session, model: model ?? null, ...req.effort ? { effort: req.effort } : {}, cwd: req.cwd });
-        const path = join4(session, "events.jsonl");
+        const path = join5(session, "events.jsonl");
         const log = watch === "full" ? new EventLog(path, now, (e) => journal("event-log-failed", { label: req.label, path, error: String(e?.message ?? e) })) : undefined;
         const view = live.role({ label: req.label, role: req.role, model, effort: req.effort, session, phase: req.phase, cwd: req.cwd, ...log ? { log: path } : {} }, log && ((entry) => log.write(entry)));
         const end = (outcome, error) => {
@@ -7130,7 +7135,7 @@ When done, call the \`${tool}\` tool exactly once with your result. That call is
         journal("notify-failed", { error: String(e?.message ?? e) });
       }
     };
-    const writeResult = (result) => writeFileSync(join4(dir, "result.json"), JSON.stringify(result, null, 2));
+    const writeResult = (result) => writeFileSync(join5(dir, "result.json"), JSON.stringify(result, null, 2));
     const settle = (reply, notice) => {
       run.reply = reply;
       const clear = live.close(run.status);
@@ -7174,7 +7179,7 @@ Call granny_status with runId "${id}" and report to the user.`;
         settle(reply, run.cancelled ? undefined : reply);
       }
     }).catch(() => {});
-    return started(id, join4(dir, "journal.jsonl"));
+    return started(id, join5(dir, "journal.jsonl"));
   };
   const waitSentence = (id) => `To wait in this turn, call granny_wait { runId: "${id}" }; otherwise end your turn - the finish message starts a new one. Never write your own watcher, sleep or poll loop on the run files. Use granny_status { runId: "${id}" } for progress and granny_cancel to stop it.`;
   const startRun = (input, ctx) => {
@@ -7183,7 +7188,7 @@ Call granny_status with runId "${id}" and report to the user.`;
       return `granny_run refused:
 - ${problems.join(`
 - `)}`;
-    const layers = [readJson(globalConfigPath()), readJson(join4(input.repo, "granny.config.json")), input.config];
+    const layers = [readJson(globalConfigPath()), readJson(join5(input.repo, "granny.config.json")), input.config];
     const config = resolveConfig(layers, "omp");
     const unknownChecks = stageCheckErrors(input.stages, config.checks);
     if (unknownChecks.length)

@@ -1,8 +1,9 @@
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process'
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync } from 'node:fs'
-import { homedir } from 'node:os'
 import { isAbsolute, join } from 'node:path'
 import { isCancelled } from '../core/cancel'
+import { globalConfigPath, readJson } from './config-files'
+export { globalConfigPath, readJson } from './config-files'
 import { type ConfigRole, type GrannyConfig, judgeConfigGaps, type ModelSpec, planReviewWarning, resolveConfig, resolveModel } from '../core/config'
 export { planReviewWarning } from '../core/config'
 import { checkJudgeInput, type JudgeInput, type RunInput } from '../core/engine'
@@ -20,20 +21,6 @@ export const SUBMIT: Partial<Record<ResultKind, string>> = {
   findings: 'granny_submit_findings',
   judge: 'granny_submit_judgement',
   final: 'granny_submit_final',
-}
-
-export function globalConfigPath(): string {
-  if (process.env.GRANNY_CONFIG) return process.env.GRANNY_CONFIG
-  return join(process.env.XDG_CONFIG_HOME ?? join(homedir(), '.config'), 'granny', 'config.json')
-}
-
-export function readJson(path: string): unknown {
-  if (!existsSync(path)) return undefined
-  try {
-    return JSON.parse(readFileSync(path, 'utf8'))
-  } catch (e) {
-    throw new Error(`${path}: invalid JSON (${(e as Error).message})`)
-  }
 }
 
 function git(repo: string, args: string[]): string {
