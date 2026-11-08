@@ -71,7 +71,7 @@ function tags(f: Finding): string {
 }
 
 /** Agents' text inside a finding: it may not add a heading to the report, nor swallow what follows in an open code fence. */
-function body(text: string): string {
+export function body(text: string): string {
   let open = ''
   const lines = text.split('\n').map(line => {
     const [, marker = '', rest = ''] = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(line) ?? []
