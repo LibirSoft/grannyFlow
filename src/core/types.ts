@@ -219,6 +219,54 @@ export interface RepoResult {
   final: FinalReport | null
 }
 
+export type TrailRoute = 'sent' | 'residual'
+export type TrailOutcome = 'clean' | 'residual-only' | 'round-cap' | 'review-failed' | 'checks-failed'
+
+export interface TrailReviewer {
+  name: string
+  engine: string
+  model?: string
+}
+
+export interface TrailFinding extends Finding {
+  route?: TrailRoute
+  /** A P0/P1 that went to the implementer without the judge. */
+  blocker?: true
+  /** The fixer's reason for declining the finding this one repeats, when the judge sent it back anyway. */
+  overruled?: string
+}
+
+export interface TrailFix {
+  label: string
+  startSha?: string
+  headSha?: string
+  commits?: string[]
+  declined?: Declined[]
+  deviations?: string
+}
+
+/** One review round as it ended, written to `<workDir>/trail/<loop>-r<round>.json`. */
+export interface TrailRound {
+  version: 1
+  loop: string
+  name: string
+  round: number
+  base: string
+  reviewedSha?: string
+  reviewers: TrailReviewer[]
+  findings: TrailFinding[]
+  fix?: TrailFix
+  outcome?: TrailOutcome
+  note?: string
+}
+
+export interface TrailSummary {
+  dir: string
+  written: number
+  /** `<loop>-r<round>` of each record that could not be written. */
+  failed: string[]
+}
+
 export interface RunResult {
   repo: string
   branch: string
@@ -232,6 +280,7 @@ export interface RunResult {
   recheck?: Recheck
   final: FinalReport | null
   repos?: RepoResult[]
+  trail?: TrailSummary
 }
 
 export type ReportBucket = 'P0' | 'P1' | 'P2' | 'P3' | 'dismissed'
