@@ -19,6 +19,21 @@ describe('skill docs', () => {
     expect(read('references/prompts.md')).toBe(renderPrompts())
   })
 
+  it('names the Claude Code script of each mode wherever a launch is described', () => {
+    const cc = read('references/claude-code.md')
+    for (const script of ['plan.js', 'workflow.js', 'judge.js']) {
+      expect(cc).toContain(`script: <contents of ${script}>`)
+      expect(() => read(`engines/claude-code/${script}`)).not.toThrow()
+    }
+    expect(cc).toContain('a new launch of `workflow.js`')
+    expect(read('references/judge.md')).toContain('`engines/claude-code/judge.js`')
+    const md = read('SKILL.md')
+    expect(md).toContain('`engines/claude-code/plan.js`')
+    expect(md).toContain('`engines/claude-code/judge.js` with `judge: true`')
+    expect(md).toContain('on Claude Code with `engines/claude-code/workflow.js`, not `plan.js`')
+    for (const doc of [cc, read('references/judge.md'), md]) expect(doc).not.toContain('same Workflow script')
+  })
+
   it('has only JSON examples that resolveConfig accepts on every host - omp refusing only the Codex reviewers, with its own message', () => {
     const docs: Record<string, string> = { 'README.md': readRoot('README.md'), 'SKILL.md': read('SKILL.md') }
     for (const f of readdirSync(join(skill, 'references'))) docs[`references/${f}`] = read(`references/${f}`)

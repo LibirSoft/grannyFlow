@@ -5,6 +5,7 @@
 ### Changed
 
 - Claude Code: a normal run's phase list has no empty "Judge" row, and Final review is listed in order, before PR ready. The last two phases of a `granny judge` run are "Tagging" and "Save report", listed after PR ready.
+- Claude Code: one Workflow script per mode, each listing only the phases its mode runs, so the Workflow view has no row that stays "Not started yet" for the whole run. `engines/claude-code/plan.js` plans a goal (Worktree, Plan, Plan review), `engines/claude-code/workflow.js` implements a plan (Worktree, Plan review, Implement, Checks, Review, Final review, PR ready) and `engines/claude-code/judge.js` runs `granny judge` (Review, Tagging, Save report; `judge: true` stays in its args). Before, `workflow.js` ran every mode and listed every phase: an implement run showed Plan, Tagging and Save report, and a judge run the whole implement pipeline. Each script refuses the args of another mode before any agent starts and names the script to use instead; after a planning run is approved, the implement run is a new launch of `workflow.js`. A resume uses the script the run was launched with.
 
 ## 1.6.0
 

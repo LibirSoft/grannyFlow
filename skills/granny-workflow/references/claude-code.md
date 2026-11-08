@@ -1,11 +1,11 @@
 # granny on Claude Code
 
-The engine is `engines/claude-code/workflow.js`, a Workflow script: the loop is code, every role is an `agent()` call with its own `model`, `effort` and JSON schema. Never re-author it per task; launch it as is.
+The engine is three Workflow scripts, one per mode: `engines/claude-code/plan.js` for a planning run (`goal` in args), `engines/claude-code/workflow.js` for an implement run (`plan` and `stages`, review-only stages included) and `engines/claude-code/judge.js` for `granny judge`. In each the loop is code and every role is an `agent()` call with its own `model`, `effort` and JSON schema. Each lists only its own mode's phases, so the Workflow view shows no row the run never enters, and each refuses the args of another mode before any agent starts, naming the script to use (`this is the implement script; a planning run (args with goal) uses engines/claude-code/plan.js`). Never re-author them per task; launch them as they are.
 
 ## Launch
 
 1. Collect the config layers. Read `~/.config/granny/config.json` and `<repo>/granny.config.json` if they exist; do not merge them yourself - the engine does that and rejects bad keys.
-2. Read `engines/claude-code/workflow.js` (relative to the skill directory) and pass the full text unchanged as `script`. Alternative: copy the file into the session's scratchpad directory (the one your session names, not `/tmp`) and pass that copy's path as `scriptPath` instead of `script`. Never point `scriptPath` into the skill directory: when the skill lives outside the session's working directories, Workflow refuses that path; the scratchpad path works.
+2. Pick the script for the mode: `workflow.js` to implement a plan, `plan.js` to plan a goal ([Planning](#planning)). Read `engines/claude-code/<script>` (relative to the skill directory) and pass the full text unchanged as `script`. Alternative: copy the file into the session's scratchpad directory (the one your session names, not `/tmp`) and pass that copy's path as `scriptPath` instead of `script`. Never point `scriptPath` into the skill directory: when the skill lives outside the session's working directories, Workflow refuses that path; the scratchpad path works.
 3. Call:
 
 ```
@@ -14,9 +14,17 @@ Workflow({
   args: {
     repo, branch, base, context, plan, stages,    // plan: absolute path or list; fromStage when resuming by stage
     repos,                                         // optional: other repos the stages work in
-    // or, to plan first: repo, branch, base, context, goal, plan?  (no stages)
     config: [<user config>, <project config>, <run overrides>]   // omit missing layers
   }
+})
+```
+
+To plan first, launch `plan.js` instead:
+
+```
+Workflow({
+  script: <contents of plan.js>,                  // or scriptPath: <scratchpad copy of plan.js>
+  args: { repo, branch, base, context, goal, plan?, repos?, config: [...] }   // no stages
 })
 ```
 
@@ -26,11 +34,11 @@ Workflow({
 
 ## Review only: `granny judge`
 
-The steps, with what to ask the user first, are in [judge.md](judge.md). The launch is the same script with other args:
+The steps, with what to ask the user first, are in [judge.md](judge.md). The launch uses `judge.js`; keep `judge: true` in args:
 
 ```
 Workflow({
-  script: <contents of workflow.js>,              // or scriptPath: <scratchpad copy of workflow.js>
+  script: <contents of judge.js>,                 // or scriptPath: <scratchpad copy of judge.js>
   args: { judge: true, repo, base, context, config: [<user config>, <project config>] }   // omit missing layers
 })
 ```
@@ -49,7 +57,7 @@ With `worktree` on (the default) the run starts with phase "Worktree": a helper 
 
 ## Planning
 
-With `goal` in args (and no `stages`), phase "Plan" runs after "Worktree": one `agent()` call, label `plan`, `roles.planner`'s model and effort, write access, schema `{ files, stages, summary, questions? }`. It writes the plan at the absolute path in its prompt - by default the main checkout's `<workDir>/plans/<branch-slug>.md`, which the session can write - then the plan review runs on it when `"planReview": true`, and the Workflow ends with `draft`, `plan`, `stages: []` and `final: null` ([config.md](config.md#planning)).
+A planning run launches `plan.js` with `goal` in args (and no `stages`); its phases are "Worktree", "Plan" and "Plan review". Phase "Plan" runs after "Worktree": one `agent()` call, label `plan`, `roles.planner`'s model and effort, write access, schema `{ files, stages, summary, questions? }`. It writes the plan at the absolute path in its prompt - by default the main checkout's `<workDir>/plans/<branch-slug>.md`, which the session can write - then the plan review runs on it when `"planReview": true`, and the Workflow ends with `draft`, `plan`, `stages: []` and `final: null` ([config.md](config.md#planning)). Once the user approves, the implement run is a new launch of `workflow.js` with `plan: draft.files` and the approved `stages`, not a resume of the planning run.
 
 ## Parallel stages
 
@@ -86,7 +94,7 @@ Details: [config.md](config.md#reviewers).
 
 ## Resume
 
-Same script, same args: `Workflow({ scriptPath, args, resumeFromRunId })`, where `scriptPath` is the path the first launch returned when you passed `script`, or the same scratchpad copy you launched with (leave it in place until the run is done). Unchanged agent calls return cached results instantly, so the run continues where it stopped. To restart from a stage instead, add `fromStage` to args; when that stage's implementer finds its work already committed and adds nothing, the stage is reviewed over `<base>...HEAD` instead of ending `no-changes` ([config.md](config.md#checks), Reading git). With parallel stages, `fromStage` runs every stage from there on again, also those that finished beside the failed one (the log line `a stage failed ... Finished: ... Not finished: ...` names them), so prefer `resumeFromRunId`, which returns their cached results.
+Same script, same args: a run resumes with the script it was launched with (`plan.js`, `workflow.js` or `judge.js`), `Workflow({ scriptPath, args, resumeFromRunId })`, where `scriptPath` is the path the first launch returned when you passed `script`, or the same scratchpad copy you launched with (leave it in place until the run is done). Unchanged agent calls return cached results instantly, so the run continues where it stopped. To restart from a stage instead, add `fromStage` to args; when that stage's implementer finds its work already committed and adds nothing, the stage is reviewed over `<base>...HEAD` instead of ending `no-changes` ([config.md](config.md#checks), Reading git). With parallel stages, `fromStage` runs every stage from there on again, also those that finished beside the failed one (the log line `a stage failed ... Finished: ... Not finished: ...` names them), so prefer `resumeFromRunId`, which returns their cached results.
 
 ## When it ends
 
