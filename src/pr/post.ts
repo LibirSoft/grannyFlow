@@ -108,14 +108,19 @@ function postedBodies(io: PosterIo, pr: PrInfo): string | { error: string } {
 /** Pin every diff setting a user's git config could change, so the hunks are the ones GitHub shows. */
 const DIFF_FLAGS = ['--unified=3', '--no-color', '--no-ext-diff', '--no-textconv', '--no-relative', '--src-prefix=a/', '--dst-prefix=b/']
 
-/** Where a round's comments anchor: its reviewed commit when the PR contains it, else the PR's head. */
-function anchorOf(io: PosterIo, r: TrailRound, pr: PrInfo): { commit: string; notInPr: boolean; hunks: Hunks } {
+/** A round's review commit: its reviewed commit when the PR contains it, else the PR's head. */
+function commitFor(io: PosterIo, r: TrailRound, pr: PrInfo): { commit: string; notInPr: boolean } {
   const sha = r.reviewedSha
   const inPr = sha !== undefined && io.exec('git', ['merge-base', '--is-ancestor', sha, pr.headRefOid]).code === 0
-  const commit = inPr ? sha! : pr.headRefOid
+  return inPr ? { commit: sha!, notInPr: false } : { commit: pr.headRefOid, notInPr: true }
+}
+
+/** Where a round's comments anchor, and the PR's hunks at that commit. */
+function anchorOf(io: PosterIo, r: TrailRound, pr: PrInfo): { commit: string; notInPr: boolean; hunks: Hunks } {
+  const { commit, notInPr } = commitFor(io, r, pr)
   const base = io.exec('git', ['merge-base', pr.baseRefOid, commit])
   const diff = base.code === 0 ? io.exec('git', ['-c', 'core.quotePath=false', 'diff', ...DIFF_FLAGS, base.stdout.trim(), commit]) : undefined
-  return { commit, notInPr: !inPr, hunks: diff?.code === 0 ? parseHunks(diff.stdout) : new Map() }
+  return { commit, notInPr, hunks: diff?.code === 0 ? parseHunks(diff.stdout) : new Map() }
 }
 
 function relative(file: string, toplevel: string): string {
@@ -130,8 +135,7 @@ export function buildReview(io: PosterIo, r: TrailRound, records: TrailRound[], 
     const earlier = records.some(x => x.loop === r.loop && x.round < r.round && x.findings.length)
     if (r.outcome === 'clean' || r.outcome === undefined) {
       if (!earlier) return undefined
-      const at = r.reviewedSha && io.exec('git', ['merge-base', '--is-ancestor', r.reviewedSha, pr.headRefOid]).code === 0 ? r.reviewedSha : pr.headRefOid
-      return { commit_id: at, event: 'COMMENT', body: cleanBody(r), comments: [] }
+      return { commit_id: commitFor(io, r, pr).commit, event: 'COMMENT', body: cleanBody(r), comments: [] }
     }
   }
   if (r.loop === 'plan') {

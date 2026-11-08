@@ -670,13 +670,16 @@ function postedBodies(io, pr) {
   return r.code === 0 ? r.stdout : { error: failure(r) };
 }
 var DIFF_FLAGS = ["--unified=3", "--no-color", "--no-ext-diff", "--no-textconv", "--no-relative", "--src-prefix=a/", "--dst-prefix=b/"];
-function anchorOf(io, r, pr) {
+function commitFor(io, r, pr) {
   const sha = r.reviewedSha;
   const inPr = sha !== undefined && io.exec("git", ["merge-base", "--is-ancestor", sha, pr.headRefOid]).code === 0;
-  const commit = inPr ? sha : pr.headRefOid;
+  return inPr ? { commit: sha, notInPr: false } : { commit: pr.headRefOid, notInPr: true };
+}
+function anchorOf(io, r, pr) {
+  const { commit, notInPr } = commitFor(io, r, pr);
   const base = io.exec("git", ["merge-base", pr.baseRefOid, commit]);
   const diff = base.code === 0 ? io.exec("git", ["-c", "core.quotePath=false", "diff", ...DIFF_FLAGS, base.stdout.trim(), commit]) : undefined;
-  return { commit, notInPr: !inPr, hunks: diff?.code === 0 ? parseHunks(diff.stdout) : new Map };
+  return { commit, notInPr, hunks: diff?.code === 0 ? parseHunks(diff.stdout) : new Map };
 }
 function relative(file, toplevel) {
   const root = `${trimSlashes(toplevel)}/`;
@@ -689,8 +692,7 @@ function buildReview(io, r, records, pr, toplevel) {
     if (r.outcome === "clean" || r.outcome === undefined) {
       if (!earlier)
         return;
-      const at = r.reviewedSha && io.exec("git", ["merge-base", "--is-ancestor", r.reviewedSha, pr.headRefOid]).code === 0 ? r.reviewedSha : pr.headRefOid;
-      return { commit_id: at, event: "COMMENT", body: cleanBody(r), comments: [] };
+      return { commit_id: commitFor(io, r, pr).commit, event: "COMMENT", body: cleanBody(r), comments: [] };
     }
   }
   if (r.loop === "plan") {
