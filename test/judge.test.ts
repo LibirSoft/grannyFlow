@@ -885,7 +885,7 @@ describe('Claude Code entry', () => {
   const load = (script: string) => new AsyncFunction('agent', 'log', 'phase', 'args', script.replace(/^export const meta/, 'const meta'))
 
   it('runs a judge run on args.judge, through the helper', async () => {
-    const script = await buildClaudeCode()
+    const script = await buildClaudeCode('judge')
     const agents: Array<{ prompt: string; opts: any }> = []
     const phases: string[] = []
     const written: string[] = []
@@ -917,23 +917,22 @@ describe('Claude Code entry', () => {
   })
 
   it('still fails the Workflow on a gap, before any agent', async () => {
-    const script = await buildClaudeCode()
+    const script = await buildClaudeCode('judge')
     let calls = 0
     const run = load(script)(async () => (calls++, null), () => {}, () => {}, { judge: true, repo: '/r', config: [] })
     await expect(run).rejects.toThrow('granny judge needs models: reviewers: no config sets who reviews')
     expect(calls).toBe(0)
   })
 
-  it('takes a normal run when judge is not exactly true', async () => {
-    const script = await buildClaudeCode()
-    const run = load(script)(async () => null, () => {}, () => {}, { judge: 'yes', repo: '/r', config: [ONE] })
+  it('leaves args whose judge is not exactly true to the implement script, which takes them as a normal run', async () => {
+    const run = load(await buildClaudeCode('workflow'))(async () => null, () => {}, () => {}, { judge: 'yes', repo: '/r', config: [ONE] })
     await expect(run).rejects.toThrow('Invalid granny input')
   })
 
-  it('lists a normal run\'s phases up to PR ready in the meta, then the two only a judge run has, and names the mode', async () => {
-    const script = await buildClaudeCode()
+  it('lists only a judge run\'s phases in the meta, and names the mode', async () => {
+    const script = await buildClaudeCode('judge')
     const meta = script.slice(0, script.indexOf('\n}\n') + 2)
-    expect([...meta.matchAll(/\{ title: '([^']+)' \}/g)].map(m => m[1])).toEqual(['Worktree', 'Plan', 'Plan review', 'Implement', 'Checks', 'Review', 'Final review', 'PR ready', 'Tagging', 'Save report'])
+    expect([...meta.matchAll(/\{ title: '([^']+)' \}/g)].map(m => m[1])).toEqual(['Review', 'Tagging', 'Save report'])
     expect(meta).toMatch(/description: '.*review-only/)
     expect(meta).toMatch(/whenToUse: '.*judge: true/)
   })

@@ -56,14 +56,18 @@ function write(path: string, text: string) {
   console.log(`wrote ${path.slice(root.length + 1)} (${text.length} bytes)`)
 }
 
-export async function buildClaudeCode(): Promise<string> {
-  const meta = readFileSync(join(root, 'src/adapters/claude-code/meta.js'), 'utf8').trim()
-  const code = await bundle('src/adapters/claude-code/entry.ts', 'browser')
+export const CLAUDE_CODE_SCRIPTS = ['plan', 'workflow', 'judge'] as const
+export type ClaudeCodeScript = (typeof CLAUDE_CODE_SCRIPTS)[number]
+
+export async function buildClaudeCode(script: ClaudeCodeScript): Promise<string> {
+  const entries = 'src/adapters/claude-code/entries'
+  const meta = readFileSync(join(root, entries, `${script}.meta.js`), 'utf8').trim()
+  const code = await bundle(`${entries}/${script}.ts`, 'browser')
   const exportTail = /\nexport\s*\{\s*main\s*\};?\s*$/
-  if (!exportTail.test(code)) throw new Error('claude-code bundle: expected a trailing `export { main }`')
+  if (!exportTail.test(code)) throw new Error(`claude-code ${script}.js bundle: expected a trailing \`export { main }\``)
   const body = code.replace(exportTail, '\n').replace(/^\/\/ .*\n/gm, '')
   for (const banned of ['Date.now(', 'Math.random(', 'new Date(', 'import ', 'require(']) {
-    if (body.includes(banned)) throw new Error(`claude-code bundle contains ${banned} - Workflow scripts cannot use it`)
+    if (body.includes(banned)) throw new Error(`claude-code ${script}.js bundle contains ${banned} - Workflow scripts cannot use it`)
   }
   return `${meta}\n${BANNER}${body.trim()}\n\nreturn await main({ agent, log, phase, args })\n`
 }
@@ -205,7 +209,7 @@ export function renderPrompts(): string {
 }
 
 if (import.meta.main) {
-  write(join(engines, 'claude-code/workflow.js'), await buildClaudeCode())
+  for (const script of CLAUDE_CODE_SCRIPTS) write(join(engines, `claude-code/${script}.js`), await buildClaudeCode(script))
   write(join(engines, 'claude-code/hooks/granny-readonly-guard.mjs'), await buildReadOnlyGuard())
   write(join(engines, 'opencode/plugin/granny-workflow/index.js'), await buildOpencode())
   write(join(engines, 'opencode/plugin/granny-workflow/tui.js'), await buildOpencodeTui())

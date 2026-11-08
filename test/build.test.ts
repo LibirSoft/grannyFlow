@@ -2,7 +2,7 @@ import { describe, expect, it, mock } from 'bun:test'
 import { readFileSync } from 'node:fs'
 import { builtinModules } from 'node:module'
 import { join } from 'node:path'
-import { buildClaudeCode, buildOmp, buildOpencode, buildOpencodeTui, buildReadOnlyGuard } from '../scripts/build'
+import { buildClaudeCode, buildOmp, CLAUDE_CODE_SCRIPTS, buildOpencode, buildOpencodeTui, buildReadOnlyGuard } from '../scripts/build'
 import { CODEX_REVIEWER, finding, review } from './fake-host'
 
 const root = join(import.meta.dir, '..')
@@ -14,21 +14,29 @@ function loadWorkflow(script: string) {
   return new AsyncFunction('agent', 'log', 'phase', 'args', 'parallel', 'pipeline', 'budget', 'workflow', body)
 }
 
+describe('claude-code Workflow scripts', () => {
+  for (const name of CLAUDE_CODE_SCRIPTS) {
+    it(`${name}.js is committed in sync with src/`, async () => {
+      const built = await buildClaudeCode(name)
+      expect(readFileSync(join(root, `skills/granny-workflow/engines/claude-code/${name}.js`), 'utf8')).toBe(built)
+    })
+
+    it(`${name}.js starts with a pure-literal meta and avoids APIs the Workflow sandbox forbids`, async () => {
+      const script = await buildClaudeCode(name)
+      const meta = script.slice(0, script.indexOf('\n}\n') + 2)
+      expect(meta).not.toMatch(/\$\{|\.\.\.|\w\(/)
+      for (const banned of ['Date.now(', 'Math.random(', 'new Date(', 'require(']) expect(script).not.toContain(banned)
+    })
+  }
+
+  it('bundles no implement loop into judge.js', async () => {
+    expect(await buildClaudeCode('judge')).not.toContain('async function runGranny(')
+  })
+})
+
 describe('claude-code workflow.js', () => {
-  it('is committed in sync with src/', async () => {
-    const built = await buildClaudeCode()
-    expect(readFileSync(join(root, 'skills/granny-workflow/engines/claude-code/workflow.js'), 'utf8')).toBe(built)
-  })
-
-  it('starts with a pure-literal meta and avoids APIs the Workflow sandbox forbids', async () => {
-    const script = await buildClaudeCode()
-    const meta = script.slice(0, script.indexOf('\n}\n') + 2)
-    expect(meta).not.toMatch(/\$\{|\.\.\.|\w\(/)
-    for (const banned of ['Date.now(', 'Math.random(', 'new Date(', 'require(']) expect(script).not.toContain(banned)
-  })
-
   it('runs the whole loop against the Workflow agent() API', async () => {
-    const script = await buildClaudeCode()
+    const script = await buildClaudeCode('workflow')
     const calls: Array<{ prompt: string; opts: any }> = []
     const logs: string[] = []
     const phases: string[] = []
@@ -88,9 +96,9 @@ describe('claude-code workflow.js', () => {
   })
 
   it('declares the Plan review phase and reviews and fixes a plan through the Workflow agent() API', async () => {
-    const script = await buildClaudeCode()
+    const script = await buildClaudeCode('workflow')
     const meta = script.slice(0, script.indexOf('\n}\n') + 2)
-    expect(meta).toContain("{ title: 'Worktree' },\n    { title: 'Plan' },\n    { title: 'Plan review' },\n    { title: 'Implement' },")
+    expect(meta).toContain("{ title: 'Worktree' },\n    { title: 'Plan review' },\n    { title: 'Implement' },")
     const calls: Array<{ prompt: string; opts: any }> = []
     const phases: string[] = []
     let reviews = 0
