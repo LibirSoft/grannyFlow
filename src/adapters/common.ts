@@ -111,6 +111,10 @@ export function summarize(result: RunResult, worktree: boolean): string {
     lines.push(`- final ${r.repo}: ${r.final ? `gates ${r.final.gatesGreen ? 'green' : 'RED'}, PR body ${r.final.prBodyPath}${r.final.issues ? `, issues: ${r.final.issues}` : ''}` : 'returned nothing'}`)
     if (r.recheck) lines.push(recheckLine(r.recheck, `checks after the final check ${r.repo}`))
   }
+  if (result.trail) {
+    const { dir, written, failed } = result.trail
+    lines.push(`- trail: ${dir} - ${written} record(s) written${failed.length ? `; NOT written: ${failed.join(', ')} - the PR will not get these rounds' comments` : ''}`)
+  }
   if (worktree) lines.push(`- worktree: ${result.worktree}${result.repos?.length ? ` (and ${result.repos.slice(1).map(r => r.worktree).join(', ')})` : ''} - review and push from there; granny never removes it`)
   return lines.join('\n')
 }
