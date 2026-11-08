@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### Added
+
+- Review trail: at the end of every review round (plan review, each stage, final review) the engine writes the round as JSON to `<workDir>/trail/<loop>-r<round>.json` in the run's main worktree - the commit the reviewers saw, the reviewers, every finding with the judge's tags, rule and route, blockers, overruled declines, and the fix's commit range, commits, declines and deviations. The run result's `trail` names the directory and any round whose record could not be written; a failed write never fails the run. Config `trail` (default `true`) turns it off.
+- `scripts/pr-comments.mjs`: once the PR is open, `node <skill-dir>/scripts/pr-comments.mjs [--pr <n>] [--trail <dir>] [--dry-run]` in the worktree posts every trail round as one GitHub review (through `gh api`), in the order things happened. A finding on a changed line of the PR diff at the reviewed commit becomes a comment on that line, with the judge's tags and what happened to it (fixed in which commits, declined and why, overruled, kept as residual, came back in a later round); the rest go into the round's review body. Each review carries a marker, so a rerun posts only what is missing. Granny still never pushes or opens a PR, and no agent writes the comments: the skill only starts the script.
+
 ### Changed
 
 - Claude Code: a normal run's phase list has no empty "Judge" row, and Final review is listed in order, before PR ready. The last two phases of a `granny judge` run are "Tagging" and "Save report", listed after PR ready.

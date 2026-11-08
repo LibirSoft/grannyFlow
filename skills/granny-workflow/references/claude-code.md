@@ -99,3 +99,7 @@ Same script, same args: a run resumes with the script it was launched with (`pla
 ## When it ends
 
 The result is `{ repo, branch, base, worktree, draft?, plan?, stages: [...], final, repos? }`; `repos` is there when the run spans several repos; `draft` is there in a planning run; `plan` is there when args had a `plan`. If anything looks empty, read `<transcriptDir>/journal.jsonl`, which records every agent's return value, before drawing conclusions. Then report per SKILL.md section 5 and wait.
+
+## When the PR is opened
+
+The run's review trail is in `<worktree>/.granny/trail/` (`trail.dir` in the result). Once the PR is open, run `cd <worktree> && node <skill-dir>/scripts/pr-comments.mjs` and relay its output; it posts every round as a GitHub review ([config.md](config.md#review-trail)). Only the script posts review comments - never write or post them yourself.

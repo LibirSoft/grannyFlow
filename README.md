@@ -102,6 +102,30 @@ None.
 
 The heading is the tagging agent's call: `critical` goes under P0, `major` under P1, `moderate` under P2 and `minor` under P3; what it refutes goes under `Dismissed by the judge`, with its reason. A finding it placed below the reviewer's severity is tagged `demoted`. Details: [references/judge.md](skills/granny-workflow/references/judge.md).
 
+## The review trail on the PR
+
+Every review round is recorded as it ends: the findings, the judge's tags and what became of each one, with the commit ids. Granny never pushes or opens the PR, so once you have opened it, ask your agent to post the trail, or run it yourself in the worktree:
+
+```sh
+node <skill-dir>/scripts/pr-comments.mjs
+```
+
+Each round becomes one review on the PR, in order. A finding sits on its line, and lines a later fix changed show as *Outdated*:
+
+```markdown
+**granny · Stage 1 (engine) · round 1 · `codex-F2`** (reviewer `codex`, P2)
+**Retry loop never gives up**
+
+`fetchAll` retries on every error, including 404.
+
+---
+**Judge:** `confirmed` `major` `common` `trivial` `in-scope` · priority 82 · rule 6 → fix: impact major is in alwaysFix (major/common/trivial -> 82)
+**Evidence:** src/fetch.ts:41 - a 404 loops forever
+**What happened:** fixed in fix r1: a1b2c3d..d4e5f6a (2 commits)
+```
+
+A script posts it, not an agent, and a rerun posts only what is missing. Details: [references/config.md](skills/granny-workflow/references/config.md#review-trail).
+
 ## How it works
 
 <picture>
@@ -168,11 +192,11 @@ To resume a stopped run: on Claude Code relaunch it with `resumeFromRunId`; on o
 
 ```sh
 bun install
-bun run build   # regenerates the engines and references/prompts.md from src/
+bun run build   # regenerates the engines, scripts/pr-comments.mjs and references/prompts.md from src/
 bun run check   # typecheck + tests
 ```
 
-`src/core` holds the loop, shared by every engine; `src/adapters` connects it to each host. The generated engine files are committed so the skill installs without a build step.
+`src/core` holds the loop, shared by every engine; `src/adapters` connects it to each host; `src/pr` is the trail poster. The generated engine files are committed so the skill installs without a build step.
 
 ## License
 
