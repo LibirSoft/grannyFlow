@@ -1083,6 +1083,10 @@ var STATUS_LINE = /^\s*[MADRCUT?!]{1,2}\s+\S/;
 var entriesOf = (answer) => Array.isArray(answer?.perFinding) ? answer.perFinding.filter((x) => x && typeof x === "object" && typeof x.id === "string") : [];
 var workOf = (c) => c.workDir.replace(/\/+$/, "");
 var phaseOf = (subject) => subject.kind === "plan" ? PLAN_PHASE : subject.note === WHOLE_BRANCH_NOTE ? FINAL_REVIEW_PHASE : REVIEW_PHASE;
+var reviewerMeta = (rv, host) => {
+  const model = resolveModel(rv.model, host.name);
+  return { name: rv.name, engine: rv.engine, ...model ? { model } : {} };
+};
 var configLayers = (input) => Array.isArray(input.config) ? input.config : [input.config];
 function engineParts(host, config) {
   const stopIfCancelled = () => {
@@ -1141,18 +1145,19 @@ ${note}` : ""}` : missing };
     return { sha, code: r.code, output: r.output };
   };
   const writeChecked = async (o) => {
+    const log = o.log ?? host.log;
     const want = utf8Length(o.text);
     for (let n = 1;n <= 2; n++) {
       const w = await shell(n === 1 ? o.labels.write : o.labels.retry, o.phase, heredocWriteScript(o.path, o.text), o.cwd, o.ask);
       if (!w.ran) {
-        host.log(`writing ${o.what} failed (exit ${w.code}): ${w.output.slice(-300)}`);
+        log(`writing ${o.what} failed (exit ${w.code}): ${w.output.slice(-300)}`);
         return false;
       }
       const size = await shell(o.labels.size, o.phase, `wc -c < ${shellQuote(o.path)}`, o.cwd, o.sizeAsk ?? o.ask);
       const got = size.ran ? lineShaped(size.output, COUNT) : undefined;
       if (got !== undefined && Number(got) === want)
         return true;
-      host.log(`${o.path} holds ${got ?? "an unknown number of"} bytes, not ${want}${n === 1 ? " - writing it once more" : ""}`);
+      log(`${o.path} holds ${got ?? "an unknown number of"} bytes, not ${want}${n === 1 ? " - writing it once more" : ""}`);
     }
     return false;
   };
@@ -1441,10 +1446,7 @@ ${notes}`);
     commits: Number(commits),
     repo,
     when: date,
-    reviewers: config.reviewers.map((rv) => {
-      const model = resolveModel(rv.model, host.name);
-      return { name: rv.name, engine: rv.engine, ...model ? { model } : {} };
-    }),
+    reviewers: config.reviewers.map((rv) => reviewerMeta(rv, host)),
     judge: resolveModel(config.roles.judge.model, host.name),
     uncommitted: notReviewed,
     failed: failedReviewers

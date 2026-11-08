@@ -28,6 +28,7 @@ import {
   gitCommandPrompt,
   tagPrompt,
   timeoutProbePrompt,
+  trailWritePrompt,
   worktreeCommandPrompt,
   roundLabel,
   type EarlierRound,
@@ -43,6 +44,7 @@ import { decide, declinedOf, isBlocker, mergeDuplicates, parseCodexReview, revie
 import { detachedReview, MAX_WAITS, planReviewScript, reportedBackend, reviewPlan, reviewStem, WAIT_SECONDS } from './reviewer'
 import { SCHEMAS } from './schemas'
 import { heredocWriteScript, shellQuote } from './shell'
+import { trailDir, trailId, trailPath, trailRound, trailText, type RoundFacts } from './trail'
 import { branchSlug, excludeScript, reportedWorktree, worktreePath, worktreeScript } from './worktree'
 import type {
   AgentRequest,
@@ -68,6 +70,9 @@ import type {
   StageOutcome,
   StageResult,
   StageSpec,
+  TrailReviewer,
+  TrailRound,
+  TrailSummary,
 } from './types'
 
 type Subject = { kind: 'diff'; base: string; stage?: StageTask; note?: string } | { kind: 'plan'; files: string[] }
@@ -185,6 +190,11 @@ const entriesOf = (answer: any): JudgeEntry[] =>
   Array.isArray(answer?.perFinding) ? answer.perFinding.filter((x: unknown) => x && typeof x === 'object' && typeof (x as { id?: unknown }).id === 'string') : []
 const workOf = (c: GrannyConfig) => c.workDir.replace(/\/+$/, '')
 const phaseOf = (subject: Subject) => (subject.kind === 'plan' ? PLAN_PHASE : subject.note === WHOLE_BRANCH_NOTE ? FINAL_REVIEW_PHASE : REVIEW_PHASE)
+
+const reviewerMeta = (rv: ReviewerConfig, host: Host): TrailReviewer => {
+  const model = resolveModel(rv.model, host.name)
+  return { name: rv.name, engine: rv.engine, ...(model ? { model } : {}) }
+}
 
 export function checkInput(input: RunInput): string[] {
   const errors: string[] = []
@@ -324,18 +334,20 @@ function engineParts(host: Host, config: GrannyConfig) {
     labels: { write: string; retry: string; size: string }
     ask: typeof gitCommandPrompt
     sizeAsk?: typeof gitCommandPrompt
+    log?: (line: string) => void
   }): Promise<boolean> => {
+    const log = o.log ?? host.log
     const want = utf8Length(o.text)
     for (let n = 1; n <= 2; n++) {
       const w = await shell(n === 1 ? o.labels.write : o.labels.retry, o.phase, heredocWriteScript(o.path, o.text), o.cwd, o.ask)
       if (!w.ran) {
-        host.log(`writing ${o.what} failed (exit ${w.code}): ${w.output.slice(-300)}`)
+        log(`writing ${o.what} failed (exit ${w.code}): ${w.output.slice(-300)}`)
         return false
       }
       const size = await shell(o.labels.size, o.phase, `wc -c < ${shellQuote(o.path)}`, o.cwd, o.sizeAsk ?? o.ask)
       const got = size.ran ? lineShaped(size.output, COUNT) : undefined
       if (got !== undefined && Number(got) === want) return true
-      host.log(`${o.path} holds ${got ?? 'an unknown number of'} bytes, not ${want}${n === 1 ? ' - writing it once more' : ''}`)
+      log(`${o.path} holds ${got ?? 'an unknown number of'} bytes, not ${want}${n === 1 ? ' - writing it once more' : ''}`)
     }
     return false
   }
@@ -505,7 +517,7 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
   if (inputErrors.length) throw new Error(`Invalid granny input:\n- ${inputErrors.join('\n- ')}`)
 
   const config = resolveConfig(configLayers(input), host.name)
-  const { call, shell, readHead, uncommitted: statusOf, reviewAll, judgeAnswers } = engineParts(host, config)
+  const { call, shell, readHead, writeChecked, uncommitted: statusOf, reviewAll, judgeAnswers } = engineParts(host, config)
   const work = workOf(config)
   const uncommitted = (label: string, phase: string, cwd: string) => statusOf(label, phase, cwd, plansIn(cwd))
   const base = input.base ?? config.base
@@ -661,13 +673,23 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
     return note
   }
 
-  const checkGate = async (lane: Lane, name: string, at: string, checks: CheckConfig[], runs: CheckRun[], stage?: StageTask, gates?: Gates): Promise<{ passed: boolean; note?: string }> => {
+  const checkGate = async (
+    lane: Lane,
+    name: string,
+    at: string,
+    checks: CheckConfig[],
+    runs: CheckRun[],
+    stage?: StageTask,
+    gates?: Gates,
+    steps?: Implementation[],
+  ): Promise<{ passed: boolean; note?: string }> => {
     host.phase(CHECKS_PHASE)
     const budget = (c: CheckConfig) => c.maxRepairs ?? config.maxRepairs
     const most = Math.max(0, ...checks.map(budget))
     let deviations: string | undefined
     const step = async (label: string, by: string, prompt: string) => {
       const impl = await implement(lane, label, prompt)
+      steps?.push(impl)
       if (gates) Object.assign(gates, { green: impl.gatesGreen, text: impl.gates, by: `${by} (${label})` })
       return saidSomething(impl.deviations)
     }
@@ -723,23 +745,86 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
     return r
   }
 
+  const trailed: Omit<TrailSummary, 'dir'> = { written: 0, failed: [] }
+  const saveTrail = async (cwd: string, record: TrailRound, at: string, phase: string) => {
+    const id = trailId(record.loop, record.round)
+    const path = trailPath(config, cwd, record.loop, record.round)
+    const why: string[] = []
+    let ok = false
+    try {
+      ok = await writeChecked({
+        path,
+        text: trailText(record),
+        cwd,
+        phase,
+        what: 'the record',
+        labels: { write: `trail ${id}`, retry: `trail ${id} retry`, size: `trail ${id} size` },
+        ask: trailWritePrompt,
+        log: line => why.push(line),
+      })
+    } catch (e) {
+      if (isCancelled(e)) throw e
+      why.push(String((e as Error)?.message ?? e))
+    }
+    if (ok) trailed.written++
+    else {
+      trailed.failed.push(id)
+      host.log(`${at}: trail record not written: ${path}${why.length ? ` (${why.join('; ')})` : ''}`)
+    }
+  }
+  const trailHead = async (label: string, phase: string, cwd: string): Promise<string | undefined> => {
+    try {
+      return (await readHead(label, phase, cwd)).sha
+    } catch (e) {
+      if (isCancelled(e)) throw e
+      host.log(`${label}: could not read HEAD for the trail record: ${String((e as Error)?.message ?? e)}`)
+      return undefined
+    }
+  }
+  const trailOf = (): { trail?: TrailSummary } => (config.trail ? { trail: { dir: trailDir(config, worktree), written: trailed.written, failed: [...trailed.failed] } } : {})
+
   const reviewLoop = async (
     lane: Lane,
     name: string,
     subject: Subject,
     reviewers = config.reviewers,
-    opts: { gates?: Gates; checks?: CheckConfig[]; runs?: CheckRun[]; notes?: string[]; prior?: EarlierRound[]; record?: { loop: NonNullable<EarlierRound['loop']>; into: EarlierRound[] } } = {},
+    opts: {
+      loop: string
+      head?: string
+      gates?: Gates
+      checks?: CheckConfig[]
+      runs?: CheckRun[]
+      notes?: string[]
+      prior?: EarlierRound[]
+      record?: { loop: NonNullable<EarlierRound['loop']>; into: EarlierRound[] }
+    },
   ): Promise<PlanResult> => {
     const { gates, checks = [], runs = [], notes = [], prior = [], record } = opts
     const { p } = lane
     const phase = phaseOf(subject)
+    const trailCwd = repoState.get(lane.repo)?.lane.cwd ?? lane.cwd
+    let known = opts.head ?? runs.at(-1)?.head
     const history: RoundRecord[] = []
     const earlier: EarlierRound[] = [...prior]
     let unmerged: Finding[] = []
     let carried: Array<{ round: number; labels: string[]; finding: Finding }> = []
     const kept = () => carried.map(c => c.finding)
     for (let round = 1; round <= config.maxRounds; round++) {
+      const reviewedSha = config.trail ? (known ?? (await trailHead(`head ${name} r${round}`, phase, lane.cwd))) : undefined
+      known = undefined
       const results = await reviewAll(lane, reviewers, name, subject, round)
+      const facts: RoundFacts = {
+        loop: opts.loop,
+        name,
+        round,
+        base: subject.kind === 'diff' ? subject.base : lane.base,
+        ...(reviewedSha ? { reviewedSha } : {}),
+        reviewers: results.filter(r => r.ran).map(r => reviewerMeta(r.reviewer, host)),
+        findings: [],
+      }
+      const keep = async (more: Partial<RoundFacts>) => {
+        if (config.trail) await saveTrail(trailCwd, trailRound({ ...facts, ...more }), `${name} r${round}`, phase)
+      }
       const failed = results.filter(r => !r.ran)
       const found = results.filter(r => r.ran).flatMap(r => r.findings)
       if (failed.length) {
@@ -750,11 +835,13 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
         )
         const note = [`reviewer(s) that did not run, also on a retry: ${[...names].join(', ')}`, ...failed.map(r => `${r.reviewer.name}: ${r.note ?? 'no output'}`)].join('\n')
         host.log(`${name} r${round}: review failed - stopping this stage's loop. ${note}`)
+        await keep({ findings: found, outcome: 'review-failed', note })
         return { outcome: 'review-failed', rounds: round, residual: [], unresolved: [...found, ...earlier], history, note }
       }
       if (!found.length) {
         host.log(`${name} r${round}: clean`)
         host.round?.({ subject: name, round, findings: [] })
+        await keep({ outcome: 'clean' })
         return { outcome: 'clean', rounds: round, residual: kept(), unresolved: [], history }
       }
 
@@ -763,6 +850,7 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
       const earlierOf = (f: Finding) => (f.repeatOf === undefined ? undefined : ledger.get(f.repeatOf))
       const blockers = found.filter(isBlocker)
       const judged = declined.size ? found : found.filter(f => !isBlocker(f))
+      const unjudgedBlockers = new Set(declined.size ? [] : blockers.map(f => f.id))
       if (blockers.length && declined.size) {
         host.log(`${name} r${round}: ${blockers.length} P0/P1 finding(s) go to the judge too - the fixer declined findings before, so a repeat of one can stay residual: ${blockers.map(f => f.id).join(', ')}`)
       } else if (blockers.length) {
@@ -807,6 +895,7 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
       host.log(`${name} r${round}: ${findings.length} finding(s)`)
 
       const { accepted, residual } = triage(findings)
+      const routed: Partial<RoundFacts> = { findings, sent: accepted, blockers: unjudgedBlockers }
       host.round?.({ subject: name, round, findings: findings.map(f => roundFinding(f, accepted.includes(f))) })
       const entry: EarlierRound = { round, sent: accepted, ...(residual.length ? { residual } : {}) }
       const recorded = record ? { ...entry, loop: record.loop } : undefined
@@ -833,6 +922,7 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
       }
       if (!accepted.length) {
         host.log(`${name} r${round}: nothing actionable left - stage done with ${carried.length} residual finding(s) for the user`)
+        await keep({ ...routed, outcome: 'residual-only' })
         return { outcome: 'residual-only', rounds: round, residual: kept(), unresolved: [], history }
       }
 
@@ -842,13 +932,16 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
       }
 
       let fixed: { deviations?: string; declined?: unknown }
+      let work: Implementation | undefined
+      const fixLabel = `fix ${name} r${round}`
       if (subject.kind === 'plan') {
-        fixed = await fixPlan(`fix ${name} r${round}`, planFixPrompt(p, subject.files, round, accepted, overruled))
+        fixed = await fixPlan(fixLabel, planFixPrompt(p, subject.files, round, accepted, overruled))
       } else {
-        const fix = await implement(lane, `fix ${name} r${round}`, fixPrompt(p, name, round, accepted, overruled))
-        if (gates) Object.assign(gates, { green: fix.gatesGreen, text: fix.gates, by: `the last fix (fix ${name} r${round})` })
+        const fix = await implement(lane, fixLabel, fixPrompt(p, name, round, accepted, overruled))
+        if (gates) Object.assign(gates, { green: fix.gatesGreen, text: fix.gates, by: `the last fix (${fixLabel})` })
         if (!fix.gatesGreen) host.log(`${name} r${round}: WARNING fixer left gates red - ${fix.gates}`)
         fixed = fix
+        work = fix
       }
       const said = saidSomething(fixed.deviations)
       const { declined: refused, unknown } = declinedOf(fixed.declined, accepted)
@@ -859,16 +952,34 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
       const reply = { ...(said ? { deviations: said } : {}), ...(refused.length ? { declined: refused } : {}) }
       earlier.push({ ...entry, ...reply })
       if (recorded) Object.assign(recorded, reply)
+      const later: Implementation[] = []
+      const before = runs.length
+      const fixFacts = (): Partial<RoundFacts> => {
+        const head = runs.length > before ? runs.at(-1)!.head : undefined
+        const commitsOf = (i: Implementation) => (Array.isArray(i.commits) ? i.commits : [])
+        const done = work && {
+          startSha: work.startSha,
+          headSha: head ?? later.at(-1)?.headSha ?? work.headSha,
+          commits: [work, ...later].flatMap(commitsOf),
+        }
+        return { ...routed, overruled: overruled.map(o => ({ id: o.id, said: o.said })), fix: { label: fixLabel, ...(done ? { work: done } : {}), refused, ...(said ? { said } : {}) } }
+      }
       if (subject.kind === 'diff' && checks.length) {
-        const gate = await checkGate(lane, name, `fix r${round}`, checks, runs, subject.stage, gates)
-        if (!gate.passed) return { outcome: 'checks-failed', rounds: round, residual: kept(), unresolved: [], history, note: gate.note }
+        const gate = await checkGate(lane, name, `fix r${round}`, checks, runs, subject.stage, gates, later)
+        if (!gate.passed) {
+          await keep({ ...fixFacts(), outcome: 'checks-failed', ...(gate.note ? { note: gate.note } : {}) })
+          return { outcome: 'checks-failed', rounds: round, residual: kept(), unresolved: [], history, note: gate.note }
+        }
+        known = runs.at(-1)?.head
         host.phase(phase)
       } else if (subject.kind === 'diff') {
         const left = await commitWork(lane, name, `fix r${round}`, subject.stage)
+        if (left.impl) later.push(left.impl)
         if (left.impl && gates) Object.assign(gates, { green: left.impl.gatesGreen, text: left.impl.gates, by: left.by })
         const note = unreviewed(name, `fix r${round}`, left)
         if (note) notes.push(note)
       }
+      await keep({ ...fixFacts(), ...(round === config.maxRounds ? { outcome: 'round-cap' as const } : {}) })
     }
     host.log(`${name}: hit the ${config.maxRounds}-round cap without a clean review`)
     return { outcome: 'round-cap', rounds: config.maxRounds, residual: carried.filter(c => c.round < config.maxRounds).map(c => c.finding), unresolved: history.at(-1)?.findings ?? [], history }
@@ -894,17 +1005,17 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
       host.log(`${name}: ${note}`)
       return { outcome: 'review-failed', rounds: 0, residual: [], unresolved: [], history: [], note }
     }
-    return reviewLoop(primaryLane, name, { kind: 'plan', files: plans }, able)
+    return reviewLoop(primaryLane, name, { kind: 'plan', files: plans }, able, { loop: 'plan' })
   }
 
   const planResult = await reviewThePlan()
   if (draft) {
     host.log(`plan written - the run stops here; launch again with plan and the approved stages to implement it`)
-    return { repo: input.repo, branch: input.branch, base, worktree, draft, ...(planResult ? { plan: planResult } : {}), stages: [], final: null }
+    return { repo: input.repo, branch: input.branch, base, worktree, draft, ...(planResult ? { plan: planResult } : {}), stages: [], final: null, ...trailOf() }
   }
   if (planResult && (planResult.outcome === 'round-cap' || planResult.outcome === 'review-failed')) {
     host.log(`plan review ended ${planResult.outcome} - stopping before stage 1; nothing was implemented`)
-    return { repo: input.repo, branch: input.branch, base, worktree, plan: planResult, stages: [], final: null }
+    return { repo: input.repo, branch: input.branch, base, worktree, plan: planResult, stages: [], final: null, ...trailOf() }
   }
 
   const tryLock = (s: RepoState) => (s.locked ? false : (s.locked = true))
@@ -996,7 +1107,7 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
           name,
           { kind: 'diff', base, ...(task ? { stage: task } : {}) },
           undefined,
-          { gates, checks, runs, notes, record: { loop: { id: `s${i + 1}`, name: `Stage ${i + 1} (${name})` }, into: ledgerOf(st, i) } },
+          { loop: `s${i + 1}`, gates, checks, runs, notes, record: { loop: { id: `s${i + 1}`, name: `Stage ${i + 1} (${name})` }, into: ledgerOf(st, i) } },
         )
     if (gates && !gates.green && !runs.length && (loop.outcome === 'clean' || loop.outcome === 'residual-only')) {
       loop.outcome = 'gates-red'
@@ -1243,7 +1354,9 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
     host.log(`${name}: reviewing ${s.lane.base}...HEAD across ${stages} stage(s)${s.merges ? ` and ${s.merges} lane merge(s)` : ''}`)
     const notes: string[] = []
     const prior = [...s.ledger].sort(([a], [b]) => a - b).flatMap(([, rounds]) => rounds)
-    const looped = await reviewLoop(s.lane, name, { kind: 'diff', base: s.lane.base, note: WHOLE_BRANCH_NOTE }, undefined, { checks, runs, notes, prior })
+    const loop = s.lane.repo === primary ? 'final' : `final-${slug(baseName(s.lane.repo))}`
+    const head = reusedHead.get(s)
+    const looped = await reviewLoop(s.lane, name, { kind: 'diff', base: s.lane.base, note: WHOLE_BRANCH_NOTE }, undefined, { loop, ...(head ? { head } : {}), checks, runs, notes, prior })
     const note = [looped.note, ...notes].filter(Boolean).join('\n')
     const r = note ? { ...looped, note } : looped
     if (r.outcome === 'checks-failed') host.log(`${name} ended checks-failed - the final check still runs, but the branch is not PR-ready`)
@@ -1322,6 +1435,7 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
     ...(primaryRecheck ? { recheck: primaryRecheck } : {}),
     final,
     ...(finals.length > 1 ? { repos: finals } : {}),
+    ...trailOf(),
   }
 }
 
@@ -1466,10 +1580,7 @@ export async function runJudge(host: Host, input: JudgeInput): Promise<JudgeResu
     commits: Number(commits),
     repo,
     when: date,
-    reviewers: config.reviewers.map(rv => {
-      const model = resolveModel(rv.model, host.name)
-      return { name: rv.name, engine: rv.engine, ...(model ? { model } : {}) }
-    }),
+    reviewers: config.reviewers.map(rv => reviewerMeta(rv, host)),
     judge: resolveModel(config.roles.judge.model, host.name),
     uncommitted: notReviewed,
     failed: failedReviewers,

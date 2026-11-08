@@ -668,7 +668,7 @@ describe('the base a stage review diffs against', () => {
   it('reads HEAD through a granny helper agent on hosts without a shell', async () => {
     const f = fakeHost({ name: 'claude-code', direct: false, override: lying })
     await runGranny(f.host, input())
-    expect(f.probes).toEqual([`cd /work/repo && git rev-parse --verify HEAD`, `cd /work/repo && git rev-list --count deadbee1..HEAD`, `cd /work/repo && git status --porcelain`])
+    expect(f.probes).toEqual([`cd /work/repo && git rev-parse --verify HEAD`, `cd /work/repo && git rev-list --count deadbee1..HEAD`, `cd /work/repo && git status --porcelain`, `cd /work/repo && git rev-parse --verify HEAD`])
     expect(f.calls.find(c => c.label === 'review core r1 codex')!.prompt).toContain('--base deadbee1')
   })
 

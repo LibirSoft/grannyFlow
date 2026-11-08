@@ -46,6 +46,8 @@ export interface FakeOptions {
   note?: string | ((command: string) => string | undefined)
   /** What the Claude Code helper reports for the n-th wait of a detached review (default `done`); null for a helper that returned nothing. */
   wait?: (command: string, n: number) => Review | null
+  /** What the n-th write of a trail record to path returns instead of success; throwing makes the host call fail. */
+  trailWrite?: (path: string, n: number) => Review | undefined
 }
 
 export interface Setup {
@@ -65,6 +67,10 @@ const COMMITS_PROBE = /git rev-list --count (\S+)\.\.HEAD/
 const STATUS_PROBE = /(^|&& )git status --porcelain( -- .*)?$/m
 const TIMEOUT_PROBE = 'command -v gtimeout'
 const isProbe = (command: string) => command.includes(HEAD_PROBE) || COMMITS_PROBE.test(command) || STATUS_PROBE.test(command) || command.includes(TIMEOUT_PROBE)
+
+const TRAIL_WRITE = /cat > ('(?:[^']|'\\'')*'|\S+) <<'(GRANNY_REPORT_END_*)'\n/
+const TRAIL_SIZE = /wc -c < ('(?:[^']|'\\'')*'|\S+)/
+const isTrail = (path: string) => path.includes('/trail/')
 
 const unquote = (word: string) => (word.startsWith("'") ? word.slice(1, -1).replaceAll(`'\\''`, "'") : word)
 const START = /nohup bash -c ('(?:[^']|'\\'')*') > \/dev\/null/
@@ -117,6 +123,29 @@ export function fakeHost(opts: FakeOptions = {}) {
   const stages: StageEvent[] = []
   const rounds: RoundEvent[] = []
   const probes: string[] = []
+  const trail = new Map<string, string>()
+  const trailWrites: Array<{ path: string; cwd: string }> = []
+  /** A trail record write or its byte count check, kept apart from the commands and the reviews. */
+  const trailStep = (command: string, cwd: string): CommandResult | undefined => {
+    const write = TRAIL_WRITE.exec(command)
+    if (write && isTrail(unquote(write[1]!))) {
+      const path = unquote(write[1]!)
+      const start = write.index + write[0].length
+      const text = command.slice(start, command.indexOf(`${write[2]}\n`, start))
+      trailWrites.push({ path, cwd })
+      const n = trailWrites.filter(w => w.path === path).length
+      const failed = opts.trailWrite?.(path, n)
+      if (failed !== undefined) return asResult(failed)
+      trail.set(path, text)
+      return { code: 0, output: '' }
+    }
+    const size = TRAIL_SIZE.exec(command)
+    if (size && isTrail(unquote(size[1]!))) {
+      const text = trail.get(unquote(size[1]!))
+      return text === undefined ? { code: 1, output: 'No such file or directory\n' } : { code: 0, output: `${Buffer.byteLength(text)}\n` }
+    }
+    return undefined
+  }
   let impl = 0
   const jobs = new Map<string, { script: string; result?: CommandResult; waits: number; exit?: string }>()
   const stops: string[] = []
@@ -205,6 +234,8 @@ export function fakeHost(opts: FakeOptions = {}) {
         setups.push({ command: line, cwd: '/', request: req })
         return withMark(noted(line, await setUp(line, '/', cdTarget(line))), marked)
       }
+      const trailed = req.kind === 'command' ? trailStep(plain, req.cwd) : undefined
+      if (trailed) return withMark(noted('trail', trailed), marked)
       if (req.kind === 'command' && isProbe(plain)) {
         const line = /Run exactly this:\n(.+)\n/.exec(plain)?.[1] ?? ''
         return withMark(noted(line, await probe(line, req.cwd)), marked)
@@ -255,13 +286,15 @@ export function fakeHost(opts: FakeOptions = {}) {
         setups.push({ command, cwd })
         return setUp(command, cwd, cwd)
       }
+      const trailed = trailStep(command, cwd)
+      if (trailed) return trailed
       if (isProbe(command)) return probe(command, cwd)
       commands.push(command)
       cwds.push(cwd)
       return nextReview(command, cwd)
     }
   }
-  return { host, calls, requests, commands, cwds, setups, logs, phases, stages, rounds, probes, stops }
+  return { host, calls, requests, commands, cwds, setups, logs, phases, stages, rounds, probes, stops, trail, trailWrites }
 }
 
 export const finding = (severity: string, title: string, file = 'src/a.ts', line = 3) =>
