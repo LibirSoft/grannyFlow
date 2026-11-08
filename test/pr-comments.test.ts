@@ -475,6 +475,21 @@ describe('postTrail', () => {
     ])
   })
 
+  it('posts a round with every finding in the body when GitHub refuses its line comments', () => {
+    const f = fake({
+      records: { 's1-r1.json': round({ findings: [finding('codex-F1', { file: 'src/a.ts', line: 12 }), finding('codex-F2', { file: 'src/b.ts', line: 99 })] }) },
+      diffs: { [SHA1]: A_DIFF },
+      failPost: p => p.comments.length > 0,
+    })
+    expect(postTrail([], f.io)).toBe(0)
+    expect(f.posted).toHaveLength(1)
+    expect(f.posted[0]!.comments).toEqual([])
+    expect(f.posted[0]!.body).toContain("GitHub refused this round's line comments (HTTP 422: Unprocessable Entity), so every finding is below.")
+    expect(f.posted[0]!.body).toContain('`src/a.ts:12`')
+    expect(f.posted[0]!.body).toContain('`src/b.ts:99`')
+    expect(f.out[0]).toBe('s1 r1: posted with all 2 in body - GitHub refused the line comments: HTTP 422: Unprocessable Entity')
+  })
+
   it('skips and names a record that does not validate', () => {
     const f = fake({ records: { 'broken.json': '{', 'old.json': { ...round(), version: 2 }, 's1-r1.json': round({ findings: [finding('codex-F1')] }) } })
     expect(postTrail([], f.io)).toBe(0)

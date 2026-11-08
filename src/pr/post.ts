@@ -130,7 +130,8 @@ function relative(file: string, toplevel: string): string {
 
 const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`
 
-export function buildReview(io: PosterIo, r: TrailRound, records: TrailRound[], pr: PrInfo, toplevel: string): ReviewPayload | undefined {
+/** `refused` (GitHub's error on the first try) puts every finding in the body, with no line comment. */
+export function buildReview(io: PosterIo, r: TrailRound, records: TrailRound[], pr: PrInfo, toplevel: string, refused?: string): ReviewPayload | undefined {
   if (!r.findings.length) {
     const earlier = records.some(x => x.loop === r.loop && x.round < r.round && x.findings.length)
     if (r.outcome === 'clean' || r.outcome === undefined) {
@@ -146,10 +147,10 @@ export function buildReview(io: PosterIo, r: TrailRound, records: TrailRound[], 
   const inBody: TrailFinding[] = []
   for (const f of r.findings) {
     const path = relative(f.file, toplevel)
-    if (onChangedLine(hunks, path, f.line)) comments.push({ path, line: f.line!, side: 'RIGHT', body: findingComment(f, r, records) })
+    if (refused === undefined && onChangedLine(hunks, path, f.line)) comments.push({ path, line: f.line!, side: 'RIGHT', body: findingComment(f, r, records) })
     else inBody.push(f)
   }
-  return { commit_id: commit, event: 'COMMENT', body: roundBody(r, records, { inBody, notInPr }), comments }
+  return { commit_id: commit, event: 'COMMENT', body: roundBody(r, records, { inBody, notInPr, ...(refused === undefined ? {} : { refused }) }), comments }
 }
 
 /** Posts one GitHub review per trail round not yet on the PR; returns the exit code. */
@@ -209,10 +210,18 @@ export function postTrail(argv: string[], io: PosterIo): number {
       io.print(JSON.stringify(review, null, 2))
       continue
     }
-    const sent = io.exec('gh', ['api', '--method', 'POST', reviewsPath(pr), '--input', '-'], JSON.stringify(review))
-    if (sent.code === 0) io.print(`${at}: posted ${what}`)
+    const post = (payload: ReviewPayload) => io.exec('gh', ['api', '--method', 'POST', reviewsPath(pr), '--input', '-'], JSON.stringify(payload))
+    const sent = post(review)
+    if (sent.code === 0) {
+      io.print(`${at}: posted ${what}`)
+      continue
+    }
+    // One line GitHub cannot place rejects the whole review: post the round once more with every finding in its body.
+    const flat = review.comments.length ? buildReview(io, r, records, pr, toplevel, failure(sent)) : undefined
+    const again = flat ? post(flat) : undefined
+    if (again?.code === 0) io.print(`${at}: posted with all ${r.findings.length} in body - GitHub refused the line comments: ${failure(sent)}`)
     else {
-      io.print(`${at}: FAILED to post - ${failure(sent)}`)
+      io.print(`${at}: FAILED to post - ${failure(again ?? sent)}`)
       failed.push(at)
     }
   }

@@ -595,6 +595,8 @@ function roundBody(r, records, layout) {
     const at = r.reviewedSha ? code(short(r.reviewedSha)) : "a commit the record does not name";
     parts.push(`Reviewed at ${at}, which is not in this PR's history: the line comments sit on the PR's head.`);
   }
+  if (layout.refused)
+    parts.push(`GitHub refused this round's line comments (${agentLine(layout.refused)}), so every finding is below.`);
   if (layout.inBody.length) {
     const title = r.loop === "plan" ? "### Findings on the plan" : "### Not on a changed line";
     parts.push(title, ...layout.inBody.map((f) => `#### ${code(place(f))}
@@ -686,7 +688,7 @@ function relative(file, toplevel) {
   return (file.startsWith(root) ? file.slice(root.length) : file).replace(/^(\.\/)+/, "");
 }
 var plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
-function buildReview(io, r, records, pr, toplevel) {
+function buildReview(io, r, records, pr, toplevel, refused) {
   if (!r.findings.length) {
     const earlier = records.some((x) => x.loop === r.loop && x.round < r.round && x.findings.length);
     if (r.outcome === "clean" || r.outcome === undefined) {
@@ -703,12 +705,12 @@ function buildReview(io, r, records, pr, toplevel) {
   const inBody = [];
   for (const f of r.findings) {
     const path = relative(f.file, toplevel);
-    if (onChangedLine(hunks, path, f.line))
+    if (refused === undefined && onChangedLine(hunks, path, f.line))
       comments.push({ path, line: f.line, side: "RIGHT", body: findingComment(f, r, records) });
     else
       inBody.push(f);
   }
-  return { commit_id: commit, event: "COMMENT", body: roundBody(r, records, { inBody, notInPr }), comments };
+  return { commit_id: commit, event: "COMMENT", body: roundBody(r, records, { inBody, notInPr, ...refused === undefined ? {} : { refused } }), comments };
 }
 function postTrail(argv, io) {
   const options = parseArgs(argv);
@@ -769,11 +771,18 @@ pass the trail directory with --trail <dir>`);
       io.print(JSON.stringify(review, null, 2));
       continue;
     }
-    const sent = io.exec("gh", ["api", "--method", "POST", reviewsPath(pr), "--input", "-"], JSON.stringify(review));
-    if (sent.code === 0)
+    const post = (payload) => io.exec("gh", ["api", "--method", "POST", reviewsPath(pr), "--input", "-"], JSON.stringify(payload));
+    const sent = post(review);
+    if (sent.code === 0) {
       io.print(`${at}: posted ${what}`);
+      continue;
+    }
+    const flat = review.comments.length ? buildReview(io, r, records, pr, toplevel, failure(sent)) : undefined;
+    const again = flat ? post(flat) : undefined;
+    if (again?.code === 0)
+      io.print(`${at}: posted with all ${r.findings.length} in body - GitHub refused the line comments: ${failure(sent)}`);
     else {
-      io.print(`${at}: FAILED to post - ${failure(sent)}`);
+      io.print(`${at}: FAILED to post - ${failure(again ?? sent)}`);
       failed.push(at);
     }
   }
