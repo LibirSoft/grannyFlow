@@ -666,12 +666,13 @@ function postedBodies(io, pr) {
   const r = io.exec("gh", ["api", "--paginate", reviewsPath(pr), "--jq", ".[].body"]);
   return r.code === 0 ? r.stdout : { error: failure(r) };
 }
+var DIFF_FLAGS = ["--unified=3", "--no-color", "--no-ext-diff", "--no-textconv", "--no-relative", "--src-prefix=a/", "--dst-prefix=b/"];
 function anchorOf(io, r, pr) {
   const sha = r.reviewedSha;
   const inPr = sha !== undefined && io.exec("git", ["merge-base", "--is-ancestor", sha, pr.headRefOid]).code === 0;
   const commit = inPr ? sha : pr.headRefOid;
   const base = io.exec("git", ["merge-base", pr.baseRefOid, commit]);
-  const diff = base.code === 0 ? io.exec("git", ["-c", "core.quotePath=false", "diff", "--unified=3", base.stdout.trim(), commit]) : undefined;
+  const diff = base.code === 0 ? io.exec("git", ["-c", "core.quotePath=false", "diff", ...DIFF_FLAGS, base.stdout.trim(), commit]) : undefined;
   return { commit, notInPr: !inPr, hunks: diff?.code === 0 ? parseHunks(diff.stdout) : new Map };
 }
 function relative(file, toplevel) {

@@ -1,4 +1,8 @@
 import { describe, expect, it } from 'bun:test'
+import { spawnSync } from 'node:child_process'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import type { TrailFinding, TrailRound } from '../src/core/types'
 import { onChangedLine, parseHunks } from '../src/pr/hunks'
 import { postTrail, type ExecResult, type PosterIo, type PrInfo, type ReviewPayload } from '../src/pr/post'
@@ -342,7 +346,7 @@ describe('postTrail', () => {
     expect(review!.body).toContain('#### `src/a.ts:40`')
     expect(review!.body).toContain(`#### \`${TOP}/src/c.ts:2\``)
     expect(review!.body).not.toContain("not in this PR's history")
-    expect(f.calls.find(c => c.args.includes('diff'))!.args).toEqual(['-c', 'core.quotePath=false', 'diff', '--unified=3', `mb-${SHA1}`, SHA1])
+    expect(f.calls.find(c => c.args.includes('diff'))!.args).toEqual(['-c', 'core.quotePath=false', 'diff', '--unified=3', '--no-color', '--no-ext-diff', '--no-textconv', '--no-relative', '--src-prefix=a/', '--dst-prefix=b/', `mb-${SHA1}`, SHA1])
     expect(f.calls.find(c => c.args[0] === 'merge-base' && c.args[1] !== '--is-ancestor')!.args).toEqual(['merge-base', BASE, SHA1])
     expect(f.out).toEqual(['s1 r1: posted 1 line comment, 2 in body', PR.url])
     const post = f.calls.find(c => c.args[1] === '--method')!
@@ -485,5 +489,85 @@ describe('postTrail', () => {
     expect(f.out[0]).toBe('--pr takes a PR number, got abc\nusage: node pr-comments.mjs [--pr <number>] [--trail <dir>] [--dry-run]')
     expect(postTrail(['--push'], f.io)).toBe(1)
     expect(f.calls).toEqual([])
+  })
+})
+
+describe('postTrail in a real checkout', () => {
+  const env = { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t', GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' }
+
+  function anchorUnder(config: (dir: string) => string[][], cwd = '') {
+    const dir = mkdtempSync(join(tmpdir(), 'granny-hunks-'))
+    try {
+      const repo = join(dir, 'repo')
+      mkdirSync(join(repo, 'b'), { recursive: true })
+      mkdirSync(join(repo, 'sub'))
+      const git = (...args: string[]) => {
+        const r = spawnSync('git', ['-C', repo, '-c', 'commit.gpgsign=false', ...args], { encoding: 'utf8', env })
+        expect(r.status).toBe(0)
+        return r.stdout.trim()
+      }
+      git('init', '-q', '-b', 'main')
+      writeFileSync(join(repo, 'b/x.ts'), 'one\n')
+      writeFileSync(join(repo, 'sub/keep.ts'), 'keep\n')
+      git('add', '.')
+      git('commit', '-q', '-m', 'base')
+      const base = git('rev-parse', 'HEAD')
+      writeFileSync(join(repo, 'b/x.ts'), 'one\ntwo\n')
+      git('commit', '-q', '-am', 'two')
+      const head = git('rev-parse', 'HEAD')
+      for (const [key, value] of config(dir)) git('config', key!, value!)
+      const trail = join(repo, '.granny/trail')
+      mkdirSync(trail, { recursive: true })
+      writeFileSync(join(trail, 's1-r1.json'), JSON.stringify(round({ base, reviewedSha: head, findings: [finding('codex-F1', { file: 'b/x.ts', line: 2 })] })))
+      const posted: ReviewPayload[] = []
+      const io: PosterIo = {
+        exec(cmd, args, input) {
+          if (cmd === 'gh' && args[0] === 'pr') return { code: 0, stdout: JSON.stringify({ ...PR, headRefOid: head, baseRefOid: base }), stderr: '' }
+          if (cmd === 'gh' && args[1] === '--paginate') return { code: 0, stdout: '', stderr: '' }
+          if (cmd === 'gh') {
+            posted.push(JSON.parse(input!) as ReviewPayload)
+            return { code: 0, stdout: '{}', stderr: '' }
+          }
+          const r = spawnSync(cmd, args, { cwd: join(repo, cwd), encoding: 'utf8', input, env })
+          return { code: r.status ?? 1, stdout: r.stdout, stderr: r.stderr }
+        },
+        list: d => (existsSync(d) ? readdirSync(d).filter(n => n.endsWith('.json')) : undefined),
+        read: path => readFileSync(path, 'utf8'),
+        workDir: () => '.granny',
+        print: () => {},
+      }
+      expect(postTrail([], io)).toBe(0)
+      return posted[0]!.comments.map(c => [c.path, c.line])
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }
+
+  it('anchors a finding with no diff config set', () => {
+    expect(anchorUnder(() => [])).toEqual([['b/x.ts', 2]])
+  })
+
+  it.each([
+    ['diff.noprefix', () => [['diff.noprefix', 'true']]],
+    ['diff.mnemonicPrefix', () => [['diff.mnemonicPrefix', 'true']]],
+    ['color.diff=always', () => [['color.diff', 'always']]],
+    ['diff.external', () => [['diff.external', 'true']]],
+  ] as Array<[string, (dir: string) => string[][]]>)("anchors a finding whatever the user's %s says", (_, config) => {
+    expect(anchorUnder(config)).toEqual([['b/x.ts', 2]])
+  })
+
+  it('anchors a finding when the file has a textconv driver', () => {
+    const config = (dir: string) => {
+      const conv = join(dir, 'conv.sh')
+      writeFileSync(conv, '#!/bin/sh\nseq 10; cat "$1"\n')
+      chmodSync(conv, 0o755)
+      writeFileSync(join(dir, 'repo/.git/info/attributes'), '*.ts diff=conv\n')
+      return [['diff.conv.textconv', conv]]
+    }
+    expect(anchorUnder(config)).toEqual([['b/x.ts', 2]])
+  })
+
+  it('anchors a finding outside the directory it runs in under diff.relative', () => {
+    expect(anchorUnder(() => [['diff.relative', 'true']], 'sub')).toEqual([['b/x.ts', 2]])
   })
 })
