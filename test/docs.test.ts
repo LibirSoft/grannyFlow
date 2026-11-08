@@ -70,6 +70,10 @@ describe('skill docs', () => {
   it('has a SKILL.md with the frontmatter every host reads', () => {
     const md = read('SKILL.md')
     expect(md).toMatch(/^---\nname: granny-workflow\ndescription: .{50,1024}\n---\n/)
+    // Hosts parse this with a YAML parser and skip the skill when it fails, e.g. on a ": " in the description.
+    const frontmatter = Bun.YAML.parse(md.split('\n---\n')[0].slice(4)) as Record<string, unknown>
+    expect(frontmatter.name).toBe('granny-workflow')
+    expect(md.split('\n')[2]).toBe(`description: ${frontmatter.description}`)
     for (const ref of ['references/claude-code.md', 'references/opencode.md', 'references/omp.md', 'references/cursor.md', 'references/config.md', 'references/setup.md', 'references/judge.md']) {
       expect(md).toContain(`(${ref}`)
       expect(() => read(ref)).not.toThrow()
