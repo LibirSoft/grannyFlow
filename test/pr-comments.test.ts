@@ -30,7 +30,7 @@ const finding = (id: string, over: Partial<TrailFinding> = {}): TrailFinding => 
   evidence: 'src/a.ts:12 - x is null',
   priority: 82,
   reason: `reason ${id}`,
-  decision: { rule: 3, action: 'fix', why: 'major is always fixed' },
+  decision: { rule: 6, action: 'fix', why: 'impact major is in alwaysFix (major/common/trivial -> 82)' },
   route: 'sent',
   ...over,
 })
@@ -247,7 +247,7 @@ describe('rendering', () => {
         'codex-F2 detail',
         '',
         '---',
-        '**Judge:** `confirmed` `major` `common` `trivial` `in-scope` · priority 82 · rule 3 → fix: major is always fixed',
+        '**Judge:** `confirmed` `major` `common` `trivial` `in-scope` · priority 82 · rule 6 → fix: impact major is in alwaysFix (major/common/trivial -> 82)',
         '**Evidence:** src/a.ts:12 - x is null',
         "**Judge's reason:** reason codex-F2",
         '**What happened:** fixed in fix r1: a1b2c3d..d4e5f6a (2 commits)',
@@ -270,12 +270,12 @@ describe('rendering', () => {
   it('renders a declined, an overruled, a residual and a blocker finding', () => {
     const declined = finding('codex-F1')
     const overruled = finding('codex-F2', { overruled: 'cannot happen' })
-    const residual = finding('codex-F3', { route: 'residual', scope: 'pre-existing', decision: { rule: 9, action: 'residual', why: 'pre-existing', attention: true } })
+    const residual = finding('codex-F3', { route: 'residual', scope: 'pre-existing', decision: { rule: 5, action: 'residual', why: 'pre-existing - ATTENTION: impact major', attention: true } })
     const blocker: TrailFinding = { id: 'codex-F4', reviewer: 'codex', severity: 'P0', file: 'src/b.ts', title: 't', detail: '', decision: { rule: 1, action: 'fix', why: 'P0/P1' }, route: 'sent', blocker: true }
     const r = round({ findings: [declined, overruled, residual, blocker], fix: fix(SHA1, SHA2, ['c'], { declined: [{ id: 'codex-F1', reason: 'parse() checks it' }] }) })
     expect(outcomeLine(declined, r, [r])).toBe('the fixer declined it: parse() checks it')
     expect(outcomeLine(overruled, r, [r])).toBe("the judge overruled the fixer's earlier decline (cannot happen); fixed in fix r1: 1111111..2222222 (1 commit)")
-    expect(outcomeLine(residual, r, [r])).toBe('kept as residual (rule 9: pre-existing); ATTENTION: pre-existing, impact major')
+    expect(outcomeLine(residual, r, [r])).toBe('kept as residual (rule 5: pre-existing - ATTENTION: impact major); ATTENTION: pre-existing, impact major')
     expect(outcomeLine(blocker, r, [r])).toBe('P0/P1: sent straight to the implementer, the judge did not route it; fixed in fix r1: 1111111..2222222 (1 commit)')
     const comment = findingComment(blocker, r, [r])
     expect(comment).toContain('**Judge:** `not judged` · rule 1 → fix: P0/P1\n')
