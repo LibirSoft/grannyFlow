@@ -274,6 +274,15 @@ export function reportWritePrompt(repo: string, step: string, script: string): s
   )
 }
 
+export function trailWritePrompt(repo: string, step: string, script: string): string {
+  return oneCommand(
+    `shell command for the "${step}" step, which saves or checks the record of one review round in the run's work dir,`,
+    `Repo ${repo}.`,
+    'Run exactly this, as one command with its line breaks and every character kept, down to its last line:',
+    script,
+  )
+}
+
 export function timeoutProbePrompt(repo: string, step: string, script: string): string {
   return oneCommand(
     `shell command for the "${step}" step: it prints the name of the timeout command the checks run in, or nothing`,

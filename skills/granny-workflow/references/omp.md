@@ -232,3 +232,7 @@ A role process that cannot start throws. For a reviewer, that is a reviewer that
 ## Resume
 
 There is no result cache. Restart with the same arguments and `fromStage` set to the first stage that did not finish, exactly as on opencode ([opencode.md](opencode.md#resume)). Earlier stages are recorded as `skipped`, and so is the plan review when `fromStage` is above 1. The restart reuses the worktree of the first run; when the interrupted step left uncommitted changes there, the run fails at the worktree step until you commit or discard them.
+
+## When the PR is opened
+
+The run's review trail is in `<worktree>/.granny/trail/` (`trail.dir` in the result). Once the PR is open, run `cd <worktree> && node <skill-dir>/scripts/pr-comments.mjs` and relay its output; it posts every round as a GitHub review ([config.md](config.md#review-trail)). Only the script posts review comments - never write or post them yourself.

@@ -19,6 +19,21 @@ describe('skill docs', () => {
     expect(read('references/prompts.md')).toBe(renderPrompts())
   })
 
+  it('names the Claude Code script of each mode wherever a launch is described', () => {
+    const cc = read('references/claude-code.md')
+    for (const script of ['plan.js', 'workflow.js', 'judge.js']) {
+      expect(cc).toContain(`script: <contents of ${script}>`)
+      expect(() => read(`engines/claude-code/${script}`)).not.toThrow()
+    }
+    expect(cc).toContain('a new launch of `workflow.js`')
+    expect(read('references/judge.md')).toContain('`engines/claude-code/judge.js`')
+    const md = read('SKILL.md')
+    expect(md).toContain('`engines/claude-code/plan.js`')
+    expect(md).toContain('`engines/claude-code/judge.js` with `judge: true`')
+    expect(md).toContain('on Claude Code with `engines/claude-code/workflow.js`, not `plan.js`')
+    for (const doc of [cc, read('references/judge.md'), md]) expect(doc).not.toContain('same Workflow script')
+  })
+
   it('has only JSON examples that resolveConfig accepts on every host - omp refusing only the Codex reviewers, with its own message', () => {
     const docs: Record<string, string> = { 'README.md': readRoot('README.md'), 'SKILL.md': read('SKILL.md') }
     for (const f of readdirSync(join(skill, 'references'))) docs[`references/${f}`] = read(`references/${f}`)
@@ -104,6 +119,25 @@ describe('skill docs', () => {
     expect(skill).not.toMatch(/^2\. `git -C <repo> status --short` is clean; create and check out `branch`/m)
     expect(read('references/cursor.md')).toContain('## The worktree')
     expect(read('references/cursor.md')).toContain('`git -C <repo> worktree list --porcelain`')
+  })
+
+  it('documents the review trail and its poster in the config keys, SKILL.md, the host references and the README', () => {
+    expect(readFileSync(join(skill, 'scripts/pr-comments.mjs'), 'utf8')).toContain('granny-trail')
+    const config = read('references/config.md')
+    expect(config).toMatch(/^\| `trail` \| `true` \|.*\[Review trail\]\(#review-trail\)/m)
+    expect(config).toContain('## Review trail')
+    expect(config).toContain('node <skill-dir>/scripts/pr-comments.mjs [--pr <n>] [--trail <dir>] [--dry-run]')
+    const md = read('SKILL.md')
+    expect(md).toContain('### When the PR is opened')
+    expect(md).toContain('run `node <skill-dir>/scripts/pr-comments.mjs` in the worktree')
+    expect(md).toContain('Never write, edit or post review comments yourself. Only the script posts them.')
+    expect(md).toContain('No push, no `git remote add`, no PR, no tag - the user decides.')
+    expect(md).toContain('`trail.failed`')
+    for (const host of ['claude-code', 'opencode', 'omp', 'cursor']) {
+      const ref = read(`references/${host}.md`)
+      expect({ host, has: ref.includes('## When the PR is opened') && ref.includes('<skill-dir>/scripts/pr-comments.mjs') }).toEqual({ host, has: true })
+    }
+    expect(readRoot('README.md')).toContain('node <skill-dir>/scripts/pr-comments.mjs')
   })
 
   it('documents the plan review in the config keys, SKILL.md, the host references and the Cursor protocol', () => {

@@ -255,6 +255,15 @@ describe('opencode plugin helpers', () => {
     expect(text).toContain(`- one: no-changes, 0 review round(s) - ${note}`)
   })
 
+  it('names the review trail and every round whose record was not written in the finish summary', () => {
+    const final = { gatesGreen: true, gates: 'ok', commits: [], prBodyPath: '.granny/PR-BODY.md', issues: '' }
+    const run = { repo: '/r', branch: 'feat/x', base: 'main', worktree: '/w', stages: [], final }
+    expect(summarize({ ...run, trail: { dir: '/w/.granny/trail', written: 3, failed: [] } }, false)).toContain('- trail: /w/.granny/trail - 3 record(s) written')
+    const failed = summarize({ ...run, trail: { dir: '/w/.granny/trail', written: 1, failed: ['s1-r2', 'final-r1'] } }, false)
+    expect(failed).toContain("- trail: /w/.granny/trail - 1 record(s) written; NOT written: s1-r2, final-r1 - the PR will not get these rounds' comments")
+    expect(summarize(run, false)).not.toContain('trail')
+  })
+
   it('parses provider/model#variant refs', () => {
     expect(modelRef('anthropic/claude-sonnet-5-5#high')).toEqual({ providerID: 'anthropic', id: 'claude-sonnet-5-5', variant: 'high' })
     expect(modelRef('zai-coding-plan/glm-5.3')).toEqual({ providerID: 'zai-coding-plan', id: 'glm-5.3' })

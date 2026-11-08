@@ -2,7 +2,7 @@
 // @bun
 // src/adapters/opencode/plugin.ts
 import { appendFileSync as appendFileSync2, mkdirSync as mkdirSync2, writeFileSync } from "fs";
-import { join as join2 } from "path";
+import { join as join3 } from "path";
 
 // src/core/types.ts
 var HOSTS = ["claude-code", "opencode", "omp"];
@@ -31,6 +31,7 @@ var DEFAULT_CONFIG = {
   worktree: true,
   planReview: false,
   finalReview: true,
+  trail: true,
   parallel: true,
   maxParallel: 3,
   language: "English",
@@ -233,6 +234,8 @@ function validate(c) {
     errors.push("planReview must be a boolean");
   if (typeof c.finalReview !== "boolean")
     errors.push("finalReview must be a boolean");
+  if (typeof c.trail !== "boolean")
+    errors.push("trail must be a boolean");
   if (typeof c.parallel !== "boolean")
     errors.push("parallel must be a boolean");
   if (!Number.isInteger(c.maxParallel) || c.maxParallel < 1)
@@ -325,6 +328,11 @@ class GrannyCancelled extends Error {
   }
 }
 var isCancelled = (e) => e instanceof GrannyCancelled || typeof e === "object" && e !== null && e.name === "GrannyCancelled";
+
+// src/core/paths.ts
+var trimSlashes = (path) => path.replace(/\/+$/, "");
+var trimPath = (path) => trimSlashes(path) || "/";
+var workOf = (config) => trimSlashes(config.workDir);
 
 // src/core/review.ts
 var MARKER = /^\s*[-*]\s*\[(P[0-3]|[A-Za-z]+)\](.*)$/;
@@ -799,6 +807,9 @@ function judgeStepPrompt(repo, step, script) {
 }
 function reportWritePrompt(repo, step, script) {
   return oneCommand(`shell command for the "${step}" step of a review-only run, which saves the review report (the one file this run writes),`, `Repo ${repo}.`, "Run exactly this, as one command with its line breaks and every character kept, down to its last line:", script);
+}
+function trailWritePrompt(repo, step, script) {
+  return oneCommand(`shell command for the "${step}" step, which saves or checks the record of one review round in the run's work dir,`, `Repo ${repo}.`, "Run exactly this, as one command with its line breaks and every character kept, down to its last line:", script);
 }
 function timeoutProbePrompt(repo, step, script) {
   return oneCommand(`shell command for the "${step}" step: it prints the name of the timeout command the checks run in, or nothing`, `Install nothing. Repo ${repo}.`, "Run exactly this:", script);
@@ -1330,6 +1341,74 @@ function checkShape(schema, value) {
   return errors;
 }
 
+// src/core/trail.ts
+var FINDING_KEYS = [
+  "id",
+  "reviewer",
+  "severity",
+  "file",
+  "line",
+  "title",
+  "detail",
+  "verdict",
+  "impact",
+  "likelihood",
+  "fixCost",
+  "scope",
+  "evidence",
+  "priority",
+  "reason",
+  "decision",
+  "duplicates",
+  "repeatOf"
+];
+var trailDir = (config, cwd) => `${trimSlashes(cwd)}/${workOf(config)}/trail`;
+var trailId = (loop, round) => `${loop}-r${round}`;
+var trailPath = (config, cwd, loop, round) => `${trailDir(config, cwd)}/${trailId(loop, round)}.json`;
+function trailFinding(f, r, sent) {
+  const out = {};
+  for (const key of FINDING_KEYS)
+    if (f[key] !== undefined)
+      out[key] = f[key];
+  if (sent)
+    out.route = sent.has(f.id) ? "sent" : "residual";
+  if (r.blockers?.has(f.id))
+    out.blocker = true;
+  const said = r.overruled?.find((o) => o.id === f.id)?.said;
+  if (said !== undefined)
+    out.overruled = said;
+  return out;
+}
+function trailFix(fix) {
+  const { work } = fix;
+  return {
+    label: fix.label,
+    ...work?.startSha ? { startSha: work.startSha } : {},
+    ...work?.headSha ? { headSha: work.headSha } : {},
+    ...Array.isArray(work?.commits) ? { commits: work.commits } : {},
+    ...fix.refused?.length ? { declined: fix.refused } : {},
+    ...fix.said ? { deviations: fix.said } : {}
+  };
+}
+function trailRound(r) {
+  const sent = r.sent ? new Set(r.sent.map((f) => f.id)) : undefined;
+  return {
+    version: 1,
+    loop: r.loop,
+    name: r.name,
+    round: r.round,
+    base: r.base,
+    ...r.reviewedSha ? { reviewedSha: r.reviewedSha } : {},
+    reviewers: r.reviewers,
+    findings: r.findings.map((f) => trailFinding(f, r, sent)),
+    ...r.fix ? { fix: trailFix(r.fix) } : {},
+    ...r.outcome ? { outcome: r.outcome } : {},
+    ...r.note ? { note: r.note } : {}
+  };
+}
+var trailText = (record) => `${JSON.stringify(record, null, 2)}
+`;
+
 // src/core/worktree.ts
 var SAID2 = "[granny] worktree: ";
 var REPORTED = /^\[granny\] worktree: (\/.*?)\r?$/m;
@@ -1409,7 +1488,6 @@ function roundFinding(f, sent) {
     ...f.decision?.why ? { why: f.decision.why } : {}
   };
 }
-var trimPath = (s) => s.replace(/\/+$/, "") || "/";
 var repoPathOf = (r) => typeof r === "string" ? r : r && typeof r === "object" ? r.repo : undefined;
 var baseName = (path) => path.slice(path.lastIndexOf("/") + 1);
 var lineShaped = (output, shape) => output.split(`
@@ -1420,8 +1498,11 @@ var short = (sha) => sha.slice(0, 8);
 var STATUS_LINE = /^\s*[MADRCUT?!]{1,2}\s+\S/;
 var listed = (status) => status.map((l) => l.trim()).join(", ");
 var entriesOf = (answer) => Array.isArray(answer?.perFinding) ? answer.perFinding.filter((x) => x && typeof x === "object" && typeof x.id === "string") : [];
-var workOf = (c) => c.workDir.replace(/\/+$/, "");
 var phaseOf = (subject) => subject.kind === "plan" ? PLAN_PHASE : subject.note === WHOLE_BRANCH_NOTE ? FINAL_REVIEW_PHASE : REVIEW_PHASE;
+var reviewerMeta = (rv, host) => {
+  const model = resolveModel(rv.model, host.name);
+  return { name: rv.name, engine: rv.engine, ...model ? { model } : {} };
+};
 function checkInput(input) {
   const errors = [];
   if (!input || typeof input !== "object")
@@ -1552,6 +1633,23 @@ ${note}` : ""}` : missing };
     const r = await shell(label, phase, "git rev-parse --verify HEAD", cwd);
     const sha = r.ran ? lineShaped(r.output, SHA) : undefined;
     return { sha, code: r.code, output: r.output };
+  };
+  const writeChecked = async (o) => {
+    const log = o.log ?? host.log;
+    const want = utf8Length(o.text);
+    for (let n = 1;n <= 2; n++) {
+      const w = await shell(n === 1 ? o.labels.write : o.labels.retry, o.phase, heredocWriteScript(o.path, o.text), o.cwd, o.ask);
+      if (!w.ran) {
+        log(`writing ${o.what} failed (exit ${w.code}): ${w.output.slice(-300)}`);
+        return false;
+      }
+      const size = await shell(o.labels.size, o.phase, `wc -c < ${shellQuote(o.path)}`, o.cwd, o.sizeAsk ?? o.ask);
+      const got = size.ran ? lineShaped(size.output, COUNT) : undefined;
+      if (got !== undefined && Number(got) === want)
+        return true;
+      log(`${o.path} holds ${got ?? "an unknown number of"} bytes, not ${want}${n === 1 ? " - writing it once more" : ""}`);
+    }
+    return false;
   };
   const work = workOf(config);
   const uncommitted = async (label, phase, cwd, plans = []) => {
@@ -1699,7 +1797,7 @@ ${judgeRetryNote(problems)}`);
     }
     return { per, decided };
   };
-  return { call, shell, readHead, uncommitted, reviewAll, judgeAnswers };
+  return { call, shell, readHead, writeChecked, uncommitted, reviewAll, judgeAnswers };
 }
 async function runGranny(host, input) {
   const inputErrors = checkInput(input);
@@ -1708,7 +1806,7 @@ async function runGranny(host, input) {
 - ${inputErrors.join(`
 - `)}`);
   const config = resolveConfig(configLayers(input), host.name);
-  const { call, shell, readHead, uncommitted: statusOf, reviewAll, judgeAnswers } = engineParts(host, config);
+  const { call, shell, readHead, writeChecked, uncommitted: statusOf, reviewAll, judgeAnswers } = engineParts(host, config);
   const work = workOf(config);
   const uncommitted = (label, phase, cwd) => statusOf(label, phase, cwd, plansIn(cwd));
   const base = input.base ?? config.base;
@@ -1876,13 +1974,14 @@ async function runGranny(host, input) {
     host.log(`${name}: ${note}`);
     return note;
   };
-  const checkGate = async (lane, name, at, checks, runs, stage, gates) => {
+  const checkGate = async (lane, name, at, checks, runs, stage, gates, steps) => {
     host.phase(CHECKS_PHASE);
     const budget = (c) => c.maxRepairs ?? config.maxRepairs;
     const most = Math.max(0, ...checks.map(budget));
     let deviations;
     const step = async (label, by, prompt) => {
       const impl = await implement(lane, label, prompt);
+      steps?.push(impl);
       if (gates)
         Object.assign(gates, { green: impl.gatesGreen, text: impl.gates, by: `${by} (${label})` });
       return saidSomething(impl.deviations);
@@ -1943,17 +2042,74 @@ the last repair's deviations: ${deviations}` : ""}`;
     host.log(`${label}: plan edited - ${Array.isArray(r.files) && r.files.length ? r.files.join(", ") : "no file reported"}`);
     return r;
   };
-  const reviewLoop = async (lane, name, subject, reviewers = config.reviewers, opts = {}) => {
+  const trailed = { written: 0, failed: [] };
+  const saveTrail = async (cwd, record, at, phase) => {
+    const id = trailId(record.loop, record.round);
+    const path = trailPath(config, cwd, record.loop, record.round);
+    const why = [];
+    let ok = false;
+    try {
+      ok = await writeChecked({
+        path,
+        text: trailText(record),
+        cwd,
+        phase,
+        what: "the record",
+        labels: { write: `trail ${id}`, retry: `trail ${id} retry`, size: `trail ${id} size` },
+        ask: trailWritePrompt,
+        log: (line) => why.push(line)
+      });
+    } catch (e) {
+      if (isCancelled(e))
+        throw e;
+      why.push(String(e?.message ?? e));
+    }
+    if (ok)
+      trailed.written++;
+    else {
+      trailed.failed.push(id);
+      host.log(`${at}: trail record not written: ${path}${why.length ? ` (${why.join("; ")})` : ""}`);
+    }
+  };
+  const trailHead = async (label, phase, cwd) => {
+    try {
+      return (await readHead(label, phase, cwd)).sha;
+    } catch (e) {
+      if (isCancelled(e))
+        throw e;
+      host.log(`${label}: could not read HEAD for the trail record: ${String(e?.message ?? e)}`);
+      return;
+    }
+  };
+  const trailOf = () => config.trail ? { trail: { dir: trailDir(config, worktree), written: trailed.written, failed: [...trailed.failed] } } : {};
+  const reviewLoop = async (lane, name, subject, reviewers = config.reviewers, opts) => {
     const { gates, checks = [], runs = [], notes = [], prior = [], record } = opts;
     const { p } = lane;
     const phase = phaseOf(subject);
+    const trailCwd = repoState.get(lane.repo)?.lane.cwd ?? lane.cwd;
+    let known = opts.head ?? runs.at(-1)?.head;
     const history = [];
     const earlier = [...prior];
     let unmerged = [];
     let carried = [];
     const kept = () => carried.map((c) => c.finding);
     for (let round = 1;round <= config.maxRounds; round++) {
+      const reviewedSha = config.trail ? known ?? await trailHead(`head ${name} r${round}`, phase, lane.cwd) : undefined;
+      known = undefined;
       const results = await reviewAll(lane, reviewers, name, subject, round);
+      const facts = {
+        loop: opts.loop,
+        name,
+        round,
+        base: subject.kind === "diff" ? subject.base : lane.base,
+        ...reviewedSha ? { reviewedSha } : {},
+        reviewers: results.filter((r) => r.ran).map((r) => reviewerMeta(r.reviewer, host)),
+        findings: []
+      };
+      const keep = async (more) => {
+        if (config.trail)
+          await saveTrail(trailCwd, trailRound({ ...facts, ...more }), `${name} r${round}`, phase);
+      };
       const failed = results.filter((r) => !r.ran);
       const found = results.filter((r) => r.ran).flatMap((r) => r.findings);
       if (failed.length) {
@@ -1963,11 +2119,13 @@ the last repair's deviations: ${deviations}` : ""}`;
         const note = [`reviewer(s) that did not run, also on a retry: ${[...names].join(", ")}`, ...failed.map((r) => `${r.reviewer.name}: ${r.note ?? "no output"}`)].join(`
 `);
         host.log(`${name} r${round}: review failed - stopping this stage's loop. ${note}`);
+        await keep({ findings: found, outcome: "review-failed", note });
         return { outcome: "review-failed", rounds: round, residual: [], unresolved: [...found, ...earlier], history, note };
       }
       if (!found.length) {
         host.log(`${name} r${round}: clean`);
         host.round?.({ subject: name, round, findings: [] });
+        await keep({ outcome: "clean" });
         return { outcome: "clean", rounds: round, residual: kept(), unresolved: [], history };
       }
       const declined = new Map(earlier.flatMap((e) => (e.declined ?? []).map((d) => [roundLabel(e.round, d, e.loop), d.reason])));
@@ -1975,6 +2133,7 @@ the last repair's deviations: ${deviations}` : ""}`;
       const earlierOf = (f) => f.repeatOf === undefined ? undefined : ledger.get(f.repeatOf);
       const blockers = found.filter(isBlocker);
       const judged = declined.size ? found : found.filter((f) => !isBlocker(f));
+      const unjudgedBlockers = new Set(declined.size ? [] : blockers.map((f) => f.id));
       if (blockers.length && declined.size) {
         host.log(`${name} r${round}: ${blockers.length} P0/P1 finding(s) go to the judge too - the fixer declined findings before, so a repeat of one can stay residual: ${blockers.map((f) => f.id).join(", ")}`);
       } else if (blockers.length) {
@@ -2013,6 +2172,7 @@ the last repair's deviations: ${deviations}` : ""}`;
       history.push({ round, findings });
       host.log(`${name} r${round}: ${findings.length} finding(s)`);
       const { accepted, residual } = triage(findings);
+      const routed = { findings, sent: accepted, blockers: unjudgedBlockers };
       host.round?.({ subject: name, round, findings: findings.map((f) => roundFinding(f, accepted.includes(f))) });
       const entry = { round, sent: accepted, ...residual.length ? { residual } : {} };
       const recorded = record ? { ...entry, loop: record.loop } : undefined;
@@ -2043,6 +2203,7 @@ the last repair's deviations: ${deviations}` : ""}`;
       }
       if (!accepted.length) {
         host.log(`${name} r${round}: nothing actionable left - stage done with ${carried.length} residual finding(s) for the user`);
+        await keep({ ...routed, outcome: "residual-only" });
         return { outcome: "residual-only", rounds: round, residual: kept(), unresolved: [], history };
       }
       const overruled = accepted.filter(declinedBefore).map((f) => ({ id: f.id, repeatOf: f.repeatOf, reason: f.reason, said: declined.get(f.repeatOf) }));
@@ -2050,15 +2211,18 @@ the last repair's deviations: ${deviations}` : ""}`;
         host.log(`${name} r${round}: the judge overruled the fixer on ${o.id} (repeat of ${o.repeatOf}, ${ruled(accepted.find((f) => f.id === o.id))})`);
       }
       let fixed;
+      let work;
+      const fixLabel = `fix ${name} r${round}`;
       if (subject.kind === "plan") {
-        fixed = await fixPlan(`fix ${name} r${round}`, planFixPrompt(p, subject.files, round, accepted, overruled));
+        fixed = await fixPlan(fixLabel, planFixPrompt(p, subject.files, round, accepted, overruled));
       } else {
-        const fix = await implement(lane, `fix ${name} r${round}`, fixPrompt(p, name, round, accepted, overruled));
+        const fix = await implement(lane, fixLabel, fixPrompt(p, name, round, accepted, overruled));
         if (gates)
-          Object.assign(gates, { green: fix.gatesGreen, text: fix.gates, by: `the last fix (fix ${name} r${round})` });
+          Object.assign(gates, { green: fix.gatesGreen, text: fix.gates, by: `the last fix (${fixLabel})` });
         if (!fix.gatesGreen)
           host.log(`${name} r${round}: WARNING fixer left gates red - ${fix.gates}`);
         fixed = fix;
+        work = fix;
       }
       const said = saidSomething(fixed.deviations);
       const { declined: refused, unknown } = declinedOf(fixed.declined, accepted);
@@ -2074,19 +2238,37 @@ the last repair's deviations: ${deviations}` : ""}`;
       earlier.push({ ...entry, ...reply });
       if (recorded)
         Object.assign(recorded, reply);
+      const later = [];
+      const before = runs.length;
+      const fixFacts = () => {
+        const head = runs.length > before ? runs.at(-1).head : undefined;
+        const commitsOf = (i) => Array.isArray(i.commits) ? i.commits : [];
+        const done = work && {
+          startSha: work.startSha,
+          headSha: head ?? later.at(-1)?.headSha ?? work.headSha,
+          commits: [work, ...later].flatMap(commitsOf)
+        };
+        return { ...routed, overruled: overruled.map((o) => ({ id: o.id, said: o.said })), fix: { label: fixLabel, ...done ? { work: done } : {}, refused, ...said ? { said } : {} } };
+      };
       if (subject.kind === "diff" && checks.length) {
-        const gate = await checkGate(lane, name, `fix r${round}`, checks, runs, subject.stage, gates);
-        if (!gate.passed)
+        const gate = await checkGate(lane, name, `fix r${round}`, checks, runs, subject.stage, gates, later);
+        if (!gate.passed) {
+          await keep({ ...fixFacts(), outcome: "checks-failed", ...gate.note ? { note: gate.note } : {} });
           return { outcome: "checks-failed", rounds: round, residual: kept(), unresolved: [], history, note: gate.note };
+        }
+        known = runs.at(-1)?.head;
         host.phase(phase);
       } else if (subject.kind === "diff") {
         const left = await commitWork(lane, name, `fix r${round}`, subject.stage);
+        if (left.impl)
+          later.push(left.impl);
         if (left.impl && gates)
           Object.assign(gates, { green: left.impl.gatesGreen, text: left.impl.gates, by: left.by });
         const note = unreviewed(name, `fix r${round}`, left);
         if (note)
           notes.push(note);
       }
+      await keep({ ...fixFacts(), ...round === config.maxRounds ? { outcome: "round-cap" } : {} });
     }
     host.log(`${name}: hit the ${config.maxRounds}-round cap without a clean review`);
     return { outcome: "round-cap", rounds: config.maxRounds, residual: carried.filter((c) => c.round < config.maxRounds).map((c) => c.finding), unresolved: history.at(-1)?.findings ?? [], history };
@@ -2114,16 +2296,16 @@ the last repair's deviations: ${deviations}` : ""}`;
       host.log(`${name}: ${note}`);
       return { outcome: "review-failed", rounds: 0, residual: [], unresolved: [], history: [], note };
     }
-    return reviewLoop(primaryLane, name, { kind: "plan", files: plans }, able);
+    return reviewLoop(primaryLane, name, { kind: "plan", files: plans }, able, { loop: "plan" });
   };
   const planResult = await reviewThePlan();
   if (draft) {
     host.log(`plan written - the run stops here; launch again with plan and the approved stages to implement it`);
-    return { repo: input.repo, branch: input.branch, base, worktree, draft, ...planResult ? { plan: planResult } : {}, stages: [], final: null };
+    return { repo: input.repo, branch: input.branch, base, worktree, draft, ...planResult ? { plan: planResult } : {}, stages: [], final: null, ...trailOf() };
   }
   if (planResult && (planResult.outcome === "round-cap" || planResult.outcome === "review-failed")) {
     host.log(`plan review ended ${planResult.outcome} - stopping before stage 1; nothing was implemented`);
-    return { repo: input.repo, branch: input.branch, base, worktree, plan: planResult, stages: [], final: null };
+    return { repo: input.repo, branch: input.branch, base, worktree, plan: planResult, stages: [], final: null, ...trailOf() };
   }
   const tryLock = (s) => s.locked ? false : s.locked = true;
   const lock = (s) => new Promise((resolve) => tryLock(s) ? resolve() : s.waiters.push(resolve));
@@ -2214,7 +2396,7 @@ the last repair's deviations: ${deviations}` : ""}`;
       host.log(`${name}: review-only stage - reviewing ${lane.base}...HEAD`);
     }
     host.phase("Review");
-    const loop = st.review === false ? { outcome: "review-skipped", rounds: 0, residual: [], unresolved: [], history: [] } : await reviewLoop(lane, name, { kind: "diff", base, ...task ? { stage: task } : {} }, undefined, { gates, checks, runs, notes, record: { loop: { id: `s${i + 1}`, name: `Stage ${i + 1} (${name})` }, into: ledgerOf(st, i) } });
+    const loop = st.review === false ? { outcome: "review-skipped", rounds: 0, residual: [], unresolved: [], history: [] } : await reviewLoop(lane, name, { kind: "diff", base, ...task ? { stage: task } : {} }, undefined, { loop: `s${i + 1}`, gates, checks, runs, notes, record: { loop: { id: `s${i + 1}`, name: `Stage ${i + 1} (${name})` }, into: ledgerOf(st, i) } });
     if (gates && !gates.green && !runs.length && (loop.outcome === "clean" || loop.outcome === "residual-only")) {
       loop.outcome = "gates-red";
       loop.note = `the review found nothing to fix, but ${gates.by} left the gates red: ${gates.text}`;
@@ -2468,7 +2650,9 @@ ${note}` : note } : result;
     host.log(`${name}: reviewing ${s.lane.base}...HEAD across ${stages} stage(s)${s.merges ? ` and ${s.merges} lane merge(s)` : ""}`);
     const notes = [];
     const prior = [...s.ledger].sort(([a], [b]) => a - b).flatMap(([, rounds]) => rounds);
-    const looped = await reviewLoop(s.lane, name, { kind: "diff", base: s.lane.base, note: WHOLE_BRANCH_NOTE }, undefined, { checks, runs, notes, prior });
+    const loop = s.lane.repo === primary ? "final" : `final-${slug(baseName(s.lane.repo))}`;
+    const head = reusedHead.get(s);
+    const looped = await reviewLoop(s.lane, name, { kind: "diff", base: s.lane.base, note: WHOLE_BRANCH_NOTE }, undefined, { loop, ...head ? { head } : {}, checks, runs, notes, prior });
     const note = [looped.note, ...notes].filter(Boolean).join(`
 `);
     const r = note ? { ...looped, note } : looped;
@@ -2552,7 +2736,8 @@ ${note}` : note } : result;
     ...primaryChecks ? { checks: primaryChecks } : {},
     ...primaryRecheck ? { recheck: primaryRecheck } : {},
     final,
-    ...finals.length > 1 ? { repos: finals } : {}
+    ...finals.length > 1 ? { repos: finals } : {},
+    ...trailOf()
   };
 }
 function checkJudgeInput(input) {
@@ -2581,7 +2766,7 @@ async function runJudge(host, input) {
   if (gaps.length)
     throw new Error(`granny judge needs models: ${gaps.join("; ")}`);
   const config = resolveConfig(layers, host.name);
-  const { call, shell, readHead, uncommitted, reviewAll, judgeAnswers } = engineParts(host, config);
+  const { call, shell, readHead, writeChecked, uncommitted, reviewAll, judgeAnswers } = engineParts(host, config);
   const repo = trimPath(input.repo);
   const base = input.base ?? config.base;
   host.phase(REVIEW_PHASE);
@@ -2692,32 +2877,23 @@ ${notes}`);
     commits: Number(commits),
     repo,
     when: date,
-    reviewers: config.reviewers.map((rv) => {
-      const model = resolveModel(rv.model, host.name);
-      return { name: rv.name, engine: rv.engine, ...model ? { model } : {} };
-    }),
+    reviewers: config.reviewers.map((rv) => reviewerMeta(rv, host)),
     judge: resolveModel(config.roles.judge.model, host.name),
     uncommitted: notReviewed,
     failed: failedReviewers
   };
   const report = renderReport(meta, findings);
   const reportPath = `${repo}/${workOf(config)}/reviews/${date}-${branchSlug(branch)}.md`;
-  const save = async () => {
-    const want = utf8Length(report);
-    for (let n = 1;n <= 2; n++) {
-      const w = await shell(n === 1 ? "write report" : "write report retry", REPORT_PHASE, heredocWriteScript(reportPath, report), repo, reportWritePrompt);
-      if (!w.ran) {
-        host.log(`writing the report failed (exit ${w.code}): ${w.output.slice(-300)}`);
-        return false;
-      }
-      const size = await shell("report size", REPORT_PHASE, `wc -c < ${shellQuote(reportPath)}`, repo, judgeStepPrompt);
-      const got = size.ran ? lineShaped(size.output, COUNT) : undefined;
-      if (got !== undefined && Number(got) === want)
-        return true;
-      host.log(`${reportPath} holds ${got ?? "an unknown number of"} bytes, not ${want}${n === 1 ? " - writing it once more" : ""}`);
-    }
-    return false;
-  };
+  const save = () => writeChecked({
+    path: reportPath,
+    text: report,
+    cwd: repo,
+    phase: REPORT_PHASE,
+    what: "the report",
+    labels: { write: "write report", retry: "write report retry", size: "report size" },
+    ask: reportWritePrompt,
+    sizeAsk: judgeStepPrompt
+  });
   let written = false;
   try {
     written = await save();
@@ -2742,17 +2918,13 @@ ${notes}`);
 
 // src/adapters/common.ts
 import { spawn, spawnSync } from "child_process";
-import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync } from "fs";
+import { appendFileSync, existsSync as existsSync2, mkdirSync, readdirSync, readFileSync as readFileSync2 } from "fs";
+import { isAbsolute, join as join2 } from "path";
+
+// src/adapters/config-files.ts
+import { existsSync, readFileSync } from "fs";
 import { homedir } from "os";
-import { isAbsolute, join } from "path";
-var SUBMIT = {
-  implementation: "granny_submit_implementation",
-  draft: "granny_submit_plan",
-  planFix: "granny_submit_plan_fix",
-  findings: "granny_submit_findings",
-  judge: "granny_submit_judgement",
-  final: "granny_submit_final"
-};
+import { join } from "path";
 function globalConfigPath() {
   if (process.env.GRANNY_CONFIG)
     return process.env.GRANNY_CONFIG;
@@ -2767,6 +2939,15 @@ function readJson(path) {
     throw new Error(`${path}: invalid JSON (${e.message})`);
   }
 }
+// src/adapters/common.ts
+var SUBMIT = {
+  implementation: "granny_submit_implementation",
+  draft: "granny_submit_plan",
+  planFix: "granny_submit_plan_fix",
+  findings: "granny_submit_findings",
+  judge: "granny_submit_judgement",
+  final: "granny_submit_final"
+};
 function git(repo, args) {
   const r = spawnSync("git", ["-C", repo, ...args], { encoding: "utf8" });
   if (r.status !== 0)
@@ -2791,12 +2972,12 @@ ${dirty.join(`
 `)}`);
   if (!problems.length) {
     const commonDir = git(repo, ["rev-parse", "--git-common-dir"]);
-    const exclude = join(isAbsolute(commonDir) ? commonDir : join(repo, commonDir), "info", "exclude");
+    const exclude = join2(isAbsolute(commonDir) ? commonDir : join2(repo, commonDir), "info", "exclude");
     const entry = `/${workDir}/`;
-    const text = existsSync(exclude) ? readFileSync(exclude, "utf8") : "";
+    const text = existsSync2(exclude) ? readFileSync2(exclude, "utf8") : "";
     if (!text.split(`
 `).includes(entry)) {
-      mkdirSync(join(exclude, ".."), { recursive: true });
+      mkdirSync(join2(exclude, ".."), { recursive: true });
       appendFileSync(exclude, `${text && !text.endsWith(`
 `) ? `
 ` : ""}${entry}
@@ -2862,6 +3043,10 @@ ${result.draft.questions.trim()}`);
     if (r.recheck)
       lines.push(recheckLine(r.recheck, `checks after the final check ${r.repo}`));
   }
+  if (result.trail) {
+    const { dir, written, failed } = result.trail;
+    lines.push(`- trail: ${dir} - ${written} record(s) written${failed.length ? `; NOT written: ${failed.join(", ")} - the PR will not get these rounds' comments` : ""}`);
+  }
   if (worktree)
     lines.push(`- worktree: ${result.worktree}${result.repos?.length ? ` (and ${result.repos.slice(1).map((r) => r.worktree).join(", ")})` : ""} - review and push from there; granny never removes it`);
   return lines.join(`
@@ -2901,7 +3086,7 @@ function sameModelNotice(input, config, host) {
   return shared ? `
 ${SAME_MODEL_HINT}. Mention this to the user in your next message; do not change a model unless the user asks.` : "";
 }
-var layerSources = (repo) => [globalConfigPath(), join(repo, "granny.config.json"), "the run's config"];
+var layerSources = (repo) => [globalConfigPath(), join2(repo, "granny.config.json"), "the run's config"];
 var AGENT_ROLES = ["granny", "helper", "planner", "implementer", "judge"];
 var JUDGE_ROLES = ["granny", "judge"];
 var isObject2 = (v) => !!v && typeof v === "object" && !Array.isArray(v);
@@ -3075,7 +3260,7 @@ function prepareJudge(input, host, problem) {
   const problems = checkJudgeInput(input);
   if (problems.length)
     return refused(problems);
-  const files = [readJson(globalConfigPath()), readJson(join(input.repo, "granny.config.json"))];
+  const files = [readJson(globalConfigPath()), readJson(join2(input.repo, "granny.config.json"))];
   const layers = [...files, input.config];
   const gaps = [...new Set([...judgeConfigGaps(files, host), ...judgeConfigGaps(layers, host)])];
   if (gaps.length)
@@ -3169,11 +3354,11 @@ function runDir(runs, runIdArg, repo) {
     return runs.get(runIdArg).dir;
   if (!repo)
     return;
-  const config = resolveConfig([readJson(globalConfigPath()), readJson(join(repo, "granny.config.json"))]);
-  const root = join(repo, config.workDir, "runs");
-  const ids = existsSync(root) ? readdirSync(root).sort() : [];
+  const config = resolveConfig([readJson(globalConfigPath()), readJson(join2(repo, "granny.config.json"))]);
+  const root = join2(repo, config.workDir, "runs");
+  const ids = existsSync2(root) ? readdirSync(root).sort() : [];
   const pick = runIdArg ?? ids.at(-1);
-  return pick && ids.includes(pick) ? join(root, pick) : undefined;
+  return pick && ids.includes(pick) ? join2(root, pick) : undefined;
 }
 var isHeartbeat = (line) => {
   try {
@@ -3200,14 +3385,14 @@ function runStatus(runs, runIdArg, repo) {
   const dir = runDir(runs, runIdArg, repo);
   if (!dir)
     return "No such granny run. Pass runId, or repo to see the latest run in that repo.";
-  const read = (f) => existsSync(join(dir, f)) ? readFileSync(join(dir, f), "utf8") : "";
+  const read = (f) => existsSync2(join2(dir, f)) ? readFileSync2(join2(dir, f), "utf8") : "";
   const tail = journalTail(read("journal.jsonl"), 40);
   const result = read("result.json");
   return [
     `status: ${read("status.json")}`,
     `journal (last 40 lines, without heartbeats):
 ${tail}`,
-    result ? `result (${join(dir, "result.json")}):
+    result ? `result (${join2(dir, "result.json")}):
 ${result.length > 30000 ? result.slice(0, 30000) + `
 ...truncated, read the file` : result}` : ""
   ].filter(Boolean).join(`
@@ -3324,7 +3509,7 @@ var createGrannyPlugin = ({ delays = DEFAULT_DELAYS, sleep = pause, killGraceMs 
   async setup(ctx) {
     const launch = async ({ input, layers, config, branch, outline, engine, finished, started }, parentSession) => {
       const id = runId();
-      const dir = join2(input.repo, config.workDir, "runs", id);
+      const dir = join3(input.repo, config.workDir, "runs", id);
       mkdirSync2(dir, { recursive: true });
       const run = {
         id,
@@ -3339,10 +3524,10 @@ var createGrannyPlugin = ({ delays = DEFAULT_DELAYS, sleep = pause, killGraceMs 
         active: new Map
       };
       runs.set(id, run);
-      const journal = (type, data) => appendFileSync2(join2(dir, "journal.jsonl"), JSON.stringify({ t: stamp(), type, ...data }) + `
+      const journal = (type, data) => appendFileSync2(join3(dir, "journal.jsonl"), JSON.stringify({ t: stamp(), type, ...data }) + `
 `);
-      const writeStatus = (extra = {}) => writeFileSync(join2(dir, "status.json"), JSON.stringify({ id, status: run.status, repo: input.repo, branch, parent: parentSession, watch: config.watch, outline, ...extra }, null, 2));
-      writeFileSync(join2(dir, "input.json"), JSON.stringify({ ...input, config: layers }, null, 2));
+      const writeStatus = (extra = {}) => writeFileSync(join3(dir, "status.json"), JSON.stringify({ id, status: run.status, repo: input.repo, branch, parent: parentSession, watch: config.watch, outline, ...extra }, null, 2));
+      writeFileSync(join3(dir, "input.json"), JSON.stringify({ ...input, config: layers }, null, 2));
       writeStatus({ startedAt: stamp() });
       let parentModel;
       try {
@@ -3507,7 +3692,7 @@ When done, call the \`${tool}\` tool exactly once with your result. That call is
       };
       engine(host).then(async (result) => {
         run.status = "done";
-        writeFileSync(join2(dir, "result.json"), JSON.stringify(result, null, 2));
+        writeFileSync(join3(dir, "result.json"), JSON.stringify(result, null, 2));
         writeStatus({ finishedAt: stamp() });
         await notify(`[granny] Run ${id} finished.
 ${finished(result, id)}`);
@@ -3519,7 +3704,7 @@ ${finished(result, id)}`);
           await notify(`[granny] Run ${id} failed: ${String(error?.message ?? error)}
 Call granny_status with runId "${id}" and report to the user.`);
       });
-      return started(id, join2(dir, "journal.jsonl"));
+      return started(id, join3(dir, "journal.jsonl"));
     };
     const notifySentence = (id) => `You will receive a message when it finishes. Use granny_status { runId: "${id}" } to check progress and granny_cancel to stop it. Do not poll in a loop.`;
     const startRun = async (input, parentSession) => {
@@ -3528,7 +3713,7 @@ Call granny_status with runId "${id}" and report to the user.`);
         return `granny_run refused:
 - ${problems.join(`
 - `)}`;
-      const layers = [readJson(globalConfigPath()), readJson(join2(input.repo, "granny.config.json")), input.config];
+      const layers = [readJson(globalConfigPath()), readJson(join3(input.repo, "granny.config.json")), input.config];
       const config = resolveConfig(layers, "opencode");
       const unknownChecks = stageCheckErrors(input.stages, config.checks);
       if (unknownChecks.length)

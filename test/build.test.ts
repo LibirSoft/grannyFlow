@@ -1,8 +1,10 @@
 import { describe, expect, it, mock } from 'bun:test'
-import { readFileSync } from 'node:fs'
+import { spawnSync } from 'node:child_process'
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { builtinModules } from 'node:module'
 import { join } from 'node:path'
-import { buildClaudeCode, buildOmp, buildOpencode, buildOpencodeTui, buildReadOnlyGuard } from '../scripts/build'
+import { buildClaudeCode, buildOmp, CLAUDE_CODE_SCRIPTS, buildOpencode, buildOpencodeTui, buildPrComments, buildReadOnlyGuard } from '../scripts/build'
 import { CODEX_REVIEWER, finding, review } from './fake-host'
 
 const root = join(import.meta.dir, '..')
@@ -14,21 +16,29 @@ function loadWorkflow(script: string) {
   return new AsyncFunction('agent', 'log', 'phase', 'args', 'parallel', 'pipeline', 'budget', 'workflow', body)
 }
 
+describe('claude-code Workflow scripts', () => {
+  for (const name of CLAUDE_CODE_SCRIPTS) {
+    it(`${name}.js is committed in sync with src/`, async () => {
+      const built = await buildClaudeCode(name)
+      expect(readFileSync(join(root, `skills/granny-workflow/engines/claude-code/${name}.js`), 'utf8')).toBe(built)
+    })
+
+    it(`${name}.js starts with a pure-literal meta and avoids APIs the Workflow sandbox forbids`, async () => {
+      const script = await buildClaudeCode(name)
+      const meta = script.slice(0, script.indexOf('\n}\n') + 2)
+      expect(meta).not.toMatch(/\$\{|\.\.\.|\w\(/)
+      for (const banned of ['Date.now(', 'Math.random(', 'new Date(', 'require(']) expect(script).not.toContain(banned)
+    })
+  }
+
+  it('bundles no implement loop into judge.js', async () => {
+    expect(await buildClaudeCode('judge')).not.toContain('async function runGranny(')
+  })
+})
+
 describe('claude-code workflow.js', () => {
-  it('is committed in sync with src/', async () => {
-    const built = await buildClaudeCode()
-    expect(readFileSync(join(root, 'skills/granny-workflow/engines/claude-code/workflow.js'), 'utf8')).toBe(built)
-  })
-
-  it('starts with a pure-literal meta and avoids APIs the Workflow sandbox forbids', async () => {
-    const script = await buildClaudeCode()
-    const meta = script.slice(0, script.indexOf('\n}\n') + 2)
-    expect(meta).not.toMatch(/\$\{|\.\.\.|\w\(/)
-    for (const banned of ['Date.now(', 'Math.random(', 'new Date(', 'require(']) expect(script).not.toContain(banned)
-  })
-
   it('runs the whole loop against the Workflow agent() API', async () => {
-    const script = await buildClaudeCode()
+    const script = await buildClaudeCode('workflow')
     const calls: Array<{ prompt: string; opts: any }> = []
     const logs: string[] = []
     const phases: string[] = []
@@ -88,9 +98,9 @@ describe('claude-code workflow.js', () => {
   })
 
   it('declares the Plan review phase and reviews and fixes a plan through the Workflow agent() API', async () => {
-    const script = await buildClaudeCode()
+    const script = await buildClaudeCode('workflow')
     const meta = script.slice(0, script.indexOf('\n}\n') + 2)
-    expect(meta).toContain("{ title: 'Worktree' },\n    { title: 'Plan' },\n    { title: 'Plan review' },\n    { title: 'Implement' },")
+    expect(meta).toContain("{ title: 'Worktree' },\n    { title: 'Plan review' },\n    { title: 'Implement' },")
     const calls: Array<{ prompt: string; opts: any }> = []
     const phases: string[] = []
     let reviews = 0
@@ -210,5 +220,76 @@ describe('omp extension bundle', () => {
     }
     expect(tools).toEqual(['granny_submit_findings'])
     expect(events).toEqual(['tool_call', 'session_start'])
+  })
+})
+
+describe('pr-comments.mjs', () => {
+  const script = join(root, 'skills/granny-workflow/scripts/pr-comments.mjs')
+
+  it('is committed in sync with src/', async () => {
+    expect(readFileSync(script, 'utf8')).toBe(await buildPrComments())
+  })
+
+  it('imports only node built-ins', () => {
+    const text = readFileSync(script, 'utf8')
+    const specifiers = [...text.matchAll(/^\s*import\s+(?:[^'"]*?\sfrom\s+)?["']([^"']+)["']/gm)].map(m => m[1]!)
+    expect(specifiers.length).toBeGreaterThan(0)
+    expect(specifiers.filter(s => !s.startsWith('node:'))).toEqual([])
+  })
+
+  it('posts a round through gh when node runs it in a checkout', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'granny-pr-'))
+    try {
+      const repo = join(dir, 'repo')
+      const bin = join(dir, 'bin')
+      mkdirSync(bin)
+      const git = (...args: string[]) => {
+        const r = spawnSync('git', ['-C', repo, '-c', 'commit.gpgsign=false', ...args], { encoding: 'utf8', env: { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' } })
+        expect(r.status).toBe(0)
+        return r.stdout.trim()
+      }
+      mkdirSync(repo)
+      git('init', '-q', '-b', 'main')
+      writeFileSync(join(repo, 'a.ts'), 'one\n')
+      git('add', 'a.ts')
+      git('commit', '-q', '-m', 'base')
+      const base = git('rev-parse', 'HEAD')
+      writeFileSync(join(repo, 'a.ts'), 'one\ntwo\n')
+      git('commit', '-q', '-am', 'two')
+      const head = git('rev-parse', 'HEAD')
+      const record = {
+        version: 1,
+        loop: 's1',
+        name: 'one',
+        round: 1,
+        base,
+        reviewedSha: head,
+        reviewers: [{ name: 'codex', engine: 'auto' }],
+        findings: [{ id: 'codex-F1', reviewer: 'codex', severity: 'P2', file: 'a.ts', line: 2, title: 'Two', detail: 'd', route: 'residual', decision: { rule: 8, action: 'residual', why: 'low' } }],
+        outcome: 'residual-only',
+      }
+      mkdirSync(join(repo, '.granny/trail'), { recursive: true })
+      writeFileSync(join(repo, '.granny/trail/s1-r1.json'), JSON.stringify(record))
+      const posted = join(dir, 'posted.json')
+      writeFileSync(
+        join(bin, 'gh'),
+        `#!/bin/sh
+case "$1 $2" in
+  "pr view") echo '{"number":3,"url":"https://github.com/o/r/pull/3","headRefOid":"${head}","baseRefOid":"${base}"}' ;;
+  "api --paginate") ;;
+  "api --method") cat > '${posted}' ;;
+  *) echo "unexpected gh $*" >&2; exit 9 ;;
+esac
+`,
+      )
+      chmodSync(join(bin, 'gh'), 0o755)
+      const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, GRANNY_CONFIG: join(dir, 'none.json') }
+      const r = spawnSync('node', [script], { cwd: repo, encoding: 'utf8', env })
+      expect({ code: r.status, stdout: r.stdout, stderr: r.stderr }).toEqual({ code: 0, stdout: 's1 r1: posted 1 line comment, 0 in body\nhttps://github.com/o/r/pull/3\n', stderr: '' })
+      const review = JSON.parse(readFileSync(posted, 'utf8'))
+      expect(review).toMatchObject({ commit_id: head, event: 'COMMENT', comments: [{ path: 'a.ts', line: 2, side: 'RIGHT' }] })
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 })
