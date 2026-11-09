@@ -2,12 +2,15 @@ import { trimSlashes } from '../core/paths'
 import type { TrailFinding, TrailRound } from '../core/types'
 import { type DiffFiles, diffLine, parseDiff } from './hunks'
 import type { PosterIo } from './io'
+import type { Platform } from './platform'
 import { cleanBody, findingComment, findingMarker, roundBody, roundMarker } from './render'
 
 /** The PR or MR a trail is planned against: its head commit and the commit of its target branch. */
 export interface Target {
   head: string
   base: string
+  /** The platform the body names; GitHub when unset. */
+  platform?: Platform
 }
 
 export interface PlannedComment {
@@ -83,6 +86,6 @@ export function planRound(io: PosterIo, r: TrailRound, records: TrailRound[], ta
     if (at) comments.push({ path, oldPath: at.oldPath, line: f.line!, ...(at.kind === 'context' ? { oldLine: at.oldLine } : {}), kind: at.kind, body: findingComment(f, r, records), marker: findingMarker(r, f) })
     else inBody.push(f)
   }
-  const body = roundBody(r, records, { inBody, notInPr, ...(refused === undefined ? {} : { refused }) })
+  const body = roundBody(r, records, { inBody, notInPr, ...(refused === undefined ? {} : { refused }), ...(target.platform === 'gitlab' ? { gitlab: true } : {}) })
   return { ...head, commit, ...(mergeBase === undefined ? {} : { mergeBase }), notInPr, body, comments }
 }

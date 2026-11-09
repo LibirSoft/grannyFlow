@@ -566,12 +566,13 @@ function roundBody(r, records, layout) {
     parts.push(`The loop ended here: ${code(r.outcome)}${r.note ? ` - ${agentLine(r.note)}` : ""}`);
   if (r.fix?.deviations)
     parts.push(`**The fixer's deviations:** ${agentText(r.fix.deviations)}`);
+  const [pr, platform] = layout.gitlab ? ["MR", "GitLab"] : ["PR", "GitHub"];
   if (layout.notInPr) {
     const at = r.reviewedSha ? code(short(r.reviewedSha)) : "a commit the record does not name";
-    parts.push(`Reviewed at ${at}, which is not in this PR's history: the line comments sit on the PR's head.`);
+    parts.push(`Reviewed at ${at}, which is not in this ${pr}'s history: the line comments sit on the ${pr}'s head.`);
   }
   if (layout.refused)
-    parts.push(`GitHub refused this round's line comments (${agentLine(layout.refused)}), so every finding is below.`);
+    parts.push(`${platform} refused this round's line comments (${agentLine(layout.refused)}), so every finding is below.`);
   if (layout.inBody.length) {
     const title = r.loop === "plan" ? "### Findings on the plan" : "### Not on a changed line";
     parts.push(title, ...layout.inBody.map((f) => `#### ${code(place(f))}
@@ -628,7 +629,7 @@ function planRound(io, r, records, target, toplevel, refused) {
     else
       inBody.push(f);
   }
-  const body = roundBody(r, records, { inBody, notInPr, ...refused === undefined ? {} : { refused } });
+  const body = roundBody(r, records, { inBody, notInPr, ...refused === undefined ? {} : { refused }, ...target.platform === "gitlab" ? { gitlab: true } : {} });
   return { ...head, commit, ...mergeBase === undefined ? {} : { mergeBase }, notInPr, body, comments };
 }
 

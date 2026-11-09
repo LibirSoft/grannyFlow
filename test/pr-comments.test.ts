@@ -481,6 +481,16 @@ describe('planRound', () => {
     expect(plan.body).toContain("refused this round's line comments (HTTP 422), so every finding is below.")
     expect(plan.body).toContain('`src/a.ts:12`')
   })
+
+  it('names an MR and GitLab in the body of a round planned against a GitLab MR', () => {
+    const r = round({ findings: [finding('codex-F1')] })
+    const gitlab: Target = { ...TARGET, platform: 'gitlab' }
+    const moved = planRound(fake({ ancestors: [], diffs: { [HEAD]: A_DIFF } }).io, r, [r], gitlab, TOP)!
+    expect(moved.body).toContain("Reviewed at `1111111`, which is not in this MR's history: the line comments sit on the MR's head.")
+    const refused = planRound(fake({ diffs: { [SHA1]: A_DIFF } }).io, r, [r], gitlab, TOP, '400 Bad Request')!
+    expect(refused.body).toContain("GitLab refused this round's line comments (400 Bad Request), so every finding is below.")
+    expect(planRound(fake({ diffs: { [SHA1]: A_DIFF } }).io, r, [r], TARGET, TOP, 'HTTP 422')!.body).toContain("GitHub refused this round's line comments")
+  })
 })
 
 describe('platform', () => {

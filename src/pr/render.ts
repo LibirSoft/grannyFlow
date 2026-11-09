@@ -117,8 +117,10 @@ export interface RoundLayout {
   inBody: TrailFinding[]
   /** Set when the reviewed commit is not in the PR, so the line comments sit on the PR head. */
   notInPr?: boolean
-  /** Set when GitHub refused the round's line comments, so every finding is in the body; GitHub's error. */
+  /** Set when the platform refused the round's line comments, so every finding is in the body; the platform's error. */
   refused?: string
+  /** Names a GitLab MR instead of a GitHub PR. */
+  gitlab?: boolean
 }
 
 function header(r: TrailRound): string {
@@ -140,11 +142,12 @@ export function roundBody(r: TrailRound, records: TrailRound[], layout: RoundLay
   const parts = [header(r)]
   if (r.outcome) parts.push(`The loop ended here: ${code(r.outcome)}${r.note ? ` - ${agentLine(r.note)}` : ''}`)
   if (r.fix?.deviations) parts.push(`**The fixer's deviations:** ${agentText(r.fix.deviations)}`)
+  const [pr, platform] = layout.gitlab ? ['MR', 'GitLab'] : ['PR', 'GitHub']
   if (layout.notInPr) {
     const at = r.reviewedSha ? code(short(r.reviewedSha)) : 'a commit the record does not name'
-    parts.push(`Reviewed at ${at}, which is not in this PR's history: the line comments sit on the PR's head.`)
+    parts.push(`Reviewed at ${at}, which is not in this ${pr}'s history: the line comments sit on the ${pr}'s head.`)
   }
-  if (layout.refused) parts.push(`GitHub refused this round's line comments (${agentLine(layout.refused)}), so every finding is below.`)
+  if (layout.refused) parts.push(`${platform} refused this round's line comments (${agentLine(layout.refused)}), so every finding is below.`)
   if (layout.inBody.length) {
     const title = r.loop === 'plan' ? '### Findings on the plan' : '### Not on a changed line'
     parts.push(title, ...layout.inBody.map(f => `#### ${code(place(f))}\n\n${findingComment(f, r, records)}`))
