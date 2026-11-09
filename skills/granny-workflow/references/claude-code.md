@@ -102,4 +102,4 @@ The result is `{ repo, branch, base, worktree, draft?, plan?, stages: [...], fin
 
 ## When the PR is opened
 
-The run's review trail is in `<worktree>/.granny/trail/` (`trail.dir` in the result). Once the PR is open, run `cd <worktree> && node <skill-dir>/scripts/pr-comments.mjs` and relay its output; it posts every round as a GitHub review ([config.md](config.md#review-trail)). Only the script posts review comments - never write or post them yourself.
+The run's review trail is in `<worktree>/.granny/trail/` (`trail.dir` in the result). Once the PR is open, run `cd <worktree> && node <skill-dir>/scripts/pr-comments.mjs` and relay its output; it posts every round as a review on the GitHub PR or GitLab MR, and on any other platform `--out <file>` writes the rounds for another client ([config.md](config.md#review-trail)). Only the script posts review comments - never write or post them yourself.

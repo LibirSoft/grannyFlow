@@ -24,7 +24,7 @@ Layers, later wins:
 | `maxRounds` | `4` | review rounds per stage, for the plan review and for the final review; the stage ends `round-cap` after the last one. Check repairs are not review rounds and do not count |
 | `planReview` | `false` | `true`: with a `plan` in the run's input, review the plan files before stage 1 - see [Plan review](#plan-review). Each round is a full review + judge + fix, so it uses many more tokens and makes the run much longer (`maxRounds` caps the rounds); set it only when the user asks for a plan review. No effect without `plan` |
 | `finalReview` | `true` | after the last stage, review each repo's whole branch (`<base>...HEAD`) once more for cross-stage duplication, inconsistencies and merge resolutions - see [Final review](#final-review). Skipped for a repo with one stage and no lane merge; `false`: never |
-| `trail` | `true` | at the end of every review round (plan review, each stage, final review), write a record of that round to `<workDir>/trail/<loop>-r<round>.json` in the run's main worktree: the reviewers, every finding with the judge's tags and where it was routed, and the fix's commit range. The run result's `trail` says where and names any record that could not be written; a failed write never fails the run. Once the PR is open, `scripts/pr-comments.mjs` posts the records as PR comments - see [Review trail](#review-trail). `false`: nothing is read or written for it |
+| `trail` | `true` | at the end of every review round (plan review, each stage, final review), write a record of that round to `<workDir>/trail/<loop>-r<round>.json` in the run's main worktree: the reviewers, every finding with the judge's tags and where it was routed, and the fix's commit range. The run result's `trail` says where and names any record that could not be written; a failed write never fails the run. Once the PR or MR is open, `scripts/pr-comments.mjs` posts the records as comments on a GitHub PR or a GitLab MR, or writes them for any other client with `--out` - see [Review trail](#review-trail). `false`: nothing is read or written for it |
 | `parallel` | `true` | run independent stages at the same time - stages in different repos, and stages whose `after` frees them from the one before; a same-repo stage runs in its own worktree and is merged back - see [Parallel stages](#parallel-stages). `false`: one stage at a time, in list order |
 | `maxParallel` | `3` | the most stages running at once (each runs its own reviewers too) |
 | `base` | `"main"` | branch never to touch; the run's `base` argument overrides it |
@@ -171,19 +171,54 @@ On **opencode** and **omp** granny executes the command itself. On **Claude Code
 
 With `trail` on (the default), the engine writes one record per review round, as JSON, to `<workDir>/trail/<loop>-r<round>.json` in the run's main worktree: `plan-r<n>` for the plan review, `s<n>-r<n>` for stage n, `final-r<n>` for the final review and `final-<repo>-r<n>` for another repo's. A record holds the commit the reviewers saw (`reviewedSha`), the reviewers, every finding as the round ended - with the judge's tags, the rule and its route, `sent` or `residual`, a `blocker` mark on a P0/P1 that skipped the judge, and the fixer's earlier reason when the judge overruled a decline - and, when the round sent findings, the fix's label, commit range, commits, declines and deviations; a round that ended its loop has its `outcome`. Code writes it; no agent writes or picks any of it.
 
-The run does not post anything: granny never pushes or opens a PR. Once the PR is open, run in the worktree:
+The run does not post anything: granny never pushes or opens a PR or MR. Once the PR (GitHub) or MR (GitLab) is open, run in the worktree:
 
 ```sh
-node <skill-dir>/scripts/pr-comments.mjs [--pr <n>] [--trail <dir>] [--dry-run]
+node <skill-dir>/scripts/pr-comments.mjs [--platform github|gitlab] [--pr <n>] [--trail <dir>] [--out <file> [--base <ref>]] [--dry-run]
 ```
 
-It needs `node`, `git` and an authenticated `gh`, and reads the trail from `<git toplevel>/<workDir>/trail` (`workDir` from the config files) unless `--trail` names it; the PR is `--pr`, else the current branch's (`gh pr view`), and without one it exits 2 with `open the PR first`. It posts one review per round (`event: COMMENT`) in the order things happened - plan review, stages by number, final reviews; rounds ascending:
+It needs `node` and `git`, and reads the trail from `<git toplevel>/<workDir>/trail` (`workDir` from the config files) unless `--trail` names it. Whatever the platform, it works out the same thing for each round, from the records and git alone, in the order things happened - plan review, stages by number, final reviews; rounds ascending:
 
-- The review sits on the round's `reviewedSha` when that commit is in the PR's history, so a line a later fix changed shows as *Outdated* - the trail of the fix. Otherwise it sits on the PR's head and says that the reviewed commit is not in the PR's history.
-- A finding becomes a comment on its line when its file and line fall in a hunk of the PR's diff at that commit (`git diff` from the merge base with the PR's base). Every other finding, and every finding of the plan review (the plan files are not in the PR), goes into the round's review body. When GitHub refuses a round's line comments (one line it cannot place rejects the whole review), the round is posted once more with every finding in its body and GitHub's error at the top.
+- The round sits on its `reviewedSha` when that commit is in the PR's history, so a line a later fix changed shows as outdated - the trail of the fix. Otherwise it sits on the PR's head and says that the reviewed commit is not in the PR's history.
+- A finding becomes a comment on its line when its file and line fall in a hunk of the PR's diff at that commit (`git diff` from the merge base with the PR's target). Every other finding, and every finding of the plan review (the plan files are not in the PR), goes into the round's body.
 - Each comment has the reviewer's title and detail, the judge's tags, priority and rule, the evidence, the judge's reason, and what happened: fixed in which commit range, declined by the fixer and why, overruled, kept as residual (with `ATTENTION` for a pre-existing finding of critical or major impact), sent without the judge as a P0/P1, came back in a later round, also reported by other reviewers.
 - A clean round posts one line only when it ends a loop that had findings; a first round that is clean posts nothing.
-- Every review carries a hidden marker, so a rerun skips the rounds already posted. It prints one line per round and the PR's URL, and exits non-zero naming every round it could not post. `--dry-run` prints each review's JSON and posts nothing.
+- Every round's body carries a hidden marker, so a rerun skips the rounds already posted. It prints one line per round (`s1 r1: posted 2 line comments, 1 in body`) and the PR's or MR's URL, and exits non-zero naming every round it could not post.
+
+**The platform.** `--platform` wins. Otherwise the poster reads the URL of the remote the current branch tracks (`origin` when it tracks none): `github.com` is GitHub; a host with `gitlab` in its name, or one `glab auth status` lists (a self-hosted GitLab glab is logged in to), is GitLab. Any other host stops with `cannot tell the platform of <host>: pass --platform github|gitlab, or --out <file>`.
+
+### GitHub
+
+It needs an authenticated `gh`. The PR is `--pr`, else the current branch's (`gh pr view`), and without one it exits 2 with `open the PR first`. Each round is one review (`event: COMMENT`, through `gh api`) with its line comments. When GitHub refuses a round's line comments (one line it cannot place rejects the whole review), the round is posted once more with every finding in its body and GitHub's error at the top. `--dry-run` prints each review's JSON and posts nothing.
+
+### GitLab
+
+It needs an authenticated `glab`, and makes every call with `glab api` in the checkout (glab's `:id` is the project). The MR is `--pr <iid>`, else the one open MR whose source branch is the current branch; with none it exits 2 with `open the MR first`, and with several it lists them and asks for `--pr`. The MR's head and target commits (`sha`, `diff_refs.start_sha`) must be in the checkout: when one is not, it stops and says to `git fetch` - it never fetches.
+
+- Each round is one review: a draft note per line comment, positioned on the round's commit (`head_sha`) with the merge base as `base_sha` and `start_sha`, the file's old and new path and `new_line` (plus `old_line` on an unchanged line), then one `draft_notes/bulk_publish` whose note is the round's body. GitLab shows a line a later fix changed as a thread on an old version of the diff. A round with no line comment is published the same way, or as a plain MR note when GitLab will not publish without a draft.
+- A publish carries every draft note you have on the MR. So before the first round it posts, it deletes the drafts an earlier run left (they carry a granny marker) and prints how many, and when you have a draft of your own it stops, names it, and posts nothing: publish or delete it first.
+- When GitLab refuses a draft or the publish, the round's drafts are deleted and the round is posted once as a plain MR note with every finding in its body and GitLab's error at the top. When a draft cannot be deleted, it stops there, so the next round does not publish it.
+- `--dry-run` reads the MR, its notes and your drafts, and prints the calls it would make (`[{ method, path, body }]` per round) without making them.
+
+### Any other client: `--out`
+
+`--out <file>` posts nothing. It writes every round it would post as JSON, for any other client (Gerrit, Bitbucket, an in-house tool) to post:
+
+```jsonc
+{
+  "version": 1,
+  "reviews": [
+    {
+      "loop": "s1", "round": 1, "marker": "<!-- granny-trail s1/r1@1a2b3c4d -->",
+      "commit": "<sha the round sits on>", "mergeBase": "<merge base with the target>", "notInPr": false,
+      "body": "<the round's body, ending with its marker>",
+      "comments": [{ "path": "src/a.ts", "oldPath": "src/a.ts", "line": 12, "oldLine": 11, "kind": "context", "body": "...", "marker": "..." }]
+    }
+  ]
+}
+```
+
+`kind` is `added` (a line the diff adds: place it by `line`) or `context` (an unchanged line, with its `oldLine`); `oldPath` is the file's path before a rename. It needs the target branch to compute the merge bases: it takes it from the PR or MR when the platform has one for the branch (or `--pr`), else from `--base <ref>` with the checked-out commit as the head, and with neither it stops and names `--base`. `--base` goes only with `--out`. `--out --dry-run` prints the file instead of writing it. It writes every round, posted or not: the client skips the markers it already has.
 
 A record that does not parse or validate is skipped and named. `granny judge` writes no trail: its report already carries the tags.
 

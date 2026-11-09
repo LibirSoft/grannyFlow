@@ -126,8 +126,11 @@ describe('skill docs', () => {
     const config = read('references/config.md')
     expect(config).toMatch(/^\| `trail` \| `true` \|.*\[Review trail\]\(#review-trail\)/m)
     expect(config).toContain('## Review trail')
-    expect(config).toContain('node <skill-dir>/scripts/pr-comments.mjs [--pr <n>] [--trail <dir>] [--dry-run]')
+    expect(config).toContain('node <skill-dir>/scripts/pr-comments.mjs [--platform github|gitlab] [--pr <n>] [--trail <dir>] [--out <file> [--base <ref>]] [--dry-run]')
+    for (const topic of ['### GitHub', '### GitLab', '### Any other client: `--out`', 'glab api', 'bulk_publish', '"version": 1']) expect({ topic, has: config.includes(topic) }).toEqual({ topic, has: true })
     const md = read('SKILL.md')
+    expect(md).toContain('a GitLab MR')
+    expect(md).toContain('`--out <file>`')
     expect(md).toContain('### When the PR is opened')
     expect(md).toContain('run `node <skill-dir>/scripts/pr-comments.mjs` in the worktree')
     expect(md).toContain('Never write, edit or post review comments yourself. Only the script posts them.')
@@ -136,8 +139,10 @@ describe('skill docs', () => {
     for (const host of ['claude-code', 'opencode', 'omp', 'cursor']) {
       const ref = read(`references/${host}.md`)
       expect({ host, has: ref.includes('## When the PR is opened') && ref.includes('<skill-dir>/scripts/pr-comments.mjs') }).toEqual({ host, has: true })
+      if (host !== 'cursor') expect({ host, gitlab: ref.includes('GitLab MR') }).toEqual({ host, gitlab: true })
     }
     expect(readRoot('README.md')).toContain('node <skill-dir>/scripts/pr-comments.mjs')
+    expect(readRoot('README.md')).toContain('GitLab')
   })
 
   it('documents the plan review in the config keys, SKILL.md, the host references and the Cursor protocol', () => {
