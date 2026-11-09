@@ -265,13 +265,14 @@ export function judgeStepPrompt(repo: string, step: string, script: string): str
   return oneCommand(`shell command for the "${step}" step of a review-only run`, `Repo ${repo}.`, 'Run exactly this:', script)
 }
 
+const VERBATIM = 'Run exactly this, as one command with its line breaks and every character kept, down to its last line:'
+
 export function reportWritePrompt(repo: string, step: string, script: string): string {
-  return oneCommand(
-    `shell command for the "${step}" step of a review-only run, which saves the review report (the one file this run writes),`,
-    `Repo ${repo}.`,
-    'Run exactly this, as one command with its line breaks and every character kept, down to its last line:',
-    script,
-  )
+  return oneCommand(`shell command for the "${step}" step of a review-only run, which saves the review report (the one file this run writes),`, `Repo ${repo}.`, VERBATIM, script)
+}
+
+export function reviewSavePrompt(repo: string, step: string, script: string): string {
+  return oneCommand(`shell command for the "${step}" step, which saves a reviewer's answer to its review file under the work dir (the one file this step writes),`, `Do not review the code yourself. Repo ${repo}.`, VERBATIM, script)
 }
 
 export function trailWritePrompt(repo: string, step: string, script: string): string {

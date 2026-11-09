@@ -107,6 +107,13 @@ describe('hostModelErrors', () => {
     const errors = hostModelErrors(resolveConfig(layers, 'omp'), layers, 'omp', model => (model.includes('/') ? undefined : 'not provider/model'), ['the config'])
     expect(errors.map(e => e.slice(0, e.indexOf(':')))).toEqual(['roles.granny.model', 'roles.helper.model', 'roles.planner.model', 'roles.implementer.model', 'roles.judge.model'])
   })
+
+  it("leaves an opencode reviewer's model to opencode, which the host never runs as its own agent", () => {
+    const layers = [{ reviewers: [{ name: 'kimi', engine: 'opencode', model: 'kimi-code-plan-global/k3.1-pro', effort: 'max' }] }]
+    for (const host of ['opencode', 'omp'] as const) {
+      expect(hostModelErrors(resolveConfig(layers, host), layers, host, () => 'not a model this host has', ['the config'], [])).toEqual([])
+    }
+  })
 })
 
 describe('withHeartbeat', () => {

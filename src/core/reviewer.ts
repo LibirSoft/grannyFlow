@@ -1,4 +1,5 @@
 import { resolveModel, type GrannyConfig, type ReviewerConfig } from './config'
+import { OPENCODE_AGENT, opencodeAgentConfig } from './opencode'
 import { shellQuote } from './shell'
 import type { HostName } from './types'
 
@@ -54,12 +55,21 @@ export function companionCommand(rv: ReviewerConfig, host: HostName, base: strin
 
 export const reviewStem = (c: GrannyConfig, stage: string, round: number, rv: ReviewerConfig) => `${c.workDir}/review-${stage}-r${round}-${rv.name}`
 
+/** `opencode run` as a read-only reviewer, its output the JSON event stream; `dirs` are the outside directories it may read. */
+function opencodeScript(rv: ReviewerConfig, host: HostName, prompt: string, dirs: string[], log: string): string {
+  const model = `${resolveModel(rv.model, host)}${rv.effort ? `#${rv.effort}` : ''}`
+  const run = `OPENCODE_CONFIG_CONTENT=${shellQuote(opencodeAgentConfig(dirs))} opencode run --standalone --archived --format json --agent ${OPENCODE_AGENT} -m ${shellQuote(model)} ${shellQuote(prompt)} </dev/null`
+  return `{ echo ${shellQuote(`${SAID}opencode ${model} (read-only agent)`)}; ${run}; } > ${log} 2>&1`
+}
+
 interface Backends {
   cli: string
   cliLabel: string
   plugin: string
   pluginLabel: string
   fallback: boolean
+  prompt: string
+  dirs: string[]
 }
 
 function script(rv: ReviewerConfig, c: GrannyConfig, host: HostName, stem: string, b: Backends): ReviewPlan {
@@ -70,6 +80,7 @@ function script(rv: ReviewerConfig, c: GrannyConfig, host: HostName, stem: strin
     return { script: `mkdir -p ${shellQuote(c.workDir)} && rm -f ${md} ${log} && ${body}`, body, ...(backend ? { backend } : {}) }
   }
 
+  if (rv.engine === 'opencode') return wrap(opencodeScript(rv, host, b.prompt, b.dirs, log))
   const cli = `${b.cli} > ${log} 2>&1`
   if (rv.engine === 'command') return wrap(cli, 'custom command')
   if (rv.engine === 'codex' || (rv.engine === 'auto' && host !== 'claude-code')) return wrap(cli, b.cliLabel)
@@ -88,7 +99,7 @@ function script(rv: ReviewerConfig, c: GrannyConfig, host: HostName, stem: strin
   return wrap(`${find}; if [ -z "$companion_version" ]; then ${missing}; elif ! command -v node >/dev/null 2>&1; then ${noNode}; else ${plugin}; fi`)
 }
 
-export function reviewPlan(rv: ReviewerConfig, c: GrannyConfig, host: HostName, base: string, stem: string, prompt = ''): ReviewPlan {
+export function reviewPlan(rv: ReviewerConfig, c: GrannyConfig, host: HostName, base: string, stem: string, prompt = '', dirs: string[] = []): ReviewPlan {
   const mode = rv.mode ?? 'review'
   return script(rv, c, host, stem, {
     cli: cliCommand(rv, host, base, `${stem}.md`, prompt),
@@ -96,10 +107,12 @@ export function reviewPlan(rv: ReviewerConfig, c: GrannyConfig, host: HostName, 
     plugin: companionCommand(rv, host, base),
     pluginLabel: mode,
     fallback: rv.engine === 'auto' && mode === 'review',
+    prompt,
+    dirs,
   })
 }
 
-export function planReviewScript(rv: ReviewerConfig, c: GrannyConfig, host: HostName, base: string, stem: string, prompt: string): ReviewPlan | undefined {
+export function planReviewScript(rv: ReviewerConfig, c: GrannyConfig, host: HostName, base: string, stem: string, prompt: string, dirs: string[] = []): ReviewPlan | undefined {
   if (rv.engine === 'agent' || (rv.engine === 'command' && !rv.command?.includes('{prompt}'))) return undefined
   const m = resolveModel(rv.model, host)
   const model = m ? ` -m ${shellQuote(m)}` : ''
@@ -113,6 +126,8 @@ export function planReviewScript(rv: ReviewerConfig, c: GrannyConfig, host: Host
     plugin: `node "$companion" task${model} ${shellQuote(prompt)} </dev/null`,
     pluginLabel: 'task',
     fallback: rv.engine === 'auto',
+    prompt,
+    dirs,
   })
 }
 

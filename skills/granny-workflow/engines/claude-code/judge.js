@@ -63,12 +63,13 @@ var REVIEWER_KEYS = new Set(["name", "engine", "model", "effort", "mode", "focus
 var CHECK_KEYS = new Set(["name", "run", "maxRepairs", "timeout", "metric"]);
 var METRIC_KEYS = new Set(["pattern", "min", "max"]);
 var EFFORTS = new Set(["low", "medium", "high", "xhigh", "max"]);
-var ENGINES = ["auto", "codex", "codex-plugin", "agent", "command"];
+var ENGINES = ["auto", "codex", "codex-plugin", "agent", "command", "opencode"];
 var PLUGIN_ENGINES = ["auto", "codex-plugin"];
 var CODEX_ENGINES = ["auto", "codex", "codex-plugin"];
 var MODES = ["review", "adversarial-review"];
 var WATCH_MODES = ["full", "panel", "off"];
 var NAME = /^[a-z0-9-]+$/;
+var OPENCODE_MODEL = /^[^\s/#]+\/[^\s#]+(#[^\s#]+)?$/;
 var isObject = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
 function resolveConfig(layers, host) {
   const config = JSON.parse(JSON.stringify(DEFAULT_CONFIG));
@@ -202,6 +203,8 @@ function reviewers(list, errors, host) {
     } else if (entry.command !== undefined) {
       errors.push(`${at}.command needs "engine": "command"; engine "${engine}" runs its own reviewer`);
     }
+    if (engine === "opencode")
+      errors.push(...opencodeModelErrors(at, entry.model, entry.effort, host));
     if (host === "omp" && CODEX_ENGINES.includes(engine)) {
       errors.push(`${at}.engine "${engine}"${entry.engine === undefined ? " (the engine of an entry that names none)" : ""} runs Codex, which granny does not run on omp - use "engine": "agent" with an omp model, e.g. "model": { "omp": "openai-codex/gpt-6.1-sol" }, or "engine": "command"`);
     } else if (host === "opencode" && adversarial && engine === "auto") {
@@ -209,6 +212,27 @@ function reviewers(list, errors, host) {
     }
     return { ...entry, name, engine };
   });
+}
+function opencodeModelErrors(at, spec, effort, host) {
+  const lists = "`opencode models` lists them";
+  if (spec === undefined)
+    return [`${at}.model is required for engine "opencode": an opencode model "provider/model", e.g. "zai/glm-5.3" - ${lists}`];
+  if (typeof spec !== "string" && !isObject(spec))
+    return [];
+  const errors = [];
+  for (const model of typeof spec === "string" ? [spec] : Object.values(spec)) {
+    if (typeof model !== "string" || !model)
+      continue;
+    if (!OPENCODE_MODEL.test(model))
+      errors.push(`${at}.model "${model}" is not an opencode model "provider/model" (optionally "#variant") - ${lists}`);
+    else if (model.includes("#") && effort !== undefined) {
+      errors.push(`${at}: model "${model}" names the variant "${model.slice(model.indexOf("#") + 1)}" and effort "${effort}" names another - keep one of them`);
+    }
+  }
+  if (host && isObject(spec) && spec[host] === undefined) {
+    errors.push(`${at}.model has no entry for ${host} - engine "opencode" needs a model on every host it runs on; a plain string applies to all of them`);
+  }
+  return errors;
 }
 function validate(c) {
   const errors = [];
@@ -657,8 +681,12 @@ var ONE_SHOT_NOTE = "This is a one-shot review: nobody fixes anything in this ru
 function judgeStepPrompt(repo, step, script) {
   return oneCommand(`shell command for the "${step}" step of a review-only run`, `Repo ${repo}.`, "Run exactly this:", script);
 }
+var VERBATIM = "Run exactly this, as one command with its line breaks and every character kept, down to its last line:";
 function reportWritePrompt(repo, step, script) {
-  return oneCommand(`shell command for the "${step}" step of a review-only run, which saves the review report (the one file this run writes),`, `Repo ${repo}.`, "Run exactly this, as one command with its line breaks and every character kept, down to its last line:", script);
+  return oneCommand(`shell command for the "${step}" step of a review-only run, which saves the review report (the one file this run writes),`, `Repo ${repo}.`, VERBATIM, script);
+}
+function reviewSavePrompt(repo, step, script) {
+  return oneCommand(`shell command for the "${step}" step, which saves a reviewer's answer to its review file under the work dir (the one file this step writes),`, `Do not review the code yourself. Repo ${repo}.`, VERBATIM, script);
 }
 var WHOLE_BRANCH_NOTE = "This is the whole-branch review: each stage was already reviewed alone, so look across them - duplicated code or helpers several stages added, inconsistencies between stages (naming, contracts, config, docs, tests) - and especially at the merge commits and their conflict resolutions (`git log --merges`, `git show <merge>`): both sides' intent must survive.";
 var taskSection = (stage) => stage ? `Stage ${stage.number}/${stage.total} "${stage.name}" - its TASK:
@@ -742,6 +770,77 @@ function judgeRetryNote(problems) {
   return problems ? `RETRY: your last answer left these findings unclassified. ${RETRY_ASK}:
 ${problems.map((x) => `- ${x.id}: ${x.why}`).join(`
 `)}` : `RETRY: your last answer was empty or did not match the schema. ${RETRY_ASK}.`;
+}
+
+var OPENCODE_AGENT = "granny-reviewer";
+var READ_ONLY_GIT = ["git diff*", "git log*", "git show*", "git status*", "git blame*", "git rev-parse*", "git merge-base*", "git ls-files*"];
+var ABSOLUTE_PATH = /(?<=^|[\s,;(\[{"'`])\/[^\s,;)\]}"'`]*/g;
+var isObject2 = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
+function errorText(error) {
+  if (!isObject2(error))
+    return String(error);
+  const message = typeof error.message === "string" ? error.message : isObject2(error.data) && typeof error.data.message === "string" ? error.data.message : JSON.stringify(error);
+  const kind = typeof error.type === "string" ? error.type : typeof error.name === "string" ? error.name : undefined;
+  return kind ? `${kind}: ${message}` : message;
+}
+function opencodeAnswer(jsonl) {
+  const parts = [];
+  const errors = [];
+  for (const raw of jsonl.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line)
+      continue;
+    let event;
+    try {
+      event = JSON.parse(line);
+    } catch {
+      if (line.startsWith("Error:"))
+        errors.push(line);
+      continue;
+    }
+    if (!isObject2(event))
+      continue;
+    if (event.type === "text" && isObject2(event.part) && event.part.type === "text" && typeof event.part.text === "string")
+      parts.push(event.part.text);
+    else if (event.type === "error")
+      errors.push(errorText(event.error));
+  }
+  const text = parts.join(`
+`).trim();
+  const error = [...new Set(errors)].join("; ");
+  return { ...text ? { text } : {}, ...error ? { error } : {} };
+}
+function normalize(path) {
+  const out = [];
+  for (const part of path.split("/")) {
+    if (!part || part === ".")
+      continue;
+    if (part === "..")
+      out.pop();
+    else
+      out.push(part);
+  }
+  return `/${out.join("/")}`;
+}
+function readableDirs(text, files, cwd) {
+  const root = normalize(cwd);
+  const dirs = [...(text.match(ABSOLUTE_PATH) ?? []).map((p) => p.replace(/[.:]+$/, "")), ...files].map((p) => {
+    const path = normalize(p);
+    return p.endsWith("/") ? path : path.slice(0, path.lastIndexOf("/"));
+  });
+  return [...new Set(dirs)].filter((d) => d && d !== "/" && d !== root && !d.startsWith(`${root}/`));
+}
+function opencodeAgentConfig(dirs) {
+  const permission = {
+    "*": "deny",
+    read: "allow",
+    grep: "allow",
+    glob: "allow",
+    list: "allow",
+    bash: { "*": "deny", ...Object.fromEntries(READ_ONLY_GIT.map((p) => [p, "allow"])), "git * --output*": "deny" },
+    ...dirs.length ? { external_directory: Object.fromEntries(dirs.map((d) => [`${d}/*`, "allow"])) } : {}
+  };
+  return JSON.stringify({ agent: { [OPENCODE_AGENT]: { mode: "primary", permission } } });
 }
 
 var HEADINGS = { critical: "P0", major: "P1", moderate: "P2", minor: "P3" };
@@ -880,6 +979,11 @@ function companionCommand(rv, host, base) {
   return `node "$companion" ${rv.mode ?? "review"} --wait --base ${shellQuote(base)} --scope branch${model}${focus}`;
 }
 var reviewStem = (c, stage, round, rv) => `${c.workDir}/review-${stage}-r${round}-${rv.name}`;
+function opencodeScript(rv, host, prompt, dirs, log) {
+  const model = `${resolveModel(rv.model, host)}${rv.effort ? `#${rv.effort}` : ""}`;
+  const run = `OPENCODE_CONFIG_CONTENT=${shellQuote(opencodeAgentConfig(dirs))} opencode run --standalone --archived --format json --agent ${OPENCODE_AGENT} -m ${shellQuote(model)} ${shellQuote(prompt)} </dev/null`;
+  return `{ echo ${shellQuote(`${SAID}opencode ${model} (read-only agent)`)}; ${run}; } > ${log} 2>&1`;
+}
 function script(rv, c, host, stem, b) {
   const md = shellQuote(`${stem}.md`);
   const log = shellQuote(`${stem}.log`);
@@ -887,6 +991,8 @@ function script(rv, c, host, stem, b) {
     const body = `${run}; code=$?; if [ -s ${md} ]; then cat ${md}; else cat ${log}; fi; exit $code`;
     return { script: `mkdir -p ${shellQuote(c.workDir)} && rm -f ${md} ${log} && ${body}`, body, ...backend ? { backend } : {} };
   };
+  if (rv.engine === "opencode")
+    return wrap(opencodeScript(rv, host, b.prompt, b.dirs, log));
   const cli = `${b.cli} > ${log} 2>&1`;
   if (rv.engine === "command")
     return wrap(cli, "custom command");
@@ -902,17 +1008,19 @@ function script(rv, c, host, stem, b) {
   const plugin = `echo "${SAID}codex-plugin ${b.pluginLabel} ($companion)" && ${ownBroker} && ${b.plugin} > ${md} 2> ${log}`;
   return wrap(`${find}; if [ -z "$companion_version" ]; then ${missing}; elif ! command -v node >/dev/null 2>&1; then ${noNode}; else ${plugin}; fi`);
 }
-function reviewPlan(rv, c, host, base, stem, prompt = "") {
+function reviewPlan(rv, c, host, base, stem, prompt = "", dirs = []) {
   const mode = rv.mode ?? "review";
   return script(rv, c, host, stem, {
     cli: cliCommand(rv, host, base, `${stem}.md`, prompt),
     cliLabel: "codex CLI (codex exec review)",
     plugin: companionCommand(rv, host, base),
     pluginLabel: mode,
-    fallback: rv.engine === "auto" && mode === "review"
+    fallback: rv.engine === "auto" && mode === "review",
+    prompt,
+    dirs
   });
 }
-function planReviewScript(rv, c, host, base, stem, prompt) {
+function planReviewScript(rv, c, host, base, stem, prompt, dirs = []) {
   if (rv.engine === "agent" || rv.engine === "command" && !rv.command?.includes("{prompt}"))
     return;
   const m = resolveModel(rv.model, host);
@@ -923,7 +1031,9 @@ function planReviewScript(rv, c, host, base, stem, prompt) {
     cliLabel: "codex CLI (codex exec, read-only)",
     plugin: `node "$companion" task${model} ${shellQuote(prompt)} </dev/null`,
     pluginLabel: "task",
-    fallback: rv.engine === "auto"
+    fallback: rv.engine === "auto",
+    prompt,
+    dirs
   });
 }
 function reportedBackend(output) {
@@ -1181,6 +1291,19 @@ ${note}` : ""}` : missing };
 `).filter((l) => STATUS_LINE.test(l) && !`${l.trim().replace(/^\S+\s+/, "")}/`.startsWith(`${work}/`));
   };
   const attribute = (rv, findings) => findings.map((f, i) => ({ ...f, id: `${rv.name}-F${i + 1}`, reviewer: rv.name }));
+  const saveAnswer = async (label, phase, path, text, cwd, tag) => {
+    const failed = `${tag}: could not save the answer to ${path}`;
+    try {
+      const w = await shell(label, phase, heredocWriteScript(path, `${text}
+`), cwd, reviewSavePrompt);
+      if (!w.ran)
+        host.log(`${failed} (exit ${w.code}): ${w.output.trim().slice(-300)}`);
+    } catch (e) {
+      if (isCancelled(e))
+        throw e;
+      host.log(`${failed}: ${String(e?.message ?? e)}`);
+    }
+  };
   const review = async (lane, rv, name, subject, round, attempt) => {
     const { p, cwd } = lane;
     const tag = `${name} r${round} ${rv.name}${attempt > 1 ? ` #${attempt}` : ""}`;
@@ -1193,9 +1316,11 @@ ${note}` : ""}` : missing };
       return { ran: true, findings: Array.isArray(r.findings) ? r.findings : [] };
     }
     const stem = reviewStem(config, slug(name), round, rv);
-    const plan = subject.kind === "plan" ? planReviewScript(rv, config, host.name, lane.base, stem, planReviewPrompt(p, subject.files)) : reviewPlan(rv, config, host.name, subject.base, stem, commandReviewPrompt(p, name, subject.base, subject.stage, subject.note));
+    const dirs = rv.engine === "opencode" ? readableDirs(p.context ?? "", subject.kind === "plan" ? subject.files : [], cwd) : [];
+    const plan = subject.kind === "plan" ? planReviewScript(rv, config, host.name, lane.base, stem, planReviewPrompt(p, subject.files), dirs) : reviewPlan(rv, config, host.name, subject.base, stem, commandReviewPrompt(p, name, subject.base, subject.stage, subject.note), dirs);
     if (!plan)
       return { ran: false, findings: [], note: "this reviewer has no command for a plan review" };
+    const failed = (out) => (rv.engine === "opencode" ? opencodeAnswer(out).error : undefined) ?? out.slice(-2000);
     let ran;
     let output;
     let note;
@@ -1204,7 +1329,7 @@ ${note}` : ""}` : missing };
       ran = r.code === 0;
       output = r.output;
       if (!ran)
-        note = `review command exited ${r.code}: ${r.output.slice(-2000)}`;
+        note = `review command exited ${r.code}: ${failed(r.output)}`;
     } else {
       const job = detachedReview(plan, config, stem, cwd);
       const step = async (label, prompt) => {
@@ -1229,11 +1354,18 @@ ${note}` : ""}` : missing };
       ran = Boolean(r?.ran);
       output = r?.output ?? "";
       if (!ran)
-        note = r ? `review command exited ${r.code}${r.note ? ` (${r.note})` : ""}: ${output.slice(-2000)}` : "review runner returned nothing";
+        note = r ? `review command exited ${r.code}${r.note ? ` (${r.note})` : ""}: ${failed(output)}` : "review runner returned nothing";
     }
     host.log(`${tag}: reviewer: ${plan.backend ?? reportedBackend(output) ?? "not reported"}`);
     if (!ran)
       return { ran, findings: [], note };
+    if (rv.engine === "opencode") {
+      const answer = opencodeAnswer(output);
+      if (!answer.text)
+        return { ran: false, findings: [], note: answer.error ? `opencode: ${answer.error}` : "opencode returned no answer" };
+      output = answer.text;
+      await saveAnswer(`review ${tag} save`, phase, `${stem}.md`, output, cwd, tag);
+    }
     const failure = reviewFailure(output);
     if (failure)
       return { ran: false, findings: [], note: `reviewer returned no usable result (${failure}): ${output.slice(-2000)}` };

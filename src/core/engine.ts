@@ -23,6 +23,7 @@ import {
   repairPrompt,
   reportWritePrompt,
   reviewReadPrompt,
+  reviewSavePrompt,
   reviewStartPrompt,
   reviewStopPrompt,
   reviewWaitPrompt,
@@ -40,6 +41,7 @@ import {
   type StageTask,
   WHOLE_BRANCH_NOTE,
 } from './prompts'
+import { opencodeAnswer, readableDirs } from './opencode'
 import { bucketOf, countsOf, isDemoted, isJudged, renderReport, severityOf, utf8Length, type ReportMeta } from './report'
 import { decide, declinedOf, isBlocker, mergeDuplicates, parseCodexReview, reviewFailure, saysNoFindings, triage, type Policy } from './review'
 import { detachedReview, MAX_WAITS, planReviewScript, reportedBackend, reviewPlan, reviewStem, WAIT_SECONDS } from './reviewer'
@@ -372,6 +374,18 @@ function engineParts(host: Host, config: GrannyConfig) {
   const attribute = (rv: ReviewerConfig, findings: Finding[]): Finding[] =>
     findings.map((f, i) => ({ ...f, id: `${rv.name}-F${i + 1}`, reviewer: rv.name }))
 
+  /** The review file keeps the answer a reviewer gave, not the event stream it was read from; a failed save only logs. */
+  const saveAnswer = async (label: string, phase: string, path: string, text: string, cwd: string, tag: string) => {
+    const failed = `${tag}: could not save the answer to ${path}`
+    try {
+      const w = await shell(label, phase, heredocWriteScript(path, `${text}\n`), cwd, reviewSavePrompt)
+      if (!w.ran) host.log(`${failed} (exit ${w.code}): ${w.output.trim().slice(-300)}`)
+    } catch (e) {
+      if (isCancelled(e)) throw e
+      host.log(`${failed}: ${String((e as Error)?.message ?? e)}`)
+    }
+  }
+
   const review = async (lane: Lane, rv: ReviewerConfig, name: string, subject: Subject, round: number, attempt: number): Promise<Omit<ReviewerRound, 'reviewer'>> => {
     const { p, cwd } = lane
     const tag = `${name} r${round} ${rv.name}${attempt > 1 ? ` #${attempt}` : ''}`
@@ -384,11 +398,13 @@ function engineParts(host: Host, config: GrannyConfig) {
     }
 
     const stem = reviewStem(config, slug(name), round, rv)
+    const dirs = rv.engine === 'opencode' ? readableDirs(p.context ?? '', subject.kind === 'plan' ? subject.files : [], cwd) : []
     const plan =
       subject.kind === 'plan'
-        ? planReviewScript(rv, config, host.name, lane.base, stem, planReviewPrompt(p, subject.files))
-        : reviewPlan(rv, config, host.name, subject.base, stem, commandReviewPrompt(p, name, subject.base, subject.stage, subject.note))
+        ? planReviewScript(rv, config, host.name, lane.base, stem, planReviewPrompt(p, subject.files), dirs)
+        : reviewPlan(rv, config, host.name, subject.base, stem, commandReviewPrompt(p, name, subject.base, subject.stage, subject.note), dirs)
     if (!plan) return { ran: false, findings: [], note: 'this reviewer has no command for a plan review' }
+    const failed = (out: string) => (rv.engine === 'opencode' ? opencodeAnswer(out).error : undefined) ?? out.slice(-2000)
     let ran: boolean
     let output: string
     let note: string | undefined
@@ -396,7 +412,7 @@ function engineParts(host: Host, config: GrannyConfig) {
       const r = await run(plan.script, cwd)
       ran = r.code === 0
       output = r.output
-      if (!ran) note = `review command exited ${r.code}: ${r.output.slice(-2000)}`
+      if (!ran) note = `review command exited ${r.code}: ${failed(r.output)}`
     } else {
       const job = detachedReview(plan, config, stem, cwd)
       const step = async (label: string, prompt: string) => {
@@ -420,10 +436,16 @@ function engineParts(host: Host, config: GrannyConfig) {
       const r = await step(`review ${tag} read`, reviewReadPrompt(p, name, rv.name, markExit(job.read)))
       ran = Boolean(r?.ran)
       output = r?.output ?? ''
-      if (!ran) note = r ? `review command exited ${r.code}${r.note ? ` (${r.note})` : ''}: ${output.slice(-2000)}` : 'review runner returned nothing'
+      if (!ran) note = r ? `review command exited ${r.code}${r.note ? ` (${r.note})` : ''}: ${failed(output)}` : 'review runner returned nothing'
     }
     host.log(`${tag}: reviewer: ${plan.backend ?? reportedBackend(output) ?? 'not reported'}`)
     if (!ran) return { ran, findings: [], note }
+    if (rv.engine === 'opencode') {
+      const answer = opencodeAnswer(output)
+      if (!answer.text) return { ran: false, findings: [], note: answer.error ? `opencode: ${answer.error}` : 'opencode returned no answer' }
+      output = answer.text
+      await saveAnswer(`review ${tag} save`, phase, `${stem}.md`, output, cwd, tag)
+    }
     const failure = reviewFailure(output)
     if (failure) return { ran: false, findings: [], note: `reviewer returned no usable result (${failure}): ${output.slice(-2000)}` }
 

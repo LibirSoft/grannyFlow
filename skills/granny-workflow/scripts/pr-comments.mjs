@@ -71,12 +71,13 @@ var REVIEWER_KEYS = new Set(["name", "engine", "model", "effort", "mode", "focus
 var CHECK_KEYS = new Set(["name", "run", "maxRepairs", "timeout", "metric"]);
 var METRIC_KEYS = new Set(["pattern", "min", "max"]);
 var EFFORTS = new Set(["low", "medium", "high", "xhigh", "max"]);
-var ENGINES = ["auto", "codex", "codex-plugin", "agent", "command"];
+var ENGINES = ["auto", "codex", "codex-plugin", "agent", "command", "opencode"];
 var PLUGIN_ENGINES = ["auto", "codex-plugin"];
 var CODEX_ENGINES = ["auto", "codex", "codex-plugin"];
 var MODES = ["review", "adversarial-review"];
 var WATCH_MODES = ["full", "panel", "off"];
 var NAME = /^[a-z0-9-]+$/;
+var OPENCODE_MODEL = /^[^\s/#]+\/[^\s#]+(#[^\s#]+)?$/;
 var isObject = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
 function resolveConfig(layers, host) {
   const config = JSON.parse(JSON.stringify(DEFAULT_CONFIG));
@@ -202,6 +203,8 @@ function reviewers(list, errors, host) {
     } else if (entry.command !== undefined) {
       errors.push(`${at}.command needs "engine": "command"; engine "${engine}" runs its own reviewer`);
     }
+    if (engine === "opencode")
+      errors.push(...opencodeModelErrors(at, entry.model, entry.effort, host));
     if (host === "omp" && CODEX_ENGINES.includes(engine)) {
       errors.push(`${at}.engine "${engine}"${entry.engine === undefined ? " (the engine of an entry that names none)" : ""} runs Codex, which granny does not run on omp - use "engine": "agent" with an omp model, e.g. "model": { "omp": "openai-codex/gpt-6.1-sol" }, or "engine": "command"`);
     } else if (host === "opencode" && adversarial && engine === "auto") {
@@ -209,6 +212,27 @@ function reviewers(list, errors, host) {
     }
     return { ...entry, name, engine };
   });
+}
+function opencodeModelErrors(at, spec, effort, host) {
+  const lists = "`opencode models` lists them";
+  if (spec === undefined)
+    return [`${at}.model is required for engine "opencode": an opencode model "provider/model", e.g. "zai/glm-5.3" - ${lists}`];
+  if (typeof spec !== "string" && !isObject(spec))
+    return [];
+  const errors = [];
+  for (const model of typeof spec === "string" ? [spec] : Object.values(spec)) {
+    if (typeof model !== "string" || !model)
+      continue;
+    if (!OPENCODE_MODEL.test(model))
+      errors.push(`${at}.model "${model}" is not an opencode model "provider/model" (optionally "#variant") - ${lists}`);
+    else if (model.includes("#") && effort !== undefined) {
+      errors.push(`${at}: model "${model}" names the variant "${model.slice(model.indexOf("#") + 1)}" and effort "${effort}" names another - keep one of them`);
+    }
+  }
+  if (host && isObject(spec) && spec[host] === undefined) {
+    errors.push(`${at}.model has no entry for ${host} - engine "opencode" needs a model on every host it runs on; a plain string applies to all of them`);
+  }
+  return errors;
 }
 function validate(c) {
   const errors = [];

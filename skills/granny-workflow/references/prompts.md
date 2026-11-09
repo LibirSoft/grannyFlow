@@ -58,7 +58,7 @@ Find wrong assumptions about the code or its dependencies, missing steps, risky 
 Return findings with id (F1, F2, ...), severity (P0 critical / P1 must fix before implementing / P2 should fix / P3 nit), file (the absolute path of the plan file), line (the line in the plan file), title and a concrete detail. Zero findings means the plan is clean.
 ```
 
-## Plan reviewer - codex exec, the Codex plugin task and the {prompt} of a command engine
+## Plan reviewer - codex exec, the Codex plugin task, the {prompt} of a command engine and the opencode engine
 
 ```text
 You are a plan REVIEWER. Do not edit, stage or commit anything. Review the plan in <plan files> - a plan, not code changes - against the actual repo at <repo> (branch `<branch>`): open the code, configs, lockfiles and docs it names before reporting anything. Design context, read it first: Plan files - read them first: <plan files> <context: work-order files and override notes> Find wrong assumptions about the code or its dependencies, missing steps, risky ordering, acceptance criteria that cannot be tested, and version drift (versions, APIs, flags or files the plan names that differ from what the repo or its dependencies have). Report each finding as one bullet line in exactly this form: `- [P1] Title — /abs/path/of/plan.md:12` - severity P0 (critical), P1 (must fix before implementing), P2 (should fix) or P3 (nit), a short title, an em dash, then the absolute path of the plan file and the line in it the finding is about. Put the detail on the following lines, indented two spaces. Use that bullet form for findings only. With no findings, write "No findings." and nothing else.
@@ -310,7 +310,7 @@ Report clean-code and design problems (duplication, unclear naming, needless abs
 Return findings with id (F1, F2, ...), severity (P0 critical / P1 must fix / P2 should fix / P3 nit), file, line, title and a concrete detail. Zero findings means the stage is clean.
 ```
 
-## Granny - a review command, start: the helper agent on Claude Code for a Codex or command reviewer, in the diff review and the plan review (on opencode and omp granny runs the review script itself and waits for it)
+## Granny - a review command, start: the helper agent on Claude Code for a Codex, command or opencode reviewer, in the diff review and the plan review (on opencode and omp granny runs the review script itself and waits for it)
 
 ```text
 Run one shell command for a code review (it starts the review detached and returns at once) and return its output. Run nothing else; edit, stage or commit nothing.
@@ -358,7 +358,22 @@ cd '<repo>' && if [ -s '.granny/review-<stage>-r<n>-<name>.pid' ]; then kill -TE
 Return ran: true only if it exited 0; exitCode: its exit code; output: everything it printed, verbatim and complete. If it failed, set ran=false and explain in note. Never invent output.
 ```
 
-## Reviewer - command engine, the text {prompt} is filled with
+## Granny - saving an opencode reviewer's answer (label `review <stage> r<n> <name> save`), the helper agent on Claude Code (on opencode and omp granny runs it itself)
+
+```text
+Run one shell command for the "review <stage name> r<n> <reviewer> save" step, which saves a reviewer's answer to its review file under the work dir (the one file this step writes), and return its output. Run nothing else; edit, stage or commit nothing.
+Do not review the code yourself. Repo <repo>.
+
+Run exactly this, as one command with its line breaks and every character kept, down to its last line:
+cd '<repo>' && mkdir -p .granny && cat > '.granny/review-<stage>-r<n>-<name>.md' <<'GRANNY_REPORT_END'
+<answer>
+GRANNY_REPORT_END
+
+
+Return ran: true only if it exited 0; exitCode: its exit code; output: everything it printed, verbatim and complete. If it failed, set ran=false and explain in note. Never invent output.
+```
+
+## Reviewer - command and opencode engines, the text {prompt} is filled with (the opencode engine passes it as the message of `opencode run`)
 
 ```text
 You are a code REVIEWER. Do not edit, stage or commit anything. Repo <repo>, branch `<branch>`. Review the changes of stage "<stage name>": `cd '<repo>' && git diff '<stage start sha>'...HEAD` plus `git log --oneline '<stage start sha>'..HEAD`. Design context, read it first: Plan files - read them first: <plan files> <context: work-order files and override notes> Stage 2/2 "<stage name>" - its TASK: <stage task> Find correctness bugs, regressions, missing tests for changed behaviour, security problems and contract breaks. Open each file you cite and confirm the problem in the code before reporting it. Check the diff against the TASK: a missing part of the task is a finding, and so is a change outside it (scope creep, unrelated edits); work the task leaves to other stages is not a finding. Report clean-code and design problems (duplication, unclear naming, needless abstraction, deviations from the design the plan or context lays out) as P2/P3 unless they break something. Report each finding as one bullet line in exactly this form: `- [P1] Title — path/to/file.ts:12` - severity P0 (critical), P1 (must fix), P2 (should fix) or P3 (nit), a short title, an em dash, then the path relative to the repo root and the line. Put the detail on the following lines, indented two spaces. Use that bullet form for findings only. With no findings, write "No findings." and nothing else.

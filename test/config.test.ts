@@ -65,7 +65,7 @@ describe('resolveConfig', () => {
         'workDir must be',
         'roles.judge.effort',
         'unknown host "cursor"',
-        'reviewers[0].engine must be one of "auto", "codex", "codex-plugin", "agent", "command"',
+        'reviewers[0].engine must be one of "auto", "codex", "codex-plugin", "agent", "command", "opencode"',
         'reviewers[1].command must be a string containing {base} or {prompt}',
       ]) {
         expect(message).toContain(part)
@@ -129,6 +129,23 @@ describe('reviewers', () => {
     ])
   })
 
+  it('runs an opencode reviewer on every host, omp included, on a provider/model with an effort or a #variant', () => {
+    for (const r of [
+      { engine: 'opencode', model: 'kimi-code-plan-global/k3.1-pro' },
+      { engine: 'opencode', model: 'kimi-code-plan-global/k3.1-pro', effort: 'max' },
+      { engine: 'opencode', model: 'kimi-code-plan-global/k3.1-pro#max' },
+      { engine: 'opencode', model: 'openrouter/moonshotai/kimi-k3' },
+      { engine: 'opencode', model: { 'claude-code': 'zai/glm-5.3', opencode: 'zai/glm-5.3', omp: 'zai/glm-5.3' } },
+    ]) {
+      expect(one(r)).not.toThrow()
+      for (const host of ['claude-code', 'opencode', 'omp'] as const) expect(one(r, host)).not.toThrow()
+    }
+    expect(resolveConfig([{ reviewers: [{ name: 'kimi', engine: 'opencode', model: 'kimi-code-plan-global/k3.1-pro', effort: 'max' }] }], 'omp').reviewers).toEqual([
+      { name: 'kimi', engine: 'opencode', model: 'kimi-code-plan-global/k3.1-pro', effort: 'max' },
+    ])
+    expect(resolveConfig([{ reviewers: [{ engine: 'opencode', model: 'zai/glm-5.3' }] }]).reviewers[0]!.name).toBe('opencode-1')
+  })
+
   it('accepts any number of reviewers of any engine', () => {
     const list = [
       { name: 'codex' },
@@ -180,6 +197,15 @@ describe('reviewers', () => {
     ['engine auto on omp', [{ engine: 'auto', mode: 'adversarial-review' }], 'reviewers[0].engine "auto" runs Codex, which granny does not run on omp', 'omp'],
     ['the Codex CLI on omp', [{ engine: 'codex' }], 'reviewers[0].engine "codex" runs Codex, which granny does not run on omp', 'omp'],
     ['the Codex plugin on omp', [{ engine: 'codex-plugin' }], 'reviewers[0].engine "codex-plugin" runs Codex, which granny does not run on omp', 'omp'],
+    ['an opencode reviewer without a model', [{ engine: 'opencode' }], 'reviewers[0].model is required for engine "opencode": an opencode model "provider/model", e.g. "zai/glm-5.3" - `opencode models` lists them'],
+    ['an opencode model without a provider', [{ engine: 'opencode', model: 'glm-5.3' }], 'reviewers[0].model "glm-5.3" is not an opencode model "provider/model" (optionally "#variant") - `opencode models` lists them'],
+    ['an opencode model with an empty variant', [{ engine: 'opencode', model: 'zai/glm-5.3#' }], 'reviewers[0].model "zai/glm-5.3#" is not an opencode model "provider/model"'],
+    ['an opencode model with a space', [{ engine: 'opencode', model: { opencode: 'zai/glm 5.3' } }], 'reviewers[0].model "zai/glm 5.3" is not an opencode model "provider/model"'],
+    ['an opencode model with a variant and an effort', [{ engine: 'opencode', model: 'zai/glm-5.3#max', effort: 'high' }], 'reviewers[0]: model "zai/glm-5.3#max" names the variant "max" and effort "high" names another - keep one of them'],
+    ['an opencode model keyed to other hosts only', [{ engine: 'opencode', model: { opencode: 'zai/glm-5.3' } }], 'reviewers[0].model has no entry for claude-code - engine "opencode" needs a model on every host it runs on; a plain string applies to all of them', 'claude-code'],
+    ['a mode on an opencode reviewer', [{ engine: 'opencode', model: 'zai/glm-5.3', mode: 'review' }], 'reviewers[0].mode needs the Codex plugin; engine "opencode" cannot run it'],
+    ['a focus on an opencode reviewer', [{ engine: 'opencode', model: 'zai/glm-5.3', focus: 'auth' }], 'reviewers[0].focus only works with mode "adversarial-review"'],
+    ['a command on an opencode reviewer', [{ engine: 'opencode', model: 'zai/glm-5.3', command: 'r {prompt}' }], 'reviewers[0].command needs "engine": "command"; engine "opencode" runs its own reviewer'],
   ]
   for (const [label, list, message, host] of rejects) {
     it(`rejects ${label}`, () => {
