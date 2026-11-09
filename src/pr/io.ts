@@ -12,6 +12,7 @@ export interface PosterIo {
   read(path: string): string
   /** The config's work dir for the checkout at `toplevel`; throws on an invalid config. */
   workDir(toplevel: string): string
+  write(path: string, text: string): void
   print(line: string): void
 }
 

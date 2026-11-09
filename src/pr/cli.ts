@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process'
-import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
+import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { globalConfigPath, readJson } from '../adapters/config-files'
 import { resolveConfig } from '../core/config'
@@ -14,6 +14,7 @@ const io: PosterIo = {
   list: dir => (existsSync(dir) && statSync(dir).isDirectory() ? readdirSync(dir).filter(n => n.endsWith('.json')) : undefined),
   read: path => readFileSync(path, 'utf8'),
   workDir: toplevel => resolveConfig([readJson(globalConfigPath()), readJson(join(toplevel, 'granny.config.json'))]).workDir,
+  write: (path, text) => writeFileSync(path, text),
   print: line => console.log(line),
 }
 

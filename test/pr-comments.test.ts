@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { TrailFinding, TrailRound } from '../src/core/types'
 import { diffLine, onChangedLine, parseDiff, parseHunks } from '../src/pr/hunks'
-import type { PrInfo, ReviewPayload } from '../src/pr/github'
+import { prTarget, type PrInfo, type ReviewPayload } from '../src/pr/github'
 import { planRound, type Target } from '../src/pr/plan'
 import { detectPlatform, hostOf } from '../src/pr/platform'
 import { postTrail, type ExecResult, type PosterIo } from '../src/pr/post'
@@ -63,6 +63,7 @@ interface Fake {
   out: string[]
   calls: Array<{ cmd: string; args: string[]; input?: string }>
   posted: ReviewPayload[]
+  written: Record<string, string>
 }
 
 function fake(opts: {
@@ -76,10 +77,12 @@ function fake(opts: {
   remotes?: Record<string, string>
   tracks?: string
   glab?: ExecResult
+  refs?: Record<string, string>
 }): Fake {
   const out: string[] = []
   const calls: Fake['calls'] = []
   const posted: ReviewPayload[] = []
+  const written: Record<string, string> = {}
   const ok = (stdout = ''): ExecResult => ({ code: 0, stdout, stderr: '' })
   const records = opts.records === undefined ? undefined : Object.fromEntries(Object.entries(opts.records).map(([k, v]) => [k, typeof v === 'string' ? v : JSON.stringify(v)]))
   const ancestors = new Set(opts.ancestors ?? [SHA1, SHA2, SHA3])
@@ -88,6 +91,10 @@ function fake(opts: {
       calls.push({ cmd, args, ...(input === undefined ? {} : { input }) })
       const line = args.join(' ')
       if (cmd === 'git' && line === 'rev-parse --show-toplevel') return ok(`${TOP}\n`)
+      if (cmd === 'git' && args[0] === 'rev-parse' && args[1] === '--verify') {
+        const sha = (opts.refs ?? { 'HEAD^{commit}': HEAD })[args[3]!]
+        return sha === undefined ? { code: 1, stdout: '', stderr: '' } : ok(`${sha}\n`)
+      }
       if (cmd === 'git' && line === 'branch --show-current') return ok('feat/x\n')
       if (cmd === 'git' && line === 'config --get branch.feat/x.remote') return opts.tracks === undefined ? { code: 1, stdout: '', stderr: '' } : ok(`${opts.tracks}\n`)
       if (cmd === 'git' && args[0] === 'remote' && args[1] === 'get-url') {
@@ -111,9 +118,12 @@ function fake(opts: {
     list: dir => (dir === DIR && records ? Object.keys(records) : undefined),
     read: path => records![path.slice(DIR.length + 1)]!,
     workDir: opts.workDir ?? (() => '.granny'),
+    write: (path, text) => {
+      written[path] = text
+    },
     print: line => out.push(line),
   }
-  return { io, out, calls, posted }
+  return { io, out, calls, posted, written }
 }
 
 describe('parseHunks', () => {
@@ -714,8 +724,83 @@ describe('postTrail', () => {
   it('refuses an unknown argument with the usage', () => {
     const f = fake({ records: {} })
     expect(postTrail(['--pr', 'abc'], f.io)).toBe(1)
-    expect(f.out[0]).toBe('--pr takes a PR number, got abc\nusage: node pr-comments.mjs [--platform github|gitlab] [--pr <number>] [--trail <dir>] [--dry-run]')
+    expect(f.out[0]).toBe('--pr takes a PR number, got abc\nusage: node pr-comments.mjs [--platform github|gitlab] [--pr <number>] [--trail <dir>] [--out <file> [--base <ref>]] [--dry-run]')
     expect(postTrail(['--push'], f.io)).toBe(1)
+    expect(f.calls).toEqual([])
+  })
+})
+
+describe('--out', () => {
+  const BITBUCKET = { origin: 'https://bitbucket.org/o/r.git' }
+  const residual: Partial<TrailFinding> = { route: 'residual', decision: { rule: 8, action: 'residual', why: 'low' } }
+  const trail = () => {
+    const r1 = round({ findings: [finding('codex-F1'), finding('codex-F2', { line: 40, ...residual })], fix: fix(SHA1, SHA2, ['c']) })
+    const r2 = round({ round: 2, reviewedSha: SHA2, outcome: 'clean' })
+    const lone = round({ loop: 's2', outcome: 'clean' })
+    return { r1, r2, lone, records: { 's1-r1.json': r1, 's1-r2.json': r2, 's2-r1.json': lone } }
+  }
+
+  it("writes every round's plan against the PR, posts nothing and reads no posted review", () => {
+    const { r1, r2, records } = trail()
+    const f = fake({ records, diffs: { [SHA1]: A_DIFF } })
+    expect(postTrail(['--out', 'trail.json'], f.io)).toBe(0)
+    const all = [r1, r2, trail().lone]
+    const plans = [r1, r2].map(r => planRound(fake({ diffs: { [SHA1]: A_DIFF } }).io, r, all, prTarget(PR), TOP))
+    expect(JSON.parse(f.written['trail.json']!)).toEqual({ version: 1, reviews: plans })
+    expect(f.written['trail.json']!.endsWith('}\n')).toBe(true)
+    expect(f.calls.filter(c => c.cmd === 'gh').map(c => c.args[0])).toEqual(['pr'])
+    expect(f.out).toEqual(['wrote 2 reviews to trail.json'])
+  })
+
+  it('plans against --base and the checked-out commit when there is no PR, without asking gh on an unknown host', () => {
+    const { r1, records } = trail()
+    const f = fake({ records, remotes: BITBUCKET, refs: { 'main^{commit}': BASE, 'HEAD^{commit}': HEAD } })
+    expect(postTrail(['--out', 'trail.json', '--base', 'main'], f.io)).toBe(0)
+    const { reviews } = JSON.parse(f.written['trail.json']!)
+    expect(reviews[0]).toMatchObject({ loop: 's1', round: 1, commit: SHA1, mergeBase: `mb-${SHA1}`, marker: roundMarker(r1) })
+    expect(f.calls.some(c => c.cmd === 'gh')).toBe(false)
+    expect(f.calls.find(c => c.args[1] === '--is-ancestor')!.args).toEqual(['merge-base', '--is-ancestor', SHA1, HEAD])
+    expect(f.calls.find(c => c.args[0] === 'merge-base' && c.args[1] !== '--is-ancestor')!.args).toEqual(['merge-base', BASE, SHA1])
+  })
+
+  it('falls back to --base when gh finds no PR, and takes the PR when there is one', () => {
+    const none = fake({ records: trail().records, pr: null, refs: { 'main^{commit}': BASE, 'HEAD^{commit}': HEAD } })
+    expect(postTrail(['--out', 'o.json', '--base', 'main'], none.io)).toBe(0)
+    expect(none.written['o.json']).toBeDefined()
+    const pr = fake({ records: trail().records, refs: {} })
+    expect(postTrail(['--out', 'o.json', '--base', 'main'], pr.io)).toBe(0)
+    expect(pr.calls.some(c => c.args[0] === 'rev-parse' && c.args[1] === '--verify')).toBe(false)
+  })
+
+  it('stops and names --base when there is no PR to take the target branch from', () => {
+    const f = fake({ records: trail().records, remotes: BITBUCKET })
+    expect(postTrail(['--out', 'trail.json'], f.io)).toBe(1)
+    expect(f.out).toEqual(['--out needs the target branch: open the PR, or pass --base <ref>'])
+    expect(f.written).toEqual({})
+  })
+
+  it('stops on a --base that is not a commit, and on a --pr gh cannot find', () => {
+    const bad = fake({ records: trail().records, remotes: BITBUCKET, refs: {} })
+    expect(postTrail(['--out', 'trail.json', '--base', 'nope'], bad.io)).toBe(1)
+    expect(bad.out).toEqual(['--base nope is not a commit'])
+    const missing = fake({ records: trail().records, pr: null })
+    expect(postTrail(['--out', 'trail.json', '--pr', '9'], missing.io)).toBe(2)
+    expect(missing.out).toEqual(['open the PR first (no pull requests found for branch "feat/x")'])
+    expect({ ...bad.written, ...missing.written }).toEqual({})
+  })
+
+  it('prints the file it would write on --dry-run', () => {
+    const f = fake({ records: trail().records, remotes: BITBUCKET, refs: { 'main^{commit}': BASE, 'HEAD^{commit}': HEAD } })
+    expect(postTrail(['--out', 'trail.json', '--base', 'main', '--dry-run'], f.io)).toBe(0)
+    expect(f.written).toEqual({})
+    expect(JSON.parse(f.out[0]!)).toMatchObject({ version: 1, reviews: [{ loop: 's1', round: 1 }, { loop: 's1', round: 2 }] })
+    expect(f.out[1]).toBe('would write 2 reviews to trail.json')
+  })
+
+  it('takes --base only with --out', () => {
+    const f = fake({ records: {} })
+    expect(postTrail(['--base', 'main'], f.io)).toBe(1)
+    expect(f.out[0]).toStartWith('--base goes with --out <file>\n')
     expect(f.calls).toEqual([])
   })
 })
@@ -763,6 +848,7 @@ describe('postTrail in a real checkout', () => {
         list: d => (existsSync(d) ? readdirSync(d).filter(n => n.endsWith('.json')) : undefined),
         read: path => readFileSync(path, 'utf8'),
         workDir: () => '.granny',
+        write: () => {},
         print: () => {},
       }
       expect(postTrail([], io)).toBe(0)
