@@ -2,13 +2,15 @@ import { trimSlashes } from '../core/paths'
 import type { TrailRound } from '../core/types'
 import { postGithub } from './github'
 import { failure, type PosterIo } from './io'
+import { detectPlatform, type Platform, PLATFORMS } from './platform'
 import { byTrailOrder, trailProblem } from './records'
 
 export type { ExecResult, PosterIo } from './io'
 
-export const USAGE = 'usage: node pr-comments.mjs [--pr <number>] [--trail <dir>] [--dry-run]'
+export const USAGE = 'usage: node pr-comments.mjs [--platform github|gitlab] [--pr <number>] [--trail <dir>] [--dry-run]'
 
 interface Options {
+  platform?: Platform
   pr?: number
   trail?: string
   dryRun: boolean
@@ -19,10 +21,14 @@ function parseArgs(argv: string[]): Options | string {
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]!
     if (arg === '--dry-run') options.dryRun = true
-    else if (arg === '--pr' || arg === '--trail') {
+    else if (arg === '--pr' || arg === '--trail' || arg === '--platform') {
       const value = argv[++i]
       if (value === undefined || value.startsWith('--')) return `${arg} needs a value`
       if (arg === '--trail') options.trail = value
+      else if (arg === '--platform') {
+        if (!(PLATFORMS as readonly string[]).includes(value)) return `--platform takes github or gitlab, got ${value}`
+        options.platform = value as Platform
+      }
       else if (/^[1-9]\d*$/.test(value)) options.pr = Number(value)
       else return `--pr takes a PR number, got ${value}`
     } else return `unknown argument ${arg}`
@@ -74,6 +80,15 @@ export function postTrail(argv: string[], io: PosterIo): number {
   const records = readRecords(io, dir)
   if (records === undefined) {
     io.print(`no trail at ${dir} - a granny run writes it there (config trail: true)`)
+    return 1
+  }
+  const platform = options.platform ?? detectPlatform(io)
+  if (typeof platform !== 'string') {
+    io.print(platform.error)
+    return 1
+  }
+  if (platform === 'gitlab') {
+    io.print('posting to a GitLab MR is not built yet: pass --out <file> to write the planned reviews')
     return 1
   }
   if (!records.length) io.print(`no trail records in ${dir}`)

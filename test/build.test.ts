@@ -250,6 +250,7 @@ describe('pr-comments.mjs', () => {
       }
       mkdirSync(repo)
       git('init', '-q', '-b', 'main')
+      git('config', 'remote.origin.url', 'https://github.com/o/r.git')
       writeFileSync(join(repo, 'a.ts'), 'one\n')
       git('add', 'a.ts')
       git('commit', '-q', '-m', 'base')

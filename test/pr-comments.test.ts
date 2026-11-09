@@ -7,6 +7,7 @@ import type { TrailFinding, TrailRound } from '../src/core/types'
 import { diffLine, onChangedLine, parseDiff, parseHunks } from '../src/pr/hunks'
 import type { PrInfo, ReviewPayload } from '../src/pr/github'
 import { planRound, type Target } from '../src/pr/plan'
+import { detectPlatform, hostOf } from '../src/pr/platform'
 import { postTrail, type ExecResult, type PosterIo } from '../src/pr/post'
 import { byTrailOrder, trailProblem } from '../src/pr/records'
 import { agentText, cleanBody, findingComment, findingMarker, outcomeLine, roundBody, roundMarker } from '../src/pr/render'
@@ -72,6 +73,9 @@ function fake(opts: {
   diffs?: Record<string, string>
   failPost?: (p: ReviewPayload) => boolean
   workDir?: () => string
+  remotes?: Record<string, string>
+  tracks?: string
+  glab?: ExecResult
 }): Fake {
   const out: string[] = []
   const calls: Fake['calls'] = []
@@ -84,6 +88,13 @@ function fake(opts: {
       calls.push({ cmd, args, ...(input === undefined ? {} : { input }) })
       const line = args.join(' ')
       if (cmd === 'git' && line === 'rev-parse --show-toplevel') return ok(`${TOP}\n`)
+      if (cmd === 'git' && line === 'branch --show-current') return ok('feat/x\n')
+      if (cmd === 'git' && line === 'config --get branch.feat/x.remote') return opts.tracks === undefined ? { code: 1, stdout: '', stderr: '' } : ok(`${opts.tracks}\n`)
+      if (cmd === 'git' && args[0] === 'remote' && args[1] === 'get-url') {
+        const url = (opts.remotes ?? { origin: 'git@github.com:o/r.git' })[args[2]!]
+        return url === undefined ? { code: 2, stdout: '', stderr: `error: No such remote '${args[2]}'` } : ok(`${url}\n`)
+      }
+      if (cmd === 'glab' && line === 'auth status --all') return opts.glab ?? { code: 127, stdout: '', stderr: 'glab: spawn glab ENOENT' }
       if (cmd === 'git' && args[0] === 'merge-base' && args[1] === '--is-ancestor') return { code: ancestors.has(args[2]!) && args[3] === HEAD ? 0 : 1, stdout: '', stderr: '' }
       if (cmd === 'git' && args[0] === 'merge-base') return ok(`mb-${args[2]}\n`)
       if (cmd === 'git' && args.includes('diff')) return ok(opts.diffs?.[args.at(-1)!] ?? '')
@@ -462,6 +473,76 @@ describe('planRound', () => {
   })
 })
 
+describe('platform', () => {
+  it('reads the host of an https, an ssh and an scp-like remote URL, and none of a local path', () => {
+    expect(hostOf('https://github.com/o/r.git')).toBe('github.com')
+    expect(hostOf('https://user:token@GitLab.Example.com:8443/team/r.git')).toBe('gitlab.example.com')
+    expect(hostOf('ssh://git@code.acme.io:2222/team/r.git')).toBe('code.acme.io')
+    expect(hostOf('git@github.com:o/r.git')).toBe('github.com')
+    expect(hostOf('code.acme.io:team/r.git')).toBe('code.acme.io')
+    expect(hostOf('/srv/git/r.git')).toBeUndefined()
+    expect(hostOf('file:///srv/git/r.git')).toBeUndefined()
+    expect(hostOf('../r')).toBeUndefined()
+  })
+
+  it('takes github.com as GitHub and a host with gitlab in its name as GitLab, without asking glab', () => {
+    const github = fake({ remotes: { origin: 'https://github.com/o/r.git' } })
+    expect(detectPlatform(github.io)).toBe('github')
+    const gitlab = fake({ remotes: { origin: 'git@gitlab.com:o/r.git' } })
+    expect(detectPlatform(gitlab.io)).toBe('gitlab')
+    expect([...github.calls, ...gitlab.calls].some(c => c.cmd === 'glab')).toBe(false)
+  })
+
+  it('takes a self-hosted host that glab lists as GitLab', () => {
+    const glab = { code: 0, stdout: '', stderr: 'gitlab.com\n  ✓ Logged in to gitlab.com as me\ncode.acme.io\n  ✓ Logged in to code.acme.io as me\n' }
+    const f = fake({ remotes: { origin: 'https://code.acme.io/team/r.git' }, glab })
+    expect(detectPlatform(f.io)).toBe('gitlab')
+    expect(f.calls.find(c => c.cmd === 'glab')!.args).toEqual(['auth', 'status', '--all'])
+  })
+
+  it('names an unknown host, and a remote with no host, instead of guessing', () => {
+    const glab = { code: 0, stdout: '', stderr: 'gitlab.com\n  ✓ Logged in to gitlab.com as me\n' }
+    expect(detectPlatform(fake({ remotes: { origin: 'https://bitbucket.org/o/r.git' }, glab }).io)).toEqual({ error: 'cannot tell the platform of bitbucket.org: pass --platform github|gitlab, or --out <file>' })
+    expect(detectPlatform(fake({ remotes: { origin: 'https://acme.io/o/r.git' } }).io)).toEqual({ error: 'cannot tell the platform of acme.io: pass --platform github|gitlab, or --out <file>' })
+    expect(detectPlatform(fake({ remotes: { origin: '/srv/git/r.git' } }).io)).toEqual({ error: 'cannot tell the platform of the remote origin (/srv/git/r.git): pass --platform github|gitlab, or --out <file>' })
+    expect(detectPlatform(fake({ remotes: {} }).io)).toEqual({ error: "cannot tell the platform: the remote origin has no URL (error: No such remote 'origin'): pass --platform github|gitlab, or --out <file>" })
+  })
+
+  it('reads the remote the current branch tracks, else origin', () => {
+    const f = fake({ remotes: { origin: 'https://github.com/o/r.git', upstream: 'https://gitlab.com/o/r.git' }, tracks: 'upstream' })
+    expect(detectPlatform(f.io)).toBe('gitlab')
+    expect(f.calls.filter(c => c.cmd === 'git').map(c => c.args.join(' '))).toEqual(['branch --show-current', 'config --get branch.feat/x.remote', 'remote get-url upstream'])
+  })
+
+  it('stops on a host it cannot place before reading the PR', () => {
+    const f = fake({ records: { 's1-r1.json': round({ findings: [finding('codex-F1')] }) }, remotes: { origin: 'https://bitbucket.org/o/r.git' } })
+    expect(postTrail([], f.io)).toBe(1)
+    expect(f.out).toEqual(['cannot tell the platform of bitbucket.org: pass --platform github|gitlab, or --out <file>'])
+    expect(f.calls.some(c => c.cmd === 'gh')).toBe(false)
+  })
+
+  it('takes --platform over the remote', () => {
+    const f = fake({ records: { 's1-r1.json': round({ findings: [finding('codex-F1')] }) }, remotes: { origin: 'https://bitbucket.org/o/r.git' } })
+    expect(postTrail(['--platform', 'github'], f.io)).toBe(0)
+    expect(f.posted).toHaveLength(1)
+    expect(f.calls.some(c => c.args[0] === 'remote')).toBe(false)
+  })
+
+  it('stops on GitLab until its adapter is built, and points at --out', () => {
+    const f = fake({ records: { 's1-r1.json': round({ findings: [finding('codex-F1')] }) }, remotes: { origin: 'git@gitlab.com:o/r.git' } })
+    expect(postTrail([], f.io)).toBe(1)
+    expect(f.out).toEqual(['posting to a GitLab MR is not built yet: pass --out <file> to write the planned reviews'])
+    expect(f.calls.some(c => c.cmd !== 'git')).toBe(false)
+  })
+
+  it('refuses a platform it does not know', () => {
+    const f = fake({ records: {} })
+    expect(postTrail(['--platform', 'gerrit'], f.io)).toBe(1)
+    expect(f.out[0]).toStartWith('--platform takes github or gitlab, got gerrit\n')
+    expect(f.calls).toEqual([])
+  })
+})
+
 describe('postTrail', () => {
   it('posts one COMMENT review per round, anchoring findings on changed lines of the reviewed commit and the rest in the body', () => {
     const inHunk = finding('codex-F1')
@@ -633,7 +714,7 @@ describe('postTrail', () => {
   it('refuses an unknown argument with the usage', () => {
     const f = fake({ records: {} })
     expect(postTrail(['--pr', 'abc'], f.io)).toBe(1)
-    expect(f.out[0]).toBe('--pr takes a PR number, got abc\nusage: node pr-comments.mjs [--pr <number>] [--trail <dir>] [--dry-run]')
+    expect(f.out[0]).toBe('--pr takes a PR number, got abc\nusage: node pr-comments.mjs [--platform github|gitlab] [--pr <number>] [--trail <dir>] [--dry-run]')
     expect(postTrail(['--push'], f.io)).toBe(1)
     expect(f.calls).toEqual([])
   })
@@ -654,6 +735,7 @@ describe('postTrail in a real checkout', () => {
         return r.stdout.trim()
       }
       git('init', '-q', '-b', 'main')
+      git('config', 'remote.origin.url', 'https://github.com/o/r.git')
       writeFileSync(join(repo, 'b/x.ts'), 'one\n')
       writeFileSync(join(repo, 'sub/keep.ts'), 'keep\n')
       git('add', '.')

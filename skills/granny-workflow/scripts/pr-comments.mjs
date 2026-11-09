@@ -713,6 +713,41 @@ function postGithub(io, { records, toplevel, pr: prNumber, dryRun }) {
   return 0;
 }
 
+// src/pr/platform.ts
+var PLATFORMS = ["github", "gitlab"];
+function hostOf(url) {
+  const scheme = /^[a-z][a-z0-9+.-]*:\/\/([^/]*)/i.exec(url);
+  const host = scheme ? scheme[1].slice(scheme[1].lastIndexOf("@") + 1).replace(/:\d*$/, "") : /^(?:[^@/]+@)?([^/:]+):/.exec(url)?.[1];
+  return host ? host.toLowerCase() : undefined;
+}
+var PASS = "pass --platform github|gitlab, or --out <file>";
+function remoteName(io) {
+  const branch = io.exec("git", ["branch", "--show-current"]).stdout.trim();
+  const tracked = branch ? io.exec("git", ["config", "--get", `branch.${branch}.remote`]) : undefined;
+  const name = tracked?.code === 0 ? tracked.stdout.trim() : "";
+  return name && name !== "." ? name : "origin";
+}
+var glabKnows = (io, host) => {
+  const r = io.exec("glab", ["auth", "status", "--all"]);
+  return `${r.stdout}
+${r.stderr}`.split(`
+`).some((line) => line.trim().toLowerCase() === host);
+};
+function detectPlatform(io) {
+  const remote = remoteName(io);
+  const url = io.exec("git", ["remote", "get-url", remote]);
+  if (url.code !== 0)
+    return { error: `cannot tell the platform: the remote ${remote} has no URL (${failure(url)}): ${PASS}` };
+  const host = hostOf(url.stdout.trim());
+  if (host === undefined)
+    return { error: `cannot tell the platform of the remote ${remote} (${url.stdout.trim()}): ${PASS}` };
+  if (host === "github.com")
+    return "github";
+  if (host.includes("gitlab") || glabKnows(io, host))
+    return "gitlab";
+  return { error: `cannot tell the platform of ${host}: ${PASS}` };
+}
+
 // src/pr/records.ts
 var SAFE = /^[A-Za-z0-9._-]+$/;
 var SHA = /^[0-9a-f]{4,64}$/i;
@@ -787,20 +822,24 @@ function byTrailOrder(a, b) {
 }
 
 // src/pr/post.ts
-var USAGE = "usage: node pr-comments.mjs [--pr <number>] [--trail <dir>] [--dry-run]";
+var USAGE = "usage: node pr-comments.mjs [--platform github|gitlab] [--pr <number>] [--trail <dir>] [--dry-run]";
 function parseArgs(argv) {
   const options = { dryRun: false };
   for (let i = 0;i < argv.length; i++) {
     const arg = argv[i];
     if (arg === "--dry-run")
       options.dryRun = true;
-    else if (arg === "--pr" || arg === "--trail") {
+    else if (arg === "--pr" || arg === "--trail" || arg === "--platform") {
       const value = argv[++i];
       if (value === undefined || value.startsWith("--"))
         return `${arg} needs a value`;
       if (arg === "--trail")
         options.trail = value;
-      else if (/^[1-9]\d*$/.test(value))
+      else if (arg === "--platform") {
+        if (!PLATFORMS.includes(value))
+          return `--platform takes github or gitlab, got ${value}`;
+        options.platform = value;
+      } else if (/^[1-9]\d*$/.test(value))
         options.pr = Number(value);
       else
         return `--pr takes a PR number, got ${value}`;
@@ -856,6 +895,15 @@ pass the trail directory with --trail <dir>`);
   const records = readRecords(io, dir);
   if (records === undefined) {
     io.print(`no trail at ${dir} - a granny run writes it there (config trail: true)`);
+    return 1;
+  }
+  const platform = options.platform ?? detectPlatform(io);
+  if (typeof platform !== "string") {
+    io.print(platform.error);
+    return 1;
+  }
+  if (platform === "gitlab") {
+    io.print("posting to a GitLab MR is not built yet: pass --out <file> to write the planned reviews");
     return 1;
   }
   if (!records.length)
