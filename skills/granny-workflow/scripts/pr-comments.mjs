@@ -815,10 +815,19 @@ function clearDrafts(io, mr, dryRun) {
   io.print(`deleted ${plural(notes.length, "leftover granny draft note")}`);
   return;
 }
+function draftId(stdout) {
+  try {
+    const id = JSON.parse(stdout).id;
+    return Number.isInteger(id) ? id : undefined;
+  } catch {
+    return;
+  }
+}
 function postRound(io, mr, plan, replan) {
   const calls = roundCalls(mr.iid, plan);
   const publish = calls.pop();
   const created = [];
+  let unknown;
   let refused;
   for (const c of calls) {
     const r = call(io, c);
@@ -826,11 +835,11 @@ function postRound(io, mr, plan, replan) {
       refused = failure(r);
       break;
     }
-    try {
-      const id = JSON.parse(r.stdout).id;
-      if (Number.isInteger(id))
-        created.push(id);
-    } catch {}
+    const id = draftId(r.stdout);
+    if (id === undefined)
+      unknown ??= r.stdout.replace(/\s+/g, " ").trim().slice(0, 200);
+    else
+      created.push(id);
   }
   const note = (body) => call(io, { method: "POST", path: `${mrPath(mr.iid)}/notes`, body: { body } });
   if (refused === undefined) {
@@ -848,6 +857,8 @@ function postRound(io, mr, plan, replan) {
     if (r.code !== 0)
       return { ok: false, error: `GitLab refused a line comment (${refused}) and its draft ${id} could not be deleted: ${failure(r)}`, stuck: true };
   }
+  if (unknown !== undefined)
+    return { ok: false, error: `GitLab refused a line comment (${refused}) and a draft it created could not be deleted: glab printed no draft id (${unknown})`, stuck: true };
   const flat = replan(refused);
   const plain = flat ? note(flat.body) : undefined;
   return plain?.code === 0 ? { ok: true, refused } : { ok: false, error: plain ? failure(plain) : refused };

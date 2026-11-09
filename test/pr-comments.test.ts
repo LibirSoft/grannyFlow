@@ -77,6 +77,8 @@ interface GitlabOpts {
   notes?: string[]
   drafts?: Draft[]
   failDraft?: (d: Draft) => boolean
+  /** Creates the draft but answers without its id. */
+  noId?: (d: Draft) => boolean
   failPublish?: (note: string, drafts: Draft[]) => boolean
   failNote?: boolean
   failDelete?: (id: number) => boolean
@@ -117,7 +119,7 @@ function fakeGitlab(opts: GitlabOpts, gl: GitlabState, args: string[], input: st
     const draft = { id: gl.next++, note: String(body!.note), position: body!.position as Record<string, unknown> }
     if (opts.failDraft?.(draft)) return GLAB_400
     gl.drafts.push(draft)
-    return ok(draft)
+    return opts.noId?.(draft) ? ok({ note: draft.note }) : ok(draft)
   }
   if (method === 'POST' && path === `${MR_PATH}/draft_notes/bulk_publish`) {
     if (opts.failPublish?.(String(body!.note), gl.drafts)) return GLAB_400
@@ -1006,6 +1008,29 @@ describe('GitLab', () => {
       MR.web_url,
       'not posted: s1 r1 - run the script again to post only what is missing',
     ])
+  })
+
+  it('stops when a refused round has a draft whose id glab did not print, so no later round publishes it', () => {
+    const records = {
+      's1-r1.json': round({ findings: [finding('codex-F1', { line: 9 }), finding('codex-F2', { line: 10 }), finding('codex-F3', { line: 12 })] }),
+      's2-r1.json': round({ loop: 's2', findings: [finding('codex-F1', { line: 40 })] }),
+    }
+    const f = gitlab({ records, diffs: { [SHA1]: A_DIFF }, gitlab: { noId: d => d.position?.new_line === 10, failDraft: d => d.position?.new_line === 12 } })
+    expect(postTrail([], f.io)).toBe(1)
+    expect(f.gl.deleted).toEqual([200])
+    expect(f.gl.drafts.map(d => d.id)).toEqual([201])
+    expect(f.gl.published).toEqual([])
+    expect(f.gl.notes).toEqual([])
+    expect(f.out[0]).toStartWith('s1 r1: FAILED to post - GitLab refused a line comment (glab: 400 Bad Request (HTTP 400)) and a draft it created could not be deleted: glab printed no draft id (')
+    expect(f.out.slice(1)).toEqual(['stopped: the next round would publish that draft too', MR.web_url, 'not posted: s1 r1 - run the script again to post only what is missing'])
+  })
+
+  it('publishes a round whose draft id glab did not print when nothing is refused', () => {
+    const r = round({ findings: [finding('codex-F1', { line: 9 }), finding('codex-F2', { line: 12 })] })
+    const f = gitlab({ records: { 's1-r1.json': r }, diffs: { [SHA1]: A_DIFF }, gitlab: { noId: d => d.position?.new_line === 9 } })
+    expect(postTrail([], f.io)).toBe(0)
+    expect(f.gl.published[0]!.drafts.map(d => d.id)).toEqual([200, 201])
+    expect(f.out).toEqual(['s1 r1: posted 2 line comments, 0 in body', MR.web_url])
   })
 
   it('prints the planned GitLab calls on --dry-run and makes none of them', () => {
