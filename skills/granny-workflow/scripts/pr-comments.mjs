@@ -320,6 +320,11 @@ function metricErrors(at, m) {
 // src/core/paths.ts
 var trimSlashes = (path) => path.replace(/\/+$/, "");
 
+// src/pr/io.ts
+var failure = (r) => (r.stderr || r.stdout).trim().split(`
+`).slice(-3).join(" / ") || `exit ${r.code}`;
+var plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
+
 // src/pr/hunks.ts
 var HUNK = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/;
 function unquote(path) {
@@ -398,82 +403,10 @@ function parseDiff(diff) {
   finish();
   return files;
 }
-function parseHunks(diff) {
-  return new Map([...parseDiff(diff)].filter(([, f]) => f.ranges.length).map(([path, f]) => [path, f.ranges]));
-}
-var onChangedLine = (hunks, file, line) => line !== undefined && (hunks.get(file) ?? []).some(([from, to]) => line >= from && line <= to);
-
-// src/pr/records.ts
-var SAFE = /^[A-Za-z0-9._-]+$/;
-var SHA = /^[0-9a-f]{4,64}$/i;
-var ROUTES = ["sent", "residual"];
-var OUTCOMES = ["clean", "residual-only", "round-cap", "review-failed", "checks-failed"];
-var isObject2 = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
-var isString = (v) => typeof v === "string";
-var isCount = (v) => Number.isInteger(v) && v > 0;
-var optional = (v, ok) => v === undefined || ok(v);
-function trailProblem(value) {
-  if (!isObject2(value))
-    return "not a JSON object";
-  if (value.version !== 1)
-    return `version ${JSON.stringify(value.version)} is not 1`;
-  if (!isString(value.loop) || !SAFE.test(value.loop))
-    return "loop is missing or not a plain id";
-  if (!isString(value.name))
-    return "name is missing";
-  if (!isCount(value.round))
-    return "round is not a positive integer";
-  if (!isString(value.base))
-    return "base is missing";
-  if (!optional(value.reviewedSha, (v) => isString(v) && SHA.test(v)))
-    return "reviewedSha is not a commit id";
-  if (!Array.isArray(value.reviewers) || !value.reviewers.every((r) => isObject2(r) && isString(r.name)))
-    return "reviewers is not a list of named reviewers";
-  if (!Array.isArray(value.findings))
-    return "findings is not a list";
-  for (const [i, f] of value.findings.entries()) {
-    const at = `findings[${i}]`;
-    if (!isObject2(f))
-      return `${at} is not an object`;
-    if (!isString(f.id) || !SAFE.test(f.id))
-      return `${at}.id is missing or not a plain id`;
-    for (const key of ["severity", "file", "title", "detail"])
-      if (!isString(f[key]))
-        return `${at}.${key} is not a string`;
-    if (!optional(f.line, isCount))
-      return `${at}.line is not a positive integer`;
-    if (!optional(f.route, (v) => ROUTES.includes(v)))
-      return `${at}.route is not sent or residual`;
-    if (!optional(f.decision, (d) => isObject2(d) && Number.isInteger(d.rule) && isString(d.action) && isString(d.why)))
-      return `${at}.decision is malformed`;
-    if (!optional(f.duplicates, (d) => Array.isArray(d) && d.every(isString)))
-      return `${at}.duplicates is not a list of ids`;
-  }
-  const fix = value.fix;
-  if (!optional(fix, (v) => isObject2(v) && isString(v.label)))
-    return "fix has no label";
-  if (fix && !optional(fix.commits, (c) => Array.isArray(c)))
-    return "fix.commits is not a list";
-  if (fix && !optional(fix.declined, (d) => Array.isArray(d) && d.every((x) => isObject2(x) && isString(x.id))))
-    return "fix.declined is malformed";
-  if (!optional(value.outcome, (v) => OUTCOMES.includes(v)))
-    return `outcome ${JSON.stringify(value.outcome)} is unknown`;
-  return;
-}
-function loopRank(loop) {
-  if (loop === "plan")
-    return [0, 0, ""];
-  const stage = /^s(\d+)$/.exec(loop);
-  if (stage)
-    return [1, Number(stage[1]), ""];
-  if (loop === "final")
-    return [2, 0, ""];
-  return [3, 0, loop];
-}
-function byTrailOrder(a, b) {
-  const [ka, na, sa] = loopRank(a.loop);
-  const [kb, nb, sb] = loopRank(b.loop);
-  return ka - kb || na - nb || (sa < sb ? -1 : sa > sb ? 1 : 0) || a.round - b.round;
+function diffLine(files, path, line) {
+  const file = files.get(path);
+  const at = line === undefined ? undefined : file?.lines.get(line);
+  return file && at ? { oldPath: file.oldPath, ...at } : undefined;
 }
 
 // src/core/report.ts
@@ -651,6 +584,208 @@ ${findingComment(f, r, records)}`));
 }
 var cleanBody = (r) => fitted(`**granny · ${loopTitle(r)} · round ${r.round}: clean** - the review found nothing more`, roundMarker(r));
 
+// src/pr/plan.ts
+var DIFF_FLAGS = ["--unified=3", "--no-color", "--no-ext-diff", "--no-textconv", "--no-relative", "--src-prefix=a/", "--dst-prefix=b/"];
+function commitFor(io, r, target) {
+  const sha = r.reviewedSha;
+  const inPr = sha !== undefined && io.exec("git", ["merge-base", "--is-ancestor", sha, target.head]).code === 0;
+  return inPr ? { commit: sha, notInPr: false } : { commit: target.head, notInPr: true };
+}
+function anchorOf(io, r, target) {
+  const { commit, notInPr } = commitFor(io, r, target);
+  const base = io.exec("git", ["merge-base", target.base, commit]);
+  if (base.code !== 0)
+    return { commit, notInPr, files: new Map };
+  const mergeBase = base.stdout.trim();
+  const diff = io.exec("git", ["-c", "core.quotePath=false", "diff", ...DIFF_FLAGS, mergeBase, commit]);
+  return { commit, notInPr, mergeBase, files: diff.code === 0 ? parseDiff(diff.stdout) : new Map };
+}
+function relative(file, toplevel) {
+  const root = `${trimSlashes(toplevel)}/`;
+  return (file.startsWith(root) ? file.slice(root.length) : file).replace(/^(\.\/)+/, "");
+}
+function planRound(io, r, records, target, toplevel, refused) {
+  const head = { loop: r.loop, round: r.round, marker: roundMarker(r) };
+  if (!r.findings.length) {
+    const earlier = records.some((x) => x.loop === r.loop && x.round < r.round && x.findings.length);
+    if (r.outcome === "clean" || r.outcome === undefined) {
+      if (!earlier)
+        return;
+      return { ...head, ...commitFor(io, r, target), body: cleanBody(r), comments: [] };
+    }
+  }
+  if (r.loop === "plan") {
+    return { ...head, commit: target.head, notInPr: false, body: roundBody(r, records, { inBody: r.findings }), comments: [] };
+  }
+  const { commit, notInPr, mergeBase, files } = anchorOf(io, r, target);
+  const comments = [];
+  const inBody = [];
+  for (const f of r.findings) {
+    const path = relative(f.file, toplevel);
+    const at = refused === undefined ? diffLine(files, path, f.line) : undefined;
+    if (at)
+      comments.push({ path, oldPath: at.oldPath, line: f.line, ...at.kind === "context" ? { oldLine: at.oldLine } : {}, kind: at.kind, body: findingComment(f, r, records), marker: findingMarker(r, f) });
+    else
+      inBody.push(f);
+  }
+  const body = roundBody(r, records, { inBody, notInPr, ...refused === undefined ? {} : { refused } });
+  return { ...head, commit, ...mergeBase === undefined ? {} : { mergeBase }, notInPr, body, comments };
+}
+
+// src/pr/github.ts
+function prOf(io, pr) {
+  const r = io.exec("gh", ["pr", "view", ...pr === undefined ? [] : [String(pr)], "--json", "number,url,headRefOid,baseRefOid"]);
+  if (r.code !== 0)
+    return failure(r);
+  try {
+    const info = JSON.parse(r.stdout);
+    if (Number.isInteger(info.number) && typeof info.headRefOid === "string" && typeof info.baseRefOid === "string")
+      return info;
+  } catch {}
+  return `gh pr view printed no PR: ${r.stdout.trim().slice(0, 200)}`;
+}
+var prTarget = (pr) => ({ head: pr.headRefOid, base: pr.baseRefOid });
+var reviewsPath = (pr) => `repos/{owner}/{repo}/pulls/${pr.number}/reviews`;
+function postedBodies(io, pr) {
+  const r = io.exec("gh", ["api", "--paginate", reviewsPath(pr), "--jq", ".[].body"]);
+  return r.code === 0 ? r.stdout : { error: failure(r) };
+}
+var reviewPayload = (plan) => ({
+  commit_id: plan.commit,
+  event: "COMMENT",
+  body: plan.body,
+  comments: plan.comments.map((c) => ({ path: c.path, line: c.line, side: "RIGHT", body: c.body }))
+});
+function buildReview(io, r, records, pr, toplevel, refused) {
+  const plan = planRound(io, r, records, prTarget(pr), toplevel, refused);
+  return plan && reviewPayload(plan);
+}
+function postGithub(io, { records, toplevel, pr: prNumber, dryRun }) {
+  const pr = prOf(io, prNumber);
+  if (typeof pr === "string") {
+    io.print(`open the PR first (${pr})`);
+    return 2;
+  }
+  const posted = postedBodies(io, pr);
+  if (typeof posted !== "string") {
+    io.print(`could not list the PR's reviews: ${posted.error}`);
+    return 1;
+  }
+  const failed = [];
+  for (const r of records) {
+    const at = `${r.loop} r${r.round}`;
+    if (posted.includes(roundMarker(r))) {
+      io.print(`${at}: skipped, already posted`);
+      continue;
+    }
+    const review = buildReview(io, r, records, pr, toplevel);
+    if (!review) {
+      io.print(`${at}: clean, nothing to post`);
+      continue;
+    }
+    const moved = r.loop !== "plan" && review.commit_id !== r.reviewedSha ? `, on the PR head ${short(pr.headRefOid)}` : "";
+    const what = r.findings.length ? `${plural(review.comments.length, "line comment")}, ${r.findings.length - review.comments.length} in body${moved}` : `the round's ${r.outcome ?? "clean"} note`;
+    if (dryRun) {
+      io.print(`${at}: would post ${what}`);
+      io.print(JSON.stringify(review, null, 2));
+      continue;
+    }
+    const post = (payload) => io.exec("gh", ["api", "--method", "POST", reviewsPath(pr), "--input", "-"], JSON.stringify(payload));
+    const sent = post(review);
+    if (sent.code === 0) {
+      io.print(`${at}: posted ${what}`);
+      continue;
+    }
+    const flat = review.comments.length ? buildReview(io, r, records, pr, toplevel, failure(sent)) : undefined;
+    const again = flat ? post(flat) : undefined;
+    if (again?.code === 0)
+      io.print(`${at}: posted with all ${r.findings.length} in body - GitHub refused the line comments: ${failure(sent)}`);
+    else {
+      io.print(`${at}: FAILED to post - ${failure(again ?? sent)}`);
+      failed.push(at);
+    }
+  }
+  io.print(pr.url);
+  if (failed.length) {
+    io.print(`not posted: ${failed.join(", ")} - run the script again to post only what is missing`);
+    return 1;
+  }
+  return 0;
+}
+
+// src/pr/records.ts
+var SAFE = /^[A-Za-z0-9._-]+$/;
+var SHA = /^[0-9a-f]{4,64}$/i;
+var ROUTES = ["sent", "residual"];
+var OUTCOMES = ["clean", "residual-only", "round-cap", "review-failed", "checks-failed"];
+var isObject2 = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
+var isString = (v) => typeof v === "string";
+var isCount = (v) => Number.isInteger(v) && v > 0;
+var optional = (v, ok) => v === undefined || ok(v);
+function trailProblem(value) {
+  if (!isObject2(value))
+    return "not a JSON object";
+  if (value.version !== 1)
+    return `version ${JSON.stringify(value.version)} is not 1`;
+  if (!isString(value.loop) || !SAFE.test(value.loop))
+    return "loop is missing or not a plain id";
+  if (!isString(value.name))
+    return "name is missing";
+  if (!isCount(value.round))
+    return "round is not a positive integer";
+  if (!isString(value.base))
+    return "base is missing";
+  if (!optional(value.reviewedSha, (v) => isString(v) && SHA.test(v)))
+    return "reviewedSha is not a commit id";
+  if (!Array.isArray(value.reviewers) || !value.reviewers.every((r) => isObject2(r) && isString(r.name)))
+    return "reviewers is not a list of named reviewers";
+  if (!Array.isArray(value.findings))
+    return "findings is not a list";
+  for (const [i, f] of value.findings.entries()) {
+    const at = `findings[${i}]`;
+    if (!isObject2(f))
+      return `${at} is not an object`;
+    if (!isString(f.id) || !SAFE.test(f.id))
+      return `${at}.id is missing or not a plain id`;
+    for (const key of ["severity", "file", "title", "detail"])
+      if (!isString(f[key]))
+        return `${at}.${key} is not a string`;
+    if (!optional(f.line, isCount))
+      return `${at}.line is not a positive integer`;
+    if (!optional(f.route, (v) => ROUTES.includes(v)))
+      return `${at}.route is not sent or residual`;
+    if (!optional(f.decision, (d) => isObject2(d) && Number.isInteger(d.rule) && isString(d.action) && isString(d.why)))
+      return `${at}.decision is malformed`;
+    if (!optional(f.duplicates, (d) => Array.isArray(d) && d.every(isString)))
+      return `${at}.duplicates is not a list of ids`;
+  }
+  const fix = value.fix;
+  if (!optional(fix, (v) => isObject2(v) && isString(v.label)))
+    return "fix has no label";
+  if (fix && !optional(fix.commits, (c) => Array.isArray(c)))
+    return "fix.commits is not a list";
+  if (fix && !optional(fix.declined, (d) => Array.isArray(d) && d.every((x) => isObject2(x) && isString(x.id))))
+    return "fix.declined is malformed";
+  if (!optional(value.outcome, (v) => OUTCOMES.includes(v)))
+    return `outcome ${JSON.stringify(value.outcome)} is unknown`;
+  return;
+}
+function loopRank(loop) {
+  if (loop === "plan")
+    return [0, 0, ""];
+  const stage = /^s(\d+)$/.exec(loop);
+  if (stage)
+    return [1, Number(stage[1]), ""];
+  if (loop === "final")
+    return [2, 0, ""];
+  return [3, 0, loop];
+}
+function byTrailOrder(a, b) {
+  const [ka, na, sa] = loopRank(a.loop);
+  const [kb, nb, sb] = loopRank(b.loop);
+  return ka - kb || na - nb || (sa < sb ? -1 : sa > sb ? 1 : 0) || a.round - b.round;
+}
+
 // src/pr/post.ts
 var USAGE = "usage: node pr-comments.mjs [--pr <number>] [--trail <dir>] [--dry-run]";
 function parseArgs(argv) {
@@ -674,8 +809,6 @@ function parseArgs(argv) {
   }
   return options;
 }
-var failure = (r) => (r.stderr || r.stdout).trim().split(`
-`).slice(-3).join(" / ") || `exit ${r.code}`;
 function readRecords(io, dir) {
   const names = io.list(dir);
   if (names === undefined)
@@ -696,63 +829,6 @@ function readRecords(io, dir) {
       records.push(value);
   }
   return records.sort(byTrailOrder);
-}
-function prOf(io, pr) {
-  const r = io.exec("gh", ["pr", "view", ...pr === undefined ? [] : [String(pr)], "--json", "number,url,headRefOid,baseRefOid"]);
-  if (r.code !== 0)
-    return failure(r);
-  try {
-    const info = JSON.parse(r.stdout);
-    if (Number.isInteger(info.number) && typeof info.headRefOid === "string" && typeof info.baseRefOid === "string")
-      return info;
-  } catch {}
-  return `gh pr view printed no PR: ${r.stdout.trim().slice(0, 200)}`;
-}
-var reviewsPath = (pr) => `repos/{owner}/{repo}/pulls/${pr.number}/reviews`;
-function postedBodies(io, pr) {
-  const r = io.exec("gh", ["api", "--paginate", reviewsPath(pr), "--jq", ".[].body"]);
-  return r.code === 0 ? r.stdout : { error: failure(r) };
-}
-var DIFF_FLAGS = ["--unified=3", "--no-color", "--no-ext-diff", "--no-textconv", "--no-relative", "--src-prefix=a/", "--dst-prefix=b/"];
-function commitFor(io, r, pr) {
-  const sha = r.reviewedSha;
-  const inPr = sha !== undefined && io.exec("git", ["merge-base", "--is-ancestor", sha, pr.headRefOid]).code === 0;
-  return inPr ? { commit: sha, notInPr: false } : { commit: pr.headRefOid, notInPr: true };
-}
-function anchorOf(io, r, pr) {
-  const { commit, notInPr } = commitFor(io, r, pr);
-  const base = io.exec("git", ["merge-base", pr.baseRefOid, commit]);
-  const diff = base.code === 0 ? io.exec("git", ["-c", "core.quotePath=false", "diff", ...DIFF_FLAGS, base.stdout.trim(), commit]) : undefined;
-  return { commit, notInPr, hunks: diff?.code === 0 ? parseHunks(diff.stdout) : new Map };
-}
-function relative(file, toplevel) {
-  const root = `${trimSlashes(toplevel)}/`;
-  return (file.startsWith(root) ? file.slice(root.length) : file).replace(/^(\.\/)+/, "");
-}
-var plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
-function buildReview(io, r, records, pr, toplevel, refused) {
-  if (!r.findings.length) {
-    const earlier = records.some((x) => x.loop === r.loop && x.round < r.round && x.findings.length);
-    if (r.outcome === "clean" || r.outcome === undefined) {
-      if (!earlier)
-        return;
-      return { commit_id: commitFor(io, r, pr).commit, event: "COMMENT", body: cleanBody(r), comments: [] };
-    }
-  }
-  if (r.loop === "plan") {
-    return { commit_id: pr.headRefOid, event: "COMMENT", body: roundBody(r, records, { inBody: r.findings }), comments: [] };
-  }
-  const { commit, notInPr, hunks } = anchorOf(io, r, pr);
-  const comments = [];
-  const inBody = [];
-  for (const f of r.findings) {
-    const path = relative(f.file, toplevel);
-    if (refused === undefined && onChangedLine(hunks, path, f.line))
-      comments.push({ path, line: f.line, side: "RIGHT", body: findingComment(f, r, records) });
-    else
-      inBody.push(f);
-  }
-  return { commit_id: commit, event: "COMMENT", body: roundBody(r, records, { inBody, notInPr, ...refused === undefined ? {} : { refused } }), comments };
 }
 function postTrail(argv, io) {
   const options = parseArgs(argv);
@@ -782,58 +858,9 @@ pass the trail directory with --trail <dir>`);
     io.print(`no trail at ${dir} - a granny run writes it there (config trail: true)`);
     return 1;
   }
-  const pr = prOf(io, options.pr);
-  if (typeof pr === "string") {
-    io.print(`open the PR first (${pr})`);
-    return 2;
-  }
-  const posted = postedBodies(io, pr);
-  if (typeof posted !== "string") {
-    io.print(`could not list the PR's reviews: ${posted.error}`);
-    return 1;
-  }
   if (!records.length)
     io.print(`no trail records in ${dir}`);
-  const failed = [];
-  for (const r of records) {
-    const at = `${r.loop} r${r.round}`;
-    if (posted.includes(roundMarker(r))) {
-      io.print(`${at}: skipped, already posted`);
-      continue;
-    }
-    const review = buildReview(io, r, records, pr, toplevel);
-    if (!review) {
-      io.print(`${at}: clean, nothing to post`);
-      continue;
-    }
-    const moved = r.loop !== "plan" && review.commit_id !== r.reviewedSha ? `, on the PR head ${short(pr.headRefOid)}` : "";
-    const what = r.findings.length ? `${plural(review.comments.length, "line comment")}, ${r.findings.length - review.comments.length} in body${moved}` : `the round's ${r.outcome ?? "clean"} note`;
-    if (options.dryRun) {
-      io.print(`${at}: would post ${what}`);
-      io.print(JSON.stringify(review, null, 2));
-      continue;
-    }
-    const post = (payload) => io.exec("gh", ["api", "--method", "POST", reviewsPath(pr), "--input", "-"], JSON.stringify(payload));
-    const sent = post(review);
-    if (sent.code === 0) {
-      io.print(`${at}: posted ${what}`);
-      continue;
-    }
-    const flat = review.comments.length ? buildReview(io, r, records, pr, toplevel, failure(sent)) : undefined;
-    const again = flat ? post(flat) : undefined;
-    if (again?.code === 0)
-      io.print(`${at}: posted with all ${r.findings.length} in body - GitHub refused the line comments: ${failure(sent)}`);
-    else {
-      io.print(`${at}: FAILED to post - ${failure(again ?? sent)}`);
-      failed.push(at);
-    }
-  }
-  io.print(pr.url);
-  if (failed.length) {
-    io.print(`not posted: ${failed.join(", ")} - run the script again to post only what is missing`);
-    return 1;
-  }
-  return 0;
+  return postGithub(io, { records, toplevel, ...options.pr === undefined ? {} : { pr: options.pr }, dryRun: options.dryRun });
 }
 
 // src/pr/cli.ts

@@ -5,9 +5,11 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { TrailFinding, TrailRound } from '../src/core/types'
 import { diffLine, onChangedLine, parseDiff, parseHunks } from '../src/pr/hunks'
-import { postTrail, type ExecResult, type PosterIo, type PrInfo, type ReviewPayload } from '../src/pr/post'
+import type { PrInfo, ReviewPayload } from '../src/pr/github'
+import { planRound, type Target } from '../src/pr/plan'
+import { postTrail, type ExecResult, type PosterIo } from '../src/pr/post'
 import { byTrailOrder, trailProblem } from '../src/pr/records'
-import { agentText, findingComment, outcomeLine, roundBody } from '../src/pr/render'
+import { agentText, cleanBody, findingComment, findingMarker, outcomeLine, roundBody, roundMarker } from '../src/pr/render'
 
 const TOP = '/w/repo'
 const DIR = `${TOP}/.granny/trail`
@@ -395,6 +397,68 @@ describe('rendering', () => {
     expect(text).toContain("Reviewed at `1111111`, which is not in this PR's history: the line comments sit on the PR's head.")
     expect(text).toContain('### Not on a changed line\n\n#### `src/a.ts:99`\n\n**granny · Stage 1 (engine) · round 1 · `codex-F1`**')
     expect(text.endsWith('\n<!-- granny-trail s1/r1@1111111a -->')).toBe(true)
+  })
+})
+
+describe('planRound', () => {
+  const TARGET: Target = { head: HEAD, base: BASE }
+  const RENAME_DIFF = ['diff --git a/src/old.ts b/src/new.ts', 'similarity index 90%', 'rename from src/old.ts', 'rename to src/new.ts', '--- a/src/old.ts', '+++ b/src/new.ts', '@@ -3,2 +3,3 @@', ' a', '+b', ' c'].join('\n')
+
+  it('plans an added and a context line as line comments on the reviewed commit and the rest in the body', () => {
+    const added = finding('codex-F1', { line: 9 })
+    const context = finding('codex-F2', { file: `${TOP}/src/a.ts`, line: 12 })
+    const outside = finding('codex-F3', { line: 40, route: 'residual', decision: { rule: 8, action: 'residual', why: 'low' } })
+    const r = round({ findings: [added, context, outside], fix: fix(SHA1, SHA2, ['c']) })
+    const plan = planRound(fake({ diffs: { [SHA1]: A_DIFF } }).io, r, [r], TARGET, TOP)!
+    expect(plan).toMatchObject({ loop: 's1', round: 1, marker: roundMarker(r), commit: SHA1, mergeBase: `mb-${SHA1}`, notInPr: false })
+    expect(plan.comments).toEqual([
+      { path: 'src/a.ts', oldPath: 'src/a.ts', line: 9, kind: 'added', body: findingComment(added, r, [r]), marker: findingMarker(r, added) },
+      { path: 'src/a.ts', oldPath: 'src/a.ts', line: 12, oldLine: 11, kind: 'context', body: findingComment(context, r, [r]), marker: findingMarker(r, context) },
+    ])
+    expect(plan.body).toBe(roundBody(r, [r], { inBody: [outside], notInPr: false }))
+  })
+
+  it("plans a comment on a renamed file with the file's old path", () => {
+    const r = round({ findings: [finding('codex-F1', { file: 'src/new.ts', line: 5 })] })
+    const plan = planRound(fake({ diffs: { [SHA1]: RENAME_DIFF } }).io, r, [r], TARGET, TOP)!
+    expect(plan.comments.map(c => [c.path, c.oldPath, c.line, c.oldLine, c.kind])).toEqual([['src/new.ts', 'src/old.ts', 5, 4, 'context']])
+  })
+
+  it("plans on the PR head and says so when the reviewed commit is not in the PR's history, or the record names none", () => {
+    const r = round({ findings: [finding('codex-F1')] })
+    const plan = planRound(fake({ ancestors: [], diffs: { [HEAD]: A_DIFF } }).io, r, [r], TARGET, TOP)!
+    expect(plan).toMatchObject({ commit: HEAD, mergeBase: `mb-${HEAD}`, notInPr: true })
+    expect(plan.comments.map(c => c.line)).toEqual([12])
+    expect(plan.body).toContain("Reviewed at `1111111`, which is not in this PR's history")
+    const unnamed = round({ findings: [finding('codex-F1')] })
+    delete unnamed.reviewedSha
+    expect(planRound(fake({ diffs: { [HEAD]: A_DIFF } }).io, unnamed, [unnamed], TARGET, TOP)).toMatchObject({ commit: HEAD, notInPr: true, marker: '<!-- granny-trail s1/r1@unknown -->' })
+  })
+
+  it('plans a plan-review round on the PR head with every finding in the body, without reading a diff', () => {
+    const f = fake({})
+    const r = round({ loop: 'plan', name: 'plan review', findings: [finding('codex-F1', { file: '/plans/p.md', line: 4 })] })
+    const plan = planRound(f.io, r, [r], TARGET, TOP)!
+    expect(plan).toEqual({ loop: 'plan', round: 1, marker: roundMarker(r), commit: HEAD, notInPr: false, body: roundBody(r, [r], { inBody: r.findings }), comments: [] })
+    expect(f.calls).toEqual([])
+  })
+
+  it('plans a clean round only when it ends a loop that had findings, and a failed round that found nothing', () => {
+    const lone = round({ outcome: 'clean' })
+    expect(planRound(fake({}).io, lone, [lone], TARGET, TOP)).toBeUndefined()
+    const r1 = round({ findings: [finding('codex-F1')] })
+    const r2 = round({ round: 2, reviewedSha: SHA2, outcome: 'clean' })
+    expect(planRound(fake({}).io, r2, [r1, r2], TARGET, TOP)).toEqual({ loop: 's1', round: 2, marker: roundMarker(r2), commit: SHA2, notInPr: false, body: cleanBody(r2), comments: [] })
+    const failed = round({ outcome: 'review-failed', note: 'codex: timed out' })
+    expect(planRound(fake({}).io, failed, [failed], TARGET, TOP)!.body).toContain('The loop ended here: `review-failed` - codex: timed out')
+  })
+
+  it("plans every finding in the body with the platform's error when it refused the line comments", () => {
+    const r = round({ findings: [finding('codex-F1')] })
+    const plan = planRound(fake({ diffs: { [SHA1]: A_DIFF } }).io, r, [r], TARGET, TOP, 'HTTP 422')!
+    expect(plan.comments).toEqual([])
+    expect(plan.body).toContain("refused this round's line comments (HTTP 422), so every finding is below.")
+    expect(plan.body).toContain('`src/a.ts:12`')
   })
 })
 
