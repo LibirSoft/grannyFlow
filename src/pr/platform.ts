@@ -1,4 +1,4 @@
-import { failure, type PosterIo } from './io'
+import { currentBranch, failure, type PosterIo } from './io'
 
 export const PLATFORMS = ['github', 'gitlab'] as const
 export type Platform = (typeof PLATFORMS)[number]
@@ -14,7 +14,7 @@ const PASS = 'pass --platform github|gitlab, or --out <file>'
 
 /** The remote the current branch tracks, else origin. */
 function remoteName(io: PosterIo): string {
-  const branch = io.exec('git', ['branch', '--show-current']).stdout.trim()
+  const branch = currentBranch(io)
   const tracked = branch ? io.exec('git', ['config', '--get', `branch.${branch}.remote`]) : undefined
   const name = tracked?.code === 0 ? tracked.stdout.trim() : ''
   return name && name !== '.' ? name : 'origin'

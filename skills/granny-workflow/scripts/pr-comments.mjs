@@ -324,6 +324,7 @@ var trimSlashes = (path) => path.replace(/\/+$/, "");
 var failure = (r) => (r.stderr || r.stdout).trim().split(`
 `).slice(-3).join(" / ") || `exit ${r.code}`;
 var plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
+var currentBranch = (io) => io.exec("git", ["branch", "--show-current"]).stdout.trim();
 
 // src/pr/hunks.ts
 var HUNK = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/;
@@ -773,7 +774,7 @@ var isRecord = (v) => typeof v === "object" && v !== null;
 function mrOf(io, iid) {
   let id = iid;
   if (id === undefined) {
-    const branch = io.exec("git", ["branch", "--show-current"]).stdout.trim();
+    const branch = currentBranch(io);
     if (!branch)
       return { error: "open the MR first (no branch is checked out: pass --pr <iid>)", code: 2 };
     const found = list(io, "projects/:id/merge_requests", [`source_branch=${branch}`, "state=opened"]);
@@ -940,7 +941,7 @@ function hostOf(url) {
 }
 var PASS = "pass --platform github|gitlab, or --out <file>";
 function remoteName(io) {
-  const branch = io.exec("git", ["branch", "--show-current"]).stdout.trim();
+  const branch = currentBranch(io);
   const tracked = branch ? io.exec("git", ["config", "--get", `branch.${branch}.remote`]) : undefined;
   const name = tracked?.code === 0 ? tracked.stdout.trim() : "";
   return name && name !== "." ? name : "origin";

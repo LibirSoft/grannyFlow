@@ -1,4 +1,4 @@
-import { failure, plural, type ExecResult, type PosterIo } from './io'
+import { currentBranch, failure, plural, type ExecResult, type PosterIo } from './io'
 import { type PlannedComment, type PlannedReview, planRound, type Target } from './plan'
 import { short } from './render'
 import { type Posted, type PostRequest, postRounds } from './rounds'
@@ -52,7 +52,7 @@ const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === 'obj
 export function mrOf(io: PosterIo, iid: number | undefined): MrInfo | MrProblem {
   let id = iid
   if (id === undefined) {
-    const branch = io.exec('git', ['branch', '--show-current']).stdout.trim()
+    const branch = currentBranch(io)
     if (!branch) return { error: 'open the MR first (no branch is checked out: pass --pr <iid>)', code: 2 }
     const found = list(io, 'projects/:id/merge_requests', [`source_branch=${branch}`, 'state=opened'])
     if (!Array.isArray(found)) return { error: `open the MR first (${found.error})`, code: 2 }

@@ -19,3 +19,6 @@ export interface PosterIo {
 export const failure = (r: ExecResult) => (r.stderr || r.stdout).trim().split('\n').slice(-3).join(' / ') || `exit ${r.code}`
 
 export const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`
+
+/** The checked-out branch, or '' on a detached HEAD. */
+export const currentBranch = (io: PosterIo) => io.exec('git', ['branch', '--show-current']).stdout.trim()
