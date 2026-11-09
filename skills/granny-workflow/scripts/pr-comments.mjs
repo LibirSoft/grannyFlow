@@ -633,6 +633,64 @@ function planRound(io, r, records, target, toplevel, refused) {
   return { ...head, commit, ...mergeBase === undefined ? {} : { mergeBase }, notInPr, body, comments };
 }
 
+// src/pr/rounds.ts
+function summary(r, plan, poster) {
+  if (!r.findings.length)
+    return `the round's ${r.outcome ?? "clean"} note`;
+  const moved = r.loop !== "plan" && plan.commit !== r.reviewedSha ? `, on the ${poster.change} head ${short(poster.head)}` : "";
+  return `${plural(plan.comments.length, "line comment")}, ${r.findings.length - plan.comments.length} in body${moved}`;
+}
+function postRounds(io, records, dryRun, poster) {
+  const failed = [];
+  let prepared = false;
+  for (const r of records) {
+    const at = `${r.loop} r${r.round}`;
+    if (poster.posted.includes(roundMarker(r))) {
+      io.print(`${at}: skipped, already posted`);
+      continue;
+    }
+    const plan = poster.planOf(r);
+    if (!plan) {
+      io.print(`${at}: clean, nothing to post`);
+      continue;
+    }
+    if (!prepared) {
+      const stop = poster.prepare?.();
+      if (stop !== undefined) {
+        io.print(stop);
+        io.print(poster.url);
+        return 1;
+      }
+      prepared = true;
+    }
+    const what = summary(r, plan, poster);
+    if (dryRun) {
+      io.print(`${at}: would post ${what}`);
+      io.print(JSON.stringify(poster.preview(plan), null, 2));
+      continue;
+    }
+    const sent = poster.post(r, plan);
+    if (sent.ok && sent.refused === undefined)
+      io.print(`${at}: posted ${what}`);
+    else if (sent.ok)
+      io.print(`${at}: posted with all ${r.findings.length} in body - ${poster.platform} refused the line comments: ${sent.refused}`);
+    else {
+      io.print(`${at}: FAILED to post - ${sent.error}`);
+      failed.push(at);
+      if (sent.stuck !== undefined) {
+        io.print(`stopped: ${sent.stuck}`);
+        break;
+      }
+    }
+  }
+  io.print(poster.url);
+  if (failed.length) {
+    io.print(`not posted: ${failed.join(", ")} - run the script again to post only what is missing`);
+    return 1;
+  }
+  return 0;
+}
+
 // src/pr/github.ts
 function prOf(io, pr) {
   const r = io.exec("gh", ["pr", "view", ...pr === undefined ? [] : [String(pr)], "--json", "number,url,headRefOid,baseRefOid"]);
@@ -672,46 +730,24 @@ function postGithub(io, { records, toplevel, pr: prNumber, dryRun }) {
     io.print(`could not list the PR's reviews: ${posted.error}`);
     return 1;
   }
-  const failed = [];
-  for (const r of records) {
-    const at = `${r.loop} r${r.round}`;
-    if (posted.includes(roundMarker(r))) {
-      io.print(`${at}: skipped, already posted`);
-      continue;
+  const send = (payload) => io.exec("gh", ["api", "--method", "POST", reviewsPath(pr), "--input", "-"], JSON.stringify(payload));
+  return postRounds(io, records, dryRun, {
+    platform: "GitHub",
+    change: "PR",
+    url: pr.url,
+    head: pr.headRefOid,
+    posted,
+    planOf: (r) => planRound(io, r, records, prTarget(pr), toplevel),
+    preview: reviewPayload,
+    post(r, plan) {
+      const sent = send(reviewPayload(plan));
+      if (sent.code === 0)
+        return { ok: true };
+      const flat = plan.comments.length ? buildReview(io, r, records, pr, toplevel, failure(sent)) : undefined;
+      const again = flat ? send(flat) : undefined;
+      return again?.code === 0 ? { ok: true, refused: failure(sent) } : { ok: false, error: failure(again ?? sent) };
     }
-    const review = buildReview(io, r, records, pr, toplevel);
-    if (!review) {
-      io.print(`${at}: clean, nothing to post`);
-      continue;
-    }
-    const moved = r.loop !== "plan" && review.commit_id !== r.reviewedSha ? `, on the PR head ${short(pr.headRefOid)}` : "";
-    const what = r.findings.length ? `${plural(review.comments.length, "line comment")}, ${r.findings.length - review.comments.length} in body${moved}` : `the round's ${r.outcome ?? "clean"} note`;
-    if (dryRun) {
-      io.print(`${at}: would post ${what}`);
-      io.print(JSON.stringify(review, null, 2));
-      continue;
-    }
-    const post = (payload) => io.exec("gh", ["api", "--method", "POST", reviewsPath(pr), "--input", "-"], JSON.stringify(payload));
-    const sent = post(review);
-    if (sent.code === 0) {
-      io.print(`${at}: posted ${what}`);
-      continue;
-    }
-    const flat = review.comments.length ? buildReview(io, r, records, pr, toplevel, failure(sent)) : undefined;
-    const again = flat ? post(flat) : undefined;
-    if (again?.code === 0)
-      io.print(`${at}: posted with all ${r.findings.length} in body - GitHub refused the line comments: ${failure(sent)}`);
-    else {
-      io.print(`${at}: FAILED to post - ${failure(again ?? sent)}`);
-      failed.push(at);
-    }
-  }
-  io.print(pr.url);
-  if (failed.length) {
-    io.print(`not posted: ${failed.join(", ")} - run the script again to post only what is missing`);
-    return 1;
-  }
-  return 0;
+  });
 }
 
 // src/pr/gitlab.ts
@@ -823,6 +859,7 @@ function draftId(stdout) {
     return;
   }
 }
+var STUCK = "the next round would publish that draft too";
 function postRound(io, mr, plan, replan) {
   const calls = roundCalls(mr.iid, plan);
   const publish = calls.pop();
@@ -855,10 +892,10 @@ function postRound(io, mr, plan, replan) {
   for (const id of created) {
     const r = call(io, { method: "DELETE", path: `${mrPath(mr.iid)}/draft_notes/${id}` });
     if (r.code !== 0)
-      return { ok: false, error: `GitLab refused a line comment (${refused}) and its draft ${id} could not be deleted: ${failure(r)}`, stuck: true };
+      return { ok: false, error: `GitLab refused a line comment (${refused}) and its draft ${id} could not be deleted: ${failure(r)}`, stuck: STUCK };
   }
   if (unknown !== undefined)
-    return { ok: false, error: `GitLab refused a line comment (${refused}) and a draft it created could not be deleted: glab printed no draft id (${unknown})`, stuck: true };
+    return { ok: false, error: `GitLab refused a line comment (${refused}) and a draft it created could not be deleted: glab printed no draft id (${unknown})`, stuck: STUCK };
   const flat = replan(refused);
   const plain = flat ? note(flat.body) : undefined;
   return plain?.code === 0 ? { ok: true, refused } : { ok: false, error: plain ? failure(plain) : refused };
@@ -881,55 +918,17 @@ function postGitlab(io, { records, toplevel, pr: iid, dryRun }) {
   }
   const posted = notes.filter(isRecord).map((n) => String(n.body ?? "")).join(`
 `);
-  const failed = [];
-  let cleared = false;
-  for (const r of records) {
-    const at = `${r.loop} r${r.round}`;
-    if (posted.includes(roundMarker(r))) {
-      io.print(`${at}: skipped, already posted`);
-      continue;
-    }
-    const plan = planRound(io, r, records, target, toplevel);
-    if (!plan) {
-      io.print(`${at}: clean, nothing to post`);
-      continue;
-    }
-    if (!cleared) {
-      const stop = clearDrafts(io, mr, dryRun);
-      if (stop !== undefined) {
-        io.print(stop);
-        io.print(mr.web_url);
-        return 1;
-      }
-      cleared = true;
-    }
-    const moved = r.loop !== "plan" && plan.commit !== r.reviewedSha ? `, on the MR head ${short(mr.sha)}` : "";
-    const what = r.findings.length ? `${plural(plan.comments.length, "line comment")}, ${r.findings.length - plan.comments.length} in body${moved}` : `the round's ${r.outcome ?? "clean"} note`;
-    if (dryRun) {
-      io.print(`${at}: would post ${what}`);
-      io.print(JSON.stringify(roundCalls(mr.iid, plan), null, 2));
-      continue;
-    }
-    const sent = postRound(io, mr, plan, (refused) => planRound(io, r, records, target, toplevel, refused));
-    if (sent.ok && sent.refused === undefined)
-      io.print(`${at}: posted ${what}`);
-    else if (sent.ok)
-      io.print(`${at}: posted with all ${r.findings.length} in body - GitLab refused the line comments: ${sent.refused}`);
-    else {
-      io.print(`${at}: FAILED to post - ${sent.error}`);
-      failed.push(at);
-      if (sent.stuck) {
-        io.print("stopped: the next round would publish that draft too");
-        break;
-      }
-    }
-  }
-  io.print(mr.web_url);
-  if (failed.length) {
-    io.print(`not posted: ${failed.join(", ")} - run the script again to post only what is missing`);
-    return 1;
-  }
-  return 0;
+  return postRounds(io, records, dryRun, {
+    platform: "GitLab",
+    change: "MR",
+    url: mr.web_url,
+    head: mr.sha,
+    posted,
+    planOf: (r) => planRound(io, r, records, target, toplevel),
+    prepare: () => clearDrafts(io, mr, dryRun),
+    preview: (plan) => roundCalls(mr.iid, plan),
+    post: (r, plan) => postRound(io, mr, plan, (refused) => planRound(io, r, records, target, toplevel, refused))
+  });
 }
 
 // src/pr/platform.ts

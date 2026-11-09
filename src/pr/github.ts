@@ -1,7 +1,7 @@
 import type { TrailRound } from '../core/types'
-import { failure, plural, type PosterIo } from './io'
+import { failure, type PosterIo } from './io'
 import { type PlannedReview, planRound, type Target } from './plan'
-import { roundMarker, short } from './render'
+import { type PostRequest, postRounds } from './rounds'
 
 export interface PrInfo {
   number: number
@@ -57,13 +57,6 @@ export function buildReview(io: PosterIo, r: TrailRound, records: TrailRound[], 
   return plan && reviewPayload(plan)
 }
 
-export interface PostRequest {
-  records: TrailRound[]
-  toplevel: string
-  pr?: number
-  dryRun: boolean
-}
-
 /** Posts one GitHub review per trail round not yet on the PR; returns the exit code. */
 export function postGithub(io: PosterIo, { records, toplevel, pr: prNumber, dryRun }: PostRequest): number {
   const pr = prOf(io, prNumber)
@@ -76,44 +69,22 @@ export function postGithub(io: PosterIo, { records, toplevel, pr: prNumber, dryR
     io.print(`could not list the PR's reviews: ${posted.error}`)
     return 1
   }
-  const failed: string[] = []
-  for (const r of records) {
-    const at = `${r.loop} r${r.round}`
-    if (posted.includes(roundMarker(r))) {
-      io.print(`${at}: skipped, already posted`)
-      continue
-    }
-    const review = buildReview(io, r, records, pr, toplevel)
-    if (!review) {
-      io.print(`${at}: clean, nothing to post`)
-      continue
-    }
-    const moved = r.loop !== 'plan' && review.commit_id !== r.reviewedSha ? `, on the PR head ${short(pr.headRefOid)}` : ''
-    const what = r.findings.length ? `${plural(review.comments.length, 'line comment')}, ${r.findings.length - review.comments.length} in body${moved}` : `the round's ${r.outcome ?? 'clean'} note`
-    if (dryRun) {
-      io.print(`${at}: would post ${what}`)
-      io.print(JSON.stringify(review, null, 2))
-      continue
-    }
-    const post = (payload: ReviewPayload) => io.exec('gh', ['api', '--method', 'POST', reviewsPath(pr), '--input', '-'], JSON.stringify(payload))
-    const sent = post(review)
-    if (sent.code === 0) {
-      io.print(`${at}: posted ${what}`)
-      continue
-    }
-    // One line GitHub cannot place rejects the whole review: post the round once more with every finding in its body.
-    const flat = review.comments.length ? buildReview(io, r, records, pr, toplevel, failure(sent)) : undefined
-    const again = flat ? post(flat) : undefined
-    if (again?.code === 0) io.print(`${at}: posted with all ${r.findings.length} in body - GitHub refused the line comments: ${failure(sent)}`)
-    else {
-      io.print(`${at}: FAILED to post - ${failure(again ?? sent)}`)
-      failed.push(at)
-    }
-  }
-  io.print(pr.url)
-  if (failed.length) {
-    io.print(`not posted: ${failed.join(', ')} - run the script again to post only what is missing`)
-    return 1
-  }
-  return 0
+  const send = (payload: ReviewPayload) => io.exec('gh', ['api', '--method', 'POST', reviewsPath(pr), '--input', '-'], JSON.stringify(payload))
+  return postRounds(io, records, dryRun, {
+    platform: 'GitHub',
+    change: 'PR',
+    url: pr.url,
+    head: pr.headRefOid,
+    posted,
+    planOf: r => planRound(io, r, records, prTarget(pr), toplevel),
+    preview: reviewPayload,
+    post(r, plan) {
+      const sent = send(reviewPayload(plan))
+      if (sent.code === 0) return { ok: true }
+      // One line GitHub cannot place rejects the whole review: post the round once more with every finding in its body.
+      const flat = plan.comments.length ? buildReview(io, r, records, pr, toplevel, failure(sent)) : undefined
+      const again = flat ? send(flat) : undefined
+      return again?.code === 0 ? { ok: true, refused: failure(sent) } : { ok: false, error: failure(again ?? sent) }
+    },
+  })
 }

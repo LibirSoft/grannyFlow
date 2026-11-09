@@ -6,10 +6,11 @@ import { join } from 'node:path'
 import type { TrailFinding, TrailRound } from '../src/core/types'
 import { diffLine, onChangedLine, parseDiff, parseHunks } from '../src/pr/hunks'
 import { prTarget, type PrInfo, type ReviewPayload } from '../src/pr/github'
-import { planRound, type Target } from '../src/pr/plan'
+import { type PlannedReview, planRound, type Target } from '../src/pr/plan'
 import { detectPlatform, hostOf } from '../src/pr/platform'
 import { postTrail, type ExecResult, type PosterIo } from '../src/pr/post'
 import { byTrailOrder, trailProblem } from '../src/pr/records'
+import { summary } from '../src/pr/rounds'
 import { agentText, cleanBody, findingComment, findingMarker, outcomeLine, roundBody, roundMarker } from '../src/pr/render'
 
 const TOP = '/w/repo'
@@ -570,6 +571,31 @@ describe('planRound', () => {
     const refused = planRound(fake({ diffs: { [SHA1]: A_DIFF } }).io, r, [r], gitlab, TOP, '400 Bad Request')!
     expect(refused.body).toContain("GitLab refused this round's line comments (400 Bad Request), so every finding is below.")
     expect(planRound(fake({ diffs: { [SHA1]: A_DIFF } }).io, r, [r], TARGET, TOP, 'HTTP 422')!.body).toContain("GitHub refused this round's line comments")
+  })
+})
+
+describe('summary', () => {
+  const plan = (commit: string, comments: number): PlannedReview => ({
+    loop: 's1',
+    round: 1,
+    marker: 'm',
+    commit,
+    notInPr: commit !== SHA1,
+    body: 'b',
+    comments: Array.from({ length: comments }, (_, i) => ({ path: 'src/a.ts', oldPath: 'src/a.ts', line: i + 1, kind: 'added' as const, body: 'c', marker: `m${i}` })),
+  })
+  const two = round({ findings: [finding('F1'), finding('F2')] })
+
+  it('counts the line comments and the findings left in the body, and names the PR or MR head the round moved to', () => {
+    expect(summary(two, plan(SHA1, 1), { change: 'PR', head: HEAD })).toBe('1 line comment, 1 in body')
+    expect(summary(two, plan(HEAD, 2), { change: 'PR', head: HEAD })).toBe('2 line comments, 0 in body, on the PR head 9999999')
+    expect(summary(two, plan(HEAD, 0), { change: 'MR', head: HEAD })).toBe('0 line comments, 2 in body, on the MR head 9999999')
+  })
+
+  it('names the note of a round with no findings, and never moves a plan-review round', () => {
+    expect(summary(round({ outcome: 'round-cap' }), plan(HEAD, 0), { change: 'MR', head: HEAD })).toBe("the round's round-cap note")
+    expect(summary(round(), plan(SHA1, 0), { change: 'PR', head: HEAD })).toBe("the round's clean note")
+    expect(summary(round({ loop: 'plan', findings: [finding('F1')] }), plan(HEAD, 0), { change: 'PR', head: HEAD })).toBe('0 line comments, 1 in body')
   })
 })
 
