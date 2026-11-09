@@ -58,12 +58,86 @@ const fix = (startSha: string, headSha: string, commits: string[], over: Partial
 
 const A_DIFF = ['diff --git a/src/a.ts b/src/a.ts', 'index 1..2 100644', '--- a/src/a.ts', '+++ b/src/a.ts', '@@ -8,6 +8,9 @@ x', ' a', '+b', ' c', ''].join('\n')
 
+const MR = { iid: 5, web_url: 'https://gitlab.com/o/r/-/merge_requests/5', sha: HEAD, diff_refs: { base_sha: BASE, head_sha: HEAD, start_sha: BASE } }
+const MR_PATH = 'projects/:id/merge_requests/5'
+const GLAB_POST = ['--method', 'POST', '--header', 'Content-Type: application/json', '--input', '-']
+
+interface Draft {
+  id: number
+  note: string
+  position?: Record<string, unknown>
+}
+
+/** What the fake GitLab holds for MR !5, and which of its calls fail. */
+interface GitlabOpts {
+  /** The open MRs the current branch is the source of. */
+  mrs?: Array<{ iid: number; web_url: string }>
+  /** `GET merge_requests/5`; null answers 404. */
+  mr?: Record<string, unknown> | null
+  notes?: string[]
+  drafts?: Draft[]
+  failDraft?: (d: Draft) => boolean
+  failPublish?: (note: string, drafts: Draft[]) => boolean
+  failNote?: boolean
+  failDelete?: (id: number) => boolean
+}
+
+interface GitlabState {
+  drafts: Draft[]
+  /** Each bulk publish: its note and the drafts it published. */
+  published: Array<{ note: string; drafts: Draft[] }>
+  /** Plain MR notes. */
+  notes: string[]
+  deleted: number[]
+  next: number
+}
+
 interface Fake {
   io: PosterIo
   out: string[]
   calls: Array<{ cmd: string; args: string[]; input?: string }>
   posted: ReviewPayload[]
   written: Record<string, string>
+  gl: GitlabState
+}
+
+const GLAB_400 = { code: 1, stdout: '', stderr: 'glab: 400 Bad Request (HTTP 400)' }
+
+function fakeGitlab(opts: GitlabOpts, gl: GitlabState, args: string[], input: string | undefined): ExecResult {
+  const ok = (value: unknown): ExecResult => ({ code: 0, stdout: `${JSON.stringify(value, null, 2)}\n`, stderr: '' })
+  const ndjson = (values: unknown[]): ExecResult => ({ code: 0, stdout: values.map(v => `${JSON.stringify(v)}\n`).join(''), stderr: '' })
+  const path = args[1]!
+  const method = args.includes('--method') ? args[args.indexOf('--method') + 1] : 'GET'
+  const body = input === undefined ? undefined : (JSON.parse(input) as Record<string, unknown>)
+  if (method === 'GET' && path === 'projects/:id/merge_requests') return ndjson(opts.mrs ?? [{ iid: 5, web_url: MR.web_url }])
+  if (method === 'GET' && path === MR_PATH) return opts.mr === null ? { code: 1, stdout: '', stderr: 'glab: 404 Not Found (HTTP 404)' } : ok(opts.mr ?? MR)
+  if (method === 'GET' && path === `${MR_PATH}/notes`) return ndjson((opts.notes ?? []).map((b, i) => ({ id: 100 + i, body: b })))
+  if (method === 'GET' && path === `${MR_PATH}/draft_notes`) return ndjson(gl.drafts)
+  if (method === 'POST' && path === `${MR_PATH}/draft_notes`) {
+    const draft = { id: gl.next++, note: String(body!.note), position: body!.position as Record<string, unknown> }
+    if (opts.failDraft?.(draft)) return GLAB_400
+    gl.drafts.push(draft)
+    return ok(draft)
+  }
+  if (method === 'POST' && path === `${MR_PATH}/draft_notes/bulk_publish`) {
+    if (opts.failPublish?.(String(body!.note), gl.drafts)) return GLAB_400
+    gl.published.push({ note: String(body!.note), drafts: gl.drafts.splice(0) })
+    return { code: 0, stdout: '', stderr: '' }
+  }
+  if (method === 'POST' && path === `${MR_PATH}/notes`) {
+    if (opts.failNote) return { code: 1, stdout: '', stderr: 'glab: 500 Internal Server Error (HTTP 500)' }
+    gl.notes.push(String(body!.body))
+    return ok({ id: 300, body: body!.body })
+  }
+  const del = new RegExp(`^${MR_PATH}/draft_notes/(\\d+)$`).exec(path)
+  if (method === 'DELETE' && del) {
+    const id = Number(del[1])
+    if (opts.failDelete?.(id)) return { code: 1, stdout: '', stderr: 'glab: 503 Service Unavailable (HTTP 503)' }
+    gl.drafts = gl.drafts.filter(d => d.id !== id)
+    gl.deleted.push(id)
+    return { code: 0, stdout: '', stderr: '' }
+  }
+  throw new Error(`unexpected glab ${args.join(' ')}`)
 }
 
 function fake(opts: {
@@ -78,11 +152,14 @@ function fake(opts: {
   tracks?: string
   glab?: ExecResult
   refs?: Record<string, string>
+  branch?: string
+  gitlab?: GitlabOpts
 }): Fake {
   const out: string[] = []
   const calls: Fake['calls'] = []
   const posted: ReviewPayload[] = []
   const written: Record<string, string> = {}
+  const gl: GitlabState = { drafts: [...(opts.gitlab?.drafts ?? [])], published: [], notes: [], deleted: [], next: 200 }
   const ok = (stdout = ''): ExecResult => ({ code: 0, stdout, stderr: '' })
   const records = opts.records === undefined ? undefined : Object.fromEntries(Object.entries(opts.records).map(([k, v]) => [k, typeof v === 'string' ? v : JSON.stringify(v)]))
   const ancestors = new Set(opts.ancestors ?? [SHA1, SHA2, SHA3])
@@ -92,16 +169,17 @@ function fake(opts: {
       const line = args.join(' ')
       if (cmd === 'git' && line === 'rev-parse --show-toplevel') return ok(`${TOP}\n`)
       if (cmd === 'git' && args[0] === 'rev-parse' && args[1] === '--verify') {
-        const sha = (opts.refs ?? { 'HEAD^{commit}': HEAD })[args[3]!]
+        const sha = (opts.refs ?? { 'HEAD^{commit}': HEAD, [`${HEAD}^{commit}`]: HEAD, [`${BASE}^{commit}`]: BASE })[args[3]!]
         return sha === undefined ? { code: 1, stdout: '', stderr: '' } : ok(`${sha}\n`)
       }
-      if (cmd === 'git' && line === 'branch --show-current') return ok('feat/x\n')
+      if (cmd === 'git' && line === 'branch --show-current') return ok(`${opts.branch ?? 'feat/x'}\n`)
       if (cmd === 'git' && line === 'config --get branch.feat/x.remote') return opts.tracks === undefined ? { code: 1, stdout: '', stderr: '' } : ok(`${opts.tracks}\n`)
       if (cmd === 'git' && args[0] === 'remote' && args[1] === 'get-url') {
         const url = (opts.remotes ?? { origin: 'git@github.com:o/r.git' })[args[2]!]
         return url === undefined ? { code: 2, stdout: '', stderr: `error: No such remote '${args[2]}'` } : ok(`${url}\n`)
       }
       if (cmd === 'glab' && line === 'auth status --all') return opts.glab ?? { code: 127, stdout: '', stderr: 'glab: spawn glab ENOENT' }
+      if (cmd === 'glab' && args[0] === 'api') return fakeGitlab(opts.gitlab ?? {}, gl, args, input)
       if (cmd === 'git' && args[0] === 'merge-base' && args[1] === '--is-ancestor') return { code: ancestors.has(args[2]!) && args[3] === HEAD ? 0 : 1, stdout: '', stderr: '' }
       if (cmd === 'git' && args[0] === 'merge-base') return ok(`mb-${args[2]}\n`)
       if (cmd === 'git' && args.includes('diff')) return ok(opts.diffs?.[args.at(-1)!] ?? '')
@@ -123,7 +201,7 @@ function fake(opts: {
     },
     print: line => out.push(line),
   }
-  return { io, out, calls, posted, written }
+  return { io, out, calls, posted, written, gl }
 }
 
 describe('parseHunks', () => {
@@ -548,13 +626,6 @@ describe('platform', () => {
     expect(f.calls.some(c => c.args[0] === 'remote')).toBe(false)
   })
 
-  it('stops on GitLab until its adapter is built, and points at --out', () => {
-    const f = fake({ records: { 's1-r1.json': round({ findings: [finding('codex-F1')] }) }, remotes: { origin: 'git@gitlab.com:o/r.git' } })
-    expect(postTrail([], f.io)).toBe(1)
-    expect(f.out).toEqual(['posting to a GitLab MR is not built yet: pass --out <file> to write the planned reviews'])
-    expect(f.calls.some(c => c.cmd !== 'git')).toBe(false)
-  })
-
   it('refuses a platform it does not know', () => {
     const f = fake({ records: {} })
     expect(postTrail(['--platform', 'gerrit'], f.io)).toBe(1)
@@ -737,6 +808,237 @@ describe('postTrail', () => {
     expect(f.out[0]).toBe('--pr takes a PR number, got abc\nusage: node pr-comments.mjs [--platform github|gitlab] [--pr <number>] [--trail <dir>] [--out <file> [--base <ref>]] [--dry-run]')
     expect(postTrail(['--push'], f.io)).toBe(1)
     expect(f.calls).toEqual([])
+  })
+})
+
+describe('GitLab', () => {
+  const GITLAB = { origin: 'git@gitlab.com:o/r.git' }
+  const residual: Partial<TrailFinding> = { route: 'residual', decision: { rule: 8, action: 'residual', why: 'low' } }
+  const gitlab = (opts: Parameters<typeof fake>[0] = {}) => fake({ remotes: GITLAB, ...opts })
+  const writes = (f: Fake) => f.calls.filter(c => c.cmd === 'glab' && c.args[0] === 'api' && ['POST', 'DELETE'].includes(c.args[c.args.indexOf('--method') + 1]!))
+  const position = (head: string, path = 'src/a.ts', oldPath = path) => ({ position_type: 'text', base_sha: `mb-${head}`, start_sha: `mb-${head}`, head_sha: head, old_path: oldPath, new_path: path })
+  const LIST = ['--method', 'GET', '--paginate', '--output', 'ndjson']
+
+  it('posts a round as one draft note per line comment and one bulk publish whose note is the round body', () => {
+    const added = finding('codex-F1', { line: 9 })
+    const context = finding('codex-F2', { line: 12 })
+    const outside = finding('codex-F3', { line: 40, ...residual })
+    const r = round({ findings: [added, context, outside], fix: fix(SHA1, SHA2, ['c']) })
+    const f = gitlab({ records: { 's1-r1.json': r }, diffs: { [SHA1]: A_DIFF } })
+    expect(postTrail([], f.io)).toBe(0)
+    expect(f.gl.published).toEqual([
+      {
+        note: roundBody(r, [r], { inBody: [outside], notInPr: false, gitlab: true }),
+        drafts: [
+          { id: 200, note: findingComment(added, r, [r]), position: { ...position(SHA1), new_line: 9 } },
+          { id: 201, note: findingComment(context, r, [r]), position: { ...position(SHA1), new_line: 12, old_line: 11 } },
+        ],
+      },
+    ])
+    expect(f.calls.filter(c => c.cmd === 'glab').map(c => c.args)).toEqual([
+      ['api', 'projects/:id/merge_requests', '--method', 'GET', '--raw-field', 'source_branch=feat/x', '--raw-field', 'state=opened', '--paginate', '--output', 'ndjson'],
+      ['api', MR_PATH],
+      ['api', `${MR_PATH}/notes`, ...LIST],
+      ['api', `${MR_PATH}/draft_notes`, ...LIST],
+      ['api', `${MR_PATH}/draft_notes`, ...GLAB_POST],
+      ['api', `${MR_PATH}/draft_notes`, ...GLAB_POST],
+      ['api', `${MR_PATH}/draft_notes/bulk_publish`, ...GLAB_POST],
+    ])
+    expect(f.calls.find(c => c.args[0] === 'merge-base' && c.args[1] !== '--is-ancestor')!.args).toEqual(['merge-base', BASE, SHA1])
+    expect(f.calls.some(c => c.cmd === 'gh')).toBe(false)
+    expect(f.out).toEqual(['s1 r1: posted 2 line comments, 1 in body', MR.web_url])
+  })
+
+  it("places a comment on a renamed file by its old and new path", () => {
+    const rename = ['diff --git a/src/old.ts b/src/new.ts', 'rename from src/old.ts', 'rename to src/new.ts', '--- a/src/old.ts', '+++ b/src/new.ts', '@@ -3,2 +3,3 @@', ' a', '+b', ' c'].join('\n')
+    const f = gitlab({ records: { 's1-r1.json': round({ findings: [finding('codex-F1', { file: 'src/new.ts', line: 5 }), finding('codex-F2', { file: 'src/new.ts', line: 4 })] }) }, diffs: { [SHA1]: rename } })
+    expect(postTrail([], f.io)).toBe(0)
+    expect(f.gl.published[0]!.drafts.map(d => d.position)).toEqual([
+      { ...position(SHA1, 'src/new.ts', 'src/old.ts'), new_line: 5, old_line: 4 },
+      { ...position(SHA1, 'src/new.ts', 'src/old.ts'), new_line: 4 },
+    ])
+  })
+
+  it("anchors on the MR head and says so when the reviewed commit is not in the MR's history", () => {
+    const f = gitlab({ records: { 's1-r1.json': round({ findings: [finding('codex-F1')] }) }, ancestors: [], diffs: { [HEAD]: A_DIFF } })
+    expect(postTrail([], f.io)).toBe(0)
+    expect(f.gl.published[0]!.drafts.map(d => d.position)).toEqual([{ ...position(HEAD), new_line: 12, old_line: 11 }])
+    expect(f.gl.published[0]!.note).toContain("Reviewed at `1111111`, which is not in this MR's history: the line comments sit on the MR's head.")
+    expect(f.out[0]).toBe('s1 r1: posted 1 line comment, 0 in body, on the MR head 9999999')
+  })
+
+  it('finds no MR, several MRs, the MR given with --pr, and none on a detached HEAD', () => {
+    const records = { 's1-r1.json': round({ findings: [finding('codex-F1')] }) }
+    const none = gitlab({ records, gitlab: { mrs: [] } })
+    expect(postTrail([], none.io)).toBe(2)
+    expect(none.out).toEqual(['open the MR first (no open merge request from feat/x)'])
+    const several = gitlab({ records, gitlab: { mrs: [{ iid: 5, web_url: MR.web_url }, { iid: 6, web_url: 'https://gitlab.com/o/r/-/merge_requests/6' }] } })
+    expect(postTrail([], several.io)).toBe(1)
+    expect(several.out).toEqual([`feat/x is the source of 2 open MRs: !5 ${MR.web_url}, !6 https://gitlab.com/o/r/-/merge_requests/6 - pass --pr <iid>`])
+    const given = gitlab({ records, gitlab: { mrs: [] } })
+    expect(postTrail(['--pr', '5'], given.io)).toBe(0)
+    expect(given.calls.filter(c => c.cmd === 'glab')[0]!.args).toEqual(['api', MR_PATH])
+    const gone = gitlab({ records, gitlab: { mr: null } })
+    expect(postTrail(['--pr', '5'], gone.io)).toBe(2)
+    expect(gone.out).toEqual(['open the MR first (glab: 404 Not Found (HTTP 404))'])
+    const detached = gitlab({ records, branch: '' })
+    expect(postTrail([], detached.io)).toBe(2)
+    expect(detached.out).toEqual(['open the MR first (no branch is checked out: pass --pr <iid>)'])
+    expect([none, several, gone, detached].flatMap(writes)).toEqual([])
+  })
+
+  it('stops when GitLab has no diff for the MR yet, or its commits are not in the checkout, and never fetches', () => {
+    const records = { 's1-r1.json': round({ findings: [finding('codex-F1')] }) }
+    const pending = gitlab({ records, gitlab: { mr: { ...MR, diff_refs: null } } })
+    expect(postTrail([], pending.io)).toBe(1)
+    expect(pending.out).toEqual(['GitLab has no diff for !5 yet: run this again in a moment'])
+    const target = gitlab({ records, refs: { [`${HEAD}^{commit}`]: HEAD } })
+    expect(postTrail([], target.io)).toBe(1)
+    expect(target.out).toEqual(["the MR's target commit 0000000 is not in this checkout: run git fetch, then run this again"])
+    const both = gitlab({ records, refs: {} })
+    expect(postTrail([], both.io)).toBe(1)
+    expect(both.out).toEqual(["the MR's head commit 9999999 and target commit 0000000 are not in this checkout: run git fetch, then run this again"])
+    for (const f of [pending, target, both]) {
+      expect(f.calls.some(c => c.args[0] === 'fetch')).toBe(false)
+      expect(f.calls.some(c => c.args[1]?.endsWith('/notes'))).toBe(false)
+    }
+  })
+
+  it("skips the rounds whose marker the MR's notes already have", () => {
+    const r1 = round({ findings: [finding('codex-F1')], fix: fix(SHA1, SHA2, ['c']) })
+    const r2 = round({ round: 2, reviewedSha: SHA2, findings: [finding('codex-F1')] })
+    const f = gitlab({ records: { 's1-r1.json': r1, 's1-r2.json': r2 }, gitlab: { notes: ['other', `header\n${roundMarker(r1)}`] } })
+    expect(postTrail([], f.io)).toBe(0)
+    expect(f.gl.published.map(p => p.note.split('\n').at(-1))).toEqual([roundMarker(r2)])
+    expect(f.out).toEqual(['s1 r1: skipped, already posted', 's1 r2: posted 0 line comments, 1 in body', MR.web_url])
+  })
+
+  it('deletes the drafts an earlier run left behind before it posts, and leaves them alone when nothing is to post', () => {
+    const r = round({ findings: [finding('codex-F1')] })
+    const left = { id: 50, note: `old\n${findingMarker(r, { id: 'codex-F1' })}` }
+    const f = gitlab({ records: { 's1-r1.json': r }, diffs: { [SHA1]: A_DIFF }, gitlab: { drafts: [left] } })
+    expect(postTrail([], f.io)).toBe(0)
+    expect(f.gl.deleted).toEqual([50])
+    expect(f.gl.published[0]!.drafts.map(d => d.id)).toEqual([200])
+    expect(f.calls.find(c => c.args.includes('DELETE'))!.args).toEqual(['api', `${MR_PATH}/draft_notes/50`, '--method', 'DELETE'])
+    expect(f.out).toEqual(['deleted 1 leftover granny draft note', 's1 r1: posted 1 line comment, 0 in body', MR.web_url])
+    const done = gitlab({ records: { 's1-r1.json': r }, gitlab: { drafts: [left], notes: [roundMarker(r)] } })
+    expect(postTrail([], done.io)).toBe(0)
+    expect(done.calls.some(c => c.args[1]?.endsWith('/draft_notes'))).toBe(false)
+  })
+
+  it("stops before posting anything when a draft note of the user's is not granny's", () => {
+    const r = round({ findings: [finding('codex-F1')] })
+    const drafts = [{ id: 50, note: `old\n${findingMarker(r, { id: 'codex-F1' })}` }, { id: 51, note: 'my own\nthought about this line' }]
+    const f = gitlab({ records: { 's1-r1.json': r }, diffs: { [SHA1]: A_DIFF }, gitlab: { drafts } })
+    expect(postTrail([], f.io)).toBe(1)
+    expect(f.out).toEqual([
+      'your draft notes on !5 that granny did not write: 51 ("my own thought about this line") - posting a round publishes all your drafts, so publish or delete them first',
+      MR.web_url,
+    ])
+    expect(writes(f)).toEqual([])
+  })
+
+  it('publishes a plan-review round and an off-diff round with no draft, and posts a plain note when GitLab refuses an empty publish', () => {
+    const plan = round({ loop: 'plan', name: 'plan review', findings: [finding('codex-F1', { file: '/plans/p.md', line: 4 })], fix: { label: 'fix plan review r1' } })
+    const off = round({ findings: [finding('codex-F1', { line: 40 })] })
+    const records = { 'plan-r1.json': plan, 's1-r1.json': off }
+    const f = gitlab({ records, diffs: { [SHA1]: A_DIFF } })
+    expect(postTrail([], f.io)).toBe(0)
+    expect(f.gl.published.map(p => [p.drafts.length, p.note.split('\n').at(-1)])).toEqual([
+      [0, roundMarker(plan)],
+      [0, roundMarker(off)],
+    ])
+    expect(f.gl.published[0]!.note).toContain('### Findings on the plan')
+    expect(f.out).toEqual(['plan r1: posted 0 line comments, 1 in body', 's1 r1: posted 0 line comments, 1 in body', MR.web_url])
+    const refused = gitlab({ records, diffs: { [SHA1]: A_DIFF }, gitlab: { failPublish: (_, drafts) => !drafts.length } })
+    expect(postTrail([], refused.io)).toBe(0)
+    expect(refused.gl.published).toEqual([])
+    expect(refused.gl.notes).toEqual([f.gl.published[0]!.note, f.gl.published[1]!.note])
+    expect(refused.calls.filter(c => c.args[1] === `${MR_PATH}/notes` && c.args.includes('POST'))[0]!.args).toEqual(['api', `${MR_PATH}/notes`, ...GLAB_POST])
+    expect(refused.out).toEqual(f.out)
+  })
+
+  it("deletes the round's drafts and posts it once as a plain note with every finding when GitLab refuses a draft", () => {
+    const r = round({ findings: [finding('codex-F1', { line: 9 }), finding('codex-F2', { line: 12 }), finding('codex-F3', { line: 40, ...residual })] })
+    const f = gitlab({ records: { 's1-r1.json': r }, diffs: { [SHA1]: A_DIFF }, gitlab: { failDraft: d => d.position?.new_line === 12 } })
+    expect(postTrail([], f.io)).toBe(0)
+    expect(f.gl.deleted).toEqual([200])
+    expect(f.gl.drafts).toEqual([])
+    expect(f.gl.published).toEqual([])
+    expect(f.gl.notes).toHaveLength(1)
+    expect(f.gl.notes[0]).toContain("GitLab refused this round's line comments (glab: 400 Bad Request (HTTP 400)), so every finding is below.")
+    for (const at of ['`src/a.ts:9`', '`src/a.ts:12`', '`src/a.ts:40`']) expect(f.gl.notes[0]).toContain(at)
+    expect(f.out).toEqual(['s1 r1: posted with all 3 in body - GitLab refused the line comments: glab: 400 Bad Request (HTTP 400)', MR.web_url])
+  })
+
+  it('falls back the same way when GitLab refuses to publish the drafts', () => {
+    const r = round({ findings: [finding('codex-F1')] })
+    const f = gitlab({ records: { 's1-r1.json': r }, diffs: { [SHA1]: A_DIFF }, gitlab: { failPublish: (_, drafts) => drafts.length > 0 } })
+    expect(postTrail([], f.io)).toBe(0)
+    expect(f.gl.deleted).toEqual([200])
+    expect(f.gl.notes[0]).toContain("GitLab refused this round's line comments")
+    expect(f.out[0]).toBe('s1 r1: posted with all 1 in body - GitLab refused the line comments: glab: 400 Bad Request (HTTP 400)')
+  })
+
+  it('names a round whose plain note fails too, keeps posting the others and exits non-zero', () => {
+    const records = { 's1-r1.json': round({ findings: [finding('codex-F1')] }), 's2-r1.json': round({ loop: 's2', findings: [finding('codex-F1', { line: 40 })] }) }
+    const f = gitlab({ records, diffs: { [SHA1]: A_DIFF }, gitlab: { failDraft: () => true, failNote: true } })
+    expect(postTrail([], f.io)).toBe(1)
+    expect(f.gl.published.map(p => p.note.split('\n').at(-1))).toEqual(['<!-- granny-trail s2/r1@1111111a -->'])
+    expect(f.out).toEqual([
+      's1 r1: FAILED to post - glab: 500 Internal Server Error (HTTP 500)',
+      's2 r1: posted 0 line comments, 1 in body',
+      MR.web_url,
+      'not posted: s1 r1 - run the script again to post only what is missing',
+    ])
+  })
+
+  it('stops when it cannot delete the drafts of a refused round, so no later round publishes them', () => {
+    const records = { 's1-r1.json': round({ findings: [finding('codex-F1', { line: 9 }), finding('codex-F2', { line: 12 })] }), 's2-r1.json': round({ loop: 's2', findings: [finding('codex-F1', { line: 40 })] }) }
+    const f = gitlab({ records, diffs: { [SHA1]: A_DIFF }, gitlab: { failDraft: d => d.position?.new_line === 12, failDelete: () => true } })
+    expect(postTrail([], f.io)).toBe(1)
+    expect(f.gl.published).toEqual([])
+    expect(f.gl.notes).toEqual([])
+    expect(f.out).toEqual([
+      "s1 r1: FAILED to post - GitLab refused a line comment (glab: 400 Bad Request (HTTP 400)) and its draft 200 could not be deleted: glab: 503 Service Unavailable (HTTP 503)",
+      'stopped: the next round would publish that draft too',
+      MR.web_url,
+      'not posted: s1 r1 - run the script again to post only what is missing',
+    ])
+  })
+
+  it('prints the planned GitLab calls on --dry-run and makes none of them', () => {
+    const r = round({ findings: [finding('codex-F1')] })
+    const left = { id: 50, note: `old\n${findingMarker(r, { id: 'codex-F1' })}` }
+    const f = gitlab({ records: { 's1-r1.json': r }, diffs: { [SHA1]: A_DIFF }, gitlab: { drafts: [left] } })
+    expect(postTrail(['--dry-run'], f.io)).toBe(0)
+    expect(writes(f)).toEqual([])
+    expect(f.out[0]).toBe('would delete 1 leftover granny draft note')
+    expect(f.out[1]).toBe('s1 r1: would post 1 line comment, 0 in body')
+    expect(JSON.parse(f.out[2]!)).toEqual([
+      { method: 'POST', path: `${MR_PATH}/draft_notes`, body: { note: findingComment(r.findings[0]!, r, [r]), position: { ...position(SHA1), new_line: 12, old_line: 11 } } },
+      { method: 'POST', path: `${MR_PATH}/draft_notes/bulk_publish`, body: { note: roundBody(r, [r], { inBody: [], notInPr: false, gitlab: true }) } },
+    ])
+    expect(f.out.at(-1)).toBe(MR.web_url)
+  })
+
+  it('writes --out against the MR, and against --base when the branch has no MR', () => {
+    const r = round({ findings: [finding('codex-F1')] })
+    const f = gitlab({ records: { 's1-r1.json': r }, diffs: { [SHA1]: A_DIFF } })
+    expect(postTrail(['--out', 'o.json'], f.io)).toBe(0)
+    const plan = planRound(fake({ diffs: { [SHA1]: A_DIFF } }).io, r, [r], { head: HEAD, base: BASE, platform: 'gitlab' }, TOP)
+    expect(JSON.parse(f.written['o.json']!)).toEqual({ version: 1, reviews: [plan] })
+    expect(writes(f)).toEqual([])
+    const none = gitlab({ records: { 's1-r1.json': r }, gitlab: { mrs: [] }, refs: { 'main^{commit}': BASE, 'HEAD^{commit}': HEAD } })
+    expect(postTrail(['--out', 'o.json', '--base', 'main'], none.io)).toBe(0)
+    expect(none.written['o.json']).toBeDefined()
+    const missing = gitlab({ records: { 's1-r1.json': r }, gitlab: { mr: null }, refs: { 'main^{commit}': BASE, 'HEAD^{commit}': HEAD } })
+    expect(postTrail(['--out', 'o.json', '--base', 'main', '--pr', '5'], missing.io)).toBe(2)
+    expect(missing.out).toEqual(['open the MR first (glab: 404 Not Found (HTTP 404))'])
+    const stale = gitlab({ records: { 's1-r1.json': r }, refs: { 'main^{commit}': BASE, 'HEAD^{commit}': HEAD } })
+    expect(postTrail(['--out', 'o.json', '--base', 'main'], stale.io)).toBe(1)
+    expect(stale.out[0]).toStartWith("the MR's head commit 9999999 and target commit 0000000 are not in this checkout")
   })
 })
 

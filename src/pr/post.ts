@@ -1,6 +1,7 @@
 import { trimSlashes } from '../core/paths'
 import type { TrailRound } from '../core/types'
 import { postGithub, prOf, prTarget } from './github'
+import { mrOf, mrTarget, postGitlab } from './gitlab'
 import { failure, plural, type PosterIo } from './io'
 import { type PlannedReview, planRound, type Target } from './plan'
 import { detectPlatform, type Platform, PLATFORMS } from './platform'
@@ -77,6 +78,11 @@ function outTarget(io: PosterIo, options: Options): Target | { error: string; co
     if (typeof pr !== 'string') return prTarget(pr)
     if (options.pr !== undefined) return { error: `open the PR first (${pr})`, code: 2 }
   }
+  if (platform === 'gitlab') {
+    const mr = mrOf(io, options.pr)
+    if (!('error' in mr)) return mrTarget(io, mr)
+    if (options.pr !== undefined || mr.code !== 2) return mr
+  }
   if (options.base === undefined) return { error: '--out needs the target branch: open the PR, or pass --base <ref>', code: 1 }
   const base = commitOf(io, options.base)
   if (base === undefined) return { error: `--base ${options.base} is not a commit`, code: 1 }
@@ -142,10 +148,7 @@ export function postTrail(argv: string[], io: PosterIo): number {
     io.print(platform.error)
     return 1
   }
-  if (platform === 'gitlab') {
-    io.print('posting to a GitLab MR is not built yet: pass --out <file> to write the planned reviews')
-    return 1
-  }
   if (!records.length) io.print(`no trail records in ${dir}`)
-  return postGithub(io, { records, toplevel, ...(options.pr === undefined ? {} : { pr: options.pr }), dryRun: options.dryRun })
+  const request = { records, toplevel, ...(options.pr === undefined ? {} : { pr: options.pr }), dryRun: options.dryRun }
+  return platform === 'gitlab' ? postGitlab(io, request) : postGithub(io, request)
 }

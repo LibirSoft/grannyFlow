@@ -714,6 +714,213 @@ function postGithub(io, { records, toplevel, pr: prNumber, dryRun }) {
   return 0;
 }
 
+// src/pr/gitlab.ts
+var MARKER = "<!-- granny-trail ";
+var mrPath = (iid) => `projects/:id/merge_requests/${iid}`;
+function call(io, c) {
+  if (c.method === "DELETE")
+    return io.exec("glab", ["api", c.path, "--method", "DELETE"]);
+  return io.exec("glab", ["api", c.path, "--method", "POST", "--header", "Content-Type: application/json", "--input", "-"], JSON.stringify(c.body));
+}
+function list(io, path, fields = []) {
+  const r = io.exec("glab", ["api", path, "--method", "GET", ...fields.flatMap((f) => ["--raw-field", f]), "--paginate", "--output", "ndjson"]);
+  if (r.code !== 0)
+    return { error: failure(r) };
+  try {
+    return r.stdout.split(`
+`).filter((line) => line.trim()).flatMap((line) => JSON.parse(line));
+  } catch (e) {
+    return { error: `glab printed no JSON list: ${e.message}` };
+  }
+}
+var isRecord = (v) => typeof v === "object" && v !== null;
+function mrOf(io, iid) {
+  let id = iid;
+  if (id === undefined) {
+    const branch = io.exec("git", ["branch", "--show-current"]).stdout.trim();
+    if (!branch)
+      return { error: "open the MR first (no branch is checked out: pass --pr <iid>)", code: 2 };
+    const found = list(io, "projects/:id/merge_requests", [`source_branch=${branch}`, "state=opened"]);
+    if (!Array.isArray(found))
+      return { error: `open the MR first (${found.error})`, code: 2 };
+    const mrs = found.filter(isRecord);
+    if (!mrs.length)
+      return { error: `open the MR first (no open merge request from ${branch})`, code: 2 };
+    if (mrs.length > 1)
+      return { error: `${branch} is the source of ${mrs.length} open MRs: ${mrs.map((m) => `!${m.iid} ${m.web_url}`).join(", ")} - pass --pr <iid>`, code: 1 };
+    id = Number(mrs[0].iid);
+  }
+  const r = io.exec("glab", ["api", mrPath(id)]);
+  if (r.code !== 0)
+    return { error: `open the MR first (${failure(r)})`, code: 2 };
+  let mr;
+  try {
+    mr = JSON.parse(r.stdout);
+  } catch {
+    return { error: `glab printed no MR: ${r.stdout.trim().slice(0, 200)}`, code: 1 };
+  }
+  if (!isRecord(mr) || !Number.isInteger(mr.iid) || typeof mr.sha !== "string")
+    return { error: `glab printed no MR: ${r.stdout.trim().slice(0, 200)}`, code: 1 };
+  if (!isRecord(mr.diff_refs) || typeof mr.diff_refs.start_sha !== "string")
+    return { error: `GitLab has no diff for !${mr.iid} yet: run this again in a moment`, code: 1 };
+  return mr;
+}
+var hasCommit = (io, sha) => io.exec("git", ["rev-parse", "--verify", "--quiet", `${sha}^{commit}`]).code === 0;
+function mrTarget(io, mr) {
+  const head = { what: "head", sha: mr.sha };
+  const target = { what: "target", sha: mr.diff_refs.start_sha };
+  const missing = [head, target].filter((c) => !hasCommit(io, c.sha)).map((c) => `${c.what} commit ${short(c.sha)}`);
+  if (missing.length)
+    return { error: `the MR's ${missing.join(" and ")} ${missing.length === 1 ? "is" : "are"} not in this checkout: run git fetch, then run this again`, code: 1 };
+  return { head: mr.sha, base: mr.diff_refs.start_sha, platform: "gitlab" };
+}
+function draftNote(plan, c) {
+  const position = {
+    position_type: "text",
+    base_sha: plan.mergeBase,
+    start_sha: plan.mergeBase,
+    head_sha: plan.commit,
+    old_path: c.oldPath,
+    new_path: c.path,
+    new_line: c.line,
+    ...c.kind === "context" ? { old_line: c.oldLine } : {}
+  };
+  return { note: c.body, position };
+}
+function roundCalls(iid, plan) {
+  const drafts = `${mrPath(iid)}/draft_notes`;
+  return [...plan.comments.map((c) => ({ method: "POST", path: drafts, body: draftNote(plan, c) })), { method: "POST", path: `${drafts}/bulk_publish`, body: { note: plan.body } }];
+}
+function clearDrafts(io, mr, dryRun) {
+  const drafts = list(io, `${mrPath(mr.iid)}/draft_notes`);
+  if (!Array.isArray(drafts))
+    return `could not list your draft notes on !${mr.iid}: ${drafts.error}`;
+  const notes = drafts.filter(isRecord).map((d) => ({ id: Number(d.id), note: String(d.note ?? "") }));
+  const foreign = notes.filter((d) => !d.note.includes(MARKER));
+  if (foreign.length) {
+    const named = foreign.map((d) => `${d.id} ("${d.note.replace(/\s+/g, " ").trim().slice(0, 60)}")`).join(", ");
+    return `your draft notes on !${mr.iid} that granny did not write: ${named} - posting a round publishes all your drafts, so publish or delete them first`;
+  }
+  if (!notes.length)
+    return;
+  if (dryRun) {
+    io.print(`would delete ${plural(notes.length, "leftover granny draft note")}`);
+    return;
+  }
+  for (const d of notes) {
+    const r = call(io, { method: "DELETE", path: `${mrPath(mr.iid)}/draft_notes/${d.id}` });
+    if (r.code !== 0)
+      return `could not delete the leftover granny draft note ${d.id}: ${failure(r)}`;
+  }
+  io.print(`deleted ${plural(notes.length, "leftover granny draft note")}`);
+  return;
+}
+function postRound(io, mr, plan, replan) {
+  const calls = roundCalls(mr.iid, plan);
+  const publish = calls.pop();
+  const created = [];
+  let refused;
+  for (const c of calls) {
+    const r = call(io, c);
+    if (r.code !== 0) {
+      refused = failure(r);
+      break;
+    }
+    try {
+      const id = JSON.parse(r.stdout).id;
+      if (Number.isInteger(id))
+        created.push(id);
+    } catch {}
+  }
+  const note = (body) => call(io, { method: "POST", path: `${mrPath(mr.iid)}/notes`, body: { body } });
+  if (refused === undefined) {
+    const published = call(io, publish);
+    if (published.code === 0)
+      return { ok: true };
+    if (!calls.length) {
+      const plain = note(plan.body);
+      return plain.code === 0 ? { ok: true } : { ok: false, error: failure(plain) };
+    }
+    refused = failure(published);
+  }
+  for (const id of created) {
+    const r = call(io, { method: "DELETE", path: `${mrPath(mr.iid)}/draft_notes/${id}` });
+    if (r.code !== 0)
+      return { ok: false, error: `GitLab refused a line comment (${refused}) and its draft ${id} could not be deleted: ${failure(r)}`, stuck: true };
+  }
+  const flat = replan(refused);
+  const plain = flat ? note(flat.body) : undefined;
+  return plain?.code === 0 ? { ok: true, refused } : { ok: false, error: plain ? failure(plain) : refused };
+}
+function postGitlab(io, { records, toplevel, pr: iid, dryRun }) {
+  const mr = mrOf(io, iid);
+  if ("error" in mr) {
+    io.print(mr.error);
+    return mr.code;
+  }
+  const target = mrTarget(io, mr);
+  if ("error" in target) {
+    io.print(target.error);
+    return target.code;
+  }
+  const notes = list(io, `${mrPath(mr.iid)}/notes`);
+  if (!Array.isArray(notes)) {
+    io.print(`could not list the MR's notes: ${notes.error}`);
+    return 1;
+  }
+  const posted = notes.filter(isRecord).map((n) => String(n.body ?? "")).join(`
+`);
+  const failed = [];
+  let cleared = false;
+  for (const r of records) {
+    const at = `${r.loop} r${r.round}`;
+    if (posted.includes(roundMarker(r))) {
+      io.print(`${at}: skipped, already posted`);
+      continue;
+    }
+    const plan = planRound(io, r, records, target, toplevel);
+    if (!plan) {
+      io.print(`${at}: clean, nothing to post`);
+      continue;
+    }
+    if (!cleared) {
+      const stop = clearDrafts(io, mr, dryRun);
+      if (stop !== undefined) {
+        io.print(stop);
+        io.print(mr.web_url);
+        return 1;
+      }
+      cleared = true;
+    }
+    const moved = r.loop !== "plan" && plan.commit !== r.reviewedSha ? `, on the MR head ${short(mr.sha)}` : "";
+    const what = r.findings.length ? `${plural(plan.comments.length, "line comment")}, ${r.findings.length - plan.comments.length} in body${moved}` : `the round's ${r.outcome ?? "clean"} note`;
+    if (dryRun) {
+      io.print(`${at}: would post ${what}`);
+      io.print(JSON.stringify(roundCalls(mr.iid, plan), null, 2));
+      continue;
+    }
+    const sent = postRound(io, mr, plan, (refused) => planRound(io, r, records, target, toplevel, refused));
+    if (sent.ok && sent.refused === undefined)
+      io.print(`${at}: posted ${what}`);
+    else if (sent.ok)
+      io.print(`${at}: posted with all ${r.findings.length} in body - GitLab refused the line comments: ${sent.refused}`);
+    else {
+      io.print(`${at}: FAILED to post - ${sent.error}`);
+      failed.push(at);
+      if (sent.stuck) {
+        io.print("stopped: the next round would publish that draft too");
+        break;
+      }
+    }
+  }
+  io.print(mr.web_url);
+  if (failed.length) {
+    io.print(`not posted: ${failed.join(", ")} - run the script again to post only what is missing`);
+    return 1;
+  }
+  return 0;
+}
+
 // src/pr/platform.ts
 var PLATFORMS = ["github", "gitlab"];
 function hostOf(url) {
@@ -891,6 +1098,13 @@ function outTarget(io, options) {
     if (options.pr !== undefined)
       return { error: `open the PR first (${pr})`, code: 2 };
   }
+  if (platform === "gitlab") {
+    const mr = mrOf(io, options.pr);
+    if (!("error" in mr))
+      return mrTarget(io, mr);
+    if (options.pr !== undefined || mr.code !== 2)
+      return mr;
+  }
   if (options.base === undefined)
     return { error: "--out needs the target branch: open the PR, or pass --base <ref>", code: 1 };
   const base = commitOf(io, options.base);
@@ -959,13 +1173,10 @@ pass the trail directory with --trail <dir>`);
     io.print(platform.error);
     return 1;
   }
-  if (platform === "gitlab") {
-    io.print("posting to a GitLab MR is not built yet: pass --out <file> to write the planned reviews");
-    return 1;
-  }
   if (!records.length)
     io.print(`no trail records in ${dir}`);
-  return postGithub(io, { records, toplevel, ...options.pr === undefined ? {} : { pr: options.pr }, dryRun: options.dryRun });
+  const request = { records, toplevel, ...options.pr === undefined ? {} : { pr: options.pr }, dryRun: options.dryRun };
+  return platform === "gitlab" ? postGitlab(io, request) : postGithub(io, request);
 }
 
 // src/pr/cli.ts
