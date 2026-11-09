@@ -321,43 +321,85 @@ function metricErrors(at, m) {
 var trimSlashes = (path) => path.replace(/\/+$/, "");
 
 // src/pr/hunks.ts
-var HUNK = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/;
+var HUNK = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/;
 function unquote(path) {
   if (!path.startsWith('"'))
     return path;
   return path.slice(1, -1).replace(/\\(["\\tn])/g, (_, c) => ({ t: "\t", n: `
 ` })[c] ?? c);
 }
-var newPath = (line) => {
+function headerPath(line, prefix) {
   const path = unquote(line.slice(4).replace(/\t.*$/, ""));
-  return path === "/dev/null" ? undefined : path.replace(/^b\//, "");
-};
-function parseHunks(diff) {
-  const hunks = new Map;
+  if (path === "/dev/null")
+    return;
+  return path.startsWith(prefix) ? path.slice(prefix.length) : path;
+}
+function parseDiff(diff) {
+  const files = new Map;
+  let oldPath;
   let file;
   let header = false;
+  let walk;
+  const finish = () => {
+    while (walk && walk.newLine <= walk.newEnd)
+      walk.file.lines.set(walk.newLine++, { kind: "context", oldLine: walk.oldLine++ });
+    walk = undefined;
+  };
   for (const line of diff.split(`
 `)) {
+    if (walk && (walk.newLine <= walk.newEnd || walk.oldLeft > 0)) {
+      const mark = line[0];
+      const newLeft = walk.newLine <= walk.newEnd;
+      if (mark === "+" && newLeft) {
+        walk.file.lines.set(walk.newLine++, { kind: "added" });
+        continue;
+      }
+      if (mark === "-" && walk.oldLeft > 0) {
+        walk.oldLine++;
+        walk.oldLeft--;
+        continue;
+      }
+      if (mark === " " && newLeft) {
+        walk.file.lines.set(walk.newLine++, { kind: "context", oldLine: walk.oldLine++ });
+        walk.oldLeft--;
+        continue;
+      }
+      if (mark === "\\")
+        continue;
+    }
     if (line.startsWith("diff --git ")) {
+      finish();
+      oldPath = undefined;
       file = undefined;
       header = true;
-    } else if (header && line.startsWith("+++ "))
-      file = newPath(line);
-    else if (line.startsWith("@@")) {
+    } else if (header && line.startsWith("--- "))
+      oldPath = headerPath(line, "a/");
+    else if (header && line.startsWith("+++ ")) {
+      const path = headerPath(line, "b/");
+      if (path === undefined)
+        file = undefined;
+      else {
+        file = files.get(path) ?? { oldPath: oldPath ?? path, ranges: [], lines: new Map };
+        files.set(path, file);
+      }
+    } else if (line.startsWith("@@")) {
+      finish();
       header = false;
       const m = HUNK.exec(line);
       if (!m || file === undefined)
         continue;
-      const start = Number(m[1]);
-      const count = m[2] === undefined ? 1 : Number(m[2]);
-      if (!count)
-        continue;
-      const ranges = hunks.get(file) ?? [];
-      ranges.push([start, start + count - 1]);
-      hunks.set(file, ranges);
+      const start = Number(m[3]);
+      const count = m[4] === undefined ? 1 : Number(m[4]);
+      if (count)
+        file.ranges.push([start, start + count - 1]);
+      walk = { file, oldLine: Number(m[1]), oldLeft: m[2] === undefined ? 1 : Number(m[2]), newLine: start, newEnd: start + count - 1 };
     }
   }
-  return hunks;
+  finish();
+  return files;
+}
+function parseHunks(diff) {
+  return new Map([...parseDiff(diff)].filter(([, f]) => f.ranges.length).map(([path, f]) => [path, f.ranges]));
 }
 var onChangedLine = (hunks, file, line) => line !== undefined && (hunks.get(file) ?? []).some(([from, to]) => line >= from && line <= to);
 

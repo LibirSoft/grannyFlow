@@ -4,7 +4,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSyn
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { TrailFinding, TrailRound } from '../src/core/types'
-import { onChangedLine, parseHunks } from '../src/pr/hunks'
+import { diffLine, onChangedLine, parseDiff, parseHunks } from '../src/pr/hunks'
 import { postTrail, type ExecResult, type PosterIo, type PrInfo, type ReviewPayload } from '../src/pr/post'
 import { byTrailOrder, trailProblem } from '../src/pr/records'
 import { agentText, findingComment, outcomeLine, roundBody } from '../src/pr/render'
@@ -211,6 +211,74 @@ describe('parseHunks', () => {
         ['src/sp ace.ts', [[1, 1]]],
       ]),
     )
+  })
+})
+
+describe('diffLine', () => {
+  it('tells an added line from a context line and maps a context line after an earlier hunk to its old number', () => {
+    const diff = [
+      'diff --git a/src/mod.ts b/src/mod.ts',
+      '--- a/src/mod.ts',
+      '+++ b/src/mod.ts',
+      '@@ -3,3 +3,4 @@',
+      ' keep',
+      '-gone',
+      '+new',
+      '+more',
+      ' tail',
+      '\\ No newline at end of file',
+      '@@ -20,5 +21,3 @@ f()',
+      ' ctx',
+      '-x',
+      '-y',
+      '-z',
+      '+w',
+      ' end',
+    ].join('\n')
+    const files = parseDiff(diff)
+    expect(diffLine(files, 'src/mod.ts', 3)).toEqual({ oldPath: 'src/mod.ts', kind: 'context', oldLine: 3 })
+    expect(diffLine(files, 'src/mod.ts', 4)).toEqual({ oldPath: 'src/mod.ts', kind: 'added' })
+    expect(diffLine(files, 'src/mod.ts', 5)).toEqual({ oldPath: 'src/mod.ts', kind: 'added' })
+    expect(diffLine(files, 'src/mod.ts', 6)).toEqual({ oldPath: 'src/mod.ts', kind: 'context', oldLine: 5 })
+    expect(diffLine(files, 'src/mod.ts', 21)).toEqual({ oldPath: 'src/mod.ts', kind: 'context', oldLine: 20 })
+    expect(diffLine(files, 'src/mod.ts', 22)).toEqual({ oldPath: 'src/mod.ts', kind: 'added' })
+    expect(diffLine(files, 'src/mod.ts', 23)).toEqual({ oldPath: 'src/mod.ts', kind: 'context', oldLine: 24 })
+    expect(diffLine(files, 'src/mod.ts', 7)).toBeUndefined()
+    expect(diffLine(files, 'src/mod.ts', 24)).toBeUndefined()
+    expect(diffLine(files, 'src/mod.ts', undefined)).toBeUndefined()
+  })
+
+  it("names a renamed file's old path, and a new file's own path", () => {
+    const diff = [
+      'diff --git a/src/old.ts b/src/new.ts',
+      'similarity index 90%',
+      'rename from src/old.ts',
+      'rename to src/new.ts',
+      '--- a/src/old.ts',
+      '+++ b/src/new.ts',
+      '@@ -3,2 +3,3 @@',
+      ' a',
+      '+b',
+      ' c',
+      'diff --git a/src/fresh.ts b/src/fresh.ts',
+      'new file mode 100644',
+      '--- /dev/null',
+      '+++ b/src/fresh.ts',
+      '@@ -0,0 +1 @@',
+      '+one',
+    ].join('\n')
+    const files = parseDiff(diff)
+    expect(diffLine(files, 'src/new.ts', 5)).toEqual({ oldPath: 'src/old.ts', kind: 'context', oldLine: 4 })
+    expect(diffLine(files, 'src/new.ts', 4)).toEqual({ oldPath: 'src/old.ts', kind: 'added' })
+    expect(diffLine(files, 'src/old.ts', 4)).toBeUndefined()
+    expect(diffLine(files, 'src/fresh.ts', 1)).toEqual({ oldPath: 'src/fresh.ts', kind: 'added' })
+  })
+
+  it('reads an added line that looks like a file header as an added line', () => {
+    const diff = ['diff --git a/src/a.ts b/src/a.ts', '--- a/src/a.ts', '+++ b/src/a.ts', '@@ -1,1 +1,2 @@', ' a', '+++ b/src/evil.ts'].join('\n')
+    const files = parseDiff(diff)
+    expect(diffLine(files, 'src/a.ts', 2)).toEqual({ oldPath: 'src/a.ts', kind: 'added' })
+    expect(files.has('src/evil.ts')).toBe(false)
   })
 })
 
