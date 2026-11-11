@@ -30,6 +30,8 @@ export const OPENCODE_DECODE = [
   String.raw`{ print }`,
 ].join('; ')
 
+const COUNTED = /[^ \t\r]/
+
 const FRAME_LINE = /^\[granny\] opencode: (?:text (\d+)|(step)|error (.*)|(dropped))$/
 
 export interface OpencodeAnswer {
@@ -80,7 +82,7 @@ export function opencodeAnswer(output: string): OpencodeAnswer {
     const line = raw.trim()
     if (open && open.got < open.want) {
       open.lines.push(raw)
-      if (line) open.got++
+      if (COUNTED.test(raw)) open.got++
       continue
     }
     const frame = FRAME_LINE.exec(line)
@@ -92,7 +94,7 @@ export function opencodeAnswer(output: string): OpencodeAnswer {
       else dropped++
       continue
     }
-    if (open && !line) {
+    if (open && !COUNTED.test(raw)) {
       open.lines.push(raw)
       continue
     }

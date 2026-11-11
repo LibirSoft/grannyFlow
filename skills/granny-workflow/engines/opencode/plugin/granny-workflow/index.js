@@ -1048,6 +1048,7 @@ var OPENCODE_DECODE = [
   String.raw`/^\{/ { next }`,
   String.raw`{ print }`
 ].join("; ");
+var COUNTED = /[^ \t\r]/;
 var FRAME_LINE = /^\[granny\] opencode: (?:text (\d+)|(step)|error (.*)|(dropped))$/;
 function errorText(error) {
   if (!isObject2(error))
@@ -1090,7 +1091,7 @@ function opencodeAnswer(output) {
     const line = raw.trim();
     if (open && open.got < open.want) {
       open.lines.push(raw);
-      if (line)
+      if (COUNTED.test(raw))
         open.got++;
       continue;
     }
@@ -1107,7 +1108,7 @@ function opencodeAnswer(output) {
         dropped++;
       continue;
     }
-    if (open && !line) {
+    if (open && !COUNTED.test(raw)) {
       open.lines.push(raw);
       continue;
     }

@@ -113,6 +113,11 @@ describe('opencodeAnswer', () => {
     expect(opencodeAnswer(`[granny] opencode: step\n[granny] opencode: text 5\n${detail.join('\n')}\n`)).toEqual({ text: detail.join('\n') })
   })
 
+  it('counts a part\'s lines as the decoder does, so a line of only a no-break space or form feed does not pull a later frame into the text', () => {
+    expect(opencodeAnswer('[granny] opencode: text 3\npartial\n\u00a0\nmore\n[granny] opencode: error {"type":"error","error":{"type":"x","message":"boom"}}\n')).toEqual({ text: 'partial\n\u00a0\nmore', error: 'x: boom' })
+    expect(opencodeAnswer('[granny] opencode: text 3\nLooking.\n\f\nchecking\n[granny] opencode: step\n[granny] opencode: text 1\n- [P1] Real — a.ts:1\n')).toEqual({ text: '- [P1] Real — a.ts:1' })
+  })
+
   it('counts a text part that came back short, or one the script could not decode, as dropped', () => {
     expect(opencodeAnswer('[granny] opencode: text 1\nNo findings.\n[granny] opencode: text 3\n- [P1] Leak — src/a.ts:3\n')).toEqual({ text: 'No findings.\n- [P1] Leak — src/a.ts:3', dropped: 1 })
     expect(opencodeAnswer('[granny] opencode: dropped\n[granny] opencode: text 1\nNo findings.\n')).toEqual({ text: 'No findings.', dropped: 1 })
