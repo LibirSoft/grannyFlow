@@ -1062,6 +1062,12 @@ function opencodeAnswer(output) {
   };
   for (const raw of output.split(/\r?\n/)) {
     const line = raw.trim();
+    if (open && open.got < open.want) {
+      open.lines.push(raw);
+      if (line)
+        open.got++;
+      continue;
+    }
     const frame = FRAME_LINE.exec(line);
     if (frame) {
       close();
@@ -1075,10 +1081,8 @@ function opencodeAnswer(output) {
         dropped++;
       continue;
     }
-    if (open && (!line || open.got < open.want)) {
+    if (open && !line) {
       open.lines.push(raw);
-      if (line)
-        open.got++;
       continue;
     }
     close();

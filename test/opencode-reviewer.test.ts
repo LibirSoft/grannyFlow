@@ -108,8 +108,13 @@ describe('opencodeAnswer', () => {
     expect(opencodeAnswer('[granny] opencode: text 1\nNo findings.\n\nError: Variant unavailable for kimi/k3: nope\n')).toEqual({ text: 'No findings.', error: 'Error: Variant unavailable for kimi/k3: nope' })
   })
 
+  it('takes a frame-shaped line inside a text part as the part\'s text while the part is short of its lines', () => {
+    const detail = ['- [P2] Frames in text — src/core/opencode.ts:81', '  [granny] opencode: error {"type":"x"}', '  [granny] opencode: step', '[granny] opencode: text 2', 'end of detail']
+    expect(opencodeAnswer(`[granny] opencode: step\n[granny] opencode: text 5\n${detail.join('\n')}\n`)).toEqual({ text: detail.join('\n') })
+  })
+
   it('counts a text part that came back short, or one the script could not decode, as dropped', () => {
-    expect(opencodeAnswer('[granny] opencode: text 3\n- [P1] Leak — src/a.ts:3\n[granny] opencode: step\n[granny] opencode: text 1\nNo findings.')).toEqual({ text: 'No findings.', dropped: 1 })
+    expect(opencodeAnswer('[granny] opencode: text 1\nNo findings.\n[granny] opencode: text 3\n- [P1] Leak — src/a.ts:3\n')).toEqual({ text: 'No findings.\n- [P1] Leak — src/a.ts:3', dropped: 1 })
     expect(opencodeAnswer('[granny] opencode: dropped\n[granny] opencode: text 1\nNo findings.\n')).toEqual({ text: 'No findings.', dropped: 1 })
   })
 
