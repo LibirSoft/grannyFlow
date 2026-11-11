@@ -52,7 +52,7 @@ Ask these five, each with the current value (or the default) marked:
    | 5 | `granny` | the final PR-ready check and the extraction fallback | session model | every host |
    | 6 | `helper` | runs granny's plain commands (worktree setup, git reads, checks) and reports the exit code; decides nothing | `haiku`, effort `low` | Claude Code only |
 
-   Skip `helper` on opencode and omp: granny runs those commands itself there and starts no helper. On Claude Code and omp, ask the implementer's and the planner's effort too (`low`, `medium`, `high`, `xhigh`, `max`; default: the host's own); omp passes it as `--thinking`. On opencode effort is ignored: offer the model's `#variant` instead. A Codex reviewer keeps Codex's own model unless the user names one.
+   Skip `helper` on opencode and omp: granny runs those commands itself there and starts no helper. On Claude Code and omp, ask the implementer's and the planner's effort on this host too (`low`, `medium`, `high`, `xhigh`, `max`; default: the host's own); omp passes it as `--thinking`. On opencode effort is ignored: offer the model's `#variant` instead. A Codex reviewer keeps Codex's own model unless the user names one.
 
    When the answers leave every reviewer an `agent` reviewer on the implementer's model (two roles with no model share the session model; a Codex or `command` reviewer counts as different), tell the user: "reviewers share the implementer's model; a different model may catch more". This is advice on every host: never refuse, and write what the user chose.
 
@@ -68,7 +68,7 @@ Build the config from the answers:
 - `reviewers`: written when it is not the default, or when the file already had a different list.
 - `checks`: one entry per chosen command, `{ "name": "<script or target name>", "run": "<command>" }`, every name unique. Left out when none were chosen.
 - `roles.<role>.model` and a reviewer entry's `model`: an object keyed by the current host, `{ "<host>": "<model>" }` with host `claude-code`, `opencode` or `omp`, so the same file works on the other hosts. Merge the key into the object the file already has, keeping the other hosts' keys; a string already there becomes an object that keeps it for the other hosts. A role left on its default gets no key for this host (drop a key the file had for it, then an empty object, then an empty role). A choice equal to the built-in default (`haiku` for the judge or the helper on Claude Code) is not written either.
-- `roles.<role>.effort` and a reviewer's `effort`: written only when chosen. It is not keyed by host: Claude Code and omp use it, opencode ignores it.
+- `roles.<role>.effort` and a reviewer's `effort`: written only when chosen, as an object keyed by the current host, `{ "<host>": "<effort>" }` with host `claude-code` or `omp`. Merge the key into the object the file already has, keeping the other hosts' keys; a string already there becomes an object that keeps it for the other effort host (`"high"`, with `medium` chosen on omp, becomes `{ "claude-code": "high", "omp": "medium" }`). Never written on opencode, where the model's `#variant` is offered instead. A choice of "the host's own" drops this host's key, then an empty object.
 
 When the file already exists, keep every key the user did not answer for and replace only the ones they did. Use only keys from [config.md](config.md#keys): granny rejects unknown keys when a run starts.
 
@@ -96,7 +96,7 @@ Example - on omp, normal strictness, models chosen per role: Opus writes the cod
 {
   "threshold": 70,
   "roles": {
-    "implementer": { "model": { "omp": "anthropic/claude-opus-5-5" }, "effort": "high" },
+    "implementer": { "model": { "omp": "anthropic/claude-opus-5-5" }, "effort": { "omp": "high" } },
     "judge": { "model": { "omp": "anthropic/claude-haiku-5-5" } }
   },
   "reviewers": [

@@ -7,7 +7,7 @@ Layers, later wins:
 3. `<repo>/granny.config.json` - project, safe to commit
 4. the run's `config` argument
 
-`roles.<role>` objects merge key by key (set a key to `null` to drop it); every other key, `reviewers` included, replaces the lower layer. Unknown keys and invalid values stop the run before any agent starts, with every problem listed and its path (`reviewers[2].focus ...`).
+`roles.<role>` objects merge key by key (set a key to `null` to drop it); every other key, `reviewers` included, replaces the lower layer. Inside a role a higher layer's `model` or `effort` replaces the lower layer's whole, string or object: host keys are not merged across layers ([Models per host](#models-per-host)). Unknown keys and invalid values stop the run before any agent starts, with every problem listed and its path (`reviewers[2].focus ...`); an invalid `effort` also names the config layer that set it (`config layer 2: reviewers[0].effort: unknown host "cursor"`).
 
 ## Keys
 
@@ -54,14 +54,26 @@ A role's or a reviewer's `model` is either one string for every host, or an obje
 }
 ```
 
-- **Claude Code** passes it to `agent({ model })`: `opus`, `sonnet`, `haiku`, or a model ID the session accepts. `effort` (`low`, `medium`, `high`, `xhigh`, `max`) is passed as the agent's reasoning effort.
-- **opencode** needs `provider/model`, optionally `#variant` (`anthropic/claude-sonnet-5-5#high`); list them with `opencode models`. `effort` is ignored - use the variant suffix. A role with no model uses the model of the session that called `granny_run`.
-- **omp** takes what `omp --model` takes: `provider/id` (exact, `anthropic/claude-sonnet-5-5`), a fuzzy id (keyed to omp, `{ "omp": "opus" }`) or a model role from the omp settings (`slow`); list them with `omp models`. `effort` is passed as `--thinking <effort>`. A role with no model uses the model of the session that called `granny_run`.
+- **Claude Code** passes it to `agent({ model })`: `opus`, `sonnet`, `haiku`, or a model ID the session accepts. `effort` (`low`, `medium`, `high`, `xhigh`, `max`), or its `claude-code` key, is passed as the agent's reasoning effort.
+- **opencode** needs `provider/model`, optionally `#variant` (`anthropic/claude-sonnet-5-5#high`); list them with `opencode models`. `effort` is ignored - use the variant suffix. An `opencode` key in a host-keyed `effort` is accepted, so the object matches the string form, and has no effect. A role with no model uses the model of the session that called `granny_run`.
+- **omp** takes what `omp --model` takes: `provider/id` (exact, `anthropic/claude-sonnet-5-5`), a fuzzy id (keyed to omp, `{ "omp": "opus" }`) or a model role from the omp settings (`slow`); list them with `omp models`. `effort`, or its `omp` key, is passed as `--thinking <effort>`. A role with no model uses the model of the session that called `granny_run`.
 - **Cursor** reads no config; set `model:` in the subagent files (see cursor.md).
 
 On opencode and omp `granny_run` refuses a run with a model the host cannot run, before anything starts, with one line per entry, the config layer it came from and the fix. A Claude Code alias (`sonnet`, `opus`, ...) written as one string for every host is refused on both, so key it to `claude-code` in a config you share between hosts. Claude Code takes its aliases.
 
-A host key that is missing means "inherit" on that host. Reviewers take `model` and `effort` from their own entry, never from a role.
+`effort` takes the same two forms: one of `low`, `medium`, `high`, `xhigh`, `max` for every host, or an object of those keyed by host, so two models in one entry can think at different levels:
+
+```json
+{
+  "reviewers": [
+    { "name": "opus", "engine": "agent", "model": { "claude-code": "opus", "omp": "openai-codex/gpt-6.1-terra" }, "effort": { "claude-code": "high", "omp": "medium" } }
+  ]
+}
+```
+
+A host key that is missing means "inherit" on that host for `model`; for `effort`, a missing host key means the host's default effort. Reviewers take `model` and `effort` from their own entry, never from a role.
+
+A higher layer's `model` or `effort` replaces the lower layer's whole: a project file with `"effort": { "omp": "medium" }` over a user file with `"effort": { "claude-code": "high" }` leaves no `claude-code` effort. That holds for the defaults too: a layer that sets `roles.helper.effort` to an object without a `claude-code` key drops the helper's default `low` on Claude Code. An unknown host key or an effort outside the five values stops the run with the entry and the config layer, such as `config layer 2: roles.implementer.effort: unknown host "cursor"`.
 
 ## Worktree
 
@@ -218,7 +230,7 @@ The fix step is the implementer with write access (label `fix plan review r<n>`)
 | `name` | unique; `a-z`, `0-9`, `-` | names the reviewer's output files, log lines and finding ids. Omitted: `<engine>-<n>`, with `n` its 1-based position (`agent-2`) |
 | `engine` | `auto` (default), `codex`, `codex-plugin`, `agent`, `command` | which reviewer runs, below |
 | `model` | a string or an object keyed by host | the Codex engines pass it as `-m`; `agent` runs that host model; `command` puts it in `{model}` |
-| `effort` | `low`, `medium`, `high`, `xhigh`, `max` | the agent's reasoning effort, for engine `agent` on Claude Code and omp (as `--thinking`); the other engines do not use it |
+| `effort` | `low`, `medium`, `high`, `xhigh`, `max`, or an object of those keyed by host | the agent's reasoning effort, for engine `agent` on Claude Code and omp (as `--thinking`); the other engines do not use it |
 | `mode`, `focus` | | the Codex plugin only (engines `auto` and `codex-plugin`) - see [The Codex plugin](#the-codex-plugin) |
 | `command` | a command template | engine `command` only, and required there - see [Command reviewers](#command-reviewers) |
 
@@ -573,7 +585,7 @@ Claude Code (`/workflows`) has its own view of a run; it accepts the key and ign
   },
   "reviewers": [
     { "name": "codex", "engine": "auto", "mode": "review" },
-    { "name": "opus", "engine": "agent", "model": { "claude-code": "opus", "opencode": "anthropic/claude-opus-5-5", "omp": "anthropic/claude-opus-5-5" }, "effort": "high" },
+    { "name": "opus", "engine": "agent", "model": { "claude-code": "opus", "opencode": "anthropic/claude-opus-5-5", "omp": "anthropic/claude-opus-5-5" }, "effort": { "claude-code": "high", "omp": "medium" } },
     { "name": "glm", "engine": "command", "command": "opencode run -m opencode/glm-5.3-flash-free {prompt}" }
   ],
   "threshold": 70,

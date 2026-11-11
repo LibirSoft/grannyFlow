@@ -189,7 +189,7 @@ The prompt ends by asking the role to call its submit tool exactly once. When th
 
 ## Models and permissions
 
-Models are what omp's `--model` takes: `provider/id` (exact, such as `anthropic/claude-sonnet-5-5`), a fuzzy id (`opus`), or a model role from your omp settings (`slow`, `@slow`). List them with `omp models`. A role or agent reviewer without a model uses the model of the session that called `granny_run`; when that is unknown, omp picks its default. `effort` is passed as `--thinking <effort>`: `low`, `medium`, `high`, `xhigh` and `max` are all omp thinking levels.
+Models are what omp's `--model` takes: `provider/id` (exact, such as `anthropic/claude-sonnet-5-5`), a fuzzy id (`opus`), or a model role from your omp settings (`slow`, `@slow`). List them with `omp models`. A role or agent reviewer without a model uses the model of the session that called `granny_run`; when that is unknown, omp picks its default. `effort` is passed as `--thinking <effort>`: `low`, `medium`, `high`, `xhigh` and `max` are all omp thinking levels. Of a host-keyed `effort` only the `omp` key is passed, and without that key the role gets no `--thinking`.
 
 `granny_run` checks every role's and every `agent` reviewer's model before anything starts. A Claude Code alias (`default`, `sonnet`, `opus`, `haiku`, `opusplan`) written as one string for every host gets `granny_run refused:` with one line per entry, the config layer it came from and the fix, a host-keyed model: `{ "claude-code": "sonnet", "omp": "<provider/model>" }`. Keyed to omp (`{ "omp": "opus" }`) the same word is your choice and goes to `--model` as a fuzzy id.
 
@@ -217,7 +217,7 @@ A new session inside the same omp process still sees the run: `granny_status`, `
 
 Every entry of `reviewers` reviews every round, all at the same time: agent reviewers as concurrent role processes (each session dir is named after its label, `review <stage> r<n> <name>`), the other engines as concurrent review commands in your omp process.
 
-- `agent` reviews in a read-only role process on the entry's `model` and `effort` - any model omp has, GLM included (`zai/glm-5.3`).
+- `agent` reviews in a read-only role process on the entry's `model` and `effort` (the `omp` key of a host-keyed `effort`) - any model omp has, GLM included (`zai/glm-5.3`).
 - No Codex engine: `auto`, `codex` and `codex-plugin` - and so an entry without `engine` - are refused before the run starts, with a message naming the entry. omp reaches Codex models itself, so a Codex review here is an `agent` reviewer on one of them, e.g. `{ "name": "codex", "engine": "agent", "model": { "omp": "openai-codex/gpt-6.1-sol" } }` (`omp models` lists the ids).
 - `command` runs the template in your omp process's shell; `{prompt}` arrives as one shell-quoted line.
 
