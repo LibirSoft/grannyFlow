@@ -32,7 +32,10 @@ export const OPENCODE_DECODE = [
 
 const COUNTED = /[^ \t\r]/
 
-const FRAME_LINE = /^\[granny\] opencode: (?:text (\d+)|(step)|error (.*)|(dropped))$/
+/** The frame the review script prints when the decoder itself fails, before what it says about it. */
+export const DECODER_FAILED = `${FRAME}decoder failed `
+
+const FRAME_LINE = /^\[granny\] opencode: (?:text (\d+)|(step)|error (.*)|(dropped)|(decoder failed .*))$/
 
 export interface OpencodeAnswer {
   text?: string
@@ -91,6 +94,7 @@ export function opencodeAnswer(output: string): OpencodeAnswer {
       if (frame[1] !== undefined) open = { lines: [], want: Number(frame[1]), got: 0 }
       else if (frame[2]) boundary = true
       else if (frame[3] !== undefined) errors.push(errorEvent(frame[3]))
+      else if (frame[5] !== undefined) errors.push(frame[5])
       else dropped++
       continue
     }

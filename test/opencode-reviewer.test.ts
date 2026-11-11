@@ -131,6 +131,11 @@ describe('opencodeAnswer', () => {
     expect(opencodeAnswer('[granny] opencode: text 3\nLooking.\n\f\nchecking\n[granny] opencode: step\n[granny] opencode: text 1\n- [P1] Real — a.ts:1\n')).toEqual({ text: '- [P1] Real — a.ts:1' })
   })
 
+  it('reads a decoder failure frame as the error, naming the log', () => {
+    const out = '[granny] reviewer: opencode k (read-only agent)\n[granny] opencode: text 1\nLet me look.\n[granny] opencode: decoder failed (awk exit 2) - the raw answer is in .granny/r.log\n'
+    expect(opencodeAnswer(out)).toEqual({ text: 'Let me look.', error: 'decoder failed (awk exit 2) - the raw answer is in .granny/r.log' })
+  })
+
   it('counts a text part that came back short, or one the script could not decode, as dropped', () => {
     expect(opencodeAnswer('[granny] opencode: text 1\nNo findings.\n[granny] opencode: text 3\n- [P1] Leak — src/a.ts:3\n')).toEqual({ text: 'No findings.\n- [P1] Leak — src/a.ts:3', dropped: 1 })
     expect(opencodeAnswer('[granny] opencode: dropped\n[granny] opencode: text 1\nNo findings.\n')).toEqual({ text: 'No findings.', dropped: 1 })
@@ -310,7 +315,7 @@ describe('the opencode review script', () => {
       const s = reviewPlan(rv({}, host), config, host, 'abc', stem, PROMPT, ['/repo/.granny/plans'])
       const agent = shellQuote(opencodeAgentConfig(['/repo/.granny/plans']))
       expect(s.script).toBe(
-        `mkdir -p .granny && rm -f ${stem}.md ${stem}.log && { echo '[granny] reviewer: opencode kimi-code-plan-global/k3.1-pro (read-only agent)'; OPENCODE_DISABLE_PROJECT_CONFIG=1 OPENCODE_CONFIG_CONTENT=${agent} opencode run --standalone --archived --format json --agent granny-reviewer -m kimi-code-plan-global/k3.1-pro 'Review \`git diff abc...HEAD\`; it'\\''s $HOME' </dev/null; } > ${stem}.log 2>&1; code=$?; LC_ALL=C awk ${shellQuote(OPENCODE_DECODE)} ${stem}.log; exit $code`,
+        `mkdir -p .granny && rm -f ${stem}.md ${stem}.log && { echo '[granny] reviewer: opencode kimi-code-plan-global/k3.1-pro (read-only agent)'; OPENCODE_DISABLE_PROJECT_CONFIG=1 OPENCODE_CONFIG_CONTENT=${agent} opencode run --standalone --archived --format json --agent granny-reviewer -m kimi-code-plan-global/k3.1-pro 'Review \`git diff abc...HEAD\`; it'\\''s $HOME' </dev/null; } > ${stem}.log 2>&1; code=$?; LC_ALL=C awk ${shellQuote(OPENCODE_DECODE)} ${stem}.log || echo "[granny] opencode: decoder failed (awk exit $?) - the raw answer is in "${stem}.log; exit $code`,
       )
       expect(s.backend).toBeUndefined()
     })
@@ -433,6 +438,21 @@ describe('the opencode review script', () => {
     }
   })
 
+  it('prints a decoder failure frame naming the log when awk fails, and still exits with opencode\'s code', () => {
+    for (const [awkExit, opencodeExit] of [[2, 0], [127, 3]]) {
+      const dir = mkdtempSync(join(tmpdir(), 'granny-opencode-'))
+      spawnSync('mkdir', ['-p', join(dir, 'bin')])
+      writeFileSync(join(dir, 'bin/opencode'), `#!/usr/bin/env bash\necho '${text('- [P1] Leak — src/a.ts:3')}'\nexit ${opencodeExit}\n`)
+      writeFileSync(join(dir, 'bin/awk'), `#!/usr/bin/env bash\nexit ${awkExit}\n`)
+      for (const f of ['opencode', 'awk']) chmodSync(join(dir, 'bin', f), 0o755)
+      const s = reviewPlan(rv({}), config, 'opencode', 'abc', stem, 'p')
+      const r = spawnSync('bash', ['-c', s.script], { cwd: dir, encoding: 'utf8', env: { ...process.env, PATH: `${join(dir, 'bin')}:${process.env.PATH}` } })
+      expect(r.status).toBe(opencodeExit)
+      expect(r.stdout).toBe(`[granny] opencode: decoder failed (awk exit ${awkExit}) - the raw answer is in ${stem}.log\n`)
+      expect(opencodeAnswer(r.stdout)).toEqual({ error: `decoder failed (awk exit ${awkExit}) - the raw answer is in ${stem}.log` })
+    }
+  })
+
   it("exits with opencode's exit code", () => {
     const dir = mkdtempSync(join(tmpdir(), 'granny-opencode-'))
     spawnSync('mkdir', ['-p', join(dir, 'bin')])
@@ -510,6 +530,16 @@ describe('an opencode reviewer in a run', () => {
     expect(f.logs).toContain('core r1 kimi: did not run - retrying once. opencode: provider.no-route: Variant unavailable for kimi-code-plan-global/k3.1-pro: max')
     expect(r.stages[0]!.note).toContain('kimi: review command exited 1: provider.no-route: Variant unavailable for kimi-code-plan-global/k3.1-pro: max')
     expect(r.stages[0]!.note).not.toContain('"type"')
+  })
+
+  it('names a failed decoder and its log in the stage note, not "no answer"', async () => {
+    const failed = `${BACKEND}\n[granny] opencode: decoder failed (awk exit 127) - the raw answer is in .granny/review-core-r1-kimi.log\n`
+    const o = opencode([failed, failed])
+    const f = fakeHost({ reviews: o.reviews })
+    const r = await runGranny(f.host, input())
+    expect(r.stages[0]).toMatchObject({ outcome: 'review-failed' })
+    expect(r.stages[0]!.note).toContain('kimi: opencode: decoder failed (awk exit 127) - the raw answer is in .granny/review-core-r1-kimi.log')
+    expect(r.stages[0]!.note).not.toContain('returned no answer')
   })
 
   it('counts an answer followed by an error event on exit 0 as a reviewer that did not run, never as a finished review', async () => {

@@ -1050,7 +1050,8 @@ var OPENCODE_DECODE = [
   String.raw`{ print }`
 ].join("; ");
 var COUNTED = /[^ \t\r]/;
-var FRAME_LINE = /^\[granny\] opencode: (?:text (\d+)|(step)|error (.*)|(dropped))$/;
+var DECODER_FAILED = `${FRAME}decoder failed `;
+var FRAME_LINE = /^\[granny\] opencode: (?:text (\d+)|(step)|error (.*)|(dropped)|(decoder failed .*))$/;
 function errorText(error) {
   if (!isObject2(error))
     return String(error);
@@ -1105,6 +1106,8 @@ function opencodeAnswer(output) {
         boundary = true;
       else if (frame[3] !== undefined)
         errors.push(errorEvent(frame[3]));
+      else if (frame[5] !== undefined)
+        errors.push(frame[5]);
       else
         dropped++;
       continue;
@@ -1328,20 +1331,24 @@ function companionCommand(rv, host, base) {
 }
 var reviewStem = (c, stage, round, rv) => `${c.workDir}/review-${stage}-r${round}-${rv.name}`;
 var opencodeModel = (rv, host) => `${resolveModel(rv.model, host)}${rv.effort ? `#${rv.effort}` : ""}`;
-function opencodeScript(rv, host, prompt, dirs, log) {
-  const model = opencodeModel(rv, host);
-  const run = `OPENCODE_DISABLE_PROJECT_CONFIG=1 OPENCODE_CONFIG_CONTENT=${shellQuote(opencodeAgentConfig(dirs))} opencode run --standalone --archived --format json --agent ${OPENCODE_AGENT} -m ${shellQuote(model)} ${shellQuote(prompt)} </dev/null`;
-  return `{ echo ${shellQuote(`${SAID}opencode ${model} (read-only agent)`)}; ${run}; } > ${log} 2>&1`;
-}
-function script(rv, c, host, stem, b) {
+var reviewerModel = (rv, host) => rv.engine === "opencode" ? opencodeModel(rv, host) : resolveModel(rv.model, host);
+function wrapper(c, stem) {
   const md = shellQuote(`${stem}.md`);
   const log = shellQuote(`${stem}.log`);
   const wrap = (run, backend, print = `if [ -s ${md} ]; then cat ${md}; else cat ${log}; fi`) => {
     const body = `${run}; code=$?; ${print}; exit $code`;
     return { script: `mkdir -p ${shellQuote(c.workDir)} && rm -f ${md} ${log} && ${body}`, body, ...backend ? { backend } : {} };
   };
-  if (rv.engine === "opencode")
-    return wrap(opencodeScript(rv, host, b.prompt, b.dirs, log), undefined, `LC_ALL=C awk ${shellQuote(OPENCODE_DECODE)} ${log}`);
+  return { wrap, md, log };
+}
+function opencodePlan(rv, c, host, stem, prompt, dirs) {
+  const { wrap, log } = wrapper(c, stem);
+  const model = opencodeModel(rv, host);
+  const run = `OPENCODE_DISABLE_PROJECT_CONFIG=1 OPENCODE_CONFIG_CONTENT=${shellQuote(opencodeAgentConfig(dirs))} opencode run --standalone --archived --format json --agent ${OPENCODE_AGENT} -m ${shellQuote(model)} ${shellQuote(prompt)} </dev/null`;
+  return wrap(`{ echo ${shellQuote(`${SAID}opencode ${model} (read-only agent)`)}; ${run}; } > ${log} 2>&1`, undefined, `LC_ALL=C awk ${shellQuote(OPENCODE_DECODE)} ${log} || echo "${DECODER_FAILED}(awk exit $?) - the raw answer is in "${log}`);
+}
+function script(rv, c, host, stem, b) {
+  const { wrap, md, log } = wrapper(c, stem);
   const cli = `${b.cli} > ${log} 2>&1`;
   if (rv.engine === "command")
     return wrap(cli, "custom command");
@@ -1358,20 +1365,22 @@ function script(rv, c, host, stem, b) {
   return wrap(`${find}; if [ -z "$companion_version" ]; then ${missing}; elif ! command -v node >/dev/null 2>&1; then ${noNode}; else ${plugin}; fi`);
 }
 function reviewPlan(rv, c, host, base, stem, prompt = "", dirs = []) {
+  if (rv.engine === "opencode")
+    return opencodePlan(rv, c, host, stem, prompt, dirs);
   const mode = rv.mode ?? "review";
   return script(rv, c, host, stem, {
     cli: cliCommand(rv, host, base, `${stem}.md`, prompt),
     cliLabel: "codex CLI (codex exec review)",
     plugin: companionCommand(rv, host, base),
     pluginLabel: mode,
-    fallback: rv.engine === "auto" && mode === "review",
-    prompt,
-    dirs
+    fallback: rv.engine === "auto" && mode === "review"
   });
 }
 function planReviewScript(rv, c, host, base, stem, prompt, dirs = []) {
   if (rv.engine === "agent" || rv.engine === "command" && !rv.command?.includes("{prompt}"))
     return;
+  if (rv.engine === "opencode")
+    return opencodePlan(rv, c, host, stem, prompt, dirs);
   const m = resolveModel(rv.model, host);
   const model = m ? ` -m ${shellQuote(m)}` : "";
   const cli = rv.engine === "command" ? cliCommand(rv, host, base, `${stem}.md`, prompt) : `codex exec --sandbox read-only${model} -o ${shellQuote(`${stem}.md`)} ${shellQuote(prompt)} </dev/null`;
@@ -1380,9 +1389,7 @@ function planReviewScript(rv, c, host, base, stem, prompt, dirs = []) {
     cliLabel: "codex CLI (codex exec, read-only)",
     plugin: `node "$companion" task${model} ${shellQuote(prompt)} </dev/null`,
     pluginLabel: "task",
-    fallback: rv.engine === "auto",
-    prompt,
-    dirs
+    fallback: rv.engine === "auto"
   });
 }
 function reportedBackend(output) {
@@ -1700,7 +1707,7 @@ var listed = (status) => status.map((l) => l.trim()).join(", ");
 var entriesOf = (answer) => Array.isArray(answer?.perFinding) ? answer.perFinding.filter((x) => x && typeof x === "object" && typeof x.id === "string") : [];
 var phaseOf = (subject) => subject.kind === "plan" ? PLAN_PHASE : subject.note === WHOLE_BRANCH_NOTE ? FINAL_REVIEW_PHASE : REVIEW_PHASE;
 var reviewerMeta = (rv, host) => {
-  const model = rv.engine === "opencode" ? opencodeModel(rv, host.name) : resolveModel(rv.model, host.name);
+  const model = reviewerModel(rv, host.name);
   return { name: rv.name, engine: rv.engine, ...model ? { model } : {} };
 };
 function checkInput(input) {
@@ -3351,7 +3358,7 @@ var shown = (value) => {
     return value;
   return JSON.stringify(value);
 };
-var reviewersText = (list, host) => list.map((rv) => `${rv.name} (${[rv.engine, rv.engine === "opencode" ? opencodeModel(rv, host) : resolveModel(rv.model, host)].filter(Boolean).join(", ")})`).join(", ");
+var reviewersText = (list, host) => list.map((rv) => `${rv.name} (${[rv.engine, reviewerModel(rv, host)].filter(Boolean).join(", ")})`).join(", ");
 function overridesNotice(layers, host) {
   if (layers.at(-1) === undefined)
     return "";
