@@ -6,7 +6,7 @@ import { join } from 'node:path'
 import { resolveConfig } from '../src/core/config'
 import { runGranny, type RunInput } from '../src/core/engine'
 import { OPENCODE_AGENT, opencodeAgentConfig, opencodeAnswer, readableDirs } from '../src/core/opencode'
-import { parseCodexReview } from '../src/core/review'
+import { parseCodexReview, saysNoFindings } from '../src/core/review'
 import { planReviewScript, reportedBackend, reviewPlan } from '../src/core/reviewer'
 import type { CommandResult, HostName } from '../src/core/types'
 import { fakeHost, finding, review } from './fake-host'
@@ -25,14 +25,31 @@ describe('opencodeAnswer', () => {
     expect(parseCodexReview(answer.text!)).toEqual({ findings: [], markers: 0 })
   })
 
-  it('joins the text parts in order, one per line, so a finding that starts a part starts a line', () => {
+  it('joins the text parts of the last stretch in order, one per line, so a finding that starts a part starts a line', () => {
     const stream = [text('I read the diff.'), toolUse('x'), text('- [P2] Off by one — src/a.ts:3-3\n  It skips the last item.\n'), text('- [P3] Typo — src/b.ts:1')].join('\n')
     const answer = opencodeAnswer(stream).text!
-    expect(answer).toBe('I read the diff.\n- [P2] Off by one — src/a.ts:3-3\n  It skips the last item.\n\n- [P3] Typo — src/b.ts:1')
+    expect(answer).toBe('- [P2] Off by one — src/a.ts:3-3\n  It skips the last item.\n\n- [P3] Typo — src/b.ts:1')
     expect(parseCodexReview(answer).findings.map(f => [f.severity, f.title, f.file, f.line])).toEqual([
       ['P2', 'Off by one', 'src/a.ts', 3],
       ['P3', 'Typo', 'src/b.ts', 1],
     ])
+  })
+
+  it('drops the narration of earlier steps, so a clean review is the no-findings sentence alone', () => {
+    const step = (...events: string[]) => [event('step_start', { type: 'step-start' }), ...events, event('step_finish', { type: 'step-finish' })]
+    const stream = [
+      ...step(text('Let me look at the diff.'), toolUse(DIFF_WITH_FINDING)),
+      ...step(text('- [P1] Now checking the parser — src/a.ts:1'), toolUse('x')),
+      ...step(text('No findings.')),
+    ].join('\n')
+    const answer = opencodeAnswer(stream)
+    expect(answer).toEqual({ text: 'No findings.' })
+    expect(saysNoFindings(answer.text!)).toBe(true)
+  })
+
+  it('keeps the last text when the final step has none, and a blank part never starts a new stretch', () => {
+    expect(opencodeAnswer([event('step_start'), text('No findings.'), event('step_finish'), event('step_start'), event('step_finish')].join('\n'))).toEqual({ text: 'No findings.' })
+    expect(opencodeAnswer([text('No findings.'), event('step_start'), text('  ')].join('\n'))).toEqual({ text: 'No findings.' })
   })
 
   it('skips lines that are not JSON events, the backend line and CRLF included', () => {
@@ -59,14 +76,20 @@ describe('opencodeAnswer', () => {
 
 describe('readableDirs', () => {
   it('takes the directory of every absolute path in the text and of every file, once, outside the worktree only', () => {
-    const context = 'Plan files - read them first: /repo/.granny/plans/a.md, /repo/.granny/plans/b.md\nSee "/notes/wo-1.md" and (/specs/api/) and https://x.dev/doc and plans/rel.md and /wt/src/a.ts.'
-    expect(readableDirs(context, ['/other/plan.md'], '/wt')).toEqual(['/repo/.granny/plans', '/notes', '/specs/api', '/other'])
+    const context = 'Plan files - read them first: /repo/.granny/plans/a.md, /repo/.granny/plans/b.md\nSee "/srv/notes/wo-1.md" and (/srv/specs/api/) and https://x.dev/doc and plans/rel.md and /wt/src/a.ts.'
+    expect(readableDirs(context, ['/srv/other/plan.md'], '/wt')).toEqual(['/repo/.granny/plans', '/srv/notes', '/srv/specs/api', '/srv/other'])
   })
 
   it('normalizes . and .. and never opens the root or the worktree', () => {
-    expect(readableDirs('/a/./b/../c/x.md /top.md /wt2/x.md', [], '/wt/')).toEqual(['/a/c', '/wt2'])
+    expect(readableDirs('/a/./b/../c/x.md /top.md /wt2/x/y.md', [], '/wt/')).toEqual(['/a/c', '/wt2/x'])
     expect(readableDirs('/wt/x.md /wt/sub/y.md', [], '/wt')).toEqual([])
     expect(readableDirs('', [], '/wt')).toEqual([])
+  })
+
+  it('never opens a top-level directory, a home directory or a dot directory right under one', () => {
+    expect(readableDirs('Main checkout /home/u/proj, notes in /home/u/todo.md, see /etc/hosts', [], '/home/u/wt/feat')).toEqual([])
+    expect(readableDirs('/Users/u/notes.md /root/plan.md /var/home/u/x.md /home/u/.ssh/id_ed25519 /home/u/.claude/CLAUDE.md /tmp/plan.md', ['/home/u/.aws/config'], '/wt')).toEqual([])
+    expect(readableDirs('/home/u/proj/.granny/plans/a.md /home/u/.claude/plans/b.md /tmp/run/plan.md', [], '/wt')).toEqual(['/home/u/proj/.granny/plans', '/home/u/.claude/plans', '/tmp/run'])
   })
 })
 
@@ -119,7 +142,7 @@ describe('the opencode review script', () => {
       const s = reviewPlan(rv({}, host), config, host, 'abc', stem, PROMPT, ['/repo/.granny/plans'])
       const agent = `'${opencodeAgentConfig(['/repo/.granny/plans'])}'`
       expect(s.script).toBe(
-        `mkdir -p .granny && rm -f ${stem}.md ${stem}.log && { echo '[granny] reviewer: opencode kimi-code-plan-global/k3.1-pro (read-only agent)'; OPENCODE_CONFIG_CONTENT=${agent} opencode run --standalone --archived --format json --agent granny-reviewer -m kimi-code-plan-global/k3.1-pro 'Review \`git diff abc...HEAD\`; it'\\''s $HOME' </dev/null; } > ${stem}.log 2>&1; code=$?; if [ -s ${stem}.md ]; then cat ${stem}.md; else cat ${stem}.log; fi; exit $code`,
+        `mkdir -p .granny && rm -f ${stem}.md ${stem}.log && { echo '[granny] reviewer: opencode kimi-code-plan-global/k3.1-pro (read-only agent)'; OPENCODE_DISABLE_PROJECT_CONFIG=1 OPENCODE_CONFIG_CONTENT=${agent} opencode run --standalone --archived --format json --agent granny-reviewer -m kimi-code-plan-global/k3.1-pro 'Review \`git diff abc...HEAD\`; it'\\''s $HOME' </dev/null; } > ${stem}.log 2>&1; code=$?; sed -E '/^\\{"type":"(text|error|step_start)"/!s/^(\\{"type":"[a-z_]+").*/\\1}/' ${stem}.log; exit $code`,
       )
       expect(s.backend).toBeUndefined()
     })
@@ -140,7 +163,7 @@ describe('the opencode review script', () => {
   it('runs the plan review the same way, with the plan review prompt', () => {
     const s = planReviewScript(rv({}), config, 'claude-code', 'main', '.granny/review-plan-review-r1-kimi', 'Review the plan /plans/v1.md', ['/plans'])!
     expect(s).toBeDefined()
-    expect(s.body).toContain(`OPENCODE_CONFIG_CONTENT='${opencodeAgentConfig(['/plans'])}' opencode run --standalone --archived --format json --agent granny-reviewer -m kimi-code-plan-global/k3.1-pro 'Review the plan /plans/v1.md' </dev/null; } > .granny/review-plan-review-r1-kimi.log 2>&1`)
+    expect(s.body).toContain(`OPENCODE_DISABLE_PROJECT_CONFIG=1 OPENCODE_CONFIG_CONTENT='${opencodeAgentConfig(['/plans'])}' opencode run --standalone --archived --format json --agent granny-reviewer -m kimi-code-plan-global/k3.1-pro 'Review the plan /plans/v1.md' </dev/null; } > .granny/review-plan-review-r1-kimi.log 2>&1`)
     expect(s.body).not.toContain('codex')
   })
 
@@ -150,13 +173,14 @@ describe('the opencode review script', () => {
     spawnSync('mkdir', ['-p', bin])
     writeFileSync(
       join(bin, 'opencode'),
-      `#!/usr/bin/env bash\nprintf '%s' "$OPENCODE_CONFIG_CONTENT" > "${dir}/config.json"\nfor a in "$@"; do printf '%s\\n' "$a"; done > "${dir}/args"\n${['echo', `'${text('No findings.')}'`].join(' ')}\n`,
+      `#!/usr/bin/env bash\nprintf '%s' "$OPENCODE_CONFIG_CONTENT" > "${dir}/config.json"\nprintf '%s' "$OPENCODE_DISABLE_PROJECT_CONFIG" > "${dir}/no-project"\nfor a in "$@"; do printf '%s\\n' "$a"; done > "${dir}/args"\n${['echo', `'${text('No findings.')}'`].join(' ')}\n`,
     )
     chmodSync(join(bin, 'opencode'), 0o755)
     const s = reviewPlan(rv({ effort: 'high' }), config, 'opencode', 'abc', stem, PROMPT, ["/my dir's/plans"])
     const r = spawnSync('bash', ['-c', s.script], { cwd: dir, encoding: 'utf8', env: { ...process.env, PATH: `${bin}:${process.env.PATH}` } })
     expect(r.status).toBe(0)
     expect(JSON.parse(readFileSync(join(dir, 'config.json'), 'utf8'))).toEqual(JSON.parse(opencodeAgentConfig(["/my dir's/plans"])))
+    expect(readFileSync(join(dir, 'no-project'), 'utf8')).toBe('1')
     expect(readFileSync(join(dir, 'args'), 'utf8').split('\n').slice(0, -1)).toEqual([
       'run',
       '--standalone',
@@ -172,6 +196,37 @@ describe('the opencode review script', () => {
     expect(r.stdout.split('\n')[0]).toBe('[granny] reviewer: opencode kimi-code-plan-global/k3.1-pro#high (read-only agent)')
     expect(reportedBackend(r.stdout)).toBe('opencode kimi-code-plan-global/k3.1-pro#high (read-only agent)')
     expect(opencodeAnswer(r.stdout)).toEqual({ text: 'No findings.' })
+  })
+
+  it('prints the stream with every tool output cut away, so a large one never reaches the reader, and keeps the full stream in the log', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'granny-opencode-'))
+    spawnSync('mkdir', ['-p', join(dir, 'bin')])
+    const big = `${DIFF_WITH_FINDING}${'+ a line of a large diff with "quotes" and \\ backslashes\n'.repeat(20000)}`
+    const reasoning = event('reasoning', { type: 'reasoning', text: 'x'.repeat(50000) })
+    const error = JSON.stringify({ type: 'error', error: { type: 'provider.quota', message: 'quota' } })
+    const events = [event('step_start', { type: 'step-start' }), text('Let me look.'), toolUse(big), event('step_finish', { type: 'step-finish', tokens: { input: 1 } }), event('step_start'), reasoning, text('- [P2] Off by one — src/a.ts:3'), error, event('step_finish')]
+    writeFileSync(join(dir, 'events.jsonl'), `${events.join('\n')}\n`)
+    writeFileSync(join(dir, 'bin/opencode'), `#!/usr/bin/env bash\ncat "${dir}/events.jsonl"\n`)
+    chmodSync(join(dir, 'bin/opencode'), 0o755)
+    const s = reviewPlan(rv({}), config, 'opencode', 'abc', stem, 'p')
+    const r = spawnSync('bash', ['-c', s.script], { cwd: dir, encoding: 'utf8', env: { ...process.env, PATH: `${join(dir, 'bin')}:${process.env.PATH}` } })
+    expect(r.status).toBe(0)
+    expect(readFileSync(join(dir, `${stem}.log`), 'utf8').length).toBeGreaterThan(1_000_000)
+    expect(r.stdout.length).toBeLessThan(2000)
+    expect(r.stdout).not.toContain('Planted bug')
+    expect(r.stdout.split('\n').filter(Boolean)).toEqual([
+      '[granny] reviewer: opencode kimi-code-plan-global/k3.1-pro (read-only agent)',
+      events[0],
+      events[1],
+      '{"type":"tool_use"}',
+      '{"type":"step_finish"}',
+      events[4],
+      '{"type":"reasoning"}',
+      events[6],
+      events[7],
+      '{"type":"step_finish"}',
+    ])
+    expect(opencodeAnswer(r.stdout)).toEqual({ text: '- [P2] Off by one — src/a.ts:3', error: 'provider.quota: quota' })
   })
 
   it("exits with opencode's exit code", () => {
@@ -253,6 +308,16 @@ describe('an opencode reviewer in a run', () => {
     expect(r.stages[0]!.note).not.toContain('"type"')
   })
 
+  it('counts an answer followed by an error event on exit 0 as a reviewer that did not run, never as a finished review', async () => {
+    const error = JSON.stringify({ type: 'error', error: { type: 'provider.quota', message: 'rate limited' } })
+    const o = opencode([stream('- [P2] Half a review — src/a.ts:1', error), stream('- [P2] Half a review — src/a.ts:1', error)])
+    const f = fakeHost({ reviews: o.reviews })
+    const r = await runGranny(f.host, input())
+    expect(r.stages[0]).toMatchObject({ outcome: 'review-failed', rounds: 1 })
+    expect(r.stages[0]!.note).toContain('kimi: opencode: provider.quota: rate limited')
+    expect(o.saves).toEqual([])
+  })
+
   it('keeps the review when saving the answer fails, and says so', async () => {
     const o = opencode([stream('No findings.')], { code: 1, output: 'disk full' })
     const f = fakeHost({ reviews: o.reviews })
@@ -264,18 +329,18 @@ describe('an opencode reviewer in a run', () => {
   it('lets the reviewer read the plan files outside the worktree, and nothing else outside it', async () => {
     const o = opencode([stream('No findings.')])
     const f = fakeHost({ reviews: o.reviews, worktree: '/wt/feat-x' })
-    await runGranny(f.host, input({ plan: ['/work/repo/.granny/plans/feat-x.md', '/wt/feat-x/docs/plan-2.md'], context: 'Work orders in /orders/wo-1.md' }))
+    await runGranny(f.host, input({ plan: ['/work/repo/.granny/plans/feat-x.md', '/wt/feat-x/docs/plan-2.md'], context: 'Work orders in /srv/orders/wo-1.md' }))
     const run = f.commands.find(c => c.includes('opencode run'))!
-    expect(run).toContain(`OPENCODE_CONFIG_CONTENT='${opencodeAgentConfig(['/work/repo/.granny/plans', '/orders'])}' opencode run`)
+    expect(run).toContain(`OPENCODE_CONFIG_CONTENT='${opencodeAgentConfig(['/work/repo/.granny/plans', '/srv/orders'])}' opencode run`)
     expect(f.cwds[f.commands.indexOf(run)]).toBe('/wt/feat-x')
   })
 
   it('runs the plan review through opencode too, with the plan directory readable', async () => {
     const o = opencode([stream('No findings.'), stream('No findings.')])
     const f = fakeHost({ reviews: o.reviews, worktree: '/wt/feat-x' })
-    await runGranny(f.host, input({ plan: '/plans/v1.md', config: { reviewers: [KIMI], planReview: true } }))
+    await runGranny(f.host, input({ plan: '/srv/plans/v1.md', config: { reviewers: [KIMI], planReview: true } }))
     const plan = f.commands.find(c => c.includes('review-plan-review-r1-kimi.log'))!
-    expect(plan).toContain(`OPENCODE_CONFIG_CONTENT='${opencodeAgentConfig(['/plans'])}' opencode run`)
+    expect(plan).toContain(`OPENCODE_CONFIG_CONTENT='${opencodeAgentConfig(['/srv/plans'])}' opencode run`)
     expect(o.saves[0]).toContain('cat > .granny/review-plan-review-r1-kimi.md')
   })
 

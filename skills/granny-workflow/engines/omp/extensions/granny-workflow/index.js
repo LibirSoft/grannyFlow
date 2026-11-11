@@ -1044,7 +1044,8 @@ function errorText(error) {
   return kind ? `${kind}: ${message}` : message;
 }
 function opencodeAnswer(jsonl) {
-  const parts = [];
+  let parts = [];
+  let boundary = false;
   const errors = [];
   for (const raw of jsonl.split(/\r?\n/)) {
     const line = raw.trim();
@@ -1060,8 +1061,12 @@ function opencodeAnswer(jsonl) {
     }
     if (!isObject2(event))
       continue;
-    if (event.type === "text" && isObject2(event.part) && event.part.type === "text" && typeof event.part.text === "string")
+    if (event.type === "text" && isObject2(event.part) && event.part.type === "text" && typeof event.part.text === "string") {
+      if (boundary && event.part.text.trim())
+        [parts, boundary] = [[], false];
       parts.push(event.part.text);
+    } else if (event.type === "tool_use" || event.type === "step_start")
+      boundary = true;
     else if (event.type === "error")
       errors.push(errorText(event.error));
   }
@@ -1082,13 +1087,15 @@ function normalize(path) {
   }
   return `/${out.join("/")}`;
 }
+var HOME = /^\/(?:root|(?:home|Users|var\/home)\/[^/]+)(?:\/\.[^/]+)?$/;
+var tooWide = (dir) => dir.split("/").length < 3 || HOME.test(dir);
 function readableDirs(text, files, cwd) {
   const root = normalize(cwd);
   const dirs = [...(text.match(ABSOLUTE_PATH) ?? []).map((p) => p.replace(/[.:]+$/, "")), ...files].map((p) => {
     const path = normalize(p);
     return p.endsWith("/") ? path : path.slice(0, path.lastIndexOf("/"));
   });
-  return [...new Set(dirs)].filter((d) => d && d !== "/" && d !== root && !d.startsWith(`${root}/`));
+  return [...new Set(dirs)].filter((d) => !tooWide(d) && d !== root && !d.startsWith(`${root}/`));
 }
 function opencodeAgentConfig(dirs) {
   const permission = {
@@ -1241,20 +1248,21 @@ function companionCommand(rv, host, base) {
   return `node "$companion" ${rv.mode ?? "review"} --wait --base ${shellQuote(base)} --scope branch${model}${focus}`;
 }
 var reviewStem = (c, stage, round, rv) => `${c.workDir}/review-${stage}-r${round}-${rv.name}`;
+var OPENCODE_SHORTEN = '/^\\{"type":"(text|error|step_start)"/!s/^(\\{"type":"[a-z_]+").*/\\1}/';
 function opencodeScript(rv, host, prompt, dirs, log) {
   const model = `${resolveModel(rv.model, host)}${rv.effort ? `#${rv.effort}` : ""}`;
-  const run = `OPENCODE_CONFIG_CONTENT=${shellQuote(opencodeAgentConfig(dirs))} opencode run --standalone --archived --format json --agent ${OPENCODE_AGENT} -m ${shellQuote(model)} ${shellQuote(prompt)} </dev/null`;
+  const run = `OPENCODE_DISABLE_PROJECT_CONFIG=1 OPENCODE_CONFIG_CONTENT=${shellQuote(opencodeAgentConfig(dirs))} opencode run --standalone --archived --format json --agent ${OPENCODE_AGENT} -m ${shellQuote(model)} ${shellQuote(prompt)} </dev/null`;
   return `{ echo ${shellQuote(`${SAID}opencode ${model} (read-only agent)`)}; ${run}; } > ${log} 2>&1`;
 }
 function script(rv, c, host, stem, b) {
   const md = shellQuote(`${stem}.md`);
   const log = shellQuote(`${stem}.log`);
-  const wrap = (run, backend) => {
-    const body = `${run}; code=$?; if [ -s ${md} ]; then cat ${md}; else cat ${log}; fi; exit $code`;
+  const wrap = (run, backend, print = `if [ -s ${md} ]; then cat ${md}; else cat ${log}; fi`) => {
+    const body = `${run}; code=$?; ${print}; exit $code`;
     return { script: `mkdir -p ${shellQuote(c.workDir)} && rm -f ${md} ${log} && ${body}`, body, ...backend ? { backend } : {} };
   };
   if (rv.engine === "opencode")
-    return wrap(opencodeScript(rv, host, b.prompt, b.dirs, log));
+    return wrap(opencodeScript(rv, host, b.prompt, b.dirs, log), undefined, `sed -E ${shellQuote(OPENCODE_SHORTEN)} ${log}`);
   const cli = `${b.cli} > ${log} 2>&1`;
   if (rv.engine === "command")
     return wrap(cli, "custom command");
@@ -1852,8 +1860,10 @@ ${note}` : ""}` : missing };
       return { ran, findings: [], note };
     if (rv.engine === "opencode") {
       const answer = opencodeAnswer(output);
+      if (answer.error)
+        return { ran: false, findings: [], note: `opencode: ${answer.error}` };
       if (!answer.text)
-        return { ran: false, findings: [], note: answer.error ? `opencode: ${answer.error}` : "opencode returned no answer" };
+        return { ran: false, findings: [], note: "opencode returned no answer" };
       output = answer.text;
       await saveAnswer(`review ${tag} save`, phase, `${stem}.md`, output, cwd, tag);
     }

@@ -55,10 +55,13 @@ export function companionCommand(rv: ReviewerConfig, host: HostName, base: strin
 
 export const reviewStem = (c: GrannyConfig, stage: string, round: number, rv: ReviewerConfig) => `${c.workDir}/review-${stage}-r${round}-${rv.name}`
 
+/** Cuts every event but text, error and step_start down to its type, so a tool's output never reaches whoever reads the stream. */
+const OPENCODE_SHORTEN = '/^\\{"type":"(text|error|step_start)"/!s/^(\\{"type":"[a-z_]+").*/\\1}/'
+
 /** `opencode run` as a read-only reviewer, its output the JSON event stream; `dirs` are the outside directories it may read. */
 function opencodeScript(rv: ReviewerConfig, host: HostName, prompt: string, dirs: string[], log: string): string {
   const model = `${resolveModel(rv.model, host)}${rv.effort ? `#${rv.effort}` : ''}`
-  const run = `OPENCODE_CONFIG_CONTENT=${shellQuote(opencodeAgentConfig(dirs))} opencode run --standalone --archived --format json --agent ${OPENCODE_AGENT} -m ${shellQuote(model)} ${shellQuote(prompt)} </dev/null`
+  const run = `OPENCODE_DISABLE_PROJECT_CONFIG=1 OPENCODE_CONFIG_CONTENT=${shellQuote(opencodeAgentConfig(dirs))} opencode run --standalone --archived --format json --agent ${OPENCODE_AGENT} -m ${shellQuote(model)} ${shellQuote(prompt)} </dev/null`
   return `{ echo ${shellQuote(`${SAID}opencode ${model} (read-only agent)`)}; ${run}; } > ${log} 2>&1`
 }
 
@@ -75,12 +78,12 @@ interface Backends {
 function script(rv: ReviewerConfig, c: GrannyConfig, host: HostName, stem: string, b: Backends): ReviewPlan {
   const md = shellQuote(`${stem}.md`)
   const log = shellQuote(`${stem}.log`)
-  const wrap = (run: string, backend?: string): ReviewPlan => {
-    const body = `${run}; code=$?; if [ -s ${md} ]; then cat ${md}; else cat ${log}; fi; exit $code`
+  const wrap = (run: string, backend?: string, print = `if [ -s ${md} ]; then cat ${md}; else cat ${log}; fi`): ReviewPlan => {
+    const body = `${run}; code=$?; ${print}; exit $code`
     return { script: `mkdir -p ${shellQuote(c.workDir)} && rm -f ${md} ${log} && ${body}`, body, ...(backend ? { backend } : {}) }
   }
 
-  if (rv.engine === 'opencode') return wrap(opencodeScript(rv, host, b.prompt, b.dirs, log))
+  if (rv.engine === 'opencode') return wrap(opencodeScript(rv, host, b.prompt, b.dirs, log), undefined, `sed -E ${shellQuote(OPENCODE_SHORTEN)} ${log}`)
   const cli = `${b.cli} > ${log} 2>&1`
   if (rv.engine === 'command') return wrap(cli, 'custom command')
   if (rv.engine === 'codex' || (rv.engine === 'auto' && host !== 'claude-code')) return wrap(cli, b.cliLabel)

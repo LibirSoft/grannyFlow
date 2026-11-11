@@ -17,9 +17,10 @@ function errorText(error: unknown): string {
   return kind ? `${kind}: ${message}` : message
 }
 
-/** The answer in `opencode run --format json` output: its text parts in order, never a tool's output. */
+/** The answer in `opencode run --format json` output: the text parts after the last tool call or step start, never a tool's output. */
 export function opencodeAnswer(jsonl: string): OpencodeAnswer {
-  const parts: string[] = []
+  let parts: string[] = []
+  let boundary = false
   const errors: string[] = []
   for (const raw of jsonl.split(/\r?\n/)) {
     const line = raw.trim()
@@ -32,7 +33,10 @@ export function opencodeAnswer(jsonl: string): OpencodeAnswer {
       continue
     }
     if (!isObject(event)) continue
-    if (event.type === 'text' && isObject(event.part) && event.part.type === 'text' && typeof event.part.text === 'string') parts.push(event.part.text)
+    if (event.type === 'text' && isObject(event.part) && event.part.type === 'text' && typeof event.part.text === 'string') {
+      if (boundary && event.part.text.trim()) [parts, boundary] = [[], false]
+      parts.push(event.part.text)
+    } else if (event.type === 'tool_use' || event.type === 'step_start') boundary = true
     else if (event.type === 'error') errors.push(errorText(event.error))
   }
   const text = parts.join('\n').trim()
@@ -50,14 +54,18 @@ function normalize(path: string): string {
   return `/${out.join('/')}`
 }
 
-/** The directories of the absolute paths named in `text` and of `files` that lie outside `cwd`; never `/`. */
+const HOME = /^\/(?:root|(?:home|Users|var\/home)\/[^/]+)(?:\/\.[^/]+)?$/
+
+const tooWide = (dir: string) => dir.split('/').length < 3 || HOME.test(dir)
+
+/** The directories of the absolute paths named in `text` and of `files` that lie outside `cwd`; never a top-level directory, a home directory or a dot directory right under one. */
 export function readableDirs(text: string, files: string[], cwd: string): string[] {
   const root = normalize(cwd)
   const dirs = [...(text.match(ABSOLUTE_PATH) ?? []).map(p => p.replace(/[.:]+$/, '')), ...files].map(p => {
     const path = normalize(p)
     return p.endsWith('/') ? path : path.slice(0, path.lastIndexOf('/'))
   })
-  return [...new Set(dirs)].filter(d => d && d !== '/' && d !== root && !d.startsWith(`${root}/`))
+  return [...new Set(dirs)].filter(d => !tooWide(d) && d !== root && !d.startsWith(`${root}/`))
 }
 
 /** OPENCODE_CONFIG_CONTENT for the reviewer: an agent opencode itself keeps to reading and read-only git. */

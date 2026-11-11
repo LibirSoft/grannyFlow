@@ -442,7 +442,8 @@ function engineParts(host: Host, config: GrannyConfig) {
     if (!ran) return { ran, findings: [], note }
     if (rv.engine === 'opencode') {
       const answer = opencodeAnswer(output)
-      if (!answer.text) return { ran: false, findings: [], note: answer.error ? `opencode: ${answer.error}` : 'opencode returned no answer' }
+      if (answer.error) return { ran: false, findings: [], note: `opencode: ${answer.error}` }
+      if (!answer.text) return { ran: false, findings: [], note: 'opencode returned no answer' }
       output = answer.text
       await saveAnswer(`review ${tag} save`, phase, `${stem}.md`, output, cwd, tag)
     }
