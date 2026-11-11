@@ -668,6 +668,17 @@ describe('an opencode reviewer in a run', () => {
     expect(f.commands[0]).toContain('opencode run --standalone --archived --format json --agent granny-reviewer')
   })
 
+  it("on Claude Code names opencode's error from a read step that exited non-zero, not the raw event", async () => {
+    const error = `[granny] opencode: error ${JSON.stringify({ type: 'error', error: { type: 'provider.no-route', message: 'Variant unavailable for kimi-code-plan-global/k3.1-pro: max' } })}`
+    const failed = { code: 1, output: `${BACKEND}\n${error}\n` }
+    const o = opencode([failed, failed])
+    const f = fakeHost({ name: 'claude-code', direct: false, reviews: o.reviews })
+    const r = await runGranny(f.host, input())
+    expect(r.stages[0]).toMatchObject({ outcome: 'review-failed' })
+    expect(r.stages[0]!.note).toContain('provider.no-route: Variant unavailable for kimi-code-plan-global/k3.1-pro: max')
+    expect(r.stages[0]!.note).not.toContain('"type"')
+  })
+
   it('on Claude Code takes the findings from the decoded text the read step relays', async () => {
     const answer = review(finding('P1', 'Leak "quoted"'))
     const relayed = `${BACKEND}\n[granny] opencode: step\n[granny] opencode: text ${answer.split('\n').filter(l => l.trim()).length}\n${answer}\n`
