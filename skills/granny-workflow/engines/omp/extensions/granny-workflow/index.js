@@ -839,7 +839,7 @@ function reviewSavePrompt(repo, step, script) {
   return oneCommand(`shell command for the "${step}" step, which saves a reviewer's answer to its review file under the work dir (the one file this step writes),`, `Do not review the code yourself. Repo ${repo}.`, VERBATIM, script);
 }
 function trailWritePrompt(repo, step, script) {
-  return oneCommand(`shell command for the "${step}" step, which saves or checks the record of one review round in the run's work dir,`, `Repo ${repo}.`, "Run exactly this, as one command with its line breaks and every character kept, down to its last line:", script);
+  return oneCommand(`shell command for the "${step}" step, which saves or checks the record of one review round in the run's work dir,`, `Repo ${repo}.`, VERBATIM, script);
 }
 function timeoutProbePrompt(repo, step, script) {
   return oneCommand(`shell command for the "${step}" step: it prints the name of the timeout command the checks run in, or nothing`, `Install nothing. Repo ${repo}.`, "Run exactly this:", script);
