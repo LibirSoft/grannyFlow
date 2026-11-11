@@ -325,6 +325,14 @@ describe('the opencode review script', () => {
     expect(opencodeAnswer(r.stdout)).toEqual({ text: '- [P2] Off by one — src/a.ts:3', error: 'provider.quota: quota' })
   })
 
+  it('finds the backend line wherever it sits among the JSON events', () => {
+    const line = '[granny] reviewer: opencode zai/glm-5.3 (read-only agent)'
+    for (const stream of [[line, text('a')], [text('a'), line], [text('a'), line, toolUse('x'), text('b')]]) {
+      expect(reportedBackend(stream.join('\n'))).toBe('opencode zai/glm-5.3 (read-only agent)')
+      expect(reportedBackend(stream.join('\r\n'))).toBe('opencode zai/glm-5.3 (read-only agent)')
+    }
+  })
+
   it("exits with opencode's exit code", () => {
     const dir = mkdtempSync(join(tmpdir(), 'granny-opencode-'))
     spawnSync('mkdir', ['-p', join(dir, 'bin')])
@@ -454,6 +462,18 @@ describe('an opencode reviewer in a run', () => {
     const plan = f.commands.find(c => c.includes('review-plan-review-r1-kimi.log'))!
     expect(plan).toContain(`OPENCODE_CONFIG_CONTENT=${shellQuote(opencodeAgentConfig(['/srv/plans']))} opencode run`)
     expect(o.saves[0]).toContain('cat > .granny/review-plan-review-r1-kimi.md')
+  })
+
+  it("records the round in the trail with the reviewer, its engine and model, and the findings of its answer only", async () => {
+    const o = opencode([stream(review(finding('P2', 'Off by one'))), stream('No findings.')])
+    const f = fakeHost({ reviews: o.reviews, scores: [{ 'kimi-F1': 90 }] })
+    const r = await runGranny(f.host, input())
+    expect(r.trail).toEqual({ dir: '/work/repo/.granny/trail', written: 2, failed: [] })
+    const r1 = JSON.parse(f.trail.get('/work/repo/.granny/trail/s1-r1.json')!)
+    expect(r1.reviewers).toEqual([{ name: 'kimi', engine: 'opencode', model: 'kimi-code-plan-global/k3.1-pro' }])
+    expect(r1.findings.map((x: Record<string, unknown>) => [x.id, x.reviewer, x.title, x.file, x.route])).toEqual([['kimi-F1', 'kimi', 'Off by one', 'src/a.ts', 'sent']])
+    expect(JSON.stringify(r1)).not.toContain('Planted bug')
+    expect(JSON.parse(f.trail.get('/work/repo/.granny/trail/s1-r2.json')!)).toMatchObject({ findings: [], outcome: 'clean' })
   })
 
   it('on Claude Code runs it detached through the helper steps, then has a helper save the answer', async () => {

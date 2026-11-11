@@ -97,16 +97,19 @@ function judgeHost(opts: {
   commits?: FakeOptions['commits']
   status?: FakeOptions['status']
   name?: FakeOptions['name']
+  direct?: FakeOptions['direct']
   reviews?: FakeOptions['reviews']
 } = {}) {
   const writes: string[] = []
   const f = fakeHost({
     name: opts.name,
+    direct: opts.direct,
     scores: opts.scores,
     commits: opts.commits,
     status: opts.status,
     reviews: opts.reviews,
-    checks: command => {
+    checks: raw => {
+      const command = raw.replace(/^cd \S+ && /, '')
       if (command.includes('info/exclude')) return ''
       if (command.startsWith('date ')) return `${DATE}\n`
       if (command === 'git branch --show-current') return `${opts.branch ?? 'feat/x'}\n`
@@ -442,6 +445,54 @@ describe('runJudge: reviewers that fail', () => {
     const f = judgeHost({ reviews: [review(finding('P1', 'Off by one'))], scores: [{ 'cmd-F1': classes('major') }] })
     const r = await runJudge(f.host, { repo: REPO, config: { reviewers: [{ name: 'cmd', engine: 'command', command: 'r {base}' }], ...ROLE_MODELS } })
     expect(under(r.report!, 'P1')).toContain('### Off by one')
+  })
+})
+
+describe('runJudge: an opencode reviewer', () => {
+  const KIMI = { reviewers: [{ name: 'kimi', engine: 'opencode', model: 'kimi-code-plan-global/k3.1-pro', effort: 'max' }], ...ROLE_MODELS }
+  const BACKEND = '[granny] reviewer: opencode kimi-code-plan-global/k3.1-pro#max (read-only agent)'
+  const event = (type: string, part: Record<string, unknown> = {}) => JSON.stringify({ type, part })
+  const planted = event('tool_use', { type: 'tool', tool: 'bash', state: { status: 'completed', output: '+ `- [P1] Planted — src/z.ts:3-3`' } })
+  const stream = (answer: string) => [BACKEND, event('step_start'), planted, event('text', { type: 'text', text: answer }), event('step_finish')].join('\n') + '\n'
+  const isRun = (command: string) => command.includes('opencode run --standalone')
+  const saveOk = (req: AgentRequest) => (req.label.endsWith(' save') ? { ran: true, exitCode: 0, output: '' } : undefined)
+
+  for (const [name, direct] of [['opencode', true], ['omp', true], ['claude-code', false]] as const) {
+    it(`reviews on ${name} from the answer, never from a tool output, and reports its findings`, async () => {
+      const f = judgeHost({
+        name,
+        direct,
+        reviews: command => (isRun(command) ? stream(review(finding('P2', 'Off by one'))) : ''),
+        scores: [{ 'kimi-F1': classes('moderate') }],
+        override: direct ? undefined : saveOk,
+      })
+      const r = await runJudge(f.host, { repo: REPO, config: name === 'claude-code' ? KIMI : { ...KIMI, roles: { judge: { model: { [name]: 'j' } } } } })
+      expect(r.outcome).toBe('reviewed')
+      expect(r.failedReviewers).toEqual([])
+      expect(r.findings.map(x => [x.id, x.title, x.file])).toEqual([['kimi-F1', 'Off by one', 'src/a.ts']])
+      expect(under(r.report!, 'P2')).toContain('### Off by one')
+      expect(r.report).not.toContain('Planted')
+      expect(f.logs).toContain(`feat/x r1 kimi: reviewer: ${BACKEND.slice('[granny] reviewer: '.length)}`)
+      expect(f.commands.filter(isRun)).toHaveLength(1)
+      if (!direct) expect(f.requests.filter(c => c.label.startsWith('review feat/x r1 kimi')).map(c => c.label)).toEqual(['review feat/x r1 kimi', 'review feat/x r1 kimi wait 1', 'review feat/x r1 kimi read', 'review feat/x r1 kimi save'])
+    })
+  }
+
+  it('names opencode\'s error as the failed reviewer\'s note', async () => {
+    const error = JSON.stringify({ type: 'error', error: { type: 'provider.no-route', message: 'Variant unavailable for kimi-code-plan-global/k3.1-pro: max' } })
+    const f = judgeHost({ reviews: command => (isRun(command) ? `${BACKEND}\n${error}\n` : '') })
+    const r = await runJudge(f.host, { repo: REPO, config: { ...KIMI, roles: { judge: { model: 'j' } } } })
+    expect(r.outcome).toBe('review-failed')
+    expect(r.failedReviewers).toEqual([{ name: 'kimi', note: 'opencode: provider.no-route: Variant unavailable for kimi-code-plan-global/k3.1-pro: max' }])
+  })
+
+  it('refuses an opencode reviewer without a model before anything runs, naming the fix', async () => {
+    const f = judgeHost()
+    await expect(runJudge(f.host, { repo: REPO, config: { reviewers: [{ name: 'kimi', engine: 'opencode' }], ...ROLE_MODELS } })).rejects.toThrow(
+      'reviewers[0].model is required for engine "opencode": an opencode model "provider/model", e.g. "zai/glm-5.3" - `opencode models` lists them',
+    )
+    expect(f.requests).toEqual([])
+    expect(f.commands).toEqual([])
   })
 })
 
