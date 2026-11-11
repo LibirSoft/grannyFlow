@@ -435,6 +435,25 @@ describe('skill docs', () => {
     }
   })
 
+  it('documents effort per host', () => {
+    const config = read('references/config.md')
+    expect(jsonBlocks(config).some(block => block.includes('"effort": { "claude-code": "high", "omp": "medium" }'))).toBe(true)
+    expect(config).toContain("a missing host key means the host's default effort")
+    expect(config).toContain("a higher layer's `model` or `effort` replaces the lower layer's whole")
+    expect(config).toContain('config layer 2: reviewers[0].effort: unknown host "cursor"')
+    const opencode = read('references/opencode.md')
+    expect(opencode).toContain('An `opencode` key in a host-keyed `effort` is accepted and has no effect')
+    expect(opencode).toContain('`#variant`')
+    expect(read('references/claude-code.md')).toContain('the `claude-code` key of a host-keyed `effort`')
+    expect(read('references/omp.md')).toContain('the `omp` key of a host-keyed `effort`')
+    const setup = read('references/setup.md')
+    expect(setup).not.toContain('It is not keyed by host')
+    expect(setup).toContain("`roles.<role>.effort` and a reviewer's `effort`: written only when chosen, as an object keyed by the current host")
+    expect(read('SKILL.md')).toContain('"effort": { "claude-code": "high", "omp": "high" }')
+    const unreleased = /^## Unreleased\n([\s\S]*?)^## /m.exec(readRoot('CHANGELOG.md'))?.[1] ?? ''
+    expect(unreleased.split('\n').some(line => line.includes('`effort`') && line.includes('keyed by host'))).toBe(true)
+  })
+
   it('releases 1.6.0 with a CHANGELOG entry for the package version', () => {
     const { version } = JSON.parse(readRoot('package.json'))
     expect(version).toBe('1.6.0')

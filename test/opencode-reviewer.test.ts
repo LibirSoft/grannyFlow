@@ -8,7 +8,7 @@ import { runGranny, type RunInput } from '../src/core/engine'
 import { OPENCODE_AGENT, OPENCODE_DECODE, opencodeAgentConfig, opencodeAnswer, readGrant } from '../src/core/opencode'
 import { commandReviewPrompt, WHOLE_BRANCH_NOTE } from '../src/core/prompts'
 import { parseCodexReview, saysNoFindings } from '../src/core/review'
-import { planReviewScript, reportedBackend, reviewPlan } from '../src/core/reviewer'
+import { planReviewScript, reportedBackend, reviewerModel, reviewPlan } from '../src/core/reviewer'
 import { shellQuote } from '../src/core/shell'
 import type { CommandResult, HostName } from '../src/core/types'
 import { fakeHost, finding, review } from './fake-host'
@@ -325,6 +325,15 @@ describe('the opencode review script', () => {
     expect(reviewPlan(rv({ effort: 'max' }), config, 'opencode', 'abc', stem, 'p').script).toContain(`-m 'kimi-code-plan-global/k3.1-pro#max' p </dev/null`)
     expect(reviewPlan(rv({ effort: 'max' }), config, 'opencode', 'abc', stem, 'p').script).toContain(`'[granny] reviewer: opencode kimi-code-plan-global/k3.1-pro#max (read-only agent)'`)
     expect(reviewPlan(rv({ model: 'zai/glm-5.3#high' }), config, 'opencode', 'abc', stem, 'p').script).toContain(`-m 'zai/glm-5.3#high' p </dev/null`)
+  })
+
+  it('takes the variant of a host-keyed effort from the host the run is on, and none where that host has no key', () => {
+    const keyed = rv({ effort: { 'claude-code': 'max', omp: 'high' } })
+    expect(reviewPlan(keyed, config, 'claude-code', 'abc', stem, 'p').script).toContain(`-m 'kimi-code-plan-global/k3.1-pro#max' p </dev/null`)
+    expect(reviewPlan(keyed, config, 'omp', 'abc', stem, 'p').script).toContain(`-m 'kimi-code-plan-global/k3.1-pro#high' p </dev/null`)
+    expect(reviewPlan(keyed, config, 'opencode', 'abc', stem, 'p').script).toContain('-m kimi-code-plan-global/k3.1-pro p </dev/null')
+    expect(reviewerModel(keyed, 'omp')).toBe('kimi-code-plan-global/k3.1-pro#high')
+    expect(reviewerModel(keyed, 'opencode')).toBe('kimi-code-plan-global/k3.1-pro')
   })
 
   it('takes the host entry of a host-keyed model', () => {

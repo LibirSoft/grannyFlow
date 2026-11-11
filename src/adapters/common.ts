@@ -4,7 +4,7 @@ import { isAbsolute, join } from 'node:path'
 import { isCancelled } from '../core/cancel'
 import { globalConfigPath, readJson } from './config-files'
 export { globalConfigPath, readJson } from './config-files'
-import { type ConfigRole, type GrannyConfig, judgeConfigGaps, type ModelSpec, planReviewWarning, resolveConfig, resolveModel } from '../core/config'
+import { type ConfigRole, type GrannyConfig, judgeConfigGaps, type ModelSpec, planReviewWarning, resolveConfig, resolveEffort, resolveModel } from '../core/config'
 export { planReviewWarning } from '../core/config'
 import { checkJudgeInput, type JudgeInput, type RunInput } from '../core/engine'
 import { noteLine, oneLine } from '../core/report'
@@ -227,7 +227,7 @@ export function overridesNotice(layers: unknown[], host: HostName): string {
   }
   for (const role of Object.keys(after.roles) as ConfigRole[]) {
     note(`roles.${role}.model`, shown(resolveModel(after.roles[role].model, host)), shown(resolveModel(before.roles[role].model, host)))
-    note(`roles.${role}.effort`, shown(after.roles[role].effort), shown(before.roles[role].effort))
+    note(`roles.${role}.effort`, shown(resolveEffort(after.roles[role].effort, host)), shown(resolveEffort(before.roles[role].effort, host)))
   }
   for (const key of Object.keys(after) as Array<keyof GrannyConfig>) {
     if (key === 'roles') continue

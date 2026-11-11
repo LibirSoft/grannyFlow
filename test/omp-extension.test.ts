@@ -944,6 +944,23 @@ describe('omp extension in the user session (parent mode)', () => {
     expect(git(repo, 'status', '--porcelain')).toBe('')
   })
 
+  it('passes the omp key of a host-keyed effort as --thinking, and none when that key is missing', async () => {
+    behave({})
+    const f = fakePi()
+    await extension(f.pi as any)
+    const { dir } = await start(f, {
+      roles: { judge: { model: { omp: 'anthropic/judge-model' }, effort: { 'claude-code': 'low', omp: 'high' } }, implementer: { effort: { 'claude-code': 'max' } } },
+    })
+    await finished(dir)
+    const impl = calls().find(c => c.slug === 'implement-one')!
+    const judge = calls().find(c => c.slug === 'judge-one-r1')!
+    expect(flag(judge.argv, '--thinking')).toBe('high')
+    expect(impl.argv).not.toContain('--thinking')
+    const agents = journalOf(dir).filter(e => e.type === 'agent')
+    expect(agents.find(e => e.label === 'judge one r1')).toMatchObject({ role: 'judge', effort: 'high' })
+    expect(agents.find(e => e.label === 'implement one')!.effort).toBeUndefined()
+  })
+
   it('uses omp\'s default model when neither the role nor the calling session names one', async () => {
     behave({})
     const f = fakePi()

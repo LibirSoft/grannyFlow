@@ -1,4 +1,4 @@
-import { resolveModel, type GrannyConfig, type ReviewerConfig } from './config'
+import { resolveEffort, resolveModel, type GrannyConfig, type ReviewerConfig } from './config'
 import { DECODER_FAILED, OPENCODE_AGENT, OPENCODE_DECODE, opencodeAgentConfig } from './opencode'
 import { shellQuote } from './shell'
 import type { HostName } from './types'
@@ -55,7 +55,11 @@ export function companionCommand(rv: ReviewerConfig, host: HostName, base: strin
 
 export const reviewStem = (c: GrannyConfig, stage: string, round: number, rv: ReviewerConfig) => `${c.workDir}/review-${stage}-r${round}-${rv.name}`
 
-const opencodeModel = (rv: ReviewerConfig, host: HostName) => `${resolveModel(rv.model, host)}${rv.effort ? `#${rv.effort}` : ''}`
+/** An opencode reviewer's model with its effort on this host as the variant. */
+const opencodeModel = (rv: ReviewerConfig, host: HostName) => {
+  const effort = resolveEffort(rv.effort, host)
+  return `${resolveModel(rv.model, host)}${effort ? `#${effort}` : ''}`
+}
 
 /** The model string a reviewer runs on: for an opencode reviewer its effort as the variant. */
 export const reviewerModel = (rv: ReviewerConfig, host: HostName) => (rv.engine === 'opencode' ? opencodeModel(rv, host) : resolveModel(rv.model, host))
