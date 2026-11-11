@@ -446,7 +446,7 @@ function engineParts(host: Host, config: GrannyConfig) {
     if (rv.engine === 'opencode') {
       const answer = opencodeAnswer(output)
       if (answer.error) return { ran: false, findings: [], note: `opencode: ${answer.error}` }
-      if (answer.dropped) host.log(`${tag}: opencode: ${answer.dropped} event line(s) were not valid JSON and are missing from the answer - check ${stem}.log`)
+      if (answer.dropped) host.log(`${tag}: opencode: ${answer.dropped} text part(s) did not come back whole and may be missing from the answer - check ${stem}.log`)
       if (!answer.text) return { ran: false, findings: [], note: 'opencode returned no answer' }
       output = answer.text
       await saveAnswer(`review ${tag} save`, phase, `${stem}.md`, output, cwd, tag)

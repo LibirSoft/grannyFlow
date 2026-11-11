@@ -11,10 +11,31 @@ const ABSOLUTE_PATH = /(?<=^|[\s,;(\[{"'`])\/[^\s,;)\]}"'`]*/g
 
 const isObject = (v: unknown): v is Record<string, any> => typeof v === 'object' && v !== null && !Array.isArray(v)
 
+const FRAME = '[granny] opencode: '
+
+/**
+ * POSIX awk, run under LC_ALL=C, that turns `opencode run --format json` output into lines a reader can relay as plain text:
+ * a text part becomes `<FRAME>text <its non-blank line count>` and its decoded text, a tool call or step start `<FRAME>step`,
+ * an error event `<FRAME>error <event>`, a text event it cannot decode `<FRAME>dropped`; every other event goes, other lines stay.
+ */
+export const OPENCODE_DECODE = [
+  String.raw`function hex(s, i, n) { n = 0; for (i = 1; i <= 4; i++) n = n * 16 + index("0123456789abcdef", tolower(substr(s, i, 1))) - 1; return n }`,
+  String.raw`function utf8(c) { if (c < 128) return sprintf("%c", c); if (c < 2048) return sprintf("%c%c", 192 + int(c / 64), 128 + c % 64); if (c < 65536) return sprintf("%c%c%c", 224 + int(c / 4096), 128 + int(c / 64) % 64, 128 + c % 64); return sprintf("%c%c%c%c", 240 + int(c / 262144), 128 + int(c / 4096) % 64, 128 + int(c / 64) % 64, 128 + c % 64) }`,
+  String.raw`function jstr(s, i, out, r, p, c, h, lo) { out = ""; i++; while (1) { r = substr(s, i); p = match(r, /[\\"]/); if (!p) { BAD = 1; return "" } out = out substr(r, 1, p - 1); i += p; if (substr(r, p, 1) == "\"") { J = i; return out } c = substr(s, i, 1); i++; if (c == "n") out = out "\n"; else if (c == "t") out = out "\t"; else if (c == "r") out = out "\r"; else if (c == "b") out = out "\b"; else if (c == "f") out = out "\f"; else if (c == "u") { h = hex(substr(s, i, 4)); i += 4; if (h >= 55296 && h < 56320 && substr(s, i, 2) == "\\u") { lo = hex(substr(s, i + 2, 4)); if (lo >= 56320 && lo < 57344) { h = 65536 + (h - 55296) * 1024 + lo - 56320; i += 6 } } out = out utf8(h) } else out = out c } }`,
+  String.raw`function text(s, i, k, v) { i = 1; while ((k = index(substr(s, i), "\"")) > 0) { v = jstr(s, i + k - 1); if (BAD) return ""; i = J; if (v == "text" && substr(s, i, 2) == ":\"") { v = jstr(s, i + 1); if (!BAD) FOUND = 1; return v } } return "" }`,
+  String.raw`/^\{"type":"text"/ { x = $0; if (gsub(/"type":"text"/, "", x) < 2) next; BAD = 0; FOUND = 0; t = text($0); if (!FOUND) { print "${FRAME}dropped"; next } n = split(t, L, "\n"); c = 0; for (i = 1; i <= n; i++) if (L[i] ~ /[^ \t\r]/) c++; print "${FRAME}text " c; print t; next }`,
+  String.raw`/^\{"type":"(tool_use|step_start)"/ { print "${FRAME}step"; next }`,
+  String.raw`/^\{"type":"error"/ { print "${FRAME}error " $0; next }`,
+  String.raw`/^\{/ { next }`,
+  String.raw`{ print }`,
+].join('; ')
+
+const FRAME_LINE = /^\[granny\] opencode: (?:text (\d+)|(step)|error (.*)|(dropped))$/
+
 export interface OpencodeAnswer {
   text?: string
   error?: string
-  /** Lines that start like an event but are not valid JSON, so whatever they held is missing from the answer. */
+  /** Text parts that did not come back whole - an event line that is not valid JSON, a decoded part short of its lines, or one the script could not decode. */
   dropped?: number
 }
 
@@ -25,15 +46,53 @@ function errorText(error: unknown): string {
   return kind ? `${kind}: ${message}` : message
 }
 
-/** The answer in `opencode run --format json` output: the text parts after the last tool call or step start, or every text part when those hold no finding and are not the no-findings sentence; never a tool's output. */
-export function opencodeAnswer(jsonl: string): OpencodeAnswer {
+function errorEvent(line: string): string {
+  try {
+    const event: unknown = JSON.parse(line)
+    if (isObject(event) && 'error' in event) return errorText(event.error)
+  } catch {}
+  return line
+}
+
+/**
+ * The answer in what the review script prints (OPENCODE_DECODE's lines) or in raw `opencode run --format json` output: the text parts
+ * after the last tool call or step start, or every text part when those hold no finding and are not the no-findings sentence; never a tool's output.
+ */
+export function opencodeAnswer(output: string): OpencodeAnswer {
   const all: string[] = []
   let parts: string[] = []
   let boundary = false
   const errors: string[] = []
   let dropped = 0
-  for (const raw of jsonl.split(/\r?\n/)) {
+  let open: { lines: string[]; want: number; got: number } | undefined
+  const add = (text: string) => {
+    if (boundary && text.trim()) [parts, boundary] = [[], false]
+    parts.push(text)
+    all.push(text)
+  }
+  const close = () => {
+    if (!open) return
+    if (open.got < open.want) dropped++
+    add(open.lines.join('\n'))
+    open = undefined
+  }
+  for (const raw of output.split(/\r?\n/)) {
     const line = raw.trim()
+    const frame = FRAME_LINE.exec(line)
+    if (frame) {
+      close()
+      if (frame[1] !== undefined) open = { lines: [], want: Number(frame[1]), got: 0 }
+      else if (frame[2]) boundary = true
+      else if (frame[3] !== undefined) errors.push(errorEvent(frame[3]))
+      else dropped++
+      continue
+    }
+    if (open && (!line || open.got < open.want)) {
+      open.lines.push(raw)
+      if (line) open.got++
+      continue
+    }
+    close()
     if (!line) continue
     let event: unknown
     try {
@@ -44,13 +103,11 @@ export function opencodeAnswer(jsonl: string): OpencodeAnswer {
       continue
     }
     if (!isObject(event)) continue
-    if (event.type === 'text' && isObject(event.part) && event.part.type === 'text' && typeof event.part.text === 'string') {
-      if (boundary && event.part.text.trim()) [parts, boundary] = [[], false]
-      parts.push(event.part.text)
-      all.push(event.part.text)
-    } else if (event.type === 'tool_use' || event.type === 'step_start') boundary = true
+    if (event.type === 'text' && isObject(event.part) && event.part.type === 'text' && typeof event.part.text === 'string') add(event.part.text)
+    else if (event.type === 'tool_use' || event.type === 'step_start') boundary = true
     else if (event.type === 'error') errors.push(errorText(event.error))
   }
+  close()
   const last = parts.join('\n').trim()
   const text = parseCodexReview(last).markers || saysNoFindings(last) ? last : all.join('\n').trim()
   const error = [...new Set(errors)].join('; ')

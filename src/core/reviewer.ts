@@ -1,5 +1,5 @@
 import { resolveModel, type GrannyConfig, type ReviewerConfig } from './config'
-import { OPENCODE_AGENT, opencodeAgentConfig } from './opencode'
+import { OPENCODE_AGENT, OPENCODE_DECODE, opencodeAgentConfig } from './opencode'
 import { shellQuote } from './shell'
 import type { HostName } from './types'
 
@@ -55,8 +55,6 @@ export function companionCommand(rv: ReviewerConfig, host: HostName, base: strin
 
 export const reviewStem = (c: GrannyConfig, stage: string, round: number, rv: ReviewerConfig) => `${c.workDir}/review-${stage}-r${round}-${rv.name}`
 
-/** Cuts every event but text, error and step_start down to its type, so a tool's output never reaches whoever reads the stream. */
-const OPENCODE_SHORTEN = '/^\\{"type":"(text|error|step_start)"/!s/^(\\{"type":"[a-z_]+").*/\\1}/'
 
 export const opencodeModel = (rv: ReviewerConfig, host: HostName) => `${resolveModel(rv.model, host)}${rv.effort ? `#${rv.effort}` : ''}`
 
@@ -85,7 +83,7 @@ function script(rv: ReviewerConfig, c: GrannyConfig, host: HostName, stem: strin
     return { script: `mkdir -p ${shellQuote(c.workDir)} && rm -f ${md} ${log} && ${body}`, body, ...(backend ? { backend } : {}) }
   }
 
-  if (rv.engine === 'opencode') return wrap(opencodeScript(rv, host, b.prompt, b.dirs, log), undefined, `sed -E ${shellQuote(OPENCODE_SHORTEN)} ${log}`)
+  if (rv.engine === 'opencode') return wrap(opencodeScript(rv, host, b.prompt, b.dirs, log), undefined, `LC_ALL=C awk ${shellQuote(OPENCODE_DECODE)} ${log}`)
   const cli = `${b.cli} > ${log} 2>&1`
   if (rv.engine === 'command') return wrap(cli, 'custom command')
   if (rv.engine === 'codex' || (rv.engine === 'auto' && host !== 'claude-code')) return wrap(cli, b.cliLabel)

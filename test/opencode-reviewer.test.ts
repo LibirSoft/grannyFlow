@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { resolveConfig } from '../src/core/config'
 import { runGranny, type RunInput } from '../src/core/engine'
-import { OPENCODE_AGENT, opencodeAgentConfig, opencodeAnswer, readableDirs } from '../src/core/opencode'
+import { OPENCODE_AGENT, OPENCODE_DECODE, opencodeAgentConfig, opencodeAnswer, readableDirs } from '../src/core/opencode'
 import { parseCodexReview, saysNoFindings } from '../src/core/review'
 import { planReviewScript, reportedBackend, reviewPlan } from '../src/core/reviewer'
 import { shellQuote } from '../src/core/shell'
@@ -79,6 +79,38 @@ describe('opencodeAnswer', () => {
     expect(opencodeAnswer(named)).toEqual({ error: 'APIError: quota exceeded' })
     expect(opencodeAnswer(JSON.stringify({ type: 'error', error: 'boom' }))).toEqual({ error: 'boom' })
     expect(opencodeAnswer([errorEvent, errorEvent, text('partial')].join('\n'))).toEqual({ text: 'partial', error: 'provider.no-route: Variant unavailable for kimi/k3: nope' })
+  })
+
+  it('reads the decoded form the review script prints: text parts as plain lines, step and error frames', () => {
+    const out = [
+      '[granny] reviewer: opencode zai/glm-5.3 (read-only agent)',
+      '[granny] opencode: step',
+      '[granny] opencode: text 1',
+      'Let me look.',
+      '[granny] opencode: step',
+      '[granny] opencode: text 2',
+      '- [P2] Off by one — src/a.ts:3-3',
+      '  It says "page" and \\n literally.',
+      '',
+      '[granny] opencode: text 1',
+      '- [P3] Typo — src/b.ts:1',
+    ].join('\n')
+    expect(opencodeAnswer(out)).toEqual({ text: '- [P2] Off by one — src/a.ts:3-3\n  It says "page" and \\n literally.\n\n- [P3] Typo — src/b.ts:1' })
+    expect(parseCodexReview(opencodeAnswer(out).text!).findings.map(f => [f.severity, f.file, f.line])).toEqual([
+      ['P2', 'src/a.ts', 3],
+      ['P3', 'src/b.ts', 1],
+    ])
+    const error = JSON.stringify({ type: 'error', error: { type: 'provider.quota', message: 'quota' } })
+    expect(opencodeAnswer(`[granny] opencode: error ${error}\n[granny] opencode: error not json\nError: boom\n`)).toEqual({ error: 'provider.quota: quota; not json; Error: boom' })
+  })
+
+  it('ends a text part after its non-blank lines, so a later stderr line is not part of the answer', () => {
+    expect(opencodeAnswer('[granny] opencode: text 1\nNo findings.\n\nError: Variant unavailable for kimi/k3: nope\n')).toEqual({ text: 'No findings.', error: 'Error: Variant unavailable for kimi/k3: nope' })
+  })
+
+  it('counts a text part that came back short, or one the script could not decode, as dropped', () => {
+    expect(opencodeAnswer('[granny] opencode: text 3\n- [P1] Leak — src/a.ts:3\n[granny] opencode: step\n[granny] opencode: text 1\nNo findings.')).toEqual({ text: 'No findings.', dropped: 1 })
+    expect(opencodeAnswer('[granny] opencode: dropped\n[granny] opencode: text 1\nNo findings.\n')).toEqual({ text: 'No findings.', dropped: 1 })
   })
 
   it('has no text for a stream without a text part, or with blank ones only', () => {
@@ -238,7 +270,7 @@ describe('the opencode review script', () => {
       const s = reviewPlan(rv({}, host), config, host, 'abc', stem, PROMPT, ['/repo/.granny/plans'])
       const agent = shellQuote(opencodeAgentConfig(['/repo/.granny/plans']))
       expect(s.script).toBe(
-        `mkdir -p .granny && rm -f ${stem}.md ${stem}.log && { echo '[granny] reviewer: opencode kimi-code-plan-global/k3.1-pro (read-only agent)'; OPENCODE_DISABLE_PROJECT_CONFIG=1 OPENCODE_CONFIG_CONTENT=${agent} opencode run --standalone --archived --format json --agent granny-reviewer -m kimi-code-plan-global/k3.1-pro 'Review \`git diff abc...HEAD\`; it'\\''s $HOME' </dev/null; } > ${stem}.log 2>&1; code=$?; sed -E '/^\\{"type":"(text|error|step_start)"/!s/^(\\{"type":"[a-z_]+").*/\\1}/' ${stem}.log; exit $code`,
+        `mkdir -p .granny && rm -f ${stem}.md ${stem}.log && { echo '[granny] reviewer: opencode kimi-code-plan-global/k3.1-pro (read-only agent)'; OPENCODE_DISABLE_PROJECT_CONFIG=1 OPENCODE_CONFIG_CONTENT=${agent} opencode run --standalone --archived --format json --agent granny-reviewer -m kimi-code-plan-global/k3.1-pro 'Review \`git diff abc...HEAD\`; it'\\''s $HOME' </dev/null; } > ${stem}.log 2>&1; code=$?; LC_ALL=C awk ${shellQuote(OPENCODE_DECODE)} ${stem}.log; exit $code`,
       )
       expect(s.backend).toBeUndefined()
     })
@@ -294,35 +326,63 @@ describe('the opencode review script', () => {
     expect(opencodeAnswer(r.stdout)).toEqual({ text: 'No findings.' })
   })
 
-  it('prints the stream with every tool output cut away, so a large one never reaches the reader, and keeps the full stream in the log', () => {
+  const printed = (events: string[]) => {
     const dir = mkdtempSync(join(tmpdir(), 'granny-opencode-'))
     spawnSync('mkdir', ['-p', join(dir, 'bin')])
-    const big = `${DIFF_WITH_FINDING}${'+ a line of a large diff with "quotes" and \\ backslashes\n'.repeat(20000)}`
-    const reasoning = event('reasoning', { type: 'reasoning', text: 'x'.repeat(50000) })
-    const error = JSON.stringify({ type: 'error', error: { type: 'provider.quota', message: 'quota' } })
-    const events = [event('step_start', { type: 'step-start' }), text('Let me look.'), toolUse(big), event('step_finish', { type: 'step-finish', tokens: { input: 1 } }), event('step_start'), reasoning, text('- [P2] Off by one — src/a.ts:3'), error, event('step_finish')]
     writeFileSync(join(dir, 'events.jsonl'), `${events.join('\n')}\n`)
     writeFileSync(join(dir, 'bin/opencode'), `#!/usr/bin/env bash\ncat "${dir}/events.jsonl"\n`)
     chmodSync(join(dir, 'bin/opencode'), 0o755)
     const s = reviewPlan(rv({}), config, 'opencode', 'abc', stem, 'p')
     const r = spawnSync('bash', ['-c', s.script], { cwd: dir, encoding: 'utf8', env: { ...process.env, PATH: `${join(dir, 'bin')}:${process.env.PATH}` } })
+    return { ...r, log: readFileSync(join(dir, `${stem}.log`), 'utf8') }
+  }
+
+  it('prints the answer decoded, every tool output cut away, so a large one never reaches the reader, and keeps the full stream in the log', () => {
+    const big = `${DIFF_WITH_FINDING}${'+ a line of a large diff with "quotes" and \\ backslashes\n'.repeat(20000)}`
+    const reasoning = event('reasoning', { type: 'reasoning', text: 'x'.repeat(50000) })
+    const error = JSON.stringify({ type: 'error', error: { type: 'provider.quota', message: 'quota' } })
+    const events = [event('step_start', { type: 'step-start' }), text('Let me look.'), toolUse(big), event('step_finish', { type: 'step-finish', tokens: { input: 1 } }), event('step_start'), reasoning, text('- [P2] Off by one — src/a.ts:3'), error, event('step_finish')]
+    const r = printed(events)
     expect(r.status).toBe(0)
-    expect(readFileSync(join(dir, `${stem}.log`), 'utf8').length).toBeGreaterThan(1_000_000)
+    expect(r.log.length).toBeGreaterThan(1_000_000)
     expect(r.stdout.length).toBeLessThan(2000)
     expect(r.stdout).not.toContain('Planted bug')
     expect(r.stdout.split('\n').filter(Boolean)).toEqual([
       '[granny] reviewer: opencode kimi-code-plan-global/k3.1-pro (read-only agent)',
-      events[0],
-      events[1],
-      '{"type":"tool_use"}',
-      '{"type":"step_finish"}',
-      events[4],
-      '{"type":"reasoning"}',
-      events[6],
-      events[7],
-      '{"type":"step_finish"}',
+      '[granny] opencode: step',
+      '[granny] opencode: text 1',
+      'Let me look.',
+      '[granny] opencode: step',
+      '[granny] opencode: step',
+      '[granny] opencode: text 1',
+      '- [P2] Off by one — src/a.ts:3',
+      `[granny] opencode: error ${error}`,
     ])
     expect(opencodeAnswer(r.stdout)).toEqual({ text: '- [P2] Off by one — src/a.ts:3', error: 'provider.quota: quota' })
+  })
+
+  it('prints a text part as the plain text it holds, every JSON escape decoded, so a helper relays markdown and not an escaped JSON line', () => {
+    const answer = '- [P1] Quote "a" \\ back — src/a.ts:3-3\n  Tab\there, slash /, bell \u0007, é, — and 😀.\n\n- [P3] Typo — src/b.ts:1\n'
+    const escaped = JSON.stringify({ type: 'text', part: { id: 'p', type: 'text', text: answer, time: { start: 1 } } })
+      .replace('é', '\\u00e9')
+      .replace('😀', '\\ud83d\\ude00')
+      .replace('slash /', 'slash \\/')
+    expect(escaped).toContain('\\u00e9')
+    const r = printed([event('step_start'), escaped, text('')])
+    expect(r.status).toBe(0)
+    expect(r.stdout).not.toContain('{"type"')
+    expect(r.stdout).toContain(`[granny] opencode: text 3\n${answer}\n[granny] opencode: text 0\n\n`)
+    expect(opencodeAnswer(r.stdout)).toEqual({ text: answer.trim() })
+    expect(parseCodexReview(opencodeAnswer(r.stdout).text!).findings.map(f => [f.severity, f.file, f.line])).toEqual([
+      ['P1', 'src/a.ts', 3],
+      ['P3', 'src/b.ts', 1],
+    ])
+  })
+
+  it('prints a frame for a text event it cannot decode, and nothing for a reasoning part or any other event', () => {
+    const r = printed(['{"type":"text","part":{"type":"text","text":"cut off', event('text', { type: 'reasoning', text: '- [P1] thinking — a.ts:1' }), event('step_finish'), text('No findings.')])
+    expect(r.stdout.split('\n').filter(Boolean).slice(1)).toEqual(['[granny] opencode: dropped', '[granny] opencode: text 1', 'No findings.'])
+    expect(opencodeAnswer(r.stdout)).toEqual({ text: 'No findings.', dropped: 1 })
   })
 
   it('finds the backend line wherever it sits among the JSON events', () => {
@@ -447,12 +507,12 @@ describe('an opencode reviewer in a run', () => {
     expect(run).toContain(`OPENCODE_CONFIG_CONTENT=${shellQuote(opencodeAgentConfig(['/Users/u/Library/Mobile Documents/plans', '/home/u/My Plans']))} opencode run`)
   })
 
-  it('says how many event lines it dropped as not valid JSON', async () => {
+  it('says how many text parts did not come back whole', async () => {
     const broken = text('- [P1] Leak — src/a.ts:3').replace('Leak', 'Le"ak')
     const o = opencode([stream('No findings.', broken)])
     const f = fakeHost({ reviews: o.reviews })
     await runGranny(f.host, input())
-    expect(f.logs).toContain('core r1 kimi: opencode: 1 event line(s) were not valid JSON and are missing from the answer - check .granny/review-core-r1-kimi.log')
+    expect(f.logs).toContain('core r1 kimi: opencode: 1 text part(s) did not come back whole and may be missing from the answer - check .granny/review-core-r1-kimi.log')
   })
 
   it('runs the plan review through opencode too, with the plan directory readable', async () => {
@@ -489,5 +549,16 @@ describe('an opencode reviewer in a run', () => {
     expect(save.prompt).toContain('line breaks and every character kept')
     expect(save.prompt).toContain(`\n( cd /work/repo && mkdir -p .granny && cat > ${md} <<'GRANNY_REPORT_END'\nReview comments:\n\n- [P1] Leak`)
     expect(f.commands[0]).toContain('opencode run --standalone --archived --format json --agent granny-reviewer')
+  })
+
+  it('on Claude Code takes the findings from the decoded text the read step relays', async () => {
+    const answer = review(finding('P1', 'Leak "quoted"'))
+    const relayed = `${BACKEND}\n[granny] opencode: step\n[granny] opencode: text ${answer.split('\n').filter(l => l.trim()).length}\n${answer}\n`
+    const o = opencode([relayed, stream('No findings.')])
+    const f = fakeHost({ name: 'claude-code', direct: false, reviews: o.reviews, override: req => (req.label.endsWith(' save') ? { ran: true, exitCode: 0, output: '' } : undefined) })
+    const r = await runGranny(f.host, input())
+    expect(r.stages[0]).toMatchObject({ outcome: 'clean', rounds: 2 })
+    expect(r.stages[0]!.history[0]!.findings.map(x => x.title)).toEqual(['Leak "quoted"'])
+    expect(f.logs.some(l => l.includes('did not come back whole'))).toBe(false)
   })
 })
