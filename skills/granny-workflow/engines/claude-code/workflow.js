@@ -888,10 +888,11 @@ ${reviewAsks(stage).join(`
 `)}
 Return findings with id (F1, F2, ...), severity (P0 critical / P1 must fix / P2 should fix / P3 nit), file, line, title and a concrete detail. Zero findings means the stage is clean.`;
 }
-function commandReviewPrompt(p, name, reviewBase, stage, note) {
+function commandReviewPrompt(p, name, reviewBase, stage, note, inWorktree = false) {
+  const diff = inWorktree ? `, from the worktree you run in: \`git diff ${reviewBase}...HEAD\` plus \`git log --oneline ${reviewBase}..HEAD\`` : `: \`cd ${shellQuote(p.repo)} && git diff ${shellQuote(reviewBase)}...HEAD\` plus \`git log --oneline ${shellQuote(reviewBase)}..HEAD\``;
   return [
     "You are a code REVIEWER. Do not edit, stage or commit anything.",
-    `Repo ${p.repo}, branch \`${p.branch}\`. Review the changes of stage "${name}": \`cd ${shellQuote(p.repo)} && git diff ${shellQuote(reviewBase)}...HEAD\` plus \`git log --oneline ${shellQuote(reviewBase)}..HEAD\`.`,
+    `Repo ${p.repo}, branch \`${p.branch}\`. Review the changes of stage "${name}"${diff}.`,
     note ?? "",
     p.context ? `Design context, read it first: ${p.context}` : "",
     taskSection(stage),
@@ -1737,7 +1738,7 @@ ${note}` : ""}` : missing };
     const stem = reviewStem(config, slug(name), round, rv);
     const readable = lane.readable ?? { text: p.context ?? "", files: [] };
     const dirs = rv.engine === "opencode" ? readableDirs(readable.text, [...readable.files, ...subject.kind === "plan" ? subject.files : []], cwd) : [];
-    const plan = subject.kind === "plan" ? planReviewScript(rv, config, host.name, lane.base, stem, planReviewPrompt(p, subject.files), dirs) : reviewPlan(rv, config, host.name, subject.base, stem, commandReviewPrompt(p, name, subject.base, subject.stage, subject.note), dirs);
+    const plan = subject.kind === "plan" ? planReviewScript(rv, config, host.name, lane.base, stem, planReviewPrompt(p, subject.files), dirs) : reviewPlan(rv, config, host.name, subject.base, stem, commandReviewPrompt(p, name, subject.base, subject.stage, subject.note, rv.engine === "opencode"), dirs);
     if (!plan)
       return { ran: false, findings: [], note: "this reviewer has no command for a plan review" };
     const failed = (out) => (rv.engine === "opencode" ? opencodeAnswer(out).error : undefined) ?? out.slice(-2000);

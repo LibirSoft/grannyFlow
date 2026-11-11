@@ -6,6 +6,7 @@ import { join } from 'node:path'
 import { resolveConfig } from '../src/core/config'
 import { runGranny, type RunInput } from '../src/core/engine'
 import { OPENCODE_AGENT, OPENCODE_DECODE, opencodeAgentConfig, opencodeAnswer, readableDirs } from '../src/core/opencode'
+import { commandReviewPrompt, WHOLE_BRANCH_NOTE } from '../src/core/prompts'
 import { parseCodexReview, saysNoFindings } from '../src/core/review'
 import { planReviewScript, reportedBackend, reviewPlan } from '../src/core/reviewer'
 import { shellQuote } from '../src/core/shell'
@@ -16,6 +17,18 @@ const event = (type: string, part: Record<string, unknown> = {}) => JSON.stringi
 const text = (t: string) => event('text', { type: 'text', text: t })
 const DIFF_WITH_FINDING = 'diff --git a/test/review.test.ts b/test/review.test.ts\n+  const out = `- [P1] Planted bug — src/a.ts:3-3`\n'
 const toolUse = (output: string) => event('tool_use', { type: 'tool', tool: 'bash', state: { status: 'completed', input: { command: 'git diff main...HEAD' }, output } })
+
+const OPENCODE_WILDCARD = (command: string, pattern: string) => {
+  let re = pattern.replaceAll('\\', '/').replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.')
+  if (re.endsWith(' .*')) re = `${re.slice(0, -3)}( .*)?`
+  return new RegExp(`^${re}$`, 's').test(command.replaceAll('\\', '/'))
+}
+const bashDecision = (command: string) => {
+  const rules = Object.entries(JSON.parse(opencodeAgentConfig([])).agent[OPENCODE_AGENT].permission.bash as Record<string, string>)
+  return rules.reverse().find(([pattern]) => OPENCODE_WILDCARD(command, pattern))?.[1]
+}
+/** The shell commands a review prompt names in backticks, a placeholder such as `<merge>` left out. */
+const promptCommands = (prompt: string) => [...prompt.matchAll(/`((?:cd|git) [^`]*)`/g)].map(m => m[1]!).filter(c => !c.includes('<'))
 
 describe('opencodeAnswer', () => {
   it('reads only the text parts, so a finding inside a tool output never counts', () => {
@@ -216,16 +229,6 @@ describe('opencodeAgentConfig', () => {
     expect(Object.keys(agent.permission)[0]).toBe('*')
   })
 
-  const OPENCODE_WILDCARD = (command: string, pattern: string) => {
-    let re = pattern.replaceAll('\\', '/').replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.')
-    if (re.endsWith(' .*')) re = `${re.slice(0, -3)}( .*)?`
-    return new RegExp(`^${re}$`, 's').test(command.replaceAll('\\', '/'))
-  }
-  const bashDecision = (command: string) => {
-    const rules = Object.entries(JSON.parse(opencodeAgentConfig([])).agent[OPENCODE_AGENT].permission.bash as Record<string, string>)
-    return rules.reverse().find(([pattern]) => OPENCODE_WILDCARD(command, pattern))?.[1]
-  }
-
   it('lets the reviewer run read-only git on the worktree', () => {
     for (const command of ['git diff main...HEAD', 'git diff main...HEAD -- src/a.ts', 'git log --oneline main..HEAD', 'git show HEAD:src/a.ts', 'git status --short', 'git blame -L 1,9 src/a.ts', 'git ls-files src', 'git rev-parse HEAD', 'git merge-base main HEAD'])
       expect([command, bashDecision(command)]).toEqual([command, 'allow'])
@@ -258,6 +261,16 @@ describe('opencodeAgentConfig', () => {
       'git blame --contents\t/etc/passwd src/a.ts',
     ])
       expect([command, bashDecision(command)]).toEqual([command, 'deny'])
+  })
+
+  it('lets the reviewer run every git command its review prompt names, from the worktree it runs in', () => {
+    const p = { repo: "/home/u/my repo's", branch: 'feat/x', base: 'main', config: resolveConfig([]) }
+    for (const base of ['main', 'deadbee1']) {
+      const prompt = commandReviewPrompt(p, 'core', base, { number: 1, total: 1, name: 'core', task: 'Do WP-01.' }, WHOLE_BRANCH_NOTE, true)
+      const commands = promptCommands(prompt)
+      expect(commands).toEqual([`git diff ${base}...HEAD`, `git log --oneline ${base}..HEAD`, 'git log --merges'])
+      for (const command of commands) expect([command, bashDecision(command)]).toEqual([command, 'allow'])
+    }
   })
 
   it('allows reading in the given directories outside the worktree, after the deny-all', () => {
@@ -507,6 +520,16 @@ describe('an opencode reviewer in a run', () => {
     const run = f.commands.find(c => c.includes('opencode run'))!
     expect(run).toContain(`OPENCODE_CONFIG_CONTENT=${shellQuote(opencodeAgentConfig(['/srv/orders', '/work/repo/.granny/plans']))} opencode run`)
     expect(f.cwds[f.commands.indexOf(run)]).toBe('/wt/feat-x')
+  })
+
+  it('hands opencode a prompt whose git commands its own bash rules allow', async () => {
+    const o = opencode([stream('No findings.')])
+    const f = fakeHost({ reviews: o.reviews, worktree: "/wt/feat x's" })
+    await runGranny(f.host, input())
+    const run = f.commands.find(c => c.includes('opencode run'))!
+    const commands = promptCommands(run.replaceAll(`'\\''`, "'"))
+    expect(commands).toEqual(['git diff deadbee1...HEAD', 'git log --oneline deadbee1..HEAD'])
+    for (const command of commands) expect([command, bashDecision(command)]).toEqual([command, 'allow'])
   })
 
   it('grants the plan directories from the plan list, so a plan path with a space opens its own directory and nothing wider', async () => {

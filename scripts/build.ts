@@ -164,7 +164,11 @@ export function renderPrompts(): string {
       "Granny - saving an opencode reviewer's answer (label `review <stage> r<n> <name> save`), the helper agent on Claude Code (on opencode and omp granny runs it itself)",
       reviewSavePrompt('<repo>', 'review <stage name> r<n> <reviewer> save', `cd '<repo>' && ${heredocWriteScript('.granny/review-<stage>-r<n>-<name>.md', '<answer>\n')}`),
     ],
-    ['Reviewer - command and opencode engines, the text {prompt} is filled with (the opencode engine passes it as the message of `opencode run`)', commandReviewPrompt(p, '<stage name>', '<stage start sha>', stage)],
+    ['Reviewer - command and opencode engines, the text {prompt} is filled with', commandReviewPrompt(p, '<stage name>', '<stage start sha>', stage)],
+    [
+      "Reviewer - command and opencode engines, the opencode engine's message to `opencode run` (the same text, its git commands run from the worktree without `cd` or quotes, which the reviewer's bash rules refuse)",
+      commandReviewPrompt(p, '<stage name>', '<stage start sha>', stage, undefined, true),
+    ],
     ['Judge', judgePrompt(p, '<stage start sha>', [], [], stage).replace(/\[\]$/, '<findings as JSON>')],
     [
       'Judge - from round 2 on (the plan judge gets the same EARLIER DECISIONS block; one "Round N sent" entry per earlier fix round, followed by its "kept as residual" list when that round left residual findings, and P0/P1 findings join the list once a fixer declined findings; a field the finding does not have, such as the classes of an unjudged P0/P1, is left out; `(ratchet raised <what>)` follows the why when the ratchet raised the finding)',
