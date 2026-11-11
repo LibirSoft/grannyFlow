@@ -18,11 +18,12 @@ Something is missing when:
 
 - no config file sets `reviewers` (the built-in default list does not count as a choice);
 - an `agent` reviewer has no model for this host;
+- an `opencode` reviewer has no model: it needs an opencode `provider/model` on every host, and without one the run is refused before anything starts, with the fix named;
 - the judge has no model for this host (on Claude Code the built-in `haiku` counts as set).
 
 With nothing missing, go to step 4. Otherwise ask only about what is missing:
 
-1. **Who reviews** - the reviewers, as [setup.md](setup.md#2-ask) question 2, then the model of each `agent` reviewer.
+1. **Who reviews** - the reviewers, as [setup.md](setup.md#2-ask) question 2, then the model of each `agent` reviewer, and of each `opencode` reviewer from `opencode models`.
 2. **Who tags** - the `judge` model. On Claude Code offer it too, with `haiku` marked as the default.
 3. **Where to save** - this project (`<repo>/granny.config.json`) or every project (`~/.config/granny/config.json`).
 

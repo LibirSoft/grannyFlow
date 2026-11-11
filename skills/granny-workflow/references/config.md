@@ -14,7 +14,7 @@ Layers, later wins:
 | key | default | meaning |
 |---|---|---|
 | `roles.granny` | `{}` | model/effort for the extraction fallback and the final PR-ready check |
-| `roles.helper` | `{ "model": { "claude-code": "haiku" }, "effort": "low" }` | Claude Code only: model/effort for the helper agents that run granny's plain commands, because a Workflow script has no shell - the worktree setup, the HEAD, commit-count and working-tree status reads, the timeout probe, the checks, a lane's merge and cleanup, and the start, wait, read and stop steps of a Codex or `command` review. Each is given one fixed command to run once and reports its exit code and output; it decides nothing, so a cheap model is enough. On opencode granny runs these commands itself and no helper starts |
+| `roles.helper` | `{ "model": { "claude-code": "haiku" }, "effort": "low" }` | Claude Code only: model/effort for the helper agents that run granny's plain commands, because a Workflow script has no shell - the worktree setup, the HEAD, commit-count and working-tree status reads, the timeout probe, the checks, a lane's merge and cleanup, and the start, wait, read and stop steps of a Codex, `command` or `opencode` review, plus the step that saves an `opencode` reviewer's answer. Each is given one fixed command to run once and reports its exit code and output; it decides nothing, so a cheap model is enough. On opencode granny runs these commands itself and no helper starts |
 | `roles.planner` | `{}` | writes the plan and proposes the stages in a run with `goal` ([Planning](#planning)) |
 | `roles.implementer` | `{}` | builds each stage, fixes accepted findings and repairs failed checks; fixes the plan in the plan review |
 | `roles.judge` | `{ "model": { "claude-code": "haiku" } }` | classifies each finding that is not P0/P1 (verdict, impact, likelihood, fix cost, scope, evidence) and marks duplicates; the engine decides from that ([The decision table](#the-decision-table)). Haiku on Claude Code because the judge only classifies and the engine decides; on a measured set it matched the user's later fixes more often than Sonnet, and its errors lean toward an extra fix round rather than a real bug left open ([The judge's model](#the-judges-model)). `"roles": { "judge": { "model": "sonnet" } }` switches back. On opencode and omp the judge uses the session model. The same role tags the findings of [a judge run](#judge-runs) |
@@ -55,7 +55,7 @@ A role's or a reviewer's `model` is either one string for every host, or an obje
 ```
 
 - **Claude Code** passes it to `agent({ model })`: `opus`, `sonnet`, `haiku`, or a model ID the session accepts. `effort` (`low`, `medium`, `high`, `xhigh`, `max`) is passed as the agent's reasoning effort.
-- **opencode** needs `provider/model`, optionally `#variant` (`anthropic/claude-sonnet-5-5#high`); list them with `opencode models`. `effort` is ignored - use the variant suffix. A role with no model uses the model of the session that called `granny_run`.
+- **opencode** needs `provider/model`, optionally `#variant` (`anthropic/claude-sonnet-5-5#high`); list them with `opencode models`. `effort` is ignored - use the variant suffix. (A reviewer with engine `opencode` is different: its `model` is opencode's on every host and its `effort` becomes the variant - see [opencode reviewers](#opencode-reviewers).) A role with no model uses the model of the session that called `granny_run`.
 - **omp** takes what `omp --model` takes: `provider/id` (exact, `anthropic/claude-sonnet-5-5`), a fuzzy id (keyed to omp, `{ "omp": "opus" }`) or a model role from the omp settings (`slow`); list them with `omp models`. `effort` is passed as `--thinking <effort>`. A role with no model uses the model of the session that called `granny_run`.
 - **Cursor** reads no config; set `model:` in the subagent files (see cursor.md).
 
@@ -251,9 +251,9 @@ The fix step is the implementer with write access (label `fix plan review r<n>`)
 | key | values | |
 |---|---|---|
 | `name` | unique; `a-z`, `0-9`, `-` | names the reviewer's output files, log lines and finding ids. Omitted: `<engine>-<n>`, with `n` its 1-based position (`agent-2`) |
-| `engine` | `auto` (default), `codex`, `codex-plugin`, `agent`, `command` | which reviewer runs, below |
-| `model` | a string or an object keyed by host | the Codex engines pass it as `-m`; `agent` runs that host model; `command` puts it in `{model}` |
-| `effort` | `low`, `medium`, `high`, `xhigh`, `max` | the agent's reasoning effort, for engine `agent` on Claude Code and omp (as `--thinking`); the other engines do not use it |
+| `engine` | `auto` (default), `codex`, `codex-plugin`, `agent`, `command`, `opencode` | which reviewer runs, below |
+| `model` | a string or an object keyed by host | the Codex engines pass it as `-m`; `agent` runs that host model; `command` puts it in `{model}`; `opencode` requires it, an opencode `provider/model` on every host |
+| `effort` | `low`, `medium`, `high`, `xhigh`, `max` | the agent's reasoning effort, for engine `agent` on Claude Code and omp (as `--thinking`); for engine `opencode` the model variant, `<model>#<effort>`; the other engines do not use it |
 | `mode`, `focus` | | the Codex plugin only (engines `auto` and `codex-plugin`) - see [The Codex plugin](#the-codex-plugin) |
 | `command` | a command template | engine `command` only, and required there - see [Command reviewers](#command-reviewers) |
 
@@ -262,8 +262,9 @@ The fix step is the implementer with write access (label `fix plan review r<n>`)
 | `auto` (default) | on Claude Code: the Codex plugin when its companion script is installed and `node` is on `PATH`, otherwise the Codex CLI. On opencode: always the Codex CLI. Not on omp |
 | `codex-plugin` | OpenAI's Codex plugin for Claude Code, on Claude Code and opencode. When the companion script is missing, or `node` is not on `PATH`, the reviewer fails with a note saying so - it never falls back to the CLI |
 | `codex` | the Codex CLI: `codex exec review`; not on omp |
-| `agent` | a host subagent told to stay read-only ([Read-only roles](#read-only-roles)) reviews the diff with the "Reviewer - agent engine" prompt, on this entry's `model` and `effort`. On Claude Code that means Claude models only (`opus`, `sonnet`, `haiku`, a Claude model ID); to have GLM or another provider review there, use engine `command` with a CLI that reaches it, such as `opencode run`. On opencode, any `provider/model` the server has; on omp, any model omp has |
+| `agent` | a host subagent told to stay read-only ([Read-only roles](#read-only-roles)) reviews the diff with the "Reviewer - agent engine" prompt, on this entry's `model` and `effort`. On Claude Code that means Claude models only (`opus`, `sonnet`, `haiku`, a Claude model ID); to have GLM or another provider review there, use engine `opencode`. On opencode, any `provider/model` the server has; on omp, any model omp has |
 | `command` | your command, any CLI - see [Command reviewers](#command-reviewers) |
+| `opencode` | `opencode run` as a read-only agent that opencode itself keeps to reading and read-only git, on the entry's opencode `model`, with `effort` as the model variant; on every host - see [opencode reviewers](#opencode-reviewers) |
 
 **omp runs no Codex reviewer.** The Codex engines - `auto`, `codex` and `codex-plugin`, so also an entry that names no `engine` - are refused before an omp run starts. omp reaches Codex models itself: for a Codex review there, use an `agent` reviewer on one of them (`omp models` lists the `openai-codex/...` ids):
 
@@ -289,28 +290,28 @@ Codex, Opus and GLM reviewing every stage. On opencode the GLM reviewer is an ag
 }
 ```
 
-On Claude Code it goes through `opencode run`, because a Claude Code agent runs Claude models only:
+On Claude Code it is an `opencode` reviewer, because a Claude Code agent runs Claude models only. The same entry works on opencode and omp too:
 
 ```json
 {
   "reviewers": [
     { "name": "codex", "engine": "auto" },
     { "name": "opus", "engine": "agent", "model": { "claude-code": "opus" }, "effort": "high" },
-    { "name": "glm", "engine": "command", "command": "opencode run -m opencode/glm-5.3-flash-free {prompt}" }
+    { "name": "glm", "engine": "opencode", "model": "opencode/glm-5.3-flash-free" }
   ]
 }
 ```
 
 ### Each reviewer on its own
 
-- Output files: `<workDir>/review-<stage>-r<n>-<name>.md` and `.log`; on Claude Code also `.out` (what the script printed), `.exit` (its exit code) and `.pid` (its process group), see [On Claude Code](#on-claude-code).
+- Output files: `<workDir>/review-<stage>-r<n>-<name>.md` and `.log` (for an `opencode` reviewer, `.md` holds its answer and `.log` opencode's whole event stream); on Claude Code also `.out` (what the script printed), `.exit` (its exit code) and `.pid` (its process group), see [On Claude Code](#on-claude-code).
 - Log line every round: `<stage> r<n> <name>: reviewer: <backend>`.
 - Finding ids: `<name>-F1`, `<name>-F2`, … Each finding also carries `reviewer: "<name>"` into the judge prompt, the fix prompt, the round history, residual and unresolved.
 - Codex plugin broker: `<workDir>/codex-plugin-<name>` (below).
 
 ### On Claude Code
 
-The Workflow script has no shell, so a Codex or `command` reviewer's script runs in helper agents (role `helper`, `roles.helper`'s model and effort). A review can take longer than the 10 minutes a Claude Code Bash call may run, and a helper left to wait on its own in the background may return before the review is done or never stop waiting, so the engine runs the script in fixed steps, each a helper that runs one given command once:
+The Workflow script has no shell, so a Codex, `command` or `opencode` reviewer's script runs in helper agents (role `helper`, `roles.helper`'s model and effort). A review can take longer than the 10 minutes a Claude Code Bash call may run, and a helper left to wait on its own in the background may return before the review is done or never stop waiting, so the engine runs the script in fixed steps, each a helper that runs one given command once:
 
 | step | label | command |
 |---|---|---|
@@ -318,6 +319,7 @@ The Workflow script has no shell, so a Codex or `command` reviewer's script runs
 | wait | `review <stage> r<n> <name> wait <k>` | in the foreground, with the Bash timeout set to 600000 ms: `bash -c 'until [ -s <.exit> ] \|\| [ "$SECONDS" -ge 540 ]; do sleep 5; done'`, then `done` or `pending` |
 | read | `review <stage> r<n> <name> read` | prints `.out` and exits with the code in `.exit` |
 | stop | `review <stage> r<n> <name> stop` | only after the last wait: `kill -TERM` to the process group in `.pid` |
+| save | `review <stage> r<n> <name> save` | `opencode` reviewers only, after a read that exited 0 with an answer: writes the answer to `.md` with a here-document. A failed save is logged and the review goes on |
 
 The engine calls the next wait until one prints `done`; a wait that printed anything else, failed or returned nothing counts as `pending`. After 7 waits (63 minutes) without `done` it stops the review and the reviewer did not run (below), with the note `review command still running after 7 waits of up to 9 minutes (63 minutes) - stopped it`. A start the helper reports as failed is a reviewer that did not run too (`review command did not start (exit <code>): <output>`). The plan review uses the same steps; on opencode granny runs the script directly and waits for it itself. `set -m` and bash's `$SECONDS` stand in for `setsid` and `timeout`, which macOS does not ship.
 
@@ -473,7 +475,7 @@ Engine `command` runs the entry's `command` from the worktree (`repo` with `work
 | `{base}` | the stage start sha; in the plan review, the run's base |
 | `{out}` | the file the review should be written to |
 | `{model}` | the entry's `model` for this host; empty without one |
-| `{prompt}` | a review prompt the engine writes for the stage - one line, asking for the finding format below ("Reviewer - command engine" in [prompts.md](prompts.md)) |
+| `{prompt}` | a review prompt the engine writes for the stage - one line, asking for the finding format below ("Reviewer - command and opencode engines" in [prompts.md](prompts.md)) |
 
 The template must contain `{base}` or `{prompt}`. Every value is substituted already shell-quoted, in one pass, so do not put quotes around a placeholder. On Claude Code the command runs detached and the engine waits for it ([On Claude Code](#on-claude-code)). The engine deletes `{out}` and the reviewer's log first, then reads `{out}` when the command left it non-empty, otherwise everything the command printed. A non-zero exit means the reviewer did not run.
 
@@ -482,7 +484,6 @@ With `{prompt}`, any CLI that answers a prompt can review:
 ```json
 {
   "reviewers": [
-    { "name": "glm", "engine": "command", "command": "opencode run -m opencode/glm-5.3-flash-free {prompt}" },
     { "name": "claude", "engine": "command", "command": "claude -p {prompt}" },
     { "name": "gemini", "engine": "command", "command": "gemini -p {prompt}" }
   ]
@@ -491,7 +492,40 @@ With `{prompt}`, any CLI that answers a prompt can review:
 
 With `{base}`, the command reviews the diff itself, the way `codex exec review --base {base} -o {out}` does - for example `my-review --since {base} --out {out}`.
 
-A command reviewer runs with the permissions its CLI grants. The prompt tells it not to edit, stage or commit, but granny does not enforce that; use the CLI's read-only mode or agent where it has one.
+A command reviewer runs with the permissions its CLI grants. The prompt tells it not to edit, stage or commit, but granny does not enforce that; use the CLI's read-only mode or agent where it has one. For a model opencode reaches, use engine `opencode` instead: opencode then enforces the read-only part ([opencode reviewers](#opencode-reviewers)).
+
+### opencode reviewers
+
+Engine `opencode` runs any model opencode can reach (Kimi, GLM, ...) as a reviewer on every host - Claude Code, opencode and omp - with read-only enforced by opencode itself and the answer read from opencode's JSON events:
+
+```json
+{ "reviewers": [{ "name": "kimi", "engine": "opencode", "model": "kimi-code-plan-global/k3.1-pro", "effort": "max" }] }
+```
+
+- `model` is required: an opencode `provider/model`, optionally with `#variant`; `opencode models` lists them. It is opencode's model, not the host's, so one string works on every host and the host's own model check does not apply to it. An object keyed by host works too, and then needs an entry for every host it runs on.
+- `effort` becomes the model variant, `<model>#<effort>`: `"effort": "max"` runs `-m kimi-code-plan-global/k3.1-pro#max`. A model with its own `#variant` and an `effort` is refused as ambiguous - keep one. Whether the model has that variant is opencode's call: an unknown one fails with opencode's `Variant unavailable for <model>: <variant>`, and that is the reviewer's note.
+- `mode`, `focus` and `command` are refused.
+
+The review script runs, from the worktree:
+
+```
+OPENCODE_DISABLE_PROJECT_CONFIG=1 OPENCODE_CONFIG_CONTENT=<agent JSON> opencode run --standalone --archived --format json --agent granny-reviewer -m <model[#variant]> <prompt> </dev/null
+```
+
+- `<prompt>` is the one-line prompt a `command` reviewer gets as `{prompt}` (in the plan review, the plan review prompt), so the finding format is the same.
+- `--standalone` starts a private opencode server for this one run. Without it `opencode run` talks to the opencode service already running, which never sees this process's environment and fails with `Agent not found: "granny-reviewer"`. `--archived` keeps the session out of your session list.
+- `OPENCODE_CONFIG_CONTENT` defines the `granny-reviewer` agent; it replaces any `OPENCODE_CONFIG_CONTENT` of your own for that process. `OPENCODE_DISABLE_PROJECT_CONFIG=1` keeps the reviewed branch's `opencode.json` and `.opencode/` (its agents, plugins and MCP servers) from loading. Your user config, with the provider logins, still loads.
+- The agent's permissions, which opencode enforces: `"*": "deny"`, so no edit, write, patch, `task`, `webfetch` or MCP tool; `read`, `grep`, `glob` and `list` allowed; in `bash` only `git diff`, `git log`, `git show`, `git status`, `git blame`, `git rev-parse`, `git merge-base` and `git ls-files`. After those allows - opencode takes the last pattern that matches - `bash` denies `--output`, redirects (`>`, `<`), `--no-index`, any argument that leaves the worktree (an absolute, `~` or `../` path, bare, quoted or after `=`; a lone `..`; a short option with an absolute path attached), `$`, backticks, braces, the `.?/` and `.[` globs, and a tab. These are text patterns opencode matches against the command line, not a sandbox: they refuse the forms listed here, and a form they do not list runs.
+- `external_directory`: opencode denies reading outside the worktree, except in the directories of the run's plan files and of the absolute file paths named in the run's `context` (a path ending in `/` names that directory; one whose last part has no `.` names nothing). Never a top-level directory, a home directory or a dot directory right under one (`~/.ssh`), the worktree or a directory above it. In `granny judge` only the paths named in `context` count.
+
+What comes back:
+
+- The script prints opencode's event stream with every event but `text`, `error` and `step_start` cut down to its type, so no tool output - a diff with `- [P1]` lines in it, a file read - reaches whoever reads it, and never counts as a finding. The whole stream stays in `<workDir>/review-<stage>-r<n>-<name>.log`.
+- The answer is the text after the last tool call or step start when it has a finding or is the no-findings sentence; otherwise every text part, in order. It is saved as the review's `.md` file (on Claude Code by a helper, the `save` step in [On Claude Code](#on-claude-code)) and read like any review ([Reading the output](#reading-the-output)).
+- opencode can exit 0 on a model or provider error, so a stream with no answer is a reviewer that did not run (note `opencode returned no answer`), and so is one with an error event or an `Error:` line, even with exit 0 and text before it (note `opencode: <error>`). An event line that is not valid JSON is logged as missing from the answer, with the `.log` to check.
+- The log line every round: `<stage> r<n> <name>: reviewer: opencode <model[#variant]> (read-only agent)`.
+
+opencode must be installed and logged in to the model's provider where the review runs: on Claude Code in the helper agent's shell, on opencode in the server's, on omp in your omp process's.
 
 ### Read-only roles
 
@@ -538,7 +572,7 @@ What to know:
 - The hook goes into the settings, not into the agent's frontmatter, because Claude Code skips frontmatter hooks of an agent whose folder is not trusted; a settings hook runs for every agent, so it starts `node` on every Bash call of every session and lets all but `granny-readonly` through. Without `node` on `PATH` the hook fails with a non-blocking error and the command runs - read-only is then the tool list only.
 - Without the agent definition, `agent()` throws `agent type 'granny-readonly' not found` and the run stops at the first reviewer. Without the hook, the agent still has no Edit or Write, but its Bash runs anything.
 - An `agent` reviewer cannot run the tests or any other command outside the list; it reads the code.
-- The helpers that start, wait for, read and stop a review command keep the default agent: they write the review's `.out`, `.exit` and `.pid` files.
+- The helpers that start, wait for, read and stop a review command, and the one that saves an `opencode` reviewer's answer, keep the default agent: they write the review's `.out`, `.exit`, `.pid` and `.md` files.
 - Changing the key changes the `agent()` options, so `resumeFromRunId` runs those roles again instead of reusing their cached results.
 - The guard reads the command as a shell would only for the forms above; anything it cannot read that way is refused, not guessed.
 
@@ -565,7 +599,7 @@ The word severities map to `critical` → P0, `high` → P1, `medium` → P2, `l
 
 What it reads from the config:
 
-- `reviewers`, which a config file must set: the built-in default list does not count as a choice. Each `agent` reviewer needs a model for this host.
+- `reviewers`, which a config file must set: the built-in default list does not count as a choice. Each `agent` reviewer needs a model for this host. An `opencode` reviewer runs as in a normal run, its model checked like there ([opencode reviewers](#opencode-reviewers)); it may read outside the repo only the paths named in `context`.
 - `roles.judge.model`, which must resolve on this host. The built-in `haiku` counts on Claude Code; on opencode and omp there is no default for this. Without any of these the run does not start, and the gaps are named.
 - `roles.granny` (the extraction agent), `roles.helper` on Claude Code, `base`, `workDir`, `language` and `rules`.
 
@@ -609,7 +643,7 @@ Claude Code (`/workflows`) has its own view of a run; it accepts the key and ign
   "reviewers": [
     { "name": "codex", "engine": "auto", "mode": "review" },
     { "name": "opus", "engine": "agent", "model": { "claude-code": "opus", "opencode": "anthropic/claude-opus-5-5", "omp": "anthropic/claude-opus-5-5" }, "effort": "high" },
-    { "name": "glm", "engine": "command", "command": "opencode run -m opencode/glm-5.3-flash-free {prompt}" }
+    { "name": "glm", "engine": "opencode", "model": "opencode/glm-5.3-flash-free" }
   ],
   "threshold": 70,
   "maxRounds": 4,

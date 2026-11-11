@@ -11,6 +11,7 @@ Talk to the user in their language. Ask with your host's question tool when you 
 3. Which reviewers can run here (see [config.md](config.md#reviewers)):
    - Codex: `codex --version` works and `codex login status` says logged in.
    - Claude Code only, the Codex plugin: `ls "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/cache/openai-codex/codex/*/scripts/codex-companion.mjs` finds it and `node --version` works. Engine `auto` uses it then.
+   - opencode as a reviewer, on any host: `opencode --version` works; `opencode models` lists the `provider/model` ids it can run.
 4. The project's commands, as candidate checks: the `test`, `check`, `typecheck`, `lint` and `build` scripts in `package.json` (run with the package manager the lock file names: `bun.lock` → `bun run`, `pnpm-lock.yaml` → `pnpm`, `yarn.lock` → `yarn`, otherwise `npm run`), `Makefile` targets of those names, `cargo test` with a `Cargo.toml`, `go test ./...` with a `go.mod`, `pytest` with a `pyproject.toml` or `pytest.ini`. Offer only commands that exist.
 5. The host and its models (see [config.md](config.md#models-per-host)):
    - Claude Code (you have a `Workflow` tool): `opus`, `sonnet`, `haiku`, or a model ID the session accepts.
@@ -37,6 +38,8 @@ Ask these five, each with the current value (or the default) marked:
    - the host model and Codex: `[{ "name": "reviewer", "engine": "agent" }, { "name": "codex", "engine": "auto" }]`
    - Codex only: `[{ "name": "codex", "engine": "auto" }]`
 
+   - with opencode found in step 1.3, on any host: the host model and an `opencode` reviewer on a model from `opencode models` that the user picks, `[{ "name": "reviewer", "engine": "agent" }, { "name": "<short name>", "engine": "opencode", "model": "<provider/model>" }]`. It runs any provider opencode reaches (Kimi, GLM, ...), read-only as opencode enforces it; an `effort` becomes the model's variant ([config.md](config.md#opencode-reviewers)).
+
    Codex not found: say how to get it (install the Codex CLI and `codex login`) and offer only the host model. On omp granny runs no Codex reviewer: offer the host model only, or the host model and an `agent` reviewer on a Codex model, `{ "name": "codex", "engine": "agent", "model": { "omp": "openai-codex/<model>" } }` with `<model>` from `omp models`. Other reviewers (a pinned model, any CLI) are in [config.md](config.md#reviewers); add them when the user asks.
 
 3. **Checks** (multi-select) - the commands from step 1.4 that granny should run itself after every implementation and fix, before any review; a red one goes back to the implementer. None (default) leaves it to the agents to run the gates.
@@ -54,7 +57,7 @@ Ask these five, each with the current value (or the default) marked:
 
    Skip `helper` on opencode and omp: granny runs those commands itself there and starts no helper. On Claude Code and omp, ask the implementer's and the planner's effort too (`low`, `medium`, `high`, `xhigh`, `max`; default: the host's own); omp passes it as `--thinking`. On opencode effort is ignored: offer the model's `#variant` instead. A Codex reviewer keeps Codex's own model unless the user names one.
 
-   When the answers leave every reviewer an `agent` reviewer on the implementer's model (two roles with no model share the session model; a Codex or `command` reviewer counts as different), tell the user: "reviewers share the implementer's model; a different model may catch more". This is advice on every host: never refuse, and write what the user chose.
+   When the answers leave every reviewer an `agent` reviewer on the implementer's model (two roles with no model share the session model; a Codex, `command` or `opencode` reviewer counts as different), tell the user: "reviewers share the implementer's model; a different model may catch more". This is advice on every host: never refuse, and write what the user chose.
 
 5. **Where to save** - this project (`<repo>/granny.config.json`, default; commit it to share it with the team) or every project (`~/.config/granny/config.json`).
 
@@ -68,7 +71,8 @@ Build the config from the answers:
 - `reviewers`: written when it is not the default, or when the file already had a different list.
 - `checks`: one entry per chosen command, `{ "name": "<script or target name>", "run": "<command>" }`, every name unique. Left out when none were chosen.
 - `roles.<role>.model` and a reviewer entry's `model`: an object keyed by the current host, `{ "<host>": "<model>" }` with host `claude-code`, `opencode` or `omp`, so the same file works on the other hosts. Merge the key into the object the file already has, keeping the other hosts' keys; a string already there becomes an object that keeps it for the other hosts. A role left on its default gets no key for this host (drop a key the file had for it, then an empty object, then an empty role). A choice equal to the built-in default (`haiku` for the judge or the helper on Claude Code) is not written either.
-- `roles.<role>.effort` and a reviewer's `effort`: written only when chosen. It is not keyed by host: Claude Code and omp use it, opencode ignores it.
+- `roles.<role>.effort` and a reviewer's `effort`: written only when chosen. It is not keyed by host: Claude Code and omp use it, opencode ignores it. An `opencode` reviewer's `effort` is its model variant on every host.
+- An `opencode` reviewer's `model`: one string, not keyed by host - it is opencode's model wherever the reviewer runs.
 
 When the file already exists, keep every key the user did not answer for and replace only the ones they did. Use only keys from [config.md](config.md#keys): granny rejects unknown keys when a run starts.
 

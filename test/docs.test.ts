@@ -79,7 +79,36 @@ describe('skill docs', () => {
     const glm = (c: any) => c.reviewers?.find((r: any) => r.name === 'glm')
     const trio = configs.filter(c => ['codex', 'opus', 'glm'].every(n => c.reviewers?.some((r: any) => r.name === n)))
     expect(trio.some(c => glm(c).engine === 'agent' && /^[\w.-]+\/[\w.-]+$/.test(glm(c).model?.opencode))).toBe(true)
-    expect(trio.some(c => glm(c).engine === 'command' && /^opencode run -m \S+ \{prompt\}$/.test(glm(c).command))).toBe(true)
+    expect(trio.some(c => glm(c).engine === 'opencode' && /^[\w.-]+\/[\w.-]+$/.test(glm(c).model))).toBe(true)
+  })
+
+  it('documents the opencode reviewer engine wherever the reviewer engines are listed, and no longer sends GLM through a command reviewer', () => {
+    const config = read('references/config.md')
+    expect(config).toMatch(/^\| `engine` \| [^|]*`command`, `opencode` \|/m)
+    expect(config).toMatch(/^\| `opencode` \| /m)
+    const section = config.slice(config.indexOf('### opencode reviewers'), config.indexOf('\n### ', config.indexOf('### opencode reviewers') + 1))
+    for (const topic of ['--standalone', 'OPENCODE_CONFIG_CONTENT', 'OPENCODE_DISABLE_PROJECT_CONFIG', 'external_directory', '#<effort>', 'not a sandbox', '`opencode models`', 'opencode returned no answer']) {
+      expect({ topic, has: section.includes(topic) }).toEqual({ topic, has: true })
+    }
+    const commands = jsonBlocks(config).flatMap(b => JSON.parse(b).reviewers ?? []).filter((r: any) => r.engine === 'command')
+    expect(commands.length).toBeGreaterThan(0)
+    const docs: Record<string, string> = { 'README.md': readRoot('README.md'), 'SKILL.md': read('SKILL.md') }
+    for (const f of readdirSync(join(skill, 'references'))) if (f !== 'prompts.md') docs[`references/${f}`] = read(`references/${f}`)
+    for (const [file, md] of Object.entries(docs)) expect({ file, stale: md.includes('opencode run -m') }).toEqual({ file, stale: false })
+    const md = read('SKILL.md')
+    expect(md.split('\n').find(l => l.startsWith('| reviewers |'))).toContain('`opencode`')
+    expect(md).toContain('Engine `opencode`: `opencode --version` works and `opencode models` lists the model')
+    expect(read('references/setup.md')).toContain('"engine": "opencode"')
+    for (const host of ['claude-code', 'opencode', 'omp']) {
+      const ref = read(`references/${host}.md`)
+      const reviewers = ref.slice(ref.indexOf('## Reviewers'), ref.indexOf('\n## ', ref.indexOf('## Reviewers') + 1))
+      expect({ host, has: reviewers.includes('- `opencode` ') }).toEqual({ host, has: true })
+    }
+    expect(read('references/claude-code.md')).toContain('`review <stage> r<n> <name> save`')
+    expect(read('references/judge.md')).toContain('an `opencode` reviewer')
+    expect(readRoot('README.md')).toContain('"engine": "opencode"')
+    const unreleased = readRoot('CHANGELOG.md').split('\n## ')[1]!
+    expect(unreleased).toContain('`"engine": "opencode"`')
   })
 
   it('has a SKILL.md with the frontmatter every host reads', () => {
