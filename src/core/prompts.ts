@@ -265,20 +265,21 @@ export function judgeStepPrompt(repo: string, step: string, script: string): str
   return oneCommand(`shell command for the "${step}" step of a review-only run`, `Repo ${repo}.`, 'Run exactly this:', script)
 }
 
+const VERBATIM = 'Run exactly this, as one command with its line breaks and every character kept, down to its last line:'
+
 export function reportWritePrompt(repo: string, step: string, script: string): string {
-  return oneCommand(
-    `shell command for the "${step}" step of a review-only run, which saves the review report (the one file this run writes),`,
-    `Repo ${repo}.`,
-    'Run exactly this, as one command with its line breaks and every character kept, down to its last line:',
-    script,
-  )
+  return oneCommand(`shell command for the "${step}" step of a review-only run, which saves the review report (the one file this run writes),`, `Repo ${repo}.`, VERBATIM, script)
+}
+
+export function reviewSavePrompt(repo: string, step: string, script: string): string {
+  return oneCommand(`shell command for the "${step}" step, which saves a reviewer's answer to its review file under the work dir (the one file this step writes),`, `Do not review the code yourself. Repo ${repo}.`, VERBATIM, script)
 }
 
 export function trailWritePrompt(repo: string, step: string, script: string): string {
   return oneCommand(
     `shell command for the "${step}" step, which saves or checks the record of one review round in the run's work dir,`,
     `Repo ${repo}.`,
-    'Run exactly this, as one command with its line breaks and every character kept, down to its last line:',
+    VERBATIM,
     script,
   )
 }
@@ -382,10 +383,14 @@ ${reviewAsks(stage).join('\n')}
 Return findings with id (F1, F2, ...), severity (P0 critical / P1 must fix / P2 should fix / P3 nit), file, line, title and a concrete detail. Zero findings means the stage is clean.`
 }
 
-export function commandReviewPrompt(p: PromptContext, name: string, reviewBase: string, stage?: StageTask, note?: string): string {
+/** `inWorktree`: the reviewer already runs in the worktree and its bash rules refuse `cd` and quoted arguments (the opencode engine). */
+export function commandReviewPrompt(p: PromptContext, name: string, reviewBase: string, stage?: StageTask, note?: string, inWorktree = false): string {
+  const diff = inWorktree
+    ? `, from the worktree you run in: \`git diff ${reviewBase}...HEAD\` plus \`git log --oneline ${reviewBase}..HEAD\``
+    : `: \`cd ${shellQuote(p.repo)} && git diff ${shellQuote(reviewBase)}...HEAD\` plus \`git log --oneline ${shellQuote(reviewBase)}..HEAD\``
   return [
     'You are a code REVIEWER. Do not edit, stage or commit anything.',
-    `Repo ${p.repo}, branch \`${p.branch}\`. Review the changes of stage "${name}": \`cd ${shellQuote(p.repo)} && git diff ${shellQuote(reviewBase)}...HEAD\` plus \`git log --oneline ${shellQuote(reviewBase)}..HEAD\`.`,
+    `Repo ${p.repo}, branch \`${p.branch}\`. Review the changes of stage "${name}"${diff}.`,
     note ?? '',
     p.context ? `Design context, read it first: ${p.context}` : '',
     taskSection(stage),

@@ -22,6 +22,7 @@ import {
   repairPrompt,
   reportWritePrompt,
   reviewReadPrompt,
+  reviewSavePrompt,
   reviewStartPrompt,
   reviewStopPrompt,
   reviewWaitPrompt,
@@ -129,7 +130,7 @@ export function renderPrompts(): string {
     ['Granny - worktree setup, the helper agent on Claude Code (on Cursor, run the command yourself)', worktreeCommandPrompt('<repo>', '<branch>', setup)],
     ['Planner - a run with goal (context here is the run\'s context only; the plan files do not exist yet)', draftPrompt({ ...p, context: '<context: work-order files and override notes>' }, '<goal>', ['<repo>/.granny/plans/<branch-slug>.md'])],
     ['Plan reviewer - agent engine', agentPlanReviewPrompt(p, plans)],
-    ['Plan reviewer - codex exec, the Codex plugin task and the {prompt} of a command engine', planReviewPrompt(p, plans)],
+    ['Plan reviewer - codex exec, the Codex plugin task, the {prompt} of a command engine and the opencode engine', planReviewPrompt(p, plans)],
     ['Judge - plan review', planJudgePrompt(p, plans, []).replace(/\[\]$/, '<findings as JSON>')],
     ['Implementer - plan fix (round 1; later rounds extend the newest rN deltas section)', planFixPrompt(p, plans, 1, []).replace(/\[\]$/, '<accepted findings as JSON>')],
     ['Implementer - stage', implementPrompt(p, { task: '<stage task>' }, 1, 2, '<stage name>')],
@@ -150,7 +151,7 @@ export function renderPrompts(): string {
     ['Implementer - merge (a stage that ran in its own worktree; its merge stopped on conflicts)', mergePrompt(p, '<stage name>', '<lane branch>', '<git merge output>')],
     ['Reviewer - agent engine', agentReviewPrompt(p, '<stage name>', '<stage start sha>', stage)],
     [
-      'Granny - a review command, start: the helper agent on Claude Code for a Codex or command reviewer, in the diff review and the plan review (on opencode and omp granny runs the review script itself and waits for it)',
+      'Granny - a review command, start: the helper agent on Claude Code for a Codex, command or opencode reviewer, in the diff review and the plan review (on opencode and omp granny runs the review script itself and waits for it)',
       reviewStartPrompt(p, '<stage name>', '<reviewer>', job.start),
     ],
     [
@@ -159,7 +160,15 @@ export function renderPrompts(): string {
     ],
     ['Granny - a review command, read (after a wait printed done)', reviewReadPrompt(p, '<stage name>', '<reviewer>', job.read)],
     [`Granny - a review command, stop (after ${MAX_WAITS} waits without done)`, reviewStopPrompt(p, '<stage name>', '<reviewer>', job.stop)],
-    ['Reviewer - command engine, the text {prompt} is filled with', commandReviewPrompt(p, '<stage name>', '<stage start sha>', stage)],
+    [
+      "Granny - saving an opencode reviewer's answer (label `review <stage> r<n> <name> save`), the helper agent on Claude Code (on opencode and omp granny runs it itself)",
+      reviewSavePrompt('<repo>', 'review <stage name> r<n> <reviewer> save', `cd '<repo>' && ${heredocWriteScript('.granny/review-<stage>-r<n>-<name>.md', '<answer>\n')}`),
+    ],
+    ['Reviewer - command and opencode engines, the text {prompt} is filled with', commandReviewPrompt(p, '<stage name>', '<stage start sha>', stage)],
+    [
+      "Reviewer - command and opencode engines, the opencode engine's message to `opencode run` (the same text, its git commands run from the worktree without `cd` or quotes, which the reviewer's bash rules refuse)",
+      commandReviewPrompt(p, '<stage name>', '<stage start sha>', stage, undefined, true),
+    ],
     ['Judge', judgePrompt(p, '<stage start sha>', [], [], stage).replace(/\[\]$/, '<findings as JSON>')],
     [
       'Judge - from round 2 on (the plan judge gets the same EARLIER DECISIONS block; one "Round N sent" entry per earlier fix round, followed by its "kept as residual" list when that round left residual findings, and P0/P1 findings join the list once a fixer declined findings; a field the finding does not have, such as the classes of an unjudged P0/P1, is left out; `(ratchet raised <what>)` follows the why when the ratchet raised the finding)',

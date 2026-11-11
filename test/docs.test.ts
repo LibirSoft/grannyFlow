@@ -79,7 +79,63 @@ describe('skill docs', () => {
     const glm = (c: any) => c.reviewers?.find((r: any) => r.name === 'glm')
     const trio = configs.filter(c => ['codex', 'opus', 'glm'].every(n => c.reviewers?.some((r: any) => r.name === n)))
     expect(trio.some(c => glm(c).engine === 'agent' && /^[\w.-]+\/[\w.-]+$/.test(glm(c).model?.opencode))).toBe(true)
-    expect(trio.some(c => glm(c).engine === 'command' && /^opencode run -m \S+ \{prompt\}$/.test(glm(c).command))).toBe(true)
+    expect(trio.some(c => glm(c).engine === 'opencode' && /^[\w.-]+\/[\w.-]+$/.test(glm(c).model))).toBe(true)
+  })
+
+  it('documents the opencode reviewer engine wherever the reviewer engines are listed, and no longer sends GLM through a command reviewer', () => {
+    const config = read('references/config.md')
+    expect(config).toMatch(/^\| `engine` \| [^|]*`command`, `opencode` \|/m)
+    expect(config).toMatch(/^\| `opencode` \| /m)
+    const section = config.slice(config.indexOf('### opencode reviewers'), config.indexOf('\n### ', config.indexOf('### opencode reviewers') + 1))
+    for (const topic of ['--standalone', 'OPENCODE_CONFIG_CONTENT', 'OPENCODE_DISABLE_PROJECT_CONFIG', 'external_directory', '#<effort>', 'not a sandbox', '`opencode models`', 'opencode returned no answer']) {
+      expect({ topic, has: section.includes(topic) }).toEqual({ topic, has: true })
+    }
+    const commands = jsonBlocks(config).flatMap(b => JSON.parse(b).reviewers ?? []).filter((r: any) => r.engine === 'command')
+    expect(commands.length).toBeGreaterThan(0)
+    const docs: Record<string, string> = { 'README.md': readRoot('README.md'), 'SKILL.md': read('SKILL.md') }
+    for (const f of readdirSync(join(skill, 'references'))) if (f !== 'prompts.md') docs[`references/${f}`] = read(`references/${f}`)
+    for (const [file, md] of Object.entries(docs)) expect({ file, stale: md.includes('opencode run -m') }).toEqual({ file, stale: false })
+    const md = read('SKILL.md')
+    expect(md.split('\n').find(l => l.startsWith('| reviewers |'))).toContain('`opencode`')
+    expect(md).toContain('Engine `opencode`: `opencode --version` works and `opencode models` lists the model')
+    expect(read('references/setup.md')).toContain('"engine": "opencode"')
+    for (const host of ['claude-code', 'opencode', 'omp']) {
+      const ref = read(`references/${host}.md`)
+      const reviewers = ref.slice(ref.indexOf('## Reviewers'), ref.indexOf('\n## ', ref.indexOf('## Reviewers') + 1))
+      expect({ host, has: reviewers.includes('- `opencode` ') }).toEqual({ host, has: true })
+    }
+    expect(read('references/claude-code.md')).toContain('`review <stage> r<n> <name> save`')
+    expect(read('references/judge.md')).toContain('an `opencode` reviewer')
+    expect(readRoot('README.md')).toContain('"engine": "opencode"')
+    expect(readRoot('README.md')).not.toContain('opencode keeps it read-only.')
+    expect(readRoot('README.md')).toContain('#opencode-reviewers')
+    const unreleased = readRoot('CHANGELOG.md').split('\n## ')[1]!
+    expect(unreleased).toContain('`"engine": "opencode"`')
+    const entry = unreleased.split('\n').find(l => l.includes('`"engine": "opencode"`'))!
+    expect(entry).not.toContain('one string for every host')
+    expect(entry).toContain('an object keyed by host')
+    expect(entry).toContain("of the absolute file paths named in `context` or in the stage's `task` - each whole directory")
+    expect(entry).toContain('the other repos\' worktrees')
+    expect(entry).toContain('opencode cannot read <path> - move it under a project directory')
+    expect(config).toContain('opencode cannot read <path>, ... - move it under a project directory')
+    expect(config).not.toContain('only the paths named in `context`')
+    const judgeRuns = config.split('## Judge runs')[1]!.split('\n## ')[0]!
+    expect(judgeRuns).toContain('only the directories of the absolute file paths named in `context` - each whole directory')
+    const setup = read('references/setup.md').split('2. **Reviewers**')[1]!.split('\n3. ')[0]!
+    expect(setup).not.toContain('offer only the host model')
+    expect(setup).not.toContain('offer the host model only')
+    expect(setup).toContain('the `opencode` reviewer above')
+    expect(setup).toContain('Ask its `effort` with it')
+    for (const host of ['opencode', 'omp']) {
+      const env = read(`references/${host}.md`).split('\n').find(l => / reviewer must be on that `?PATH`? and logged in/.test(l))!
+      expect({ host, env }).toEqual({ host, env: expect.stringContaining('the `opencode` binary of every `opencode` reviewer') })
+    }
+    const write = read('references/judge.md').split('## 3. Write')[1]!.split('\n## ')[0]!
+    expect(write).toContain('An `opencode` reviewer\'s `model`: one string, not keyed by host')
+    expect(write).toContain("models keyed by host except an `opencode` reviewer's")
+    const rules = read('references/setup.md').split('## 3. Write')[1]!.split('\n## ')[0]!.split('\n')
+    expect(rules.find(l => l.startsWith('- `roles.<role>.model`'))).toContain("except an `opencode` reviewer's, which is one string")
+    expect(rules.find(l => l.startsWith('- `roles.<role>.effort`'))).toContain("except an `opencode` reviewer's `effort`, which is its model variant")
   })
 
   it('has a SKILL.md with the frontmatter every host reads', () => {
@@ -158,6 +214,20 @@ describe('skill docs', () => {
     expect(read('references/omp.md')).toContain('granny_run({ repo, branch, base, context, plan?, stages')
     expect(read('references/cursor.md')).toContain('## The plan review')
     expect(readRoot('README.md')).toMatch(/^\| `planReview` \| `false` \|/m)
+  })
+
+  it('names in cursor.md only prompts that prompts.md has under that heading', () => {
+    const headings = [...read('references/prompts.md').matchAll(/^## (.+)$/gm)].map(m => m[1]!)
+    const names = [...new Set([...read('references/cursor.md').matchAll(/"([^"]+)" prompt/g)].map(m => m[1]!))]
+    expect(names.length).toBeGreaterThan(10)
+    const missing = names.filter(n => !headings.some(h => h === n || h.startsWith(`${n},`) || h.startsWith(`${n} (`) || h.startsWith(`${n} - `)))
+    expect(missing).toEqual([])
+  })
+
+  it('tells a Cursor run what to do with an opencode reviewer', () => {
+    const cursor = read('references/cursor.md')
+    expect(cursor).toContain('An `engine: "opencode"` reviewer is not supported here')
+    expect(cursor).toContain('engine `opencode`: not supported on Cursor')
   })
 
   it('says wherever plan review can be turned on that it costs many tokens and time, and to turn it on only when asked', () => {

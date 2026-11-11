@@ -854,6 +854,7 @@ describe('omp extension in the user session (parent mode)', () => {
     for (const reviewer of [{ name: 'c' }, { engine: 'codex' }, { engine: 'codex-plugin', mode: 'adversarial-review' }]) {
       const refused = textOf(await exec(f.tools.get('granny_run'), { repo, branch: 'feat/x', stages: [{ task: 't' }], config: { reviewers: [reviewer] } }))
       expect(refused).toContain('runs Codex, which granny does not run on omp - use "engine": "agent" with an omp model')
+      expect(refused).toContain('"engine": "opencode" for a model opencode reaches and omp does not')
     }
     expect(existsSync(join(repo, '.granny/runs'))).toBe(false)
   })
@@ -1396,6 +1397,12 @@ describe('omp extension in the user session (parent mode)', () => {
       const f = await tool()
       configure({ ...MODELS, reviewers: [{ name: 'kimi', engine: 'agent', model: { opencode: 'a/b' } }] })
       expect((await call(f)).split('\n')).toEqual(['granny_judge refused:', '- reviewers[0] (kimi): no model for omp', ASK])
+    })
+
+    it('refuses an opencode reviewer with no model as a gap to ask the user about', async () => {
+      const f = await tool()
+      configure({ ...MODELS, reviewers: [{ name: 'glm', engine: 'opencode' }, { name: 'kimi', engine: 'opencode', model: { opencode: 'a/b' } }] })
+      expect((await call(f)).split('\n')).toEqual(['granny_judge refused:', '- reviewers[0] (glm): no opencode model', '- reviewers[1] (kimi): no opencode model', ASK])
     })
 
     it('refuses no judge model for omp', async () => {

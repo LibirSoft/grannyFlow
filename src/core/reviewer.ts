@@ -1,4 +1,5 @@
-import { resolveModel, type GrannyConfig, type ReviewerConfig } from './config'
+import { resolveEffort, resolveModel, type GrannyConfig, type ReviewerConfig } from './config'
+import { DECODER_FAILED, OPENCODE_AGENT, OPENCODE_DECODE, opencodeAgentConfig } from './opencode'
 import { shellQuote } from './shell'
 import type { HostName } from './types'
 
@@ -54,6 +55,35 @@ export function companionCommand(rv: ReviewerConfig, host: HostName, base: strin
 
 export const reviewStem = (c: GrannyConfig, stage: string, round: number, rv: ReviewerConfig) => `${c.workDir}/review-${stage}-r${round}-${rv.name}`
 
+/** An opencode reviewer's model with its effort on this host as the variant. */
+const opencodeModel = (rv: ReviewerConfig, host: HostName) => {
+  const effort = resolveEffort(rv.effort, host)
+  return `${resolveModel(rv.model, host)}${effort ? `#${effort}` : ''}`
+}
+
+/** The model string a reviewer runs on: for an opencode reviewer its effort as the variant. */
+export const reviewerModel = (rv: ReviewerConfig, host: HostName) => (rv.engine === 'opencode' ? opencodeModel(rv, host) : resolveModel(rv.model, host))
+
+type Wrap = (run: string, backend?: string, print?: string) => ReviewPlan
+
+function wrapper(c: GrannyConfig, stem: string): { wrap: Wrap; md: string; log: string } {
+  const md = shellQuote(`${stem}.md`)
+  const log = shellQuote(`${stem}.log`)
+  const wrap: Wrap = (run, backend, print = `if [ -s ${md} ]; then cat ${md}; else cat ${log}; fi`) => {
+    const body = `${run}; code=$?; ${print}; exit $code`
+    return { script: `mkdir -p ${shellQuote(c.workDir)} && rm -f ${md} ${log} && ${body}`, body, ...(backend ? { backend } : {}) }
+  }
+  return { wrap, md, log }
+}
+
+/** `opencode run` as a read-only reviewer, its output the JSON event stream decoded; `dirs` are the outside directories it may read. */
+function opencodePlan(rv: ReviewerConfig, c: GrannyConfig, host: HostName, stem: string, prompt: string, dirs: string[]): ReviewPlan {
+  const { wrap, log } = wrapper(c, stem)
+  const model = opencodeModel(rv, host)
+  const run = `OPENCODE_DISABLE_PROJECT_CONFIG=1 OPENCODE_CONFIG_CONTENT=${shellQuote(opencodeAgentConfig(dirs))} opencode run --standalone --archived --format json --agent ${OPENCODE_AGENT} -m ${shellQuote(model)} ${shellQuote(prompt)} </dev/null`
+  return wrap(`{ echo ${shellQuote(`${SAID}opencode ${model} (read-only agent)`)}; ${run}; } > ${log} 2>&1`, undefined, `LC_ALL=C awk ${shellQuote(OPENCODE_DECODE)} ${log} || echo "${DECODER_FAILED}(awk exit $?) - the raw answer is in "${log}`)
+}
+
 interface Backends {
   cli: string
   cliLabel: string
@@ -63,13 +93,7 @@ interface Backends {
 }
 
 function script(rv: ReviewerConfig, c: GrannyConfig, host: HostName, stem: string, b: Backends): ReviewPlan {
-  const md = shellQuote(`${stem}.md`)
-  const log = shellQuote(`${stem}.log`)
-  const wrap = (run: string, backend?: string): ReviewPlan => {
-    const body = `${run}; code=$?; if [ -s ${md} ]; then cat ${md}; else cat ${log}; fi; exit $code`
-    return { script: `mkdir -p ${shellQuote(c.workDir)} && rm -f ${md} ${log} && ${body}`, body, ...(backend ? { backend } : {}) }
-  }
-
+  const { wrap, md, log } = wrapper(c, stem)
   const cli = `${b.cli} > ${log} 2>&1`
   if (rv.engine === 'command') return wrap(cli, 'custom command')
   if (rv.engine === 'codex' || (rv.engine === 'auto' && host !== 'claude-code')) return wrap(cli, b.cliLabel)
@@ -88,7 +112,8 @@ function script(rv: ReviewerConfig, c: GrannyConfig, host: HostName, stem: strin
   return wrap(`${find}; if [ -z "$companion_version" ]; then ${missing}; elif ! command -v node >/dev/null 2>&1; then ${noNode}; else ${plugin}; fi`)
 }
 
-export function reviewPlan(rv: ReviewerConfig, c: GrannyConfig, host: HostName, base: string, stem: string, prompt = ''): ReviewPlan {
+export function reviewPlan(rv: ReviewerConfig, c: GrannyConfig, host: HostName, base: string, stem: string, prompt = '', dirs: string[] = []): ReviewPlan {
+  if (rv.engine === 'opencode') return opencodePlan(rv, c, host, stem, prompt, dirs)
   const mode = rv.mode ?? 'review'
   return script(rv, c, host, stem, {
     cli: cliCommand(rv, host, base, `${stem}.md`, prompt),
@@ -99,8 +124,9 @@ export function reviewPlan(rv: ReviewerConfig, c: GrannyConfig, host: HostName, 
   })
 }
 
-export function planReviewScript(rv: ReviewerConfig, c: GrannyConfig, host: HostName, base: string, stem: string, prompt: string): ReviewPlan | undefined {
+export function planReviewScript(rv: ReviewerConfig, c: GrannyConfig, host: HostName, base: string, stem: string, prompt: string, dirs: string[] = []): ReviewPlan | undefined {
   if (rv.engine === 'agent' || (rv.engine === 'command' && !rv.command?.includes('{prompt}'))) return undefined
+  if (rv.engine === 'opencode') return opencodePlan(rv, c, host, stem, prompt, dirs)
   const m = resolveModel(rv.model, host)
   const model = m ? ` -m ${shellQuote(m)}` : ''
   const cli =

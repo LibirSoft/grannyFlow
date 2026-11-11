@@ -36,6 +36,8 @@ It works on Claude Code, opencode and omp (oh-my-pi), where the loop runs as cod
 
 3. Optional: Codex as a second reviewer. Install the [Codex CLI](https://github.com/openai/codex) and run `codex login`. On Claude Code, OpenAI's [Codex plugin](https://github.com/openai/codex-plugin-cc) is used instead when it is installed. omp runs no Codex reviewer: use an `agent` reviewer on one of omp's `openai-codex/...` models.
 
+   Optional: any model [opencode](https://opencode.ai) reaches (Kimi, GLM, ...) as a reviewer, on every host. Install opencode, log in to the provider, and add a reviewer with `"engine": "opencode"` and a model from `opencode models`; opencode's permission rules keep it to reading and read-only git, as far as their patterns reach - see [opencode reviewers](skills/granny-workflow/references/config.md#opencode-reviewers).
+
 4. In your project, ask your agent:
 
    > granny setup
@@ -52,7 +54,7 @@ It works on Claude Code, opencode and omp (oh-my-pi), where the loop runs as cod
    | normal | 70 | the default |
    | relaxed | 85 | fewer: a moderate issue only when it is on the common path and trivial to fix |
 
-2. **Reviewers** - the host model, the host model and Codex, or Codex only.
+2. **Reviewers** - the host model, the host model and Codex, or Codex only; with opencode installed, the host model and an opencode model.
 3. **Checks** - the project's test, typecheck, lint or build commands that granny runs itself before every review. A red check goes back to the implementer.
 4. **Models** - keep the defaults, or pick a model for each role in turn: who writes the code (implementer), who reviews, who judges the findings, who plans, and granny's own final check. Claude Code also asks about the helper that runs plain commands; opencode and omp have none, granny runs those commands itself.
 5. **Where to save** - this project or every project.
@@ -153,7 +155,8 @@ The full rules: [the decision table](skills/granny-workflow/references/config.md
   "maxRounds": 4,
   "reviewers": [
     { "name": "reviewer", "engine": "agent" },
-    { "name": "codex", "engine": "auto" }
+    { "name": "codex", "engine": "auto" },
+    { "name": "kimi", "engine": "opencode", "model": "kimi-code-plan-global/k3.1-pro", "effort": "max" }
   ],
   "checks": [
     { "name": "test", "run": "bun test" }
@@ -166,7 +169,7 @@ The full rules: [the decision table](skills/granny-workflow/references/config.md
 | `threshold` | `70` | findings with a priority above it are fixed |
 | `alwaysFix` | `["critical", "major"]` | impact classes that are always fixed |
 | `maxRounds` | `4` | review rounds per stage |
-| `reviewers` | the host model | any mix of host models, Codex and other CLIs |
+| `reviewers` | the host model | any mix of host models, Codex, opencode models and other CLIs |
 | `checks` | none | commands granny runs before every review |
 | `planReview` | `false` | review the plan itself before building it - many more tokens and a much longer run; only when asked |
 | `finalReview` | `true` | review the whole branch after the last stage |

@@ -2,7 +2,7 @@ import { describe, expect, it } from 'bun:test'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { dropPlaceholders, HEARTBEAT_MS, hostModelErrors, JUDGE_INPUT_SCHEMA, JUDGE_ROLES, JUDGE_TOOL_DESCRIPTION, overridesNotice, planReviewWarning, RUN_INPUT_SCHEMA, summarize, RUN_TOOL_DESCRIPTION, runStatus, SAME_MODEL_HINT, sameModelNotice, summarizeJudge, withHeartbeat } from '../src/adapters/common'
+import { dropPlaceholders, HEARTBEAT_MS, hostModelErrors, JUDGE_INPUT_SCHEMA, JUDGE_ROLES, JUDGE_TOOL_DESCRIPTION, judgeStartLine, overridesNotice, planReviewWarning, RUN_INPUT_SCHEMA, summarize, RUN_TOOL_DESCRIPTION, runStatus, SAME_MODEL_HINT, sameModelNotice, summarizeJudge, withHeartbeat } from '../src/adapters/common'
 import { resolveConfig } from '../src/core/config'
 import { checkInput, type JudgeInput, type RunInput } from '../src/core/engine'
 import { noteLine, renderReport } from '../src/core/report'
@@ -95,6 +95,11 @@ describe('overridesNotice', () => {
     )
   })
 
+  it('names an opencode reviewer by the model and variant it runs', () => {
+    const run = { reviewers: [{ name: 'kimi', engine: 'opencode', model: 'kimi-code-plan-global/k3.1-pro', effort: 'max' }] }
+    expect(overridesNotice([...files, run], 'omp')).toContain('reviewers kimi (opencode, kimi-code-plan-global/k3.1-pro#max) (config: ')
+  })
+
   it('compares a host-keyed effort by what it resolves to on this host', () => {
     const effort = (value: unknown) => overridesNotice([...files, { roles: { implementer: { effort: value } } }], 'omp')
     expect(effort({ omp: 'xhigh' })).not.toContain('roles.implementer.effort')
@@ -108,11 +113,25 @@ describe('overridesNotice', () => {
   })
 })
 
+describe('judgeStartLine', () => {
+  it('names an opencode reviewer by the model and variant it runs', () => {
+    const config = resolveConfig([{ reviewers: [{ name: 'kimi', engine: 'opencode', model: 'kimi-code-plan-global/k3.1-pro', effort: 'max' }], roles: { judge: { model: 'j/j' } } }], 'omp')
+    expect(judgeStartLine('id1', { repo: '/r' }, 'feat/x', config, 'omp')).toContain('by kimi (opencode, kimi-code-plan-global/k3.1-pro#max), tagged by j/j')
+  })
+})
+
 describe('hostModelErrors', () => {
   it('checks the model of every role at launch, the helper too', () => {
     const layers = [{ roles: { granny: { model: 'g' }, helper: { model: 'h' }, planner: { model: 'p' }, implementer: { model: 'i' }, judge: { model: 'j' } } }]
     const errors = hostModelErrors(resolveConfig(layers, 'omp'), layers, 'omp', model => (model.includes('/') ? undefined : 'not provider/model'), ['the config'])
     expect(errors.map(e => e.slice(0, e.indexOf(':')))).toEqual(['roles.granny.model', 'roles.helper.model', 'roles.planner.model', 'roles.implementer.model', 'roles.judge.model'])
+  })
+
+  it("leaves an opencode reviewer's model to opencode, which the host never runs as its own agent", () => {
+    const layers = [{ reviewers: [{ name: 'kimi', engine: 'opencode', model: 'kimi-code-plan-global/k3.1-pro', effort: 'max' }] }]
+    for (const host of ['opencode', 'omp'] as const) {
+      expect(hostModelErrors(resolveConfig(layers, host), layers, host, () => 'not a model this host has', ['the config'], [])).toEqual([])
+    }
   })
 })
 

@@ -23,6 +23,7 @@ import {
   repairPrompt,
   reportWritePrompt,
   reviewReadPrompt,
+  reviewSavePrompt,
   reviewStartPrompt,
   reviewStopPrompt,
   reviewWaitPrompt,
@@ -40,9 +41,10 @@ import {
   type StageTask,
   WHOLE_BRANCH_NOTE,
 } from './prompts'
+import { opencodeAnswer, readGrant } from './opencode'
 import { bucketOf, countsOf, isDemoted, isJudged, renderReport, severityOf, utf8Length, type ReportMeta } from './report'
 import { decide, declinedOf, isBlocker, mergeDuplicates, parseCodexReview, reviewFailure, saysNoFindings, triage, type Policy } from './review'
-import { detachedReview, MAX_WAITS, planReviewScript, reportedBackend, reviewPlan, reviewStem, WAIT_SECONDS } from './reviewer'
+import { detachedReview, MAX_WAITS, planReviewScript, reportedBackend, reviewerModel, reviewPlan, reviewStem, WAIT_SECONDS } from './reviewer'
 import { SCHEMAS } from './schemas'
 import { heredocWriteScript, shellQuote } from './shell'
 import { trailDir, trailId, trailPath, trailRound, trailText, type RoundFacts } from './trail'
@@ -137,6 +139,8 @@ interface Lane {
   branch: string
   cwd: string
   p: PromptContext
+  /** What an opencode reviewer may read outside the worktree: the paths named in free text, and files. */
+  readable: { text: string; files: string[] }
 }
 
 interface RepoState {
@@ -191,7 +195,7 @@ const entriesOf = (answer: any): JudgeEntry[] =>
 const phaseOf = (subject: Subject) => (subject.kind === 'plan' ? PLAN_PHASE : subject.note === WHOLE_BRANCH_NOTE ? FINAL_REVIEW_PHASE : REVIEW_PHASE)
 
 const reviewerMeta = (rv: ReviewerConfig, host: Host): TrailReviewer => {
-  const model = resolveModel(rv.model, host.name)
+  const model = reviewerModel(rv, host.name)
   return { name: rv.name, engine: rv.engine, ...(model ? { model } : {}) }
 }
 
@@ -372,6 +376,18 @@ function engineParts(host: Host, config: GrannyConfig) {
   const attribute = (rv: ReviewerConfig, findings: Finding[]): Finding[] =>
     findings.map((f, i) => ({ ...f, id: `${rv.name}-F${i + 1}`, reviewer: rv.name }))
 
+  /** The review file keeps the answer a reviewer gave, not the event stream it was read from; a failed save only logs. */
+  const saveAnswer = async (label: string, phase: string, path: string, text: string, cwd: string, tag: string) => {
+    const failed = `${tag}: could not save the answer to ${path}`
+    try {
+      const w = await shell(label, phase, heredocWriteScript(path, `${text}\n`), cwd, reviewSavePrompt)
+      if (!w.ran) host.log(`${failed} (exit ${w.code}): ${w.output.trim().slice(-300)}`)
+    } catch (e) {
+      if (isCancelled(e)) throw e
+      host.log(`${failed}: ${String((e as Error)?.message ?? e)}`)
+    }
+  }
+
   const review = async (lane: Lane, rv: ReviewerConfig, name: string, subject: Subject, round: number, attempt: number): Promise<Omit<ReviewerRound, 'reviewer'>> => {
     const { p, cwd } = lane
     const tag = `${name} r${round} ${rv.name}${attempt > 1 ? ` #${attempt}` : ''}`
@@ -384,11 +400,20 @@ function engineParts(host: Host, config: GrannyConfig) {
     }
 
     const stem = reviewStem(config, slug(name), round, rv)
+    const { text, files } = lane.readable
+    const { dirs, refused } =
+      rv.engine === 'opencode'
+        ? subject.kind === 'plan'
+          ? readGrant(text, [...files, ...subject.files], cwd, p.others ?? [])
+          : readGrant([text, subject.stage?.task ?? ''].join('\n'), files, cwd)
+        : { dirs: [], refused: [] }
+    if (refused.length) host.log(`${tag}: opencode cannot read ${refused.join(', ')} - move ${refused.length > 1 ? 'them' : 'it'} under a project directory`)
     const plan =
       subject.kind === 'plan'
-        ? planReviewScript(rv, config, host.name, lane.base, stem, planReviewPrompt(p, subject.files))
-        : reviewPlan(rv, config, host.name, subject.base, stem, commandReviewPrompt(p, name, subject.base, subject.stage, subject.note))
+        ? planReviewScript(rv, config, host.name, lane.base, stem, planReviewPrompt(p, subject.files), dirs)
+        : reviewPlan(rv, config, host.name, subject.base, stem, commandReviewPrompt(p, name, subject.base, subject.stage, subject.note, rv.engine === 'opencode'), dirs)
     if (!plan) return { ran: false, findings: [], note: 'this reviewer has no command for a plan review' }
+    const failed = (out: string) => (rv.engine === 'opencode' ? opencodeAnswer(out).error : undefined) ?? out.slice(-2000)
     let ran: boolean
     let output: string
     let note: string | undefined
@@ -396,7 +421,7 @@ function engineParts(host: Host, config: GrannyConfig) {
       const r = await run(plan.script, cwd)
       ran = r.code === 0
       output = r.output
-      if (!ran) note = `review command exited ${r.code}: ${r.output.slice(-2000)}`
+      if (!ran) note = `review command exited ${r.code}: ${failed(r.output)}`
     } else {
       const job = detachedReview(plan, config, stem, cwd)
       const step = async (label: string, prompt: string) => {
@@ -420,10 +445,18 @@ function engineParts(host: Host, config: GrannyConfig) {
       const r = await step(`review ${tag} read`, reviewReadPrompt(p, name, rv.name, markExit(job.read)))
       ran = Boolean(r?.ran)
       output = r?.output ?? ''
-      if (!ran) note = r ? `review command exited ${r.code}${r.note ? ` (${r.note})` : ''}: ${output.slice(-2000)}` : 'review runner returned nothing'
+      if (!ran) note = r ? `review command exited ${r.code}${r.note ? ` (${r.note})` : ''}: ${failed(output)}` : 'review runner returned nothing'
     }
     host.log(`${tag}: reviewer: ${plan.backend ?? reportedBackend(output) ?? 'not reported'}`)
     if (!ran) return { ran, findings: [], note }
+    if (rv.engine === 'opencode') {
+      const answer = opencodeAnswer(output)
+      if (answer.error) return { ran: false, findings: [], note: `opencode: ${answer.error}` }
+      if (answer.dropped) host.log(`${tag}: opencode: ${answer.dropped} text part(s) did not come back whole and may be missing from the answer - check ${stem}.log`)
+      if (!answer.text) return { ran: false, findings: [], note: 'opencode returned no answer' }
+      output = answer.text
+      await saveAnswer(`review ${tag} save`, phase, `${stem}.md`, output, cwd, tag)
+    }
     const failure = reviewFailure(output)
     if (failure) return { ran: false, findings: [], note: `reviewer returned no usable result (${failure}): ${output.slice(-2000)}` }
 
@@ -599,6 +632,7 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
   const plans = draft ? draft.files : planFiles(input)
   const plansIn = (cwd: string): string[] => plans.filter(f => f.startsWith(`${trimPath(cwd)}/`) && !f.slice(trimPath(cwd).length + 1).startsWith(`${work}/`))
   const context = [plans.length ? `Plan files - read them first: ${plans.join(', ')}` : '', input.context ?? ''].filter(Boolean).join('\n') || undefined
+  const readable = { text: input.context ?? '', files: plans }
   const promptFor = (repo: string, cwd: string, branch: string, others: string[], prBody?: string): PromptContext => ({
     repo: cwd,
     branch,
@@ -612,7 +646,7 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
     used.map(r => {
       const cwd = cwdOf.get(r)!
       const others = used.filter(o => o !== r).map(o => cwdOf.get(o)!)
-      return [r, { lane: { repo: r, base: baseOf(r), branch: input.branch, cwd, p: promptFor(r, cwd, input.branch, others) }, locked: false, waiters: [], setup: Promise.resolve(), merges: 0, ledger: new Map() }]
+      return [r, { lane: { repo: r, base: baseOf(r), branch: input.branch, cwd, p: promptFor(r, cwd, input.branch, others), readable }, locked: false, waiters: [], setup: Promise.resolve(), merges: 0, ledger: new Map() }]
     }),
   )
   const primaryLane = repoState.get(primary)!.lane
@@ -1191,7 +1225,7 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
     state.setup = setup.catch(() => {})
     const cwd = await setup
     const others = [main.cwd, ...used.filter(o => o !== main.repo).map(o => cwdOf.get(o)!)]
-    const lane: Lane = { repo: main.repo, base: main.base, branch, cwd, p: promptFor(main.repo, cwd, branch, others, `${main.cwd}/${config.workDir}/PR-BODY-s${i + 1}-${slug(name)}.md`) }
+    const lane: Lane = { repo: main.repo, base: main.base, branch, cwd, p: promptFor(main.repo, cwd, branch, others, `${main.cwd}/${config.workDir}/PR-BODY-s${i + 1}-${slug(name)}.md`), readable }
     const result = await runStage(lane, st, i, name)
     if (result.outcome === 'checks-failed') {
       const note = `ran in parallel on ${branch}; its checks stayed red, so it was not merged - its worktree ${cwd} is left in place`
@@ -1520,7 +1554,7 @@ export async function runJudge(host: Host, input: JudgeInput): Promise<JudgeResu
   }
 
   const p: PromptContext = { repo, branch, base, config, ...(input.context ? { context: input.context } : {}) }
-  const lane: Lane = { repo, base, branch, cwd: repo, p }
+  const lane: Lane = { repo, base, branch, cwd: repo, p, readable: { text: input.context ?? '', files: [] } }
   const note = `${ONE_SHOT_NOTE}${current ? '' : ` HEAD is detached at ${branch}, so that is the "branch" named here.`}`
   const results = await reviewAll(lane, config.reviewers, branch, { kind: 'diff', base, note }, 1)
   const failedReviewers = results.filter(r => !r.ran).map(r => ({ name: r.reviewer.name, note: r.note ?? 'no output' }))

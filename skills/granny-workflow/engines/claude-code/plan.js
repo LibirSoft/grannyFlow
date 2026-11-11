@@ -66,12 +66,13 @@ var REVIEWER_KEYS = new Set(["name", "engine", "model", "effort", "mode", "focus
 var CHECK_KEYS = new Set(["name", "run", "maxRepairs", "timeout", "metric"]);
 var METRIC_KEYS = new Set(["pattern", "min", "max"]);
 var EFFORTS = new Set(["low", "medium", "high", "xhigh", "max"]);
-var ENGINES = ["auto", "codex", "codex-plugin", "agent", "command"];
+var ENGINES = ["auto", "codex", "codex-plugin", "agent", "command", "opencode"];
 var PLUGIN_ENGINES = ["auto", "codex-plugin"];
 var CODEX_ENGINES = ["auto", "codex", "codex-plugin"];
 var MODES = ["review", "adversarial-review"];
 var WATCH_MODES = ["full", "panel", "off"];
 var NAME = /^[a-z0-9-]+$/;
+var OPENCODE_MODEL = /^[^\s/#]+\/[^\s#]+(#[^\s#]+)?$/;
 var isObject = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
 function resolveConfig(layers, host) {
   const config = JSON.parse(JSON.stringify(DEFAULT_CONFIG));
@@ -221,13 +222,38 @@ function reviewers(list, errors, host, where) {
     } else if (entry.command !== undefined) {
       errors.push(`${at}.command needs "engine": "command"; engine "${engine}" runs its own reviewer`);
     }
+    if (engine === "opencode")
+      errors.push(...opencodeModelErrors(at, entry.model, entry.effort, host));
     if (host === "omp" && CODEX_ENGINES.includes(engine)) {
-      errors.push(`${at}.engine "${engine}"${entry.engine === undefined ? " (the engine of an entry that names none)" : ""} runs Codex, which granny does not run on omp - use "engine": "agent" with an omp model, e.g. "model": { "omp": "openai-codex/gpt-6.1-sol" }, or "engine": "command"`);
+      errors.push(`${at}.engine "${engine}"${entry.engine === undefined ? " (the engine of an entry that names none)" : ""} runs Codex, which granny does not run on omp - use "engine": "agent" with an omp model, e.g. "model": { "omp": "openai-codex/gpt-6.1-sol" }, "engine": "opencode" for a model opencode reaches and omp does not, e.g. "model": "openai/gpt-6.1-sol", or "engine": "command"`);
     } else if (host === "opencode" && adversarial && engine === "auto") {
       errors.push(`${at}.mode "adversarial-review" needs the Codex plugin, and on opencode engine "auto" means the Codex CLI - set ${at}.engine to "codex-plugin"`);
     }
     return { ...entry, name, engine };
   });
+}
+function opencodeModelErrors(at, spec, effort, host) {
+  const lists = "`opencode models` lists them";
+  if (spec === undefined)
+    return [`${at}.model is required for engine "opencode": an opencode model "provider/model", e.g. "zai/glm-5.3" - ${lists}`];
+  if (typeof spec !== "string" && !isObject(spec))
+    return [];
+  const errors = [];
+  for (const [on, model] of typeof spec === "string" ? [[undefined, spec]] : Object.entries(spec)) {
+    if (typeof model !== "string" || !model)
+      continue;
+    if (!OPENCODE_MODEL.test(model))
+      errors.push(`${at}.model "${model}" is not an opencode model "provider/model" (optionally "#variant") - ${lists}`);
+    else if (model.includes("#")) {
+      const named = isObject(effort) ? on === undefined ? Object.values(effort)[0] : effort[on] : effort;
+      if (named !== undefined)
+        errors.push(`${at}: model "${model}" names the variant "${model.slice(model.indexOf("#") + 1)}" and effort "${named}" names another - keep one of them`);
+    }
+  }
+  if (host && isObject(spec) && spec[host] === undefined) {
+    errors.push(`${at}.model has no entry for ${host} - engine "opencode" needs a model on every host it runs on; a plain string applies to all of them`);
+  }
+  return errors;
 }
 function validate(c, effortLayer) {
   const errors = [];
@@ -822,8 +848,12 @@ function worktreeCommandPrompt(repo, branch, script) {
 function gitCommandPrompt(repo, step, script) {
   return oneCommand(`git command for the "${step}" step`, `Repo ${repo}.`, "Run exactly this:", script);
 }
+var VERBATIM = "Run exactly this, as one command with its line breaks and every character kept, down to its last line:";
+function reviewSavePrompt(repo, step, script) {
+  return oneCommand(`shell command for the "${step}" step, which saves a reviewer's answer to its review file under the work dir (the one file this step writes),`, `Do not review the code yourself. Repo ${repo}.`, VERBATIM, script);
+}
 function trailWritePrompt(repo, step, script) {
-  return oneCommand(`shell command for the "${step}" step, which saves or checks the record of one review round in the run's work dir,`, `Repo ${repo}.`, "Run exactly this, as one command with its line breaks and every character kept, down to its last line:", script);
+  return oneCommand(`shell command for the "${step}" step, which saves or checks the record of one review round in the run's work dir,`, `Repo ${repo}.`, VERBATIM, script);
 }
 function timeoutProbePrompt(repo, step, script) {
   return oneCommand(`shell command for the "${step}" step: it prints the name of the timeout command the checks run in, or nothing`, `Install nothing. Repo ${repo}.`, "Run exactly this:", script);
@@ -887,10 +917,11 @@ ${reviewAsks(stage).join(`
 `)}
 Return findings with id (F1, F2, ...), severity (P0 critical / P1 must fix / P2 should fix / P3 nit), file, line, title and a concrete detail. Zero findings means the stage is clean.`;
 }
-function commandReviewPrompt(p, name, reviewBase, stage, note) {
+function commandReviewPrompt(p, name, reviewBase, stage, note, inWorktree = false) {
+  const diff = inWorktree ? `, from the worktree you run in: \`git diff ${reviewBase}...HEAD\` plus \`git log --oneline ${reviewBase}..HEAD\`` : `: \`cd ${shellQuote(p.repo)} && git diff ${shellQuote(reviewBase)}...HEAD\` plus \`git log --oneline ${shellQuote(reviewBase)}..HEAD\``;
   return [
     "You are a code REVIEWER. Do not edit, stage or commit anything.",
-    `Repo ${p.repo}, branch \`${p.branch}\`. Review the changes of stage "${name}": \`cd ${shellQuote(p.repo)} && git diff ${shellQuote(reviewBase)}...HEAD\` plus \`git log --oneline ${shellQuote(reviewBase)}..HEAD\`.`,
+    `Repo ${p.repo}, branch \`${p.branch}\`. Review the changes of stage "${name}"${diff}.`,
     note ?? "",
     p.context ? `Design context, read it first: ${p.context}` : "",
     taskSection(stage),
@@ -1003,6 +1034,167 @@ ${output.slice(-3000)}
 First read ${branchLog(p)} and \`git log --oneline HEAD..${shellQuote(lane)}\`. Resolve every conflict so both sides' intent survives, keep the gates green, and conclude with \`git commit --no-edit\`. Never abort the merge or reset. Return startSha = HEAD before the merge (\`git rev-parse HEAD\` before you commit).`;
 }
 
+var OPENCODE_AGENT = "granny-reviewer";
+var READ_ONLY_GIT = ["git diff*", "git log*", "git show*", "git status*", "git blame*", "git rev-parse*", "git merge-base*", "git ls-files*"];
+var REDIRECT = ["*>*", "*<*"];
+var OUTSIDE_PATH = ["*--no-index*", "* /*", "*'/*", '*"/*', "*=/*", "* ~*", "*'~*", '*"~*', "*=~*", "*../*", "* ..", "* .. *", "*'..*", '*"..*', "*$*", "*`*", "*{*", "*.?/*", "*.[*", "* -?/*", "*\t*"];
+var ABSOLUTE_PATH = /(?<=^|[\s,;(\[{"'`])\/[^\s,;)\]}"'`]*/g;
+var isObject2 = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
+var FRAME = "[granny] opencode: ";
+var OPENCODE_DECODE = [
+  String.raw`function hex(s, i, n) { n = 0; for (i = 1; i <= 4; i++) n = n * 16 + index("0123456789abcdef", tolower(substr(s, i, 1))) - 1; return n }`,
+  String.raw`function utf8(c) { if (c < 128) return sprintf("%c", c); if (c < 2048) return sprintf("%c%c", 192 + int(c / 64), 128 + c % 64); if (c < 65536) return sprintf("%c%c%c", 224 + int(c / 4096), 128 + int(c / 64) % 64, 128 + c % 64); return sprintf("%c%c%c%c", 240 + int(c / 262144), 128 + int(c / 4096) % 64, 128 + int(c / 64) % 64, 128 + c % 64) }`,
+  String.raw`function jstr(s, i, out, r, p, c, h, lo) { out = ""; i++; while (1) { r = substr(s, i); p = match(r, /[\\"]/); if (!p) { BAD = 1; return "" } out = out substr(r, 1, p - 1); i += p; if (substr(r, p, 1) == "\"") { J = i; return out } c = substr(s, i, 1); i++; if (c == "n") out = out "\n"; else if (c == "t") out = out "\t"; else if (c == "r") out = out "\r"; else if (c == "b") out = out "\b"; else if (c == "f") out = out "\f"; else if (c == "u") { h = hex(substr(s, i, 4)); i += 4; if (h >= 55296 && h < 56320 && substr(s, i, 2) == "\\u") { lo = hex(substr(s, i + 2, 4)); if (lo >= 56320 && lo < 57344) { h = 65536 + (h - 55296) * 1024 + lo - 56320; i += 6 } } out = out utf8(h) } else out = out c } }`,
+  String.raw`function text(s, i, k, v) { i = 1; while ((k = index(substr(s, i), "\"")) > 0) { v = jstr(s, i + k - 1); if (BAD) return ""; i = J; if (v == "text" && substr(s, i, 2) == ":\"") { v = jstr(s, i + 1); if (!BAD) FOUND = 1; return v } } return "" }`,
+  String.raw`/^\{"type":"text"/ { x = $0; if (gsub(/"type":"text"/, "", x) < 2) next; BAD = 0; FOUND = 0; t = text($0); if (!FOUND) { print "${FRAME}dropped"; next } n = split(t, L, "\n"); c = 0; for (i = 1; i <= n; i++) if (L[i] ~ /[^ \t\r]/) c++; print "${FRAME}text " c; print t; next }`,
+  String.raw`/^\{"type":"(tool_use|step_start)"/ { print "${FRAME}step"; next }`,
+  String.raw`/^\{"type":"error"/ { print "${FRAME}error " $0; next }`,
+  String.raw`/^\{/ { next }`,
+  String.raw`{ print }`
+].join("; ");
+var COUNTED = /[^ \t\r]/;
+var DECODER_FAILED = `${FRAME}decoder failed `;
+var FRAME_LINE = /^\[granny\] opencode: (?:text (\d+)|(step)|error (.*)|(dropped)|(decoder failed .*))$/;
+function errorText(error) {
+  if (!isObject2(error))
+    return String(error);
+  const message = typeof error.message === "string" ? error.message : isObject2(error.data) && typeof error.data.message === "string" ? error.data.message : JSON.stringify(error);
+  const kind = typeof error.type === "string" ? error.type : typeof error.name === "string" ? error.name : undefined;
+  return kind ? `${kind}: ${message}` : message;
+}
+function errorEvent(line) {
+  try {
+    const event = JSON.parse(line);
+    if (isObject2(event) && "error" in event)
+      return errorText(event.error);
+  } catch {}
+  return line;
+}
+function opencodeAnswer(output) {
+  const all = [];
+  let parts = [];
+  let boundary = false;
+  const errors = [];
+  let dropped = 0;
+  let open;
+  const add = (text) => {
+    if (boundary && text.trim())
+      [parts, boundary] = [[], false];
+    parts.push(text);
+    all.push(text);
+  };
+  const close = () => {
+    if (!open)
+      return;
+    if (open.got < open.want)
+      dropped++;
+    add(open.lines.join(`
+`));
+    open = undefined;
+  };
+  for (const raw of output.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (open && open.got < open.want) {
+      open.lines.push(raw);
+      if (COUNTED.test(raw))
+        open.got++;
+      continue;
+    }
+    const frame = FRAME_LINE.exec(line);
+    if (frame) {
+      close();
+      if (frame[1] !== undefined)
+        open = { lines: [], want: Number(frame[1]), got: 0 };
+      else if (frame[2])
+        boundary = true;
+      else if (frame[3] !== undefined)
+        errors.push(errorEvent(frame[3]));
+      else if (frame[5] !== undefined)
+        errors.push(frame[5]);
+      else
+        dropped++;
+      continue;
+    }
+    if (open && !COUNTED.test(raw)) {
+      open.lines.push(raw);
+      continue;
+    }
+    close();
+    if (!line)
+      continue;
+    let event;
+    try {
+      event = JSON.parse(line);
+    } catch {
+      if (line.startsWith("Error:"))
+        errors.push(line);
+      else if (line.startsWith("{"))
+        dropped++;
+      continue;
+    }
+    if (!isObject2(event))
+      continue;
+    if (event.type === "text" && isObject2(event.part) && event.part.type === "text" && typeof event.part.text === "string")
+      add(event.part.text);
+    else if (event.type === "tool_use" || event.type === "step_start")
+      boundary = true;
+    else if (event.type === "error")
+      errors.push(errorText(event.error));
+  }
+  close();
+  const last = parts.join(`
+`).trim();
+  const text = parseCodexReview(last).markers || saysNoFindings(last) ? last : all.join(`
+`).trim();
+  const error = [...new Set(errors)].join("; ");
+  return { ...text ? { text } : {}, ...error ? { error } : {}, ...dropped ? { dropped } : {} };
+}
+function normalize(path) {
+  const out = [];
+  for (const part of path.split("/")) {
+    if (!part || part === ".")
+      continue;
+    if (part === "..")
+      out.pop();
+    else
+      out.push(part);
+  }
+  return `/${out.join("/")}`;
+}
+var HOME = /^\/(?:root|(?:home|Users|var\/home)\/[^/]+)(?:\/\.[^/]+)?$/;
+var tooWide = (dir) => dir.split("/").length < 3 || HOME.test(dir);
+var parent = (path) => path.slice(0, path.lastIndexOf("/"));
+function readGrant(text, files, cwd, dirs = []) {
+  const root = normalize(cwd);
+  const named = (text.match(ABSOLUTE_PATH) ?? []).map((p) => p.replace(/[.:]+$/, "")).flatMap((p) => {
+    const path = normalize(p);
+    if (path === "/")
+      return [];
+    if (p.endsWith("/"))
+      return [{ path: p, dir: path }];
+    return path.slice(path.lastIndexOf("/") + 1).includes(".") ? [{ path: p, dir: parent(path) }] : [];
+  });
+  const asked = [...named, ...files.map((f) => ({ path: f, dir: parent(normalize(f)) })), ...dirs.map((d) => ({ path: d, dir: normalize(d) }))];
+  const outside = asked.filter((a) => a.dir !== root && !a.dir.startsWith(`${root}/`));
+  const refuse = (dir) => tooWide(dir) || root.startsWith(`${dir}/`);
+  return {
+    dirs: [...new Set(outside.filter((a) => !refuse(a.dir)).map((a) => a.dir))],
+    refused: [...new Set(outside.filter((a) => refuse(a.dir)).map((a) => a.path))]
+  };
+}
+function opencodeAgentConfig(dirs) {
+  const permission = {
+    "*": "deny",
+    read: "allow",
+    grep: "allow",
+    glob: "allow",
+    list: "allow",
+    bash: { "*": "deny", ...Object.fromEntries(READ_ONLY_GIT.map((p) => [p, "allow"])), ...Object.fromEntries(["git * --output*", ...REDIRECT, ...OUTSIDE_PATH].map((p) => [p, "deny"])) },
+    ...dirs.length ? { external_directory: Object.fromEntries(dirs.map((d) => [`${d}/*`, "allow"])) } : {}
+  };
+  return JSON.stringify({ agent: { [OPENCODE_AGENT]: { mode: "primary", permission } } });
+}
+
 var P_HEADINGS = ["P0", "P1", "P2", "P3"];
 var ORDER = [...P_HEADINGS, "dismissed"];
 function utf8Length(text) {
@@ -1046,13 +1238,28 @@ function companionCommand(rv, host, base) {
   return `node "$companion" ${rv.mode ?? "review"} --wait --base ${shellQuote(base)} --scope branch${model}${focus}`;
 }
 var reviewStem = (c, stage, round, rv) => `${c.workDir}/review-${stage}-r${round}-${rv.name}`;
-function script(rv, c, host, stem, b) {
+var opencodeModel = (rv, host) => {
+  const effort = resolveEffort(rv.effort, host);
+  return `${resolveModel(rv.model, host)}${effort ? `#${effort}` : ""}`;
+};
+var reviewerModel = (rv, host) => rv.engine === "opencode" ? opencodeModel(rv, host) : resolveModel(rv.model, host);
+function wrapper(c, stem) {
   const md = shellQuote(`${stem}.md`);
   const log = shellQuote(`${stem}.log`);
-  const wrap = (run, backend) => {
-    const body = `${run}; code=$?; if [ -s ${md} ]; then cat ${md}; else cat ${log}; fi; exit $code`;
+  const wrap = (run, backend, print = `if [ -s ${md} ]; then cat ${md}; else cat ${log}; fi`) => {
+    const body = `${run}; code=$?; ${print}; exit $code`;
     return { script: `mkdir -p ${shellQuote(c.workDir)} && rm -f ${md} ${log} && ${body}`, body, ...backend ? { backend } : {} };
   };
+  return { wrap, md, log };
+}
+function opencodePlan(rv, c, host, stem, prompt, dirs) {
+  const { wrap, log } = wrapper(c, stem);
+  const model = opencodeModel(rv, host);
+  const run = `OPENCODE_DISABLE_PROJECT_CONFIG=1 OPENCODE_CONFIG_CONTENT=${shellQuote(opencodeAgentConfig(dirs))} opencode run --standalone --archived --format json --agent ${OPENCODE_AGENT} -m ${shellQuote(model)} ${shellQuote(prompt)} </dev/null`;
+  return wrap(`{ echo ${shellQuote(`${SAID}opencode ${model} (read-only agent)`)}; ${run}; } > ${log} 2>&1`, undefined, `LC_ALL=C awk ${shellQuote(OPENCODE_DECODE)} ${log} || echo "${DECODER_FAILED}(awk exit $?) - the raw answer is in "${log}`);
+}
+function script(rv, c, host, stem, b) {
+  const { wrap, md, log } = wrapper(c, stem);
   const cli = `${b.cli} > ${log} 2>&1`;
   if (rv.engine === "command")
     return wrap(cli, "custom command");
@@ -1068,7 +1275,9 @@ function script(rv, c, host, stem, b) {
   const plugin = `echo "${SAID}codex-plugin ${b.pluginLabel} ($companion)" && ${ownBroker} && ${b.plugin} > ${md} 2> ${log}`;
   return wrap(`${find}; if [ -z "$companion_version" ]; then ${missing}; elif ! command -v node >/dev/null 2>&1; then ${noNode}; else ${plugin}; fi`);
 }
-function reviewPlan(rv, c, host, base, stem, prompt = "") {
+function reviewPlan(rv, c, host, base, stem, prompt = "", dirs = []) {
+  if (rv.engine === "opencode")
+    return opencodePlan(rv, c, host, stem, prompt, dirs);
   const mode = rv.mode ?? "review";
   return script(rv, c, host, stem, {
     cli: cliCommand(rv, host, base, `${stem}.md`, prompt),
@@ -1078,9 +1287,11 @@ function reviewPlan(rv, c, host, base, stem, prompt = "") {
     fallback: rv.engine === "auto" && mode === "review"
   });
 }
-function planReviewScript(rv, c, host, base, stem, prompt) {
+function planReviewScript(rv, c, host, base, stem, prompt, dirs = []) {
   if (rv.engine === "agent" || rv.engine === "command" && !rv.command?.includes("{prompt}"))
     return;
+  if (rv.engine === "opencode")
+    return opencodePlan(rv, c, host, stem, prompt, dirs);
   const m = resolveModel(rv.model, host);
   const model = m ? ` -m ${shellQuote(m)}` : "";
   const cli = rv.engine === "command" ? cliCommand(rv, host, base, `${stem}.md`, prompt) : `codex exec --sandbox read-only${model} -o ${shellQuote(`${stem}.md`)} ${shellQuote(prompt)} </dev/null`;
@@ -1292,7 +1503,7 @@ var trailText = (record) => `${JSON.stringify(record, null, 2)}
 
 var SAID2 = "[granny] worktree: ";
 var REPORTED = /^\[granny\] worktree: (\/.*?)\r?$/m;
-function normalize(path) {
+function normalize2(path) {
   const parts = [];
   for (const part of path.split("/")) {
     if (!part || part === ".")
@@ -1306,13 +1517,13 @@ function normalize(path) {
 }
 var branchSlug = (branch) => branch.replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") || "branch";
 function worktreePath(repo, branch, worktreeDir, shared = false) {
-  const top = normalize(repo);
+  const top = normalize2(repo);
   const cut = top.lastIndexOf("/");
   const parent = top.slice(0, cut) || "/";
   const name = top.slice(cut + 1);
   const dir = worktreeDir === undefined ? `${parent}/${name}-worktrees` : worktreeDir.startsWith("/") ? worktreeDir : `${parent}/${worktreeDir}`;
   const prefix = shared && worktreeDir !== undefined ? `${name}-` : "";
-  return normalize(`${dir}/${prefix}${branchSlug(branch)}`);
+  return normalize2(`${dir}/${prefix}${branchSlug(branch)}`);
 }
 function excludeScript(c) {
   const entry = shellQuote(`/${c.workDir}/`);
@@ -1377,7 +1588,7 @@ var listed = (status) => status.map((l) => l.trim()).join(", ");
 var entriesOf = (answer) => Array.isArray(answer?.perFinding) ? answer.perFinding.filter((x) => x && typeof x === "object" && typeof x.id === "string") : [];
 var phaseOf = (subject) => subject.kind === "plan" ? PLAN_PHASE : subject.note === WHOLE_BRANCH_NOTE ? FINAL_REVIEW_PHASE : REVIEW_PHASE;
 var reviewerMeta = (rv, host) => {
-  const model = resolveModel(rv.model, host.name);
+  const model = reviewerModel(rv, host.name);
   return { name: rv.name, engine: rv.engine, ...model ? { model } : {} };
 };
 function checkInput(input) {
@@ -1546,6 +1757,19 @@ ${note}` : ""}` : missing };
 `).filter((l) => STATUS_LINE.test(l) && !`${l.trim().replace(/^\S+\s+/, "")}/`.startsWith(`${work}/`));
   };
   const attribute = (rv, findings) => findings.map((f, i) => ({ ...f, id: `${rv.name}-F${i + 1}`, reviewer: rv.name }));
+  const saveAnswer = async (label, phase, path, text, cwd, tag) => {
+    const failed = `${tag}: could not save the answer to ${path}`;
+    try {
+      const w = await shell(label, phase, heredocWriteScript(path, `${text}
+`), cwd, reviewSavePrompt);
+      if (!w.ran)
+        host.log(`${failed} (exit ${w.code}): ${w.output.trim().slice(-300)}`);
+    } catch (e) {
+      if (isCancelled(e))
+        throw e;
+      host.log(`${failed}: ${String(e?.message ?? e)}`);
+    }
+  };
   const review = async (lane, rv, name, subject, round, attempt) => {
     const { p, cwd } = lane;
     const tag = `${name} r${round} ${rv.name}${attempt > 1 ? ` #${attempt}` : ""}`;
@@ -1558,9 +1782,15 @@ ${note}` : ""}` : missing };
       return { ran: true, findings: Array.isArray(r.findings) ? r.findings : [] };
     }
     const stem = reviewStem(config, slug(name), round, rv);
-    const plan = subject.kind === "plan" ? planReviewScript(rv, config, host.name, lane.base, stem, planReviewPrompt(p, subject.files)) : reviewPlan(rv, config, host.name, subject.base, stem, commandReviewPrompt(p, name, subject.base, subject.stage, subject.note));
+    const { text, files } = lane.readable;
+    const { dirs, refused } = rv.engine === "opencode" ? subject.kind === "plan" ? readGrant(text, [...files, ...subject.files], cwd, p.others ?? []) : readGrant([text, subject.stage?.task ?? ""].join(`
+`), files, cwd) : { dirs: [], refused: [] };
+    if (refused.length)
+      host.log(`${tag}: opencode cannot read ${refused.join(", ")} - move ${refused.length > 1 ? "them" : "it"} under a project directory`);
+    const plan = subject.kind === "plan" ? planReviewScript(rv, config, host.name, lane.base, stem, planReviewPrompt(p, subject.files), dirs) : reviewPlan(rv, config, host.name, subject.base, stem, commandReviewPrompt(p, name, subject.base, subject.stage, subject.note, rv.engine === "opencode"), dirs);
     if (!plan)
       return { ran: false, findings: [], note: "this reviewer has no command for a plan review" };
+    const failed = (out) => (rv.engine === "opencode" ? opencodeAnswer(out).error : undefined) ?? out.slice(-2000);
     let ran;
     let output;
     let note;
@@ -1569,7 +1799,7 @@ ${note}` : ""}` : missing };
       ran = r.code === 0;
       output = r.output;
       if (!ran)
-        note = `review command exited ${r.code}: ${r.output.slice(-2000)}`;
+        note = `review command exited ${r.code}: ${failed(r.output)}`;
     } else {
       const job = detachedReview(plan, config, stem, cwd);
       const step = async (label, prompt) => {
@@ -1594,11 +1824,22 @@ ${note}` : ""}` : missing };
       ran = Boolean(r?.ran);
       output = r?.output ?? "";
       if (!ran)
-        note = r ? `review command exited ${r.code}${r.note ? ` (${r.note})` : ""}: ${output.slice(-2000)}` : "review runner returned nothing";
+        note = r ? `review command exited ${r.code}${r.note ? ` (${r.note})` : ""}: ${failed(output)}` : "review runner returned nothing";
     }
     host.log(`${tag}: reviewer: ${plan.backend ?? reportedBackend(output) ?? "not reported"}`);
     if (!ran)
       return { ran, findings: [], note };
+    if (rv.engine === "opencode") {
+      const answer = opencodeAnswer(output);
+      if (answer.error)
+        return { ran: false, findings: [], note: `opencode: ${answer.error}` };
+      if (answer.dropped)
+        host.log(`${tag}: opencode: ${answer.dropped} text part(s) did not come back whole and may be missing from the answer - check ${stem}.log`);
+      if (!answer.text)
+        return { ran: false, findings: [], note: "opencode returned no answer" };
+      output = answer.text;
+      await saveAnswer(`review ${tag} save`, phase, `${stem}.md`, output, cwd, tag);
+    }
     const failure = reviewFailure(output);
     if (failure)
       return { ran: false, findings: [], note: `reviewer returned no usable result (${failure}): ${output.slice(-2000)}` };
@@ -1777,6 +2018,7 @@ async function runGranny(host, input) {
   const plansIn = (cwd) => plans.filter((f) => f.startsWith(`${trimPath(cwd)}/`) && !f.slice(trimPath(cwd).length + 1).startsWith(`${work}/`));
   const context = [plans.length ? `Plan files - read them first: ${plans.join(", ")}` : "", input.context ?? ""].filter(Boolean).join(`
 `) || undefined;
+  const readable = { text: input.context ?? "", files: plans };
   const promptFor = (repo, cwd, branch, others, prBody) => ({
     repo: cwd,
     branch,
@@ -1789,7 +2031,7 @@ async function runGranny(host, input) {
   const repoState = new Map(used.map((r) => {
     const cwd = cwdOf.get(r);
     const others = used.filter((o) => o !== r).map((o) => cwdOf.get(o));
-    return [r, { lane: { repo: r, base: baseOf(r), branch: input.branch, cwd, p: promptFor(r, cwd, input.branch, others) }, locked: false, waiters: [], setup: Promise.resolve(), merges: 0, ledger: new Map }];
+    return [r, { lane: { repo: r, base: baseOf(r), branch: input.branch, cwd, p: promptFor(r, cwd, input.branch, others), readable }, locked: false, waiters: [], setup: Promise.resolve(), merges: 0, ledger: new Map }];
   }));
   const primaryLane = repoState.get(primary).lane;
   const implement = async (lane, label, prompt) => {
@@ -2359,7 +2601,7 @@ the last repair's deviations: ${deviations}` : ""}`;
     state.setup = setup.catch(() => {});
     const cwd = await setup;
     const others = [main.cwd, ...used.filter((o) => o !== main.repo).map((o) => cwdOf.get(o))];
-    const lane = { repo: main.repo, base: main.base, branch, cwd, p: promptFor(main.repo, cwd, branch, others, `${main.cwd}/${config.workDir}/PR-BODY-s${i + 1}-${slug(name)}.md`) };
+    const lane = { repo: main.repo, base: main.base, branch, cwd, p: promptFor(main.repo, cwd, branch, others, `${main.cwd}/${config.workDir}/PR-BODY-s${i + 1}-${slug(name)}.md`), readable };
     const result = await runStage(lane, st, i, name);
     if (result.outcome === "checks-failed") {
       const note = `ran in parallel on ${branch}; its checks stayed red, so it was not merged - its worktree ${cwd} is left in place`;

@@ -416,6 +416,12 @@ describe('opencode plugin', () => {
       expect((await call(f)).split('\n')).toEqual(['granny_judge refused:', '- reviewers[0] (kimi): no model for opencode', ASK])
     })
 
+    it('refuses an opencode reviewer with no model as a gap to ask the user about', async () => {
+      const f = await tool()
+      configure({ ...MODELS, reviewers: [{ name: 'glm', engine: 'opencode', effort: 'max' }] })
+      expect((await call(f)).split('\n')).toEqual(['granny_judge refused:', '- reviewers[0] (glm): no opencode model', ASK])
+    })
+
     it('refuses no judge model for opencode', async () => {
       const f = await tool()
       configure({ reviewers: MODELS.reviewers })

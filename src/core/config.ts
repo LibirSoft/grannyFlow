@@ -9,7 +9,7 @@ export interface RoleConfig {
 }
 
 export type ConfigRole = 'granny' | 'helper' | 'planner' | 'implementer' | 'judge'
-export type ReviewerEngine = 'auto' | 'codex' | 'codex-plugin' | 'agent' | 'command'
+export type ReviewerEngine = 'auto' | 'codex' | 'codex-plugin' | 'agent' | 'command' | 'opencode'
 export type ReviewMode = 'review' | 'adversarial-review'
 export type WatchMode = 'full' | 'panel' | 'off'
 
@@ -105,12 +105,13 @@ const REVIEWER_KEYS = new Set(['name', 'engine', 'model', 'effort', 'mode', 'foc
 const CHECK_KEYS = new Set(['name', 'run', 'maxRepairs', 'timeout', 'metric'])
 const METRIC_KEYS = new Set(['pattern', 'min', 'max'])
 const EFFORTS = new Set(['low', 'medium', 'high', 'xhigh', 'max'])
-const ENGINES: ReviewerEngine[] = ['auto', 'codex', 'codex-plugin', 'agent', 'command']
+const ENGINES: ReviewerEngine[] = ['auto', 'codex', 'codex-plugin', 'agent', 'command', 'opencode']
 const PLUGIN_ENGINES: ReviewerEngine[] = ['auto', 'codex-plugin']
 const CODEX_ENGINES: ReviewerEngine[] = ['auto', 'codex', 'codex-plugin']
 const MODES: ReviewMode[] = ['review', 'adversarial-review']
 const WATCH_MODES: WatchMode[] = ['full', 'panel', 'off']
 const NAME = /^[a-z0-9-]+$/
+const OPENCODE_MODEL = /^[^\s/#]+\/[^\s#]+(#[^\s#]+)?$/
 
 const isObject = (v: unknown): v is Record<string, any> => typeof v === 'object' && v !== null && !Array.isArray(v)
 
@@ -175,15 +176,22 @@ export function resolveConfig(layers: unknown[], host?: HostName): GrannyConfig 
 
 /** What `granny judge` needs the user to choose, one line each: it never picks the reviewers or a model itself. */
 export function judgeConfigGaps(layers: unknown[], host: HostName): string[] {
-  const reviewersSet = layers.some(layer => isObject(layer) && layer.reviewers !== undefined)
-  const config = resolveConfig(layers, host)
+  const listed: unknown = [...layers].reverse().find((layer): layer is Record<string, any> => isObject(layer) && layer.reviewers !== undefined)?.reviewers
+  const modelless = new Set(Array.isArray(listed) ? listed.flatMap((rv, i) => (isObject(rv) && rv.engine === 'opencode' && noModel(rv.model, host) ? [i] : [])) : [])
+  // resolveConfig refuses an opencode reviewer without a model, so a stand-in model lets the other gaps be read.
+  const standIn = Array.isArray(listed) && modelless.size ? [{ reviewers: listed.map((rv, i) => (modelless.has(i) ? { ...rv, model: 'granny/stand-in', effort: undefined } : rv)) }] : []
+  const config = resolveConfig([...layers, ...standIn], host)
   return [
-    ...(reviewersSet
-      ? config.reviewers.flatMap((rv, i) => (rv.engine === 'agent' && !resolveModel(rv.model, host) ? [`reviewers[${i}] (${rv.name}): no model for ${host}`] : []))
+    ...(listed !== undefined
+      ? config.reviewers.flatMap((rv, i) =>
+          modelless.has(i) ? [`reviewers[${i}] (${rv.name}): no opencode model`] : rv.engine === 'agent' && !resolveModel(rv.model, host) ? [`reviewers[${i}] (${rv.name}): no model for ${host}`] : [],
+        )
       : ['reviewers: no config sets who reviews']),
     ...(resolveModel(config.roles.judge.model, host) ? [] : [`roles.judge.model: no model for ${host}`]),
   ]
 }
+
+const noModel = (spec: unknown, host: HostName) => spec === undefined || (typeof spec === 'string' ? !spec : isObject(spec) && !spec[host])
 
 function modelErrors(path: string, spec: unknown): string[] {
   if (spec === undefined) return []
@@ -251,15 +259,36 @@ function reviewers(list: unknown, errors: string[], host?: HostName, where?: str
     } else if (entry.command !== undefined) {
       errors.push(`${at}.command needs "engine": "command"; engine "${engine}" runs its own reviewer`)
     }
+    if (engine === 'opencode') errors.push(...opencodeModelErrors(at, entry.model, entry.effort, host))
     if (host === 'omp' && CODEX_ENGINES.includes(engine)) {
       errors.push(
-        `${at}.engine "${engine}"${entry.engine === undefined ? ' (the engine of an entry that names none)' : ''} runs Codex, which granny does not run on omp - use "engine": "agent" with an omp model, e.g. "model": { "omp": "openai-codex/gpt-6.1-sol" }, or "engine": "command"`,
+        `${at}.engine "${engine}"${entry.engine === undefined ? ' (the engine of an entry that names none)' : ''} runs Codex, which granny does not run on omp - use "engine": "agent" with an omp model, e.g. "model": { "omp": "openai-codex/gpt-6.1-sol" }, "engine": "opencode" for a model opencode reaches and omp does not, e.g. "model": "openai/gpt-6.1-sol", or "engine": "command"`,
       )
     } else if (host === 'opencode' && adversarial && engine === 'auto') {
       errors.push(`${at}.mode "adversarial-review" needs the Codex plugin, and on opencode engine "auto" means the Codex CLI - set ${at}.engine to "codex-plugin"`)
     }
     return { ...entry, name, engine }
   })
+}
+
+function opencodeModelErrors(at: string, spec: unknown, effort: unknown, host?: HostName): string[] {
+  const lists = '`opencode models` lists them'
+  if (spec === undefined) return [`${at}.model is required for engine "opencode": an opencode model "provider/model", e.g. "zai/glm-5.3" - ${lists}`]
+  if (typeof spec !== 'string' && !isObject(spec)) return []
+  const errors: string[] = []
+  for (const [on, model] of typeof spec === 'string' ? [[undefined, spec] as const] : Object.entries(spec)) {
+    if (typeof model !== 'string' || !model) continue
+    if (!OPENCODE_MODEL.test(model)) errors.push(`${at}.model "${model}" is not an opencode model "provider/model" (optionally "#variant") - ${lists}`)
+    else if (model.includes('#')) {
+      // The effort that would become a second variant: a host-keyed one only on the hosts this model runs on.
+      const named: unknown = isObject(effort) ? (on === undefined ? Object.values(effort)[0] : effort[on]) : effort
+      if (named !== undefined) errors.push(`${at}: model "${model}" names the variant "${model.slice(model.indexOf('#') + 1)}" and effort "${named}" names another - keep one of them`)
+    }
+  }
+  if (host && isObject(spec) && spec[host] === undefined) {
+    errors.push(`${at}.model has no entry for ${host} - engine "opencode" needs a model on every host it runs on; a plain string applies to all of them`)
+  }
+  return errors
 }
 
 function validate(c: GrannyConfig, effortLayer: Partial<Record<ConfigRole, string>>): string[] {
