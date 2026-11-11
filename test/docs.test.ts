@@ -107,6 +107,8 @@ describe('skill docs', () => {
     expect(read('references/claude-code.md')).toContain('`review <stage> r<n> <name> save`')
     expect(read('references/judge.md')).toContain('an `opencode` reviewer')
     expect(readRoot('README.md')).toContain('"engine": "opencode"')
+    expect(readRoot('README.md')).not.toContain('opencode keeps it read-only.')
+    expect(readRoot('README.md')).toContain('#opencode-reviewers')
     const unreleased = readRoot('CHANGELOG.md').split('\n## ')[1]!
     expect(unreleased).toContain('`"engine": "opencode"`')
     const entry = unreleased.split('\n').find(l => l.includes('`"engine": "opencode"`'))!

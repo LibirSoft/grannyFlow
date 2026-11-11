@@ -36,7 +36,7 @@ It works on Claude Code, opencode and omp (oh-my-pi), where the loop runs as cod
 
 3. Optional: Codex as a second reviewer. Install the [Codex CLI](https://github.com/openai/codex) and run `codex login`. On Claude Code, OpenAI's [Codex plugin](https://github.com/openai/codex-plugin-cc) is used instead when it is installed. omp runs no Codex reviewer: use an `agent` reviewer on one of omp's `openai-codex/...` models.
 
-   Optional: any model [opencode](https://opencode.ai) reaches (Kimi, GLM, ...) as a reviewer, on every host. Install opencode, log in to the provider, and add a reviewer with `"engine": "opencode"` and a model from `opencode models`; opencode keeps it read-only.
+   Optional: any model [opencode](https://opencode.ai) reaches (Kimi, GLM, ...) as a reviewer, on every host. Install opencode, log in to the provider, and add a reviewer with `"engine": "opencode"` and a model from `opencode models`; opencode's permission rules keep it to reading and read-only git, as far as their patterns reach - see [opencode reviewers](skills/granny-workflow/references/config.md#opencode-reviewers).
 
 4. In your project, ask your agent:
 
