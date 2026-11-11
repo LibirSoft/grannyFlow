@@ -775,7 +775,7 @@ ${problems.map((x) => `- ${x.id}: ${x.why}`).join(`
 var OPENCODE_AGENT = "granny-reviewer";
 var READ_ONLY_GIT = ["git diff*", "git log*", "git show*", "git status*", "git blame*", "git rev-parse*", "git merge-base*", "git ls-files*"];
 var REDIRECT = ["*>*", "*<*"];
-var OUTSIDE_PATH = ["*--no-index*", "* /*", "*'/*", '*"/*', "*=/*", "* ~*", "*'~*", '*"~*', "*=~*", "*../*", "* ..", "* .. *", "*'..*", '*"..*', "*$*", "*`*", "*{*", "*.?/*", "*.[*"];
+var OUTSIDE_PATH = ["*--no-index*", "* /*", "*'/*", '*"/*', "*=/*", "* ~*", "*'~*", '*"~*', "*=~*", "*../*", "* ..", "* .. *", "*'..*", '*"..*', "*$*", "*`*", "*{*", "*.?/*", "*.[*", "* -?/*", "*\t*"];
 var ABSOLUTE_PATH = /(?<=^|[\s,;(\[{"'`])\/[^\s,;)\]}"'`]*/g;
 var isObject2 = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
 function errorText(error) {
@@ -790,6 +790,7 @@ function opencodeAnswer(jsonl) {
   let parts = [];
   let boundary = false;
   const errors = [];
+  let dropped = 0;
   for (const raw of jsonl.split(/\r?\n/)) {
     const line = raw.trim();
     if (!line)
@@ -800,6 +801,8 @@ function opencodeAnswer(jsonl) {
     } catch {
       if (line.startsWith("Error:"))
         errors.push(line);
+      else if (line.startsWith("{"))
+        dropped++;
       continue;
     }
     if (!isObject2(event))
@@ -819,7 +822,7 @@ function opencodeAnswer(jsonl) {
   const text = parseCodexReview(last).markers || saysNoFindings(last) ? last : all.join(`
 `).trim();
   const error = [...new Set(errors)].join("; ");
-  return { ...text ? { text } : {}, ...error ? { error } : {} };
+  return { ...text ? { text } : {}, ...error ? { error } : {}, ...dropped ? { dropped } : {} };
 }
 function normalize(path) {
   const out = [];
@@ -835,12 +838,16 @@ function normalize(path) {
 }
 var HOME = /^\/(?:root|(?:home|Users|var\/home)\/[^/]+)(?:\/\.[^/]+)?$/;
 var tooWide = (dir) => dir.split("/").length < 3 || HOME.test(dir);
+var parent = (path) => path.slice(0, path.lastIndexOf("/"));
 function readableDirs(text, files, cwd) {
   const root = normalize(cwd);
-  const dirs = [...(text.match(ABSOLUTE_PATH) ?? []).map((p) => p.replace(/[.:]+$/, "")), ...files].map((p) => {
+  const named = (text.match(ABSOLUTE_PATH) ?? []).map((p) => p.replace(/[.:]+$/, "")).flatMap((p) => {
     const path = normalize(p);
-    return p.endsWith("/") ? path : path.slice(0, path.lastIndexOf("/"));
+    if (p.endsWith("/"))
+      return [path];
+    return path.slice(path.lastIndexOf("/") + 1).includes(".") ? [parent(path)] : [];
   });
+  const dirs = [...named, ...files.map((f) => parent(normalize(f)))];
   return [...new Set(dirs)].filter((d) => !tooWide(d) && d !== root && !d.startsWith(`${root}/`) && !root.startsWith(`${d}/`));
 }
 function opencodeAgentConfig(dirs) {
@@ -1330,7 +1337,8 @@ ${note}` : ""}` : missing };
       return { ran: true, findings: Array.isArray(r.findings) ? r.findings : [] };
     }
     const stem = reviewStem(config, slug(name), round, rv);
-    const dirs = rv.engine === "opencode" ? readableDirs(p.context ?? "", subject.kind === "plan" ? subject.files : [], cwd) : [];
+    const readable = lane.readable ?? { text: p.context ?? "", files: [] };
+    const dirs = rv.engine === "opencode" ? readableDirs(readable.text, [...readable.files, ...subject.kind === "plan" ? subject.files : []], cwd) : [];
     const plan = subject.kind === "plan" ? planReviewScript(rv, config, host.name, lane.base, stem, planReviewPrompt(p, subject.files), dirs) : reviewPlan(rv, config, host.name, subject.base, stem, commandReviewPrompt(p, name, subject.base, subject.stage, subject.note), dirs);
     if (!plan)
       return { ran: false, findings: [], note: "this reviewer has no command for a plan review" };
@@ -1377,6 +1385,8 @@ ${note}` : ""}` : missing };
       const answer = opencodeAnswer(output);
       if (answer.error)
         return { ran: false, findings: [], note: `opencode: ${answer.error}` };
+      if (answer.dropped)
+        host.log(`${tag}: opencode: ${answer.dropped} event line(s) were not valid JSON and are missing from the answer - check ${stem}.log`);
       if (!answer.text)
         return { ran: false, findings: [], note: "opencode returned no answer" };
       output = answer.text;

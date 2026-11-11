@@ -66,6 +66,11 @@ describe('opencodeAnswer', () => {
     expect(opencodeAnswer(stream)).toEqual({ text: 'No findings.' })
   })
 
+  it('counts an event line that is not valid JSON, so a text part a copy broke is never dropped without a trace', () => {
+    const broken = text('- [P1] Leak — src/a.ts:3').replace('Leak', 'Le"ak')
+    expect(opencodeAnswer([text('No findings.'), broken, '[granny] reviewer: x', '{"type":"tool_use"}'].join('\n'))).toEqual({ text: 'No findings.', dropped: 1 })
+  })
+
   it('reads an error event and a plain Error: line as the error', () => {
     const errorEvent = JSON.stringify({ type: 'error', timestamp: 1, sessionID: 's', error: { type: 'provider.no-route', message: 'Variant unavailable for kimi/k3: nope' } })
     expect(opencodeAnswer(errorEvent)).toEqual({ error: 'provider.no-route: Variant unavailable for kimi/k3: nope' })
@@ -99,6 +104,12 @@ describe('readableDirs', () => {
     expect(readableDirs('Main checkout /home/u/proj, notes in /home/u/todo.md, see /etc/hosts', [], '/home/u/wt/feat')).toEqual([])
     expect(readableDirs('/Users/u/notes.md /root/plan.md /var/home/u/x.md /home/u/.ssh/id_ed25519 /home/u/.claude/CLAUDE.md /tmp/plan.md', ['/home/u/.aws/config'], '/wt')).toEqual([])
     expect(readableDirs('/home/u/proj/.granny/plans/a.md /home/u/.claude/plans/b.md /tmp/run/plan.md', [], '/wt')).toEqual(['/home/u/proj/.granny/plans', '/home/u/.claude/plans', '/tmp/run'])
+  })
+
+  it('never grants the parent of a path in the text that names no file, so a directory named without a trailing slash opens neither itself nor its project', () => {
+    expect(readableDirs('Specs in /home/u/proj/docs and /srv/notes/README', [], '/home/u/wt/feat')).toEqual([])
+    expect(readableDirs('Specs in /home/u/proj/docs/ and /home/u/proj/docs/api.md', [], '/home/u/wt/feat')).toEqual(['/home/u/proj/docs'])
+    expect(readableDirs('', ['/srv/plans/PLAN'], '/wt')).toEqual(['/srv/plans'])
   })
 
   it('never grants the worktree or a directory above it', () => {
@@ -154,6 +165,8 @@ describe('opencodeAgentConfig', () => {
         '*{*': 'deny',
         '*.?/*': 'deny',
         '*.[*': 'deny',
+        '* -?/*': 'deny',
+        '*\t*': 'deny',
       },
     })
     const rules = Object.entries(agent.permission.bash as Record<string, string>)
@@ -177,7 +190,7 @@ describe('opencodeAgentConfig', () => {
   })
 
   it('denies a redirect, so an allowed git command never writes a file', () => {
-    for (const command of ['git log > leak.txt', 'git diff main...HEAD >> src/a.ts', 'git log>x', 'git show HEAD 2>err.txt', 'git diff --no-index /dev/stdin x < y', 'git diff HEAD --output=leak.txt'])
+    for (const command of ['git log > leak.txt', 'git diff main...HEAD >> src/a.ts', 'git log>x', 'git show HEAD 2>err.txt', 'git diff --no-index /dev/stdin x < y', 'git diff HEAD --output=leak.txt', 'git diff HEAD\t--output=leak.txt'])
       expect([command, bashDecision(command)]).toEqual([command, 'deny'])
   })
 
@@ -198,6 +211,9 @@ describe('opencodeAgentConfig', () => {
       'git diff {/etc/passwd,src/a.ts}',
       'git diff .?/outside.txt src/a.ts',
       'git diff .[.]/outside.txt src/a.ts',
+      'git blame -S/home/u/.ssh/id_ed25519 src/a.ts',
+      'git diff\t/etc/passwd\t/dev/null',
+      'git blame --contents\t/etc/passwd src/a.ts',
     ])
       expect([command, bashDecision(command)]).toEqual([command, 'deny'])
   })
@@ -411,8 +427,24 @@ describe('an opencode reviewer in a run', () => {
     const f = fakeHost({ reviews: o.reviews, worktree: '/wt/feat-x' })
     await runGranny(f.host, input({ plan: ['/work/repo/.granny/plans/feat-x.md', '/wt/feat-x/docs/plan-2.md'], context: 'Work orders in /srv/orders/wo-1.md' }))
     const run = f.commands.find(c => c.includes('opencode run'))!
-    expect(run).toContain(`OPENCODE_CONFIG_CONTENT=${shellQuote(opencodeAgentConfig(['/work/repo/.granny/plans', '/srv/orders']))} opencode run`)
+    expect(run).toContain(`OPENCODE_CONFIG_CONTENT=${shellQuote(opencodeAgentConfig(['/srv/orders', '/work/repo/.granny/plans']))} opencode run`)
     expect(f.cwds[f.commands.indexOf(run)]).toBe('/wt/feat-x')
+  })
+
+  it('grants the plan directories from the plan list, so a plan path with a space opens its own directory and nothing wider', async () => {
+    const o = opencode([stream('No findings.')])
+    const f = fakeHost({ reviews: o.reviews, worktree: '/wt/feat-x' })
+    await runGranny(f.host, input({ plan: ['/Users/u/Library/Mobile Documents/plans/a.md', '/home/u/My Plans/feat.md'] }))
+    const run = f.commands.find(c => c.includes('opencode run'))!
+    expect(run).toContain(`OPENCODE_CONFIG_CONTENT=${shellQuote(opencodeAgentConfig(['/Users/u/Library/Mobile Documents/plans', '/home/u/My Plans']))} opencode run`)
+  })
+
+  it('says how many event lines it dropped as not valid JSON', async () => {
+    const broken = text('- [P1] Leak — src/a.ts:3').replace('Leak', 'Le"ak')
+    const o = opencode([stream('No findings.', broken)])
+    const f = fakeHost({ reviews: o.reviews })
+    await runGranny(f.host, input())
+    expect(f.logs).toContain('core r1 kimi: opencode: 1 event line(s) were not valid JSON and are missing from the answer - check .granny/review-core-r1-kimi.log')
   })
 
   it('runs the plan review through opencode too, with the plan directory readable', async () => {

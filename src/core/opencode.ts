@@ -6,7 +6,7 @@ const READ_ONLY_GIT = ['git diff*', 'git log*', 'git show*', 'git status*', 'git
 // opencode v2.2.6 matches each simple command's whole text, redirect words included, after turning `\` into `/`;
 // git reads any path outside the repo it is given (no-index mode), which external_directory does not cover.
 const REDIRECT = ['*>*', '*<*']
-const OUTSIDE_PATH = ['*--no-index*', '* /*', "*'/*", '*"/*', '*=/*', '* ~*', "*'~*", '*"~*', '*=~*', '*../*', '* ..', '* .. *', "*'..*", '*"..*', '*$*', '*`*', '*{*', '*.?/*', '*.[*']
+const OUTSIDE_PATH = ['*--no-index*', '* /*', "*'/*", '*"/*', '*=/*', '* ~*', "*'~*", '*"~*', '*=~*', '*../*', '* ..', '* .. *', "*'..*", '*"..*', '*$*', '*`*', '*{*', '*.?/*', '*.[*', '* -?/*', '*\t*']
 const ABSOLUTE_PATH = /(?<=^|[\s,;(\[{"'`])\/[^\s,;)\]}"'`]*/g
 
 const isObject = (v: unknown): v is Record<string, any> => typeof v === 'object' && v !== null && !Array.isArray(v)
@@ -14,6 +14,8 @@ const isObject = (v: unknown): v is Record<string, any> => typeof v === 'object'
 export interface OpencodeAnswer {
   text?: string
   error?: string
+  /** Lines that start like an event but are not valid JSON, so whatever they held is missing from the answer. */
+  dropped?: number
 }
 
 function errorText(error: unknown): string {
@@ -29,6 +31,7 @@ export function opencodeAnswer(jsonl: string): OpencodeAnswer {
   let parts: string[] = []
   let boundary = false
   const errors: string[] = []
+  let dropped = 0
   for (const raw of jsonl.split(/\r?\n/)) {
     const line = raw.trim()
     if (!line) continue
@@ -37,6 +40,7 @@ export function opencodeAnswer(jsonl: string): OpencodeAnswer {
       event = JSON.parse(line)
     } catch {
       if (line.startsWith('Error:')) errors.push(line)
+      else if (line.startsWith('{')) dropped++
       continue
     }
     if (!isObject(event)) continue
@@ -50,7 +54,7 @@ export function opencodeAnswer(jsonl: string): OpencodeAnswer {
   const last = parts.join('\n').trim()
   const text = parseCodexReview(last).markers || saysNoFindings(last) ? last : all.join('\n').trim()
   const error = [...new Set(errors)].join('; ')
-  return { ...(text ? { text } : {}), ...(error ? { error } : {}) }
+  return { ...(text ? { text } : {}), ...(error ? { error } : {}), ...(dropped ? { dropped } : {}) }
 }
 
 function normalize(path: string): string {
@@ -67,13 +71,17 @@ const HOME = /^\/(?:root|(?:home|Users|var\/home)\/[^/]+)(?:\/\.[^/]+)?$/
 
 const tooWide = (dir: string) => dir.split('/').length < 3 || HOME.test(dir)
 
-/** The directories of the absolute paths named in `text` and of `files` that lie outside `cwd` and above it; never a top-level directory, a home directory or a dot directory right under one. */
+const parent = (path: string) => path.slice(0, path.lastIndexOf('/'))
+
+/** The directories of `files` and of the absolute paths named in `text` (a path ending in `/` is the directory itself, one whose last part has no `.` names nothing) that lie outside `cwd` and above it; never a top-level directory, a home directory or a dot directory right under one. */
 export function readableDirs(text: string, files: string[], cwd: string): string[] {
   const root = normalize(cwd)
-  const dirs = [...(text.match(ABSOLUTE_PATH) ?? []).map(p => p.replace(/[.:]+$/, '')), ...files].map(p => {
+  const named = (text.match(ABSOLUTE_PATH) ?? []).map(p => p.replace(/[.:]+$/, '')).flatMap(p => {
     const path = normalize(p)
-    return p.endsWith('/') ? path : path.slice(0, path.lastIndexOf('/'))
+    if (p.endsWith('/')) return [path]
+    return path.slice(path.lastIndexOf('/') + 1).includes('.') ? [parent(path)] : []
   })
+  const dirs = [...named, ...files.map(f => parent(normalize(f)))]
   return [...new Set(dirs)].filter(d => !tooWide(d) && d !== root && !d.startsWith(`${root}/`) && !root.startsWith(`${d}/`))
 }
 

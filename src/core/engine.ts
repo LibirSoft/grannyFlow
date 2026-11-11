@@ -139,6 +139,8 @@ interface Lane {
   branch: string
   cwd: string
   p: PromptContext
+  /** What an opencode reviewer may read outside the worktree: the paths named in free text, and files; without it, the paths in the prompt context. */
+  readable?: { text: string; files: string[] }
 }
 
 interface RepoState {
@@ -398,7 +400,8 @@ function engineParts(host: Host, config: GrannyConfig) {
     }
 
     const stem = reviewStem(config, slug(name), round, rv)
-    const dirs = rv.engine === 'opencode' ? readableDirs(p.context ?? '', subject.kind === 'plan' ? subject.files : [], cwd) : []
+    const readable = lane.readable ?? { text: p.context ?? '', files: [] }
+    const dirs = rv.engine === 'opencode' ? readableDirs(readable.text, [...readable.files, ...(subject.kind === 'plan' ? subject.files : [])], cwd) : []
     const plan =
       subject.kind === 'plan'
         ? planReviewScript(rv, config, host.name, lane.base, stem, planReviewPrompt(p, subject.files), dirs)
@@ -443,6 +446,7 @@ function engineParts(host: Host, config: GrannyConfig) {
     if (rv.engine === 'opencode') {
       const answer = opencodeAnswer(output)
       if (answer.error) return { ran: false, findings: [], note: `opencode: ${answer.error}` }
+      if (answer.dropped) host.log(`${tag}: opencode: ${answer.dropped} event line(s) were not valid JSON and are missing from the answer - check ${stem}.log`)
       if (!answer.text) return { ran: false, findings: [], note: 'opencode returned no answer' }
       output = answer.text
       await saveAnswer(`review ${tag} save`, phase, `${stem}.md`, output, cwd, tag)
@@ -622,6 +626,7 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
   const plans = draft ? draft.files : planFiles(input)
   const plansIn = (cwd: string): string[] => plans.filter(f => f.startsWith(`${trimPath(cwd)}/`) && !f.slice(trimPath(cwd).length + 1).startsWith(`${work}/`))
   const context = [plans.length ? `Plan files - read them first: ${plans.join(', ')}` : '', input.context ?? ''].filter(Boolean).join('\n') || undefined
+  const readable = { text: input.context ?? '', files: plans }
   const promptFor = (repo: string, cwd: string, branch: string, others: string[], prBody?: string): PromptContext => ({
     repo: cwd,
     branch,
@@ -635,7 +640,7 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
     used.map(r => {
       const cwd = cwdOf.get(r)!
       const others = used.filter(o => o !== r).map(o => cwdOf.get(o)!)
-      return [r, { lane: { repo: r, base: baseOf(r), branch: input.branch, cwd, p: promptFor(r, cwd, input.branch, others) }, locked: false, waiters: [], setup: Promise.resolve(), merges: 0, ledger: new Map() }]
+      return [r, { lane: { repo: r, base: baseOf(r), branch: input.branch, cwd, p: promptFor(r, cwd, input.branch, others), readable }, locked: false, waiters: [], setup: Promise.resolve(), merges: 0, ledger: new Map() }]
     }),
   )
   const primaryLane = repoState.get(primary)!.lane
@@ -1214,7 +1219,7 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
     state.setup = setup.catch(() => {})
     const cwd = await setup
     const others = [main.cwd, ...used.filter(o => o !== main.repo).map(o => cwdOf.get(o)!)]
-    const lane: Lane = { repo: main.repo, base: main.base, branch, cwd, p: promptFor(main.repo, cwd, branch, others, `${main.cwd}/${config.workDir}/PR-BODY-s${i + 1}-${slug(name)}.md`) }
+    const lane: Lane = { repo: main.repo, base: main.base, branch, cwd, p: promptFor(main.repo, cwd, branch, others, `${main.cwd}/${config.workDir}/PR-BODY-s${i + 1}-${slug(name)}.md`), readable }
     const result = await runStage(lane, st, i, name)
     if (result.outcome === 'checks-failed') {
       const note = `ran in parallel on ${branch}; its checks stayed red, so it was not merged - its worktree ${cwd} is left in place`
