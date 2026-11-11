@@ -809,7 +809,7 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
     let carried: Array<{ round: number; labels: string[]; finding: Finding }> = []
     const kept = () => carried.map(c => c.finding)
     for (let round = 1; round <= config.maxRounds; round++) {
-      const reviewedSha = config.trail ? (known ?? (await trailHead(`head ${name} r${round}`, phase, lane.cwd))) : undefined
+      const reviewedSha = config.trail && subject.kind !== 'plan' ? (known ?? (await trailHead(`head ${name} r${round}`, phase, lane.cwd))) : undefined
       known = undefined
       const results = await reviewAll(lane, reviewers, name, subject, round)
       const facts: RoundFacts = {
@@ -931,7 +931,7 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
       }
 
       let fixed: { deviations?: string; declined?: unknown }
-      let work: Implementation | undefined
+      let fixWork: Implementation | undefined
       const fixLabel = `fix ${name} r${round}`
       if (subject.kind === 'plan') {
         fixed = await fixPlan(fixLabel, planFixPrompt(p, subject.files, round, accepted, overruled))
@@ -940,7 +940,7 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
         if (gates) Object.assign(gates, { green: fix.gatesGreen, text: fix.gates, by: `the last fix (${fixLabel})` })
         if (!fix.gatesGreen) host.log(`${name} r${round}: WARNING fixer left gates red - ${fix.gates}`)
         fixed = fix
-        work = fix
+        fixWork = fix
       }
       const said = saidSomething(fixed.deviations)
       const { declined: refused, unknown } = declinedOf(fixed.declined, accepted)
@@ -956,10 +956,10 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
       const fixFacts = (): Partial<RoundFacts> => {
         const head = runs.length > before ? runs.at(-1)!.head : undefined
         const commitsOf = (i: Implementation) => (Array.isArray(i.commits) ? i.commits : [])
-        const done = work && {
-          startSha: work.startSha,
-          headSha: head ?? later.at(-1)?.headSha ?? work.headSha,
-          commits: [work, ...later].flatMap(commitsOf),
+        const done = fixWork && {
+          startSha: fixWork.startSha,
+          headSha: head ?? later.at(-1)?.headSha ?? fixWork.headSha,
+          commits: [fixWork, ...later].flatMap(commitsOf),
         }
         return { ...routed, overruled: overruled.map(o => ({ id: o.id, said: o.said })), fix: { label: fixLabel, ...(done ? { work: done } : {}), refused, ...(said ? { said } : {}) } }
       }

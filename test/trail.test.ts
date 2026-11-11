@@ -318,6 +318,7 @@ describe('the review trail of a run', () => {
     const p1 = recordOf(f, 'plan-r1.json')
     expect(p1).toMatchObject({ loop: 'plan', name: 'plan review', round: 1, base: 'main', fix: { label: 'fix plan review r1' }, findings: [{ id: 'codex-F1', route: 'sent', file: PLAN }] })
     expect(p1.fix!.startSha).toBeUndefined()
+    expect(p1.reviewedSha).toBeUndefined()
     expect(recordOf(f, 'plan-r2.json').outcome).toBe('clean')
     expect(recordOf(f, 's1-r1.json').outcome).toBe('clean')
   })

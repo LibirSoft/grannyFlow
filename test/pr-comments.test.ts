@@ -11,13 +11,13 @@ import { detectPlatform, hostOf } from '../src/pr/platform'
 import { postTrail, type ExecResult, type PosterIo } from '../src/pr/post'
 import { byTrailOrder, trailProblem } from '../src/pr/records'
 import { summary } from '../src/pr/rounds'
-import { agentText, cleanBody, findingComment, findingMarker, outcomeLine, roundBody, roundMarker } from '../src/pr/render'
+import { agentText, cleanBody, findingComment, findingMarker, MAX_BODY, outcomeLine, roundBody, roundMarker } from '../src/pr/render'
 
 const TOP = '/w/repo'
 const DIR = `${TOP}/.granny/trail`
-const SHA1 = '1111111aaaaaaaa'
-const SHA2 = '2222222bbbbbbbb'
-const SHA3 = '3333333cccccccc'
+const SHA1 = '1111111aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+const SHA2 = '2222222bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
+const SHA3 = '3333333ccccccccccccccccccccccccccccccccc'
 const HEAD = '9999999fffffff'
 const BASE = '0000000eeeeeeee'
 const PR: PrInfo = { number: 7, url: 'https://github.com/o/r/pull/7', headRefOid: HEAD, baseRefOid: BASE }
@@ -393,7 +393,10 @@ describe('trail records', () => {
     expect(trailProblem({ ...round(), version: 2 })).toBe('version 2 is not 1')
     expect(trailProblem({ ...round(), loop: 's1 -->' })).toBe('loop is missing or not a plain id')
     expect(trailProblem({ ...round(), round: 0 })).toBe('round is not a positive integer')
-    expect(trailProblem({ ...round(), reviewedSha: 'HEAD' })).toBe('reviewedSha is not a commit id')
+    expect(trailProblem({ ...round(), reviewedSha: 'HEAD' })).toBe('reviewedSha is not a full commit id')
+    expect(trailProblem({ ...round(), reviewedSha: 'abcd' })).toBe('reviewedSha is not a full commit id')
+    expect(trailProblem(round({ findings: [finding('codex-F1', { impact: 'huge' as never })] }))).toBe('findings[0].impact "huge" is unknown')
+    expect(trailProblem(round({ findings: [finding('codex-F1', { priority: '82' as never })] }))).toBe('findings[0].priority is not a number')
     expect(trailProblem(round({ findings: [finding('x -->')] }))).toBe('findings[0].id is missing or not a plain id')
     expect(trailProblem(round({ findings: [finding('a', { line: 1.5 })] }))).toBe('findings[0].line is not a positive integer')
     expect(trailProblem(round({ findings: [finding('a', { route: 'lost' as never })] }))).toBe('findings[0].route is not sent or residual')
@@ -412,6 +415,23 @@ describe('trail records', () => {
 })
 
 describe('rendering', () => {
+  it('cuts a comment that is too long without naming a platform, splitting a surrogate pair or leaving a fence open', () => {
+    const fenced = finding('codex-F1', { detail: `\`\`\`ts\n${'x'.repeat(MAX_BODY)}\n\`\`\`` })
+    const r = round({ findings: [fenced] })
+    const cut = findingComment(fenced, r, [r])
+    expect(cut.length).toBeLessThanOrEqual(MAX_BODY)
+    expect(cut.split('\n').slice(-4)).toEqual(['```', '', '... (cut: too long for one comment)', findingMarker(r, fenced)])
+    const emoji = finding('codex-F1', { detail: '😀'.repeat(MAX_BODY) })
+    const text = findingComment(emoji, round({ findings: [emoji] }), [])
+    expect(text.length).toBeLessThanOrEqual(MAX_BODY)
+    expect(/[\ud800-\udbff](?![\udc00-\udfff])/.test(text)).toBe(false)
+  })
+
+  it('keeps a backtick in a record field from ending its inline code', () => {
+    const f = finding('codex-F1', { reviewer: 'co`dex' })
+    expect(findingComment(f, round({ findings: [f] }), []).split('\n')[0]).toContain("reviewer `co'dex`")
+  })
+
   it('renders a line comment with the reviewer, the judge block, the outcome and the marker', () => {
     const f = finding('codex-F2', { severity: 'P1' })
     const r = round({ findings: [f], fix: fix('a1b2c3d4e5', 'd4e5f6a7b8', ['fix: one', 'fix: two']) })
@@ -1006,7 +1026,24 @@ describe('GitLab', () => {
     expect(postTrail([], f.io)).toBe(0)
     expect(f.gl.deleted).toEqual([200])
     expect(f.gl.notes[0]).toContain("GitLab refused this round's line comments")
-    expect(f.out[0]).toBe('s1 r1: posted with all 1 in body - GitLab refused the line comments: glab: 400 Bad Request (HTTP 400)')
+    expect(f.gl.notes[0]).toContain('(the publish failed: glab: 400 Bad Request (HTTP 400))')
+    expect(f.out[0]).toBe('s1 r1: posted with all 1 in body - GitLab refused the line comments: the publish failed: glab: 400 Bad Request (HTTP 400)')
+  })
+
+  it('stops when glab lists a draft note without an id, before it deletes or posts anything', () => {
+    const r = round({ findings: [finding('codex-F1')] })
+    const drafts = [{ note: `old\n${findingMarker(r, { id: 'codex-F1' })}` } as unknown as Draft]
+    const f = gitlab({ records: { 's1-r1.json': r }, diffs: { [SHA1]: A_DIFF }, gitlab: { drafts } })
+    expect(postTrail([], f.io)).toBe(1)
+    expect(f.out[0]).toBe('could not read your draft notes on !5: glab listed a draft without an id')
+    expect(writes(f)).toEqual([])
+  })
+
+  it('says so when the MR given with --pr is not open, and posts to it all the same', () => {
+    const r = round({ findings: [finding('codex-F1')] })
+    const f = gitlab({ records: { 's1-r1.json': r }, diffs: { [SHA1]: A_DIFF }, gitlab: { mr: { ...MR, state: 'merged' } } })
+    expect(postTrail(['--pr', '5'], f.io)).toBe(0)
+    expect(f.out.slice(0, 2)).toEqual(['note: !5 is merged, not open', 's1 r1: posted 1 line comment, 0 in body'])
   })
 
   it('names a round whose plain note fails too, keeps posting the others and exits non-zero', () => {
@@ -1084,6 +1121,9 @@ describe('GitLab', () => {
     const none = gitlab({ records: { 's1-r1.json': r }, gitlab: { mrs: [] }, refs: { 'main^{commit}': BASE, 'HEAD^{commit}': HEAD } })
     expect(postTrail(['--out', 'o.json', '--base', 'main'], none.io)).toBe(0)
     expect(none.written['o.json']).toBeDefined()
+    const old = gitlab({ records: { 's1-r1.json': round({ findings: [finding('codex-F1')] }) }, ancestors: [], gitlab: { mrs: [] }, refs: { 'main^{commit}': BASE, 'HEAD^{commit}': HEAD } })
+    expect(postTrail(['--out', 'o.json', '--base', 'main'], old.io)).toBe(0)
+    expect(JSON.parse(old.written['o.json']!).reviews[0].body).toContain("which is not in this MR's history: the line comments sit on the MR's head.")
     const missing = gitlab({ records: { 's1-r1.json': r }, gitlab: { mr: null }, refs: { 'main^{commit}': BASE, 'HEAD^{commit}': HEAD } })
     expect(postTrail(['--out', 'o.json', '--base', 'main', '--pr', '5'], missing.io)).toBe(2)
     expect(missing.out).toEqual(['open the MR first (glab: 404 Not Found (HTTP 404))'])

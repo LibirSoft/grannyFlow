@@ -1,12 +1,13 @@
 import { currentBranch, failure, plural, type ExecResult, type PosterIo } from './io'
 import { type PlannedComment, type PlannedReview, planRound, type Target } from './plan'
-import { short } from './render'
+import { MARKER_PREFIX, short } from './render'
 import { type Posted, type PostRequest, postRounds } from './rounds'
 
 export interface MrInfo {
   iid: number
   web_url: string
   sha: string
+  state?: string
   diff_refs: { start_sha: string }
 }
 
@@ -22,8 +23,6 @@ export interface GitlabCall {
   path: string
   body?: unknown
 }
-
-const MARKER = '<!-- granny-trail '
 
 const mrPath = (iid: number) => `projects/:id/merge_requests/${iid}`
 
@@ -113,7 +112,8 @@ function clearDrafts(io: PosterIo, mr: MrInfo, dryRun: boolean): string | undefi
   const drafts = list(io, `${mrPath(mr.iid)}/draft_notes`)
   if (!Array.isArray(drafts)) return `could not list your draft notes on !${mr.iid}: ${drafts.error}`
   const notes = drafts.filter(isRecord).map(d => ({ id: Number(d.id), note: String(d.note ?? '') }))
-  const foreign = notes.filter(d => !d.note.includes(MARKER))
+  if (notes.length !== drafts.length || notes.some(d => !Number.isInteger(d.id) || d.id <= 0)) return `could not read your draft notes on !${mr.iid}: glab listed a draft without an id`
+  const foreign = notes.filter(d => !d.note.includes(MARKER_PREFIX))
   if (foreign.length) {
     const named = foreign.map(d => `${d.id} ("${d.note.replace(/\s+/g, ' ').trim().slice(0, 60)}")`).join(', ')
     return `your draft notes on !${mr.iid} that granny did not write: ${named} - posting a round publishes all your drafts, so publish or delete them first`
@@ -149,6 +149,7 @@ function postRound(io: PosterIo, mr: MrInfo, plan: PlannedReview, replan: (refus
   const created: number[] = []
   let unknown: string | undefined
   let refused: string | undefined
+  let what = 'a line comment'
   for (const c of calls) {
     const r = call(io, c)
     if (r.code !== 0) {
@@ -168,12 +169,14 @@ function postRound(io: PosterIo, mr: MrInfo, plan: PlannedReview, replan: (refus
       return plain.code === 0 ? { ok: true } : { ok: false, error: failure(plain) }
     }
     refused = failure(published)
+    what = 'the publish of the round'
   }
   for (const id of created) {
     const r = call(io, { method: 'DELETE', path: `${mrPath(mr.iid)}/draft_notes/${id}` })
-    if (r.code !== 0) return { ok: false, error: `GitLab refused a line comment (${refused}) and its draft ${id} could not be deleted: ${failure(r)}`, stuck: STUCK }
+    if (r.code !== 0) return { ok: false, error: `GitLab refused ${what} (${refused}) and its draft ${id} could not be deleted: ${failure(r)}`, stuck: STUCK }
   }
-  if (unknown !== undefined) return { ok: false, error: `GitLab refused a line comment (${refused}) and a draft it created could not be deleted: glab printed no draft id (${unknown})`, stuck: STUCK }
+  if (unknown !== undefined) return { ok: false, error: `GitLab refused ${what} (${refused}) and a draft it created could not be deleted: glab printed no draft id (${unknown})`, stuck: STUCK }
+  if (what !== 'a line comment') refused = `the publish failed: ${refused}`
   const flat = replan(refused)
   const plain = flat ? note(flat.body) : undefined
   return plain?.code === 0 ? { ok: true, refused } : { ok: false, error: plain ? failure(plain) : refused }
@@ -191,6 +194,7 @@ export function postGitlab(io: PosterIo, { records, toplevel, pr: iid, dryRun }:
     io.print(target.error)
     return target.code
   }
+  if (mr.state !== undefined && mr.state !== 'opened') io.print(`note: !${mr.iid} is ${mr.state}, not open`)
   const notes = list(io, `${mrPath(mr.iid)}/notes`)
   if (!Array.isArray(notes)) {
     io.print(`could not list the MR's notes: ${notes.error}`)

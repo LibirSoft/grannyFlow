@@ -88,7 +88,7 @@ function outTarget(io: PosterIo, options: Options): Target | { error: string; co
   if (base === undefined) return { error: `--base ${options.base} is not a commit`, code: 1 }
   const head = commitOf(io, 'HEAD')
   if (head === undefined) return { error: 'HEAD is not a commit', code: 1 }
-  return { head, base }
+  return { head, base, ...(platform === 'gitlab' ? { platform } : {}) }
 }
 
 /** Writes `{ version: 1, reviews }` for any other client to post; posts nothing. */

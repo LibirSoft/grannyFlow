@@ -1,10 +1,11 @@
 import { body, oneLine, severityOf } from '../core/report'
 import type { TrailFinding, TrailRound } from '../core/types'
 
-/** GitHub refuses a review or comment body longer than 65536 characters. */
+/** GitHub refuses a review or comment body longer than 65536 characters; the same limit serves every platform. */
 export const MAX_BODY = 65000
 
-const code = (text: string) => `\`${text}\``
+/** Inline code; a backtick inside would end it early. */
+const code = (text: string) => `\`${text.replace(/`/g, "'")}\``
 export const short = (sha: string) => sha.slice(0, 7)
 const sha8 = (r: TrailRound) => (r.reviewedSha ?? 'unknown').slice(0, 8)
 
@@ -26,12 +27,33 @@ export function loopTitle(r: Pick<TrailRound, 'loop' | 'name'>): string {
   return agentLine(r.name) || r.loop
 }
 
-export const roundMarker = (r: TrailRound) => `<!-- granny-trail ${r.loop}/r${r.round}@${sha8(r)} -->`
-export const findingMarker = (r: TrailRound, f: Pick<TrailFinding, 'id'>) => `<!-- granny-trail ${r.loop}/r${r.round}@${sha8(r)}/${f.id} -->`
+/** How every marker starts: what tells a note granny wrote from any other. */
+export const MARKER_PREFIX = '<!-- granny-trail '
+export const roundMarker = (r: TrailRound) => `${MARKER_PREFIX}${r.loop}/r${r.round}@${sha8(r)} -->`
+export const findingMarker = (r: TrailRound, f: Pick<TrailFinding, 'id'>) => `${MARKER_PREFIX}${r.loop}/r${r.round}@${sha8(r)}/${f.id} -->`
 
+/** The code fence a text leaves open, if any. */
+function openFence(text: string): string {
+  let open = ''
+  for (const line of text.split('\n')) {
+    const [, marker = '', rest = ''] = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(line) ?? []
+    if (!marker) continue
+    if (!open) open = marker[0] === '`' && rest.includes('`') ? '' : marker
+    else if (marker[0] === open[0] && marker.length >= open.length && !rest.trim()) open = ''
+  }
+  return open
+}
+
+const CUT = '... (cut: too long for one comment)'
+
+/** The text with its marker, cut to fit one comment: never inside a surrogate pair, and with the fence the cut left open closed. */
 function fitted(text: string, marker: string): string {
   if (text.length + marker.length + 1 <= MAX_BODY) return `${text}\n${marker}`
-  return `${text.slice(0, MAX_BODY - marker.length - 40)}\n\n... (cut: too long for GitHub)\n${marker}`
+  let kept = text.slice(0, MAX_BODY - marker.length - CUT.length - 80)
+  const last = kept.charCodeAt(kept.length - 1)
+  if (last >= 0xd800 && last <= 0xdbff) kept = kept.slice(0, -1)
+  const fence = openFence(kept)
+  return `${kept}${fence ? `\n${fence}` : ''}\n\n${CUT}\n${marker}`
 }
 
 function judgeLine(f: TrailFinding): string {

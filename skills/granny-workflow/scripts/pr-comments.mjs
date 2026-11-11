@@ -26,6 +26,10 @@ function readJson(path) {
 // src/core/types.ts
 var HOSTS = ["claude-code", "opencode", "omp"];
 var IMPACTS = ["critical", "major", "moderate", "minor", "none"];
+var VERDICTS = ["confirmed", "refuted", "unverified"];
+var LIKELIHOODS = ["common", "edge", "rare"];
+var FIX_COSTS = ["trivial", "small", "large"];
+var SCOPES = ["in-scope", "pre-existing", "other-stage"];
 
 // src/core/config.ts
 var DEFAULT_CONFIG = {
@@ -443,7 +447,7 @@ function body(text) {
 
 // src/pr/render.ts
 var MAX_BODY = 65000;
-var code = (text) => `\`${text}\``;
+var code = (text) => `\`${text.replace(/`/g, "'")}\``;
 var short = (sha) => sha.slice(0, 7);
 var sha8 = (r) => (r.reviewedSha ?? "unknown").slice(0, 8);
 function agentText(text) {
@@ -462,15 +466,37 @@ function loopTitle(r) {
     return `final review (${r.loop.slice(6)})`;
   return agentLine(r.name) || r.loop;
 }
-var roundMarker = (r) => `<!-- granny-trail ${r.loop}/r${r.round}@${sha8(r)} -->`;
-var findingMarker = (r, f) => `<!-- granny-trail ${r.loop}/r${r.round}@${sha8(r)}/${f.id} -->`;
+var MARKER_PREFIX = "<!-- granny-trail ";
+var roundMarker = (r) => `${MARKER_PREFIX}${r.loop}/r${r.round}@${sha8(r)} -->`;
+var findingMarker = (r, f) => `${MARKER_PREFIX}${r.loop}/r${r.round}@${sha8(r)}/${f.id} -->`;
+function openFence(text) {
+  let open = "";
+  for (const line of text.split(`
+`)) {
+    const [, marker = "", rest = ""] = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(line) ?? [];
+    if (!marker)
+      continue;
+    if (!open)
+      open = marker[0] === "`" && rest.includes("`") ? "" : marker;
+    else if (marker[0] === open[0] && marker.length >= open.length && !rest.trim())
+      open = "";
+  }
+  return open;
+}
+var CUT = "... (cut: too long for one comment)";
 function fitted(text, marker) {
   if (text.length + marker.length + 1 <= MAX_BODY)
     return `${text}
 ${marker}`;
-  return `${text.slice(0, MAX_BODY - marker.length - 40)}
+  let kept = text.slice(0, MAX_BODY - marker.length - CUT.length - 80);
+  const last = kept.charCodeAt(kept.length - 1);
+  if (last >= 55296 && last <= 56319)
+    kept = kept.slice(0, -1);
+  const fence = openFence(kept);
+  return `${kept}${fence ? `
+${fence}` : ""}
 
-... (cut: too long for GitHub)
+${CUT}
 ${marker}`;
 }
 function judgeLine(f) {
@@ -752,7 +778,6 @@ function postGithub(io, { records, toplevel, pr: prNumber, dryRun }) {
 }
 
 // src/pr/gitlab.ts
-var MARKER = "<!-- granny-trail ";
 var mrPath = (iid) => `projects/:id/merge_requests/${iid}`;
 function call(io, c) {
   if (c.method === "DELETE")
@@ -833,7 +858,9 @@ function clearDrafts(io, mr, dryRun) {
   if (!Array.isArray(drafts))
     return `could not list your draft notes on !${mr.iid}: ${drafts.error}`;
   const notes = drafts.filter(isRecord).map((d) => ({ id: Number(d.id), note: String(d.note ?? "") }));
-  const foreign = notes.filter((d) => !d.note.includes(MARKER));
+  if (notes.length !== drafts.length || notes.some((d) => !Number.isInteger(d.id) || d.id <= 0))
+    return `could not read your draft notes on !${mr.iid}: glab listed a draft without an id`;
+  const foreign = notes.filter((d) => !d.note.includes(MARKER_PREFIX));
   if (foreign.length) {
     const named = foreign.map((d) => `${d.id} ("${d.note.replace(/\s+/g, " ").trim().slice(0, 60)}")`).join(", ");
     return `your draft notes on !${mr.iid} that granny did not write: ${named} - posting a round publishes all your drafts, so publish or delete them first`;
@@ -867,6 +894,7 @@ function postRound(io, mr, plan, replan) {
   const created = [];
   let unknown;
   let refused;
+  let what = "a line comment";
   for (const c of calls) {
     const r = call(io, c);
     if (r.code !== 0) {
@@ -889,14 +917,17 @@ function postRound(io, mr, plan, replan) {
       return plain.code === 0 ? { ok: true } : { ok: false, error: failure(plain) };
     }
     refused = failure(published);
+    what = "the publish of the round";
   }
   for (const id of created) {
     const r = call(io, { method: "DELETE", path: `${mrPath(mr.iid)}/draft_notes/${id}` });
     if (r.code !== 0)
-      return { ok: false, error: `GitLab refused a line comment (${refused}) and its draft ${id} could not be deleted: ${failure(r)}`, stuck: STUCK };
+      return { ok: false, error: `GitLab refused ${what} (${refused}) and its draft ${id} could not be deleted: ${failure(r)}`, stuck: STUCK };
   }
   if (unknown !== undefined)
-    return { ok: false, error: `GitLab refused a line comment (${refused}) and a draft it created could not be deleted: glab printed no draft id (${unknown})`, stuck: STUCK };
+    return { ok: false, error: `GitLab refused ${what} (${refused}) and a draft it created could not be deleted: glab printed no draft id (${unknown})`, stuck: STUCK };
+  if (what !== "a line comment")
+    refused = `the publish failed: ${refused}`;
   const flat = replan(refused);
   const plain = flat ? note(flat.body) : undefined;
   return plain?.code === 0 ? { ok: true, refused } : { ok: false, error: plain ? failure(plain) : refused };
@@ -912,6 +943,8 @@ function postGitlab(io, { records, toplevel, pr: iid, dryRun }) {
     io.print(target.error);
     return target.code;
   }
+  if (mr.state !== undefined && mr.state !== "opened")
+    io.print(`note: !${mr.iid} is ${mr.state}, not open`);
   const notes = list(io, `${mrPath(mr.iid)}/notes`);
   if (!Array.isArray(notes)) {
     io.print(`could not list the MR's notes: ${notes.error}`);
@@ -969,7 +1002,8 @@ function detectPlatform(io) {
 
 // src/pr/records.ts
 var SAFE = /^[A-Za-z0-9._-]+$/;
-var SHA = /^[0-9a-f]{4,64}$/i;
+var SHA = /^([0-9a-f]{40}|[0-9a-f]{64})$/i;
+var TAGS = { verdict: VERDICTS, impact: IMPACTS, likelihood: LIKELIHOODS, fixCost: FIX_COSTS, scope: SCOPES };
 var ROUTES = ["sent", "residual"];
 var OUTCOMES = ["clean", "residual-only", "round-cap", "review-failed", "checks-failed"];
 var isObject2 = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
@@ -990,7 +1024,7 @@ function trailProblem(value) {
   if (!isString(value.base))
     return "base is missing";
   if (!optional(value.reviewedSha, (v) => isString(v) && SHA.test(v)))
-    return "reviewedSha is not a commit id";
+    return "reviewedSha is not a full commit id";
   if (!Array.isArray(value.reviewers) || !value.reviewers.every((r) => isObject2(r) && isString(r.name)))
     return "reviewers is not a list of named reviewers";
   if (!Array.isArray(value.findings))
@@ -1006,6 +1040,13 @@ function trailProblem(value) {
         return `${at}.${key} is not a string`;
     if (!optional(f.line, isCount))
       return `${at}.line is not a positive integer`;
+    for (const [key, known] of Object.entries(TAGS))
+      if (!optional(f[key], (v) => known.includes(v)))
+        return `${at}.${key} ${JSON.stringify(f[key])} is unknown`;
+    if (!optional(f.priority, (v) => typeof v === "number" && Number.isFinite(v)))
+      return `${at}.priority is not a number`;
+    if (!optional(f.reviewer, isString))
+      return `${at}.reviewer is not a string`;
     if (!optional(f.route, (v) => ROUTES.includes(v)))
       return `${at}.route is not sent or residual`;
     if (!optional(f.decision, (d) => isObject2(d) && Number.isInteger(d.rule) && isString(d.action) && isString(d.why)))
@@ -1124,7 +1165,7 @@ function outTarget(io, options) {
   const head = commitOf(io, "HEAD");
   if (head === undefined)
     return { error: "HEAD is not a commit", code: 1 };
-  return { head, base };
+  return { head, base, ...platform === "gitlab" ? { platform } : {} };
 }
 function writeOut(io, options, records, toplevel) {
   const target = outTarget(io, options);

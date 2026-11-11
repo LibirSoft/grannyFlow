@@ -261,6 +261,7 @@ export interface TrailRound {
 }
 
 export interface TrailSummary {
+  /** The primary repo's trail dir. In a run over several repos, each other repo's records are in its own worktree's `<workDir>/trail`. */
   dir: string
   written: number
   /** `<loop>-r<round>` of each record that could not be written. */

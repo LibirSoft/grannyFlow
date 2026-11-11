@@ -14,6 +14,12 @@
 - Claude Code: a normal run's phase list has no empty "Judge" row, and Final review is listed in order, before PR ready. The last two phases of a `granny judge` run are "Tagging" and "Save report", listed after PR ready.
 - Claude Code: one Workflow script per mode, each listing only the phases its mode runs, so the Workflow view has no row that stays "Not started yet" for the whole run. `engines/claude-code/plan.js` plans a goal (Worktree, Plan, Plan review), `engines/claude-code/workflow.js` implements a plan (Worktree, Plan review, Implement, Checks, Review, Final review, PR ready) and `engines/claude-code/judge.js` runs `granny judge` (Review, Tagging, Save report; `judge: true` stays in its args). Before, `workflow.js` ran every mode and listed every phase: an implement run showed Plan, Tagging and Save report, and a judge run the whole implement pipeline. Each script refuses the args of another mode before any agent starts and names the script to use instead; after a planning run is approved, the implement run is a new launch of `workflow.js`. A resume uses the script the run was launched with.
 
+### Fixed
+
+- Review trail: the poster takes only a full commit id as `reviewedSha` and only known judge tags, and skips and names a record that has neither. A comment cut for length says `too long for one comment` on every platform, is never cut inside a surrogate pair, and closes the code fence the cut left open. A backtick in a record field does not end its inline code.
+- Review trail on GitLab: a publish GitLab refuses is reported as that, not as a refused line comment; a listed draft note without an id stops the run before anything is deleted; an MR given with `--pr` that is not open is named as such, and still gets the rounds. `--out` with `--base` on a GitLab repo names the MR and GitLab in the bodies.
+- The engine does not read HEAD before a plan review round, where no commit is anchored.
+
 ## 1.6.0
 
 ### Added
