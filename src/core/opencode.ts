@@ -136,16 +136,31 @@ const tooWide = (dir: string) => dir.split('/').length < 3 || HOME.test(dir)
 
 const parent = (path: string) => path.slice(0, path.lastIndexOf('/'))
 
-/** The directories of `files` and of the absolute paths named in `text` (a path ending in `/` is the directory itself, one whose last part has no `.` names nothing) that lie outside `cwd` and above it; never a top-level directory, a home directory or a dot directory right under one. */
-export function readableDirs(text: string, files: string[], cwd: string): string[] {
+export interface ReadGrant {
+  dirs: string[]
+  /** The paths given whose directory is too wide or holds the worktree, so the reviewer cannot read them. */
+  refused: string[]
+}
+
+/**
+ * The directories of `files`, of the absolute paths named in `text` (a path ending in `/` is the directory itself, one whose last part has no `.` names nothing)
+ * and the directories in `dirs` themselves, that lie outside `cwd`; never a top-level directory, a home directory, a dot directory right under one or a directory above `cwd`.
+ */
+export function readGrant(text: string, files: string[], cwd: string, dirs: string[] = []): ReadGrant {
   const root = normalize(cwd)
   const named = (text.match(ABSOLUTE_PATH) ?? []).map(p => p.replace(/[.:]+$/, '')).flatMap(p => {
     const path = normalize(p)
-    if (p.endsWith('/')) return [path]
-    return path.slice(path.lastIndexOf('/') + 1).includes('.') ? [parent(path)] : []
+    if (path === '/') return []
+    if (p.endsWith('/')) return [{ path: p, dir: path }]
+    return path.slice(path.lastIndexOf('/') + 1).includes('.') ? [{ path: p, dir: parent(path) }] : []
   })
-  const dirs = [...named, ...files.map(f => parent(normalize(f)))]
-  return [...new Set(dirs)].filter(d => !tooWide(d) && d !== root && !d.startsWith(`${root}/`) && !root.startsWith(`${d}/`))
+  const asked = [...named, ...files.map(f => ({ path: f, dir: parent(normalize(f)) })), ...dirs.map(d => ({ path: d, dir: normalize(d) }))]
+  const outside = asked.filter(a => a.dir !== root && !a.dir.startsWith(`${root}/`))
+  const refuse = (dir: string) => tooWide(dir) || root.startsWith(`${dir}/`)
+  return {
+    dirs: [...new Set(outside.filter(a => !refuse(a.dir)).map(a => a.dir))],
+    refused: [...new Set(outside.filter(a => refuse(a.dir)).map(a => a.path))],
+  }
 }
 
 /** OPENCODE_CONFIG_CONTENT for the reviewer: an agent opencode itself keeps to reading and read-only git. */

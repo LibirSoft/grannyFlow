@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { resolveConfig } from '../src/core/config'
 import { runGranny, type RunInput } from '../src/core/engine'
-import { OPENCODE_AGENT, OPENCODE_DECODE, opencodeAgentConfig, opencodeAnswer, readableDirs } from '../src/core/opencode'
+import { OPENCODE_AGENT, OPENCODE_DECODE, opencodeAgentConfig, opencodeAnswer, readGrant } from '../src/core/opencode'
 import { commandReviewPrompt, WHOLE_BRANCH_NOTE } from '../src/core/prompts'
 import { parseCodexReview, saysNoFindings } from '../src/core/review'
 import { planReviewScript, reportedBackend, reviewPlan } from '../src/core/reviewer'
@@ -143,7 +143,9 @@ describe('opencodeAnswer', () => {
   })
 })
 
-describe('readableDirs', () => {
+const readableDirs = (...args: Parameters<typeof readGrant>) => readGrant(...args).dirs
+
+describe('readGrant dirs', () => {
   it('takes the directory of every absolute path in the text and of every file, once, outside the worktree only', () => {
     const context = 'Plan files - read them first: /repo/.granny/plans/a.md, /repo/.granny/plans/b.md\nSee "/srv/notes/wo-1.md" and (/srv/specs/api/) and https://x.dev/doc and plans/rel.md and /wt/src/a.ts.'
     expect(readableDirs(context, ['/srv/other/plan.md'], '/wt')).toEqual(['/repo/.granny/plans', '/srv/notes', '/srv/specs/api', '/srv/other'])
@@ -173,6 +175,21 @@ describe('readableDirs', () => {
     expect(readableDirs('Main checkout: /home/u/Desktop/ws/proj', [], wt)).toEqual([])
     expect(readableDirs('see /home/u/Desktop/notes.md', [], wt)).toEqual([])
     expect(readableDirs('/home/u/Desktop/ws/proj/.granny/plans/a.md', [`${wt}-old/plan.md`], `${wt}/`)).toEqual(['/home/u/Desktop/ws/proj/.granny/plans', `${wt}-old`])
+  })
+
+  it('grants each given directory itself, not its parent, under the same limits', () => {
+    expect(readableDirs('', [], '/wt/a', ['/wt/b', '/srv/repos/c/', '/home/u', '/wt'])).toEqual(['/wt/b', '/srv/repos/c'])
+  })
+})
+
+describe('readGrant', () => {
+  it('names each path it refuses as given, once, and never one inside the worktree or one that names nothing', () => {
+    const wt = '/home/u/ws/proj-wt'
+    expect(readGrant('Plans in /tmp/plan.md and /home/u/notes.md, again /tmp/plan.md; specs /srv/s/a.md, /home/u/ws/x.md, /home/u/proj, A / B', ['/home/u/plan.md', `${wt}/p.md`], wt, ['/home/u/ws'])).toEqual({
+      dirs: ['/srv/s'],
+      refused: ['/tmp/plan.md', '/home/u/notes.md', '/home/u/ws/x.md', '/home/u/plan.md', '/home/u/ws'],
+    })
+    expect(readGrant('', [], wt)).toEqual({ dirs: [], refused: [] })
   })
 })
 
@@ -538,6 +555,43 @@ describe('an opencode reviewer in a run', () => {
     await runGranny(f.host, input({ plan: ['/Users/u/Library/Mobile Documents/plans/a.md', '/home/u/My Plans/feat.md'] }))
     const run = f.commands.find(c => c.includes('opencode run'))!
     expect(run).toContain(`OPENCODE_CONFIG_CONTENT=${shellQuote(opencodeAgentConfig(['/Users/u/Library/Mobile Documents/plans', '/home/u/My Plans']))} opencode run`)
+  })
+
+  it('grants the directory of a path only the stage task names', async () => {
+    const o = opencode([stream('No findings.')])
+    const f = fakeHost({ reviews: o.reviews, worktree: '/wt/feat-x' })
+    await runGranny(f.host, input({ stages: [{ name: 'core', task: 'Do /srv/orders/WP-01.md.' }] }))
+    const run = f.commands.find(c => c.includes('opencode run'))!
+    expect(run).toContain(`OPENCODE_CONFIG_CONTENT=${shellQuote(opencodeAgentConfig(['/srv/orders']))} opencode run`)
+  })
+
+  it('names a plan file or context path it cannot grant, once per review, with the fix', async () => {
+    for (const [extra, path] of [
+      [{ plan: '/tmp/plan.md' }, '/tmp/plan.md'],
+      [{ context: 'Work orders in /home/u/wo-1.md' }, '/home/u/wo-1.md'],
+    ] as const) {
+      const o = opencode([stream('No findings.')])
+      const f = fakeHost({ reviews: o.reviews, worktree: '/wt/feat-x' })
+      await runGranny(f.host, input(extra))
+      expect(f.logs.filter(l => l.includes('cannot read'))).toEqual([`core r1 kimi: opencode cannot read ${path} - move it under a project directory`])
+    }
+    const o = opencode([stream('No findings.')])
+    const f = fakeHost({ reviews: o.reviews, worktree: '/wt/feat-x' })
+    await runGranny(f.host, input({ plan: '/tmp/plan.md', context: 'See /home/u/wo-1.md' }))
+    expect(f.logs).toContain('core r1 kimi: opencode cannot read /home/u/wo-1.md, /tmp/plan.md - move them under a project directory')
+  })
+
+  it("grants the other repos' worktrees themselves in a multi-repo plan review", async () => {
+    const o = opencode([stream('No findings.'), stream('No findings.'), stream('No findings.')])
+    const f = fakeHost({ reviews: o.reviews })
+    await runGranny(
+      f.host,
+      input({ repos: ['/work/other'], plan: '/srv/plans/v1.md', stages: [{ name: 'a', task: 'A' }, { name: 'b', task: 'B', repo: '/work/other' }], config: { reviewers: [KIMI], planReview: true, parallel: false } }),
+    )
+    const plan = f.commands.find(c => c.includes('review-plan-review-r1-kimi.log'))!
+    expect(plan).toContain(`OPENCODE_CONFIG_CONTENT=${shellQuote(opencodeAgentConfig(['/srv/plans', '/work/other']))} opencode run`)
+    const stage = f.commands.find(c => c.includes('review-a-r1-kimi.log'))!
+    expect(stage).toContain(`OPENCODE_CONFIG_CONTENT=${shellQuote(opencodeAgentConfig(['/srv/plans']))} opencode run`)
   })
 
   it('says how many text parts did not come back whole', async () => {

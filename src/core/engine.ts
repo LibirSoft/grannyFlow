@@ -41,7 +41,7 @@ import {
   type StageTask,
   WHOLE_BRANCH_NOTE,
 } from './prompts'
-import { opencodeAnswer, readableDirs } from './opencode'
+import { opencodeAnswer, readGrant } from './opencode'
 import { bucketOf, countsOf, isDemoted, isJudged, renderReport, severityOf, utf8Length, type ReportMeta } from './report'
 import { decide, declinedOf, isBlocker, mergeDuplicates, parseCodexReview, reviewFailure, saysNoFindings, triage, type Policy } from './review'
 import { detachedReview, MAX_WAITS, opencodeModel, planReviewScript, reportedBackend, reviewPlan, reviewStem, WAIT_SECONDS } from './reviewer'
@@ -139,8 +139,8 @@ interface Lane {
   branch: string
   cwd: string
   p: PromptContext
-  /** What an opencode reviewer may read outside the worktree: the paths named in free text, and files; without it, the paths in the prompt context. */
-  readable?: { text: string; files: string[] }
+  /** What an opencode reviewer may read outside the worktree: the paths named in free text, and files. */
+  readable: { text: string; files: string[] }
 }
 
 interface RepoState {
@@ -400,8 +400,14 @@ function engineParts(host: Host, config: GrannyConfig) {
     }
 
     const stem = reviewStem(config, slug(name), round, rv)
-    const readable = lane.readable ?? { text: p.context ?? '', files: [] }
-    const dirs = rv.engine === 'opencode' ? readableDirs(readable.text, [...readable.files, ...(subject.kind === 'plan' ? subject.files : [])], cwd) : []
+    const { text, files } = lane.readable
+    const { dirs, refused } =
+      rv.engine === 'opencode'
+        ? subject.kind === 'plan'
+          ? readGrant(text, [...files, ...subject.files], cwd, p.others ?? [])
+          : readGrant([text, subject.stage?.task ?? ''].join('\n'), files, cwd)
+        : { dirs: [], refused: [] }
+    if (refused.length) host.log(`${tag}: opencode cannot read ${refused.join(', ')} - move ${refused.length > 1 ? 'them' : 'it'} under a project directory`)
     const plan =
       subject.kind === 'plan'
         ? planReviewScript(rv, config, host.name, lane.base, stem, planReviewPrompt(p, subject.files), dirs)
@@ -1548,7 +1554,7 @@ export async function runJudge(host: Host, input: JudgeInput): Promise<JudgeResu
   }
 
   const p: PromptContext = { repo, branch, base, config, ...(input.context ? { context: input.context } : {}) }
-  const lane: Lane = { repo, base, branch, cwd: repo, p }
+  const lane: Lane = { repo, base, branch, cwd: repo, p, readable: { text: input.context ?? '', files: [] } }
   const note = `${ONE_SHOT_NOTE}${current ? '' : ` HEAD is detached at ${branch}, so that is the "branch" named here.`}`
   const results = await reviewAll(lane, config.reviewers, branch, { kind: 'diff', base, note }, 1)
   const failedReviewers = results.filter(r => !r.ran).map(r => ({ name: r.reviewer.name, note: r.note ?? 'no output' }))

@@ -114,7 +114,10 @@ describe('skill docs', () => {
     const entry = unreleased.split('\n').find(l => l.includes('`"engine": "opencode"`'))!
     expect(entry).not.toContain('one string for every host')
     expect(entry).toContain('an object keyed by host')
-    expect(entry).toContain('of the absolute file paths named in `context` - each whole directory')
+    expect(entry).toContain("of the absolute file paths named in `context` or in the stage's `task` - each whole directory")
+    expect(entry).toContain('the other repos\' worktrees')
+    expect(entry).toContain('opencode cannot read <path> - move it under a project directory')
+    expect(config).toContain('opencode cannot read <path>, ... - move it under a project directory')
     expect(config).not.toContain('only the paths named in `context`')
     const judgeRuns = config.split('## Judge runs')[1]!.split('\n## ')[0]!
     expect(judgeRuns).toContain('only the directories of the absolute file paths named in `context` - each whole directory')

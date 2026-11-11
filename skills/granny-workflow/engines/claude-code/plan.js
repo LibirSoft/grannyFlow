@@ -1128,16 +1128,23 @@ function normalize(path) {
 var HOME = /^\/(?:root|(?:home|Users|var\/home)\/[^/]+)(?:\/\.[^/]+)?$/;
 var tooWide = (dir) => dir.split("/").length < 3 || HOME.test(dir);
 var parent = (path) => path.slice(0, path.lastIndexOf("/"));
-function readableDirs(text, files, cwd) {
+function readGrant(text, files, cwd, dirs = []) {
   const root = normalize(cwd);
   const named = (text.match(ABSOLUTE_PATH) ?? []).map((p) => p.replace(/[.:]+$/, "")).flatMap((p) => {
     const path = normalize(p);
+    if (path === "/")
+      return [];
     if (p.endsWith("/"))
-      return [path];
-    return path.slice(path.lastIndexOf("/") + 1).includes(".") ? [parent(path)] : [];
+      return [{ path: p, dir: path }];
+    return path.slice(path.lastIndexOf("/") + 1).includes(".") ? [{ path: p, dir: parent(path) }] : [];
   });
-  const dirs = [...named, ...files.map((f) => parent(normalize(f)))];
-  return [...new Set(dirs)].filter((d) => !tooWide(d) && d !== root && !d.startsWith(`${root}/`) && !root.startsWith(`${d}/`));
+  const asked = [...named, ...files.map((f) => ({ path: f, dir: parent(normalize(f)) })), ...dirs.map((d) => ({ path: d, dir: normalize(d) }))];
+  const outside = asked.filter((a) => a.dir !== root && !a.dir.startsWith(`${root}/`));
+  const refuse = (dir) => tooWide(dir) || root.startsWith(`${dir}/`);
+  return {
+    dirs: [...new Set(outside.filter((a) => !refuse(a.dir)).map((a) => a.dir))],
+    refused: [...new Set(outside.filter((a) => refuse(a.dir)).map((a) => a.path))]
+  };
 }
 function opencodeAgentConfig(dirs) {
   const permission = {
@@ -1732,8 +1739,11 @@ ${note}` : ""}` : missing };
       return { ran: true, findings: Array.isArray(r.findings) ? r.findings : [] };
     }
     const stem = reviewStem(config, slug(name), round, rv);
-    const readable = lane.readable ?? { text: p.context ?? "", files: [] };
-    const dirs = rv.engine === "opencode" ? readableDirs(readable.text, [...readable.files, ...subject.kind === "plan" ? subject.files : []], cwd) : [];
+    const { text, files } = lane.readable;
+    const { dirs, refused } = rv.engine === "opencode" ? subject.kind === "plan" ? readGrant(text, [...files, ...subject.files], cwd, p.others ?? []) : readGrant([text, subject.stage?.task ?? ""].join(`
+`), files, cwd) : { dirs: [], refused: [] };
+    if (refused.length)
+      host.log(`${tag}: opencode cannot read ${refused.join(", ")} - move ${refused.length > 1 ? "them" : "it"} under a project directory`);
     const plan = subject.kind === "plan" ? planReviewScript(rv, config, host.name, lane.base, stem, planReviewPrompt(p, subject.files), dirs) : reviewPlan(rv, config, host.name, subject.base, stem, commandReviewPrompt(p, name, subject.base, subject.stage, subject.note, rv.engine === "opencode"), dirs);
     if (!plan)
       return { ran: false, findings: [], note: "this reviewer has no command for a plan review" };
