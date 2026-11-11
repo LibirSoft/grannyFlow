@@ -18,7 +18,7 @@ Something is missing when:
 
 - no config file sets `reviewers` (the built-in default list does not count as a choice);
 - an `agent` reviewer has no model for this host;
-- an `opencode` reviewer has no model: it needs an opencode `provider/model` on every host, and without one the run is refused before anything starts, with the fix named;
+- an `opencode` reviewer has no model for this host: it needs an opencode `provider/model` on every host it runs on, and the run names it as a gap, `reviewers[<i>] (<name>): no opencode model`, before anything starts;
 - the judge has no model for this host (on Claude Code the built-in `haiku` counts as set).
 
 With nothing missing, go to step 4. Otherwise ask only about what is missing:
@@ -31,7 +31,7 @@ Tell the user that a reviewer on another model than the tagger is a real second 
 
 ## 3. Write
 
-Write only those keys, merged by [setup.md](setup.md#3-write)'s rules: models keyed by host, other hosts' keys kept, every key not answered kept. An `opencode` reviewer's `model`: one string, not keyed by host - it is opencode's model wherever the reviewer runs. A `haiku` judge on Claude Code is the built-in default, so it is not written. No `threshold`, `checks` or other keys.
+Write only those keys, merged by [setup.md](setup.md#3-write)'s rules: models keyed by host except an `opencode` reviewer's, other hosts' keys kept, every key not answered kept. An `opencode` reviewer's `model`: one string, not keyed by host - it is opencode's model wherever the reviewer runs; its `effort` is the model variant. A `haiku` judge on Claude Code is the built-in default, so it is not written. No `threshold`, `checks` or other keys.
 
 ```json
 {

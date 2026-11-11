@@ -600,7 +600,7 @@ The word severities map to `critical` → P0, `high` → P1, `medium` → P2, `l
 
 What it reads from the config:
 
-- `reviewers`, which a config file must set: the built-in default list does not count as a choice. Each `agent` reviewer needs a model for this host. An `opencode` reviewer runs as in a normal run, its model checked like there ([opencode reviewers](#opencode-reviewers)); outside the repo it may read only the directories of the absolute file paths named in `context` - each whole directory, not just the named file.
+- `reviewers`, which a config file must set: the built-in default list does not count as a choice. Each `agent` reviewer needs a model for this host. An `opencode` reviewer needs its opencode model for this host too (a missing one is named like the other gaps, `reviewers[<i>] (<name>): no opencode model`) and otherwise runs as in a normal run, its model checked like there ([opencode reviewers](#opencode-reviewers)); outside the repo it may read only the directories of the absolute file paths named in `context` - each whole directory, not just the named file.
 - `roles.judge.model`, which must resolve on this host. The built-in `haiku` counts on Claude Code; on opencode and omp there is no default for this. Without any of these the run does not start, and the gaps are named.
 - `roles.granny` (the extraction agent), `roles.helper` on Claude Code, `base`, `workDir`, `language` and `rules`.
 

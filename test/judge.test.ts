@@ -27,6 +27,12 @@ describe('judgeConfigGaps', () => {
     expect(judgeConfigGaps([layer], 'opencode')).toEqual([])
   })
 
+  it('names an opencode reviewer with no model for this host, with the other gaps', () => {
+    const layer = { reviewers: [{ name: 'glm', engine: 'opencode' }, { name: 'kimi', engine: 'opencode', model: { omp: 'a/b' } }, { ...agent(), name: 'ag' }, { name: 'ok', engine: 'opencode', model: 'zai/glm-5.3', effort: 'max' }] }
+    expect(judgeConfigGaps([layer], 'opencode')).toEqual(['reviewers[0] (glm): no opencode model', 'reviewers[1] (kimi): no opencode model', 'reviewers[2] (ag): no model for opencode', 'roles.judge.model: no model for opencode'])
+    expect(judgeConfigGaps([layer, { reviewers: [{ name: 'ok', engine: 'opencode', model: 'zai/glm-5.3' }] }, { roles: { judge: { model: 'h' } } }], 'omp')).toEqual([])
+  })
+
   it('does not ask a model of a reviewer that is not an agent', () => {
     const layer = { reviewers: [{ name: 'codex', engine: 'codex' }, { name: 'cmd', engine: 'command', command: 'r {base}' }], roles: { judge: { model: 'h' } } }
     expect(judgeConfigGaps([layer], 'opencode')).toEqual([])
@@ -486,15 +492,6 @@ describe('runJudge: an opencode reviewer', () => {
     expect(r.outcome).toBe('review-failed')
     expect(r.failedReviewers).toEqual([{ name: 'kimi', note: 'opencode: provider.no-route: Variant unavailable for kimi-code-plan-global/k3.1-pro: max' }])
   })
-
-  it('refuses an opencode reviewer without a model before anything runs, naming the fix', async () => {
-    const f = judgeHost()
-    await expect(runJudge(f.host, { repo: REPO, config: { reviewers: [{ name: 'kimi', engine: 'opencode' }], ...ROLE_MODELS } })).rejects.toThrow(
-      'reviewers[0].model is required for engine "opencode": an opencode model "provider/model", e.g. "zai/glm-5.3" - `opencode models` lists them',
-    )
-    expect(f.requests).toEqual([])
-    expect(f.commands).toEqual([])
-  })
 })
 
 describe('runJudge: the config gate', () => {
@@ -511,6 +508,12 @@ describe('runJudge: the config gate', () => {
     await gated([ROLE_MODELS], 'omp', 'reviewers: no config sets who reviews')
     await gated([{ reviewers: [{ name: 'kimi', engine: 'agent' }], ...ROLE_MODELS }], 'omp', 'reviewers[0] (kimi): no model for omp')
     await gated([{ reviewers: [{ name: 'kimi', engine: 'agent', model: 'k' }] }], 'omp', 'roles.judge.model: no model for omp')
+  })
+
+  it('names an opencode reviewer with no model as a gap on every host, not a config error', async () => {
+    for (const name of ['claude-code', 'opencode', 'omp'] as const) {
+      await gated([{ reviewers: [{ name: 'glm', engine: 'opencode' }], roles: { judge: { model: 'h' } } }], name, 'reviewers[0] (glm): no opencode model')
+    }
   })
 
   it('names every gap in the one error', async () => {

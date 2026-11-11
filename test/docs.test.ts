@@ -132,6 +132,10 @@ describe('skill docs', () => {
     }
     const write = read('references/judge.md').split('## 3. Write')[1]!.split('\n## ')[0]!
     expect(write).toContain('An `opencode` reviewer\'s `model`: one string, not keyed by host')
+    expect(write).toContain("models keyed by host except an `opencode` reviewer's")
+    const rules = read('references/setup.md').split('## 3. Write')[1]!.split('\n## ')[0]!.split('\n')
+    expect(rules.find(l => l.startsWith('- `roles.<role>.model`'))).toContain("except an `opencode` reviewer's, which is one string")
+    expect(rules.find(l => l.startsWith('- `roles.<role>.effort`'))).toContain("except an `opencode` reviewer's `effort`, which is its model variant")
   })
 
   it('has a SKILL.md with the frontmatter every host reads', () => {

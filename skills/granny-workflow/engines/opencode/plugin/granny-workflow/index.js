@@ -124,13 +124,16 @@ function resolveConfig(layers, host) {
   return config;
 }
 function judgeConfigGaps(layers, host) {
-  const reviewersSet = layers.some((layer) => isObject(layer) && layer.reviewers !== undefined);
-  const config = resolveConfig(layers, host);
+  const listed = [...layers].reverse().find((layer) => isObject(layer) && layer.reviewers !== undefined)?.reviewers;
+  const modelless = new Set(Array.isArray(listed) ? listed.flatMap((rv, i) => isObject(rv) && rv.engine === "opencode" && noModel(rv.model, host) ? [i] : []) : []);
+  const standIn = Array.isArray(listed) && modelless.size ? [{ reviewers: listed.map((rv, i) => modelless.has(i) ? { ...rv, model: "granny/stand-in", effort: undefined } : rv) }] : [];
+  const config = resolveConfig([...layers, ...standIn], host);
   return [
-    ...reviewersSet ? config.reviewers.flatMap((rv, i) => rv.engine === "agent" && !resolveModel(rv.model, host) ? [`reviewers[${i}] (${rv.name}): no model for ${host}`] : []) : ["reviewers: no config sets who reviews"],
+    ...listed !== undefined ? config.reviewers.flatMap((rv, i) => modelless.has(i) ? [`reviewers[${i}] (${rv.name}): no opencode model`] : rv.engine === "agent" && !resolveModel(rv.model, host) ? [`reviewers[${i}] (${rv.name}): no model for ${host}`] : []) : ["reviewers: no config sets who reviews"],
     ...resolveModel(config.roles.judge.model, host) ? [] : [`roles.judge.model: no model for ${host}`]
   ];
 }
+var noModel = (spec, host) => spec === undefined || (typeof spec === "string" ? !spec : isObject(spec) && !spec[host]);
 function modelErrors(path, spec) {
   if (spec === undefined)
     return [];

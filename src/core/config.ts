@@ -171,15 +171,22 @@ export function resolveConfig(layers: unknown[], host?: HostName): GrannyConfig 
 
 /** What `granny judge` needs the user to choose, one line each: it never picks the reviewers or a model itself. */
 export function judgeConfigGaps(layers: unknown[], host: HostName): string[] {
-  const reviewersSet = layers.some(layer => isObject(layer) && layer.reviewers !== undefined)
-  const config = resolveConfig(layers, host)
+  const listed: unknown = [...layers].reverse().find((layer): layer is Record<string, any> => isObject(layer) && layer.reviewers !== undefined)?.reviewers
+  const modelless = new Set(Array.isArray(listed) ? listed.flatMap((rv, i) => (isObject(rv) && rv.engine === 'opencode' && noModel(rv.model, host) ? [i] : [])) : [])
+  // resolveConfig refuses an opencode reviewer without a model, so a stand-in model lets the other gaps be read.
+  const standIn = Array.isArray(listed) && modelless.size ? [{ reviewers: listed.map((rv, i) => (modelless.has(i) ? { ...rv, model: 'granny/stand-in', effort: undefined } : rv)) }] : []
+  const config = resolveConfig([...layers, ...standIn], host)
   return [
-    ...(reviewersSet
-      ? config.reviewers.flatMap((rv, i) => (rv.engine === 'agent' && !resolveModel(rv.model, host) ? [`reviewers[${i}] (${rv.name}): no model for ${host}`] : []))
+    ...(listed !== undefined
+      ? config.reviewers.flatMap((rv, i) =>
+          modelless.has(i) ? [`reviewers[${i}] (${rv.name}): no opencode model`] : rv.engine === 'agent' && !resolveModel(rv.model, host) ? [`reviewers[${i}] (${rv.name}): no model for ${host}`] : [],
+        )
       : ['reviewers: no config sets who reviews']),
     ...(resolveModel(config.roles.judge.model, host) ? [] : [`roles.judge.model: no model for ${host}`]),
   ]
 }
+
+const noModel = (spec: unknown, host: HostName) => spec === undefined || (typeof spec === 'string' ? !spec : isObject(spec) && !spec[host])
 
 function modelErrors(path: string, spec: unknown): string[] {
   if (spec === undefined) return []
