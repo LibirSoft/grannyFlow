@@ -375,6 +375,8 @@ describe('skill docs', () => {
     expect(setup).not.toContain('It is not keyed by host')
     expect(setup).toContain("`roles.<role>.effort` and a reviewer's `effort`: written only when chosen, as an object keyed by the current host")
     expect(read('SKILL.md')).toContain('"effort": { "claude-code": "high", "omp": "high" }')
+    const unreleased = /^## Unreleased\n([\s\S]*?)^## /m.exec(readRoot('CHANGELOG.md'))?.[1] ?? ''
+    expect(unreleased.split('\n').some(line => line.includes('`effort`') && line.includes('keyed by host'))).toBe(true)
   })
 
   it('releases 1.6.0 with a CHANGELOG entry for the package version', () => {
