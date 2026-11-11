@@ -97,6 +97,36 @@ describe('claude-code workflow.js', () => {
     expect(logs.some(l => l.includes('one r1: to the implementer: codex-F1 (rule 7: priority 90 > threshold 80 (moderate/common/trivial))'))).toBe(true)
   })
 
+  it('gives agent() the Claude Code key of a host-keyed effort, and no effort when that key is missing', async () => {
+    const script = await buildClaudeCode('workflow')
+    const implementerOpts = async (effort: unknown) => {
+      const calls: Array<{ prompt: string; opts: any }> = []
+      const agent = async (prompt: string, opts: any) => {
+        calls.push({ prompt, opts })
+        const kind = Object.keys(opts.schema.properties).join(',')
+        if (opts.label === 'worktree') return { ran: true, exitCode: 0, output: '[granny] worktree: /r-worktrees/feat-x\n' }
+        if (kind.startsWith('startSha')) return { startSha: 's1', headSha: 'h1', gatesGreen: true, gates: 'ok', commits: ['c'], untested: '' }
+        if (kind.startsWith('ran') && prompt.includes('git rev-parse --verify HEAD')) return { ran: true, exitCode: 0, output: 's1\n' }
+        if (kind.startsWith('ran') && prompt.includes('git rev-list --count')) return { ran: true, exitCode: 0, output: '1\n' }
+        if (kind.startsWith('ran')) return { ran: true, exitCode: 0, output: '' }
+        if (kind.startsWith('findings')) return { findings: [] }
+        if (kind.startsWith('gatesGreen')) return { gatesGreen: true, gates: 'ok', commits: ['c'], prBodyPath: '.granny/PR-BODY.md', issues: '' }
+        throw new Error(`unexpected schema ${kind}`)
+      }
+      await loadWorkflow(script)(agent, () => {}, () => {}, {
+        repo: '/r',
+        branch: 'feat/x',
+        stages: [{ name: 'one', task: 'Do it.' }],
+        config: [{ reviewers: [{ engine: 'agent' }], roles: { implementer: { model: 'opus', effort } } }],
+      })
+      const impl = calls.find(c => c.opts.label === 'implement one')
+      expect(impl).toBeDefined()
+      return impl!.opts
+    }
+    expect((await implementerOpts({ 'claude-code': 'high', omp: 'medium' })).effort).toBe('high')
+    expect('effort' in (await implementerOpts({ omp: 'medium' }))).toBe(false)
+  })
+
   it('declares the Plan review phase and reviews and fixes a plan through the Workflow agent() API', async () => {
     const script = await buildClaudeCode('workflow')
     const meta = script.slice(0, script.indexOf('\n}\n') + 2)

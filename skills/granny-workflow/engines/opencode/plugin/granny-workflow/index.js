@@ -3169,7 +3169,7 @@ function overridesNotice(layers, host) {
   };
   for (const role of Object.keys(after.roles)) {
     note(`roles.${role}.model`, shown(resolveModel(after.roles[role].model, host)), shown(resolveModel(before.roles[role].model, host)));
-    note(`roles.${role}.effort`, shown(after.roles[role].effort), shown(before.roles[role].effort));
+    note(`roles.${role}.effort`, shown(resolveEffort(after.roles[role].effort, host)), shown(resolveEffort(before.roles[role].effort, host)));
   }
   for (const key of Object.keys(after)) {
     if (key === "roles")

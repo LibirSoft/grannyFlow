@@ -95,6 +95,13 @@ describe('overridesNotice', () => {
     )
   })
 
+  it('compares a host-keyed effort by what it resolves to on this host', () => {
+    const effort = (value: unknown) => overridesNotice([...files, { roles: { implementer: { effort: value } } }], 'omp')
+    expect(effort({ omp: 'xhigh' })).not.toContain('roles.implementer.effort')
+    expect(effort({ omp: 'high' })).toContain('roles.implementer.effort high (config: xhigh)')
+    expect(effort({ 'claude-code': 'high' })).toContain('roles.implementer.effort default (config: xhigh)')
+  })
+
   it('says nothing without a run config, or when it changes nothing', () => {
     expect(overridesNotice([...files, undefined], 'omp')).toBe('')
     expect(overridesNotice([...files, { threshold: 70 }], 'omp')).toBe('')
