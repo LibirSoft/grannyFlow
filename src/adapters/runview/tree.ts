@@ -423,7 +423,7 @@ const SHAPES: Record<Verb, RegExp> = {
   implement: /^$/,
   commit: new RegExp(`^${AT}(?: (#\\d+))?$`),
   repair: new RegExp(`^${AT} (#\\d+)$`),
-  review: /^(r\d+) (\S+)((?: #\d+)?(?: wait \d+| read| stop)?)$/,
+  review: /^(r\d+) (\S+)((?: #\d+)?(?: wait \d+| read| save| stop)?)$/,
   judge: /^(r\d+)((?: retry)?)$/,
   fix: /^(r\d+)$/,
   extract: /^(r\d+) (\S+)((?: retry)?)$/,

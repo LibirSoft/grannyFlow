@@ -412,6 +412,15 @@ describe('placeOf', () => {
     expect(placeOf('implement core', twins)?.group).toBe('stage:1')
     expect(placeOf('implement core', twins, undefined, numbers => numbers.find(x => x !== 1)!)?.group).toBe('stage:2')
   })
+
+  it("places a reviewer's save step in the group and round of its read step, for a stage, the plan review and the final review", () => {
+    for (const [subject, group] of [['core api', 'stage:2'], ['plan review', 'plan-review'], ['final review', 'final-review'], ['final review web', 'final-review']]) {
+      const read = placeOf(`review ${subject} r2 kimi read`, stages)
+      const save = placeOf(`review ${subject} r2 kimi save`, stages)
+      expect(read).toEqual({ group: group!, action: 'review r2 kimi read', round: 2 })
+      expect(save).toEqual({ group: group!, action: 'review r2 kimi save', round: 2 })
+    }
+  })
 })
 
 describe('the lines of a work group', () => {
