@@ -1093,7 +1093,7 @@ function readableDirs(text, files, cwd) {
     const path = normalize(p);
     return p.endsWith("/") ? path : path.slice(0, path.lastIndexOf("/"));
   });
-  return [...new Set(dirs)].filter((d) => !tooWide(d) && d !== root && !d.startsWith(`${root}/`));
+  return [...new Set(dirs)].filter((d) => !tooWide(d) && d !== root && !d.startsWith(`${root}/`) && !root.startsWith(`${d}/`));
 }
 function opencodeAgentConfig(dirs) {
   const permission = {

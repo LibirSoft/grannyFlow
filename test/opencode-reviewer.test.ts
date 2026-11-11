@@ -91,6 +91,14 @@ describe('readableDirs', () => {
     expect(readableDirs('/Users/u/notes.md /root/plan.md /var/home/u/x.md /home/u/.ssh/id_ed25519 /home/u/.claude/CLAUDE.md /tmp/plan.md', ['/home/u/.aws/config'], '/wt')).toEqual([])
     expect(readableDirs('/home/u/proj/.granny/plans/a.md /home/u/.claude/plans/b.md /tmp/run/plan.md', [], '/wt')).toEqual(['/home/u/proj/.granny/plans', '/home/u/.claude/plans', '/tmp/run'])
   })
+
+  it('never grants the worktree or a directory above it', () => {
+    const wt = '/home/u/Desktop/ws/proj-worktrees/feat'
+    expect(readableDirs(`Working repo: ${wt}`, [], wt)).toEqual([])
+    expect(readableDirs('Main checkout: /home/u/Desktop/ws/proj', [], wt)).toEqual([])
+    expect(readableDirs('see /home/u/Desktop/notes.md', [], wt)).toEqual([])
+    expect(readableDirs('/home/u/Desktop/ws/proj/.granny/plans/a.md', [`${wt}-old/plan.md`], `${wt}/`)).toEqual(['/home/u/Desktop/ws/proj/.granny/plans', `${wt}-old`])
+  })
 })
 
 describe('opencodeAgentConfig', () => {

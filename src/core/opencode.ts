@@ -58,14 +58,14 @@ const HOME = /^\/(?:root|(?:home|Users|var\/home)\/[^/]+)(?:\/\.[^/]+)?$/
 
 const tooWide = (dir: string) => dir.split('/').length < 3 || HOME.test(dir)
 
-/** The directories of the absolute paths named in `text` and of `files` that lie outside `cwd`; never a top-level directory, a home directory or a dot directory right under one. */
+/** The directories of the absolute paths named in `text` and of `files` that lie outside `cwd` and above it; never a top-level directory, a home directory or a dot directory right under one. */
 export function readableDirs(text: string, files: string[], cwd: string): string[] {
   const root = normalize(cwd)
   const dirs = [...(text.match(ABSOLUTE_PATH) ?? []).map(p => p.replace(/[.:]+$/, '')), ...files].map(p => {
     const path = normalize(p)
     return p.endsWith('/') ? path : path.slice(0, path.lastIndexOf('/'))
   })
-  return [...new Set(dirs)].filter(d => !tooWide(d) && d !== root && !d.startsWith(`${root}/`))
+  return [...new Set(dirs)].filter(d => !tooWide(d) && d !== root && !d.startsWith(`${root}/`) && !root.startsWith(`${d}/`))
 }
 
 /** OPENCODE_CONFIG_CONTENT for the reviewer: an agent opencode itself keeps to reading and read-only git. */
