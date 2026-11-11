@@ -31,7 +31,7 @@ Tell the user that a reviewer on another model than the tagger is a real second 
 
 ## 3. Write
 
-Write only those keys, merged by [setup.md](setup.md#3-write)'s rules: models keyed by host, other hosts' keys kept, every key not answered kept. A `haiku` judge on Claude Code is the built-in default, so it is not written. No `threshold`, `checks` or other keys.
+Write only those keys, merged by [setup.md](setup.md#3-write)'s rules: models keyed by host, other hosts' keys kept, every key not answered kept. An `opencode` reviewer's `model`: one string, not keyed by host - it is opencode's model wherever the reviewer runs. A `haiku` judge on Claude Code is the built-in default, so it is not written. No `threshold`, `checks` or other keys.
 
 ```json
 {

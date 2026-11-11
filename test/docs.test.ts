@@ -109,6 +109,12 @@ describe('skill docs', () => {
     expect(readRoot('README.md')).toContain('"engine": "opencode"')
     const unreleased = readRoot('CHANGELOG.md').split('\n## ')[1]!
     expect(unreleased).toContain('`"engine": "opencode"`')
+    const entry = unreleased.split('\n').find(l => l.includes('`"engine": "opencode"`'))!
+    expect(entry).not.toContain('one string for every host')
+    expect(entry).toContain('an object keyed by host')
+    expect(entry).toContain('of the absolute file paths named in `context` - each whole directory')
+    const write = read('references/judge.md').split('## 3. Write')[1]!.split('\n## ')[0]!
+    expect(write).toContain('An `opencode` reviewer\'s `model`: one string, not keyed by host')
   })
 
   it('has a SKILL.md with the frontmatter every host reads', () => {
