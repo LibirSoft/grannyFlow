@@ -544,6 +544,21 @@ describe('runGranny', () => {
     expect(cc.calls.find(c => c.role === 'judge')).toBeUndefined()
   })
 
+  it('resolves a host-keyed role effort per host, and a plain string on every host', async () => {
+    const effortOn = async (name: 'claude-code' | 'omp' | 'opencode', effort: unknown) => {
+      const f = fakeHost({ name, ...(name === 'claude-code' ? { direct: false } : {}), override: req => (req.role === 'reviewer' ? { findings: [] } : undefined) })
+      await runGranny(f.host, input({ config: { roles: { implementer: { effort } }, reviewers: [{ engine: 'agent' }] } }))
+      const impl = f.calls.find(c => c.role === 'implementer')!
+      expect(impl).toBeDefined()
+      return impl.effort
+    }
+    const keyed = { 'claude-code': 'high', omp: 'medium' }
+    expect(await effortOn('claude-code', keyed)).toBe('high')
+    expect(await effortOn('omp', keyed)).toBe('medium')
+    expect(await effortOn('opencode', keyed)).toBeUndefined()
+    for (const name of ['claude-code', 'omp', 'opencode'] as const) expect(await effortOn(name, 'high')).toBe('high')
+  })
+
   it('defaults the judge to haiku on claude-code', async () => {
     const f = fakeHost({ name: 'claude-code', direct: false, reviews: [review(finding('P2', 'x')), 'No findings.'], scores: [{ 'codex-F1': 90 }] })
     await runGranny(f.host, input())
@@ -1282,6 +1297,25 @@ describe('several reviewers', () => {
     )
     expect(f.calls.filter(c => c.role === 'reviewer').map(c => [c.label, c.model, c.effort])).toEqual([
       ['review core r1 opus', 'opus', 'high'],
+      ['review core r1 sonnet', 'sonnet', undefined],
+    ])
+  })
+
+  it("resolves an agent reviewer's host-keyed effort on the host it runs on", async () => {
+    const f = fakeHost({ name: 'claude-code', direct: false, override: req => (req.role === 'reviewer' ? { findings: [] } : undefined) })
+    await runGranny(
+      f.host,
+      input({
+        config: {
+          reviewers: [
+            { name: 'opus', engine: 'agent', model: 'opus', effort: { 'claude-code': 'xhigh' } },
+            { name: 'sonnet', engine: 'agent', model: 'sonnet', effort: { omp: 'low' } },
+          ],
+        },
+      }),
+    )
+    expect(f.calls.filter(c => c.role === 'reviewer').map(c => [c.label, c.model, c.effort])).toEqual([
+      ['review core r1 opus', 'opus', 'xhigh'],
       ['review core r1 sonnet', 'sonnet', undefined],
     ])
   })

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test'
-import { DEFAULT_CONFIG, resolveConfig, resolveModel } from '../src/core/config'
+import { DEFAULT_CONFIG, resolveConfig, resolveEffort, resolveModel } from '../src/core/config'
 import type { HostName } from '../src/core/types'
 import { cliCommand } from '../src/core/reviewer'
 
@@ -282,6 +282,73 @@ describe('resolveModel', () => {
     for (const host of ['claude-code', 'opencode'] as const) {
       expect(resolveConfig([{ reviewers: [{ engine: 'codex' }, { engine: 'codex-plugin' }, {}] }], host).reviewers.map(r => r.engine)).toEqual(['codex', 'codex-plugin', 'auto'])
     }
+  })
+})
+
+describe('effort per host', () => {
+  const hosts = ['claude-code', 'opencode', 'omp'] as const
+  const errorOf = (layers: unknown[]) => {
+    try {
+      resolveConfig(layers)
+    } catch (e) {
+      return (e as Error).message
+    }
+    throw new Error('expected resolveConfig to throw')
+  }
+
+  it('uses a plain string on every host and picks the host key from an object', () => {
+    for (const host of hosts) expect(resolveEffort('high', host)).toBe('high')
+    const spec = { 'claude-code': 'high', omp: 'medium' }
+    expect(resolveEffort(spec, 'claude-code')).toBe('high')
+    expect(resolveEffort(spec, 'omp')).toBe('medium')
+    expect(resolveEffort(spec, 'opencode')).toBeUndefined()
+    for (const host of hosts) {
+      expect(resolveEffort(undefined, host)).toBeUndefined()
+      expect(resolveEffort({}, host)).toBeUndefined()
+    }
+  })
+
+  it('accepts the host-keyed form in a role and a reviewer entry on every host and keeps it as written', () => {
+    const layers = [{ roles: { implementer: { effort: { 'claude-code': 'high', omp: 'medium' } } }, reviewers: [{ engine: 'agent', effort: { omp: 'xhigh', opencode: 'low' } }] }]
+    for (const host of hosts) {
+      const c = resolveConfig(layers, host)
+      expect(c.roles.implementer.effort).toEqual({ 'claude-code': 'high', omp: 'medium' })
+      expect(c.reviewers[0]!.effort).toEqual({ omp: 'xhigh', opencode: 'low' })
+    }
+  })
+
+  it('replaces a lower layer\'s effort whole, string or object', () => {
+    const effort = (layers: unknown[]) => resolveConfig(layers).roles.implementer.effort
+    expect(effort([{ roles: { implementer: { effort: 'high' } } }, { roles: { implementer: { effort: { omp: 'medium' } } } }])).toEqual({ omp: 'medium' })
+    expect(effort([{ roles: { implementer: { effort: { omp: 'medium' } } } }, { roles: { implementer: { effort: 'high' } } }])).toBe('high')
+    expect(effort([{ roles: { implementer: { effort: { 'claude-code': 'high' } } } }, { roles: { implementer: { effort: { omp: 'medium' } } } }])).toEqual({ omp: 'medium' })
+    const helper = resolveConfig([{ roles: { helper: { effort: { omp: 'medium' } } } }]).roles.helper
+    expect(resolveEffort(helper.effort, 'claude-code')).toBeUndefined()
+    expect(resolveEffort(helper.effort, 'omp')).toBe('medium')
+    expect(effort([{ roles: { implementer: { effort: { omp: 'medium' } } } }, { roles: { implementer: { effort: null } } }])).toBeUndefined()
+  })
+
+  it('rejects an unknown host and a bad value with the entry and the config layer', () => {
+    expect(errorOf([{}, { roles: { judge: { effort: { cursor: 'high' } } } }])).toContain('config layer 2: roles.judge.effort: unknown host "cursor"')
+    expect(errorOf([{ roles: { judge: { effort: { omp: 'huge' } } } }])).toContain('config layer 1: roles.judge.effort.omp must be one of low, medium, high, xhigh, max')
+    expect(errorOf([{ roles: { judge: { effort: { opencode: 'huge' } } } }])).toContain('config layer 1: roles.judge.effort.opencode must be one of low, medium, high, xhigh, max')
+    for (const effort of [5, ['high'], true, 'huge']) {
+      expect(errorOf([{ roles: { judge: { effort } } }])).toContain(
+        'config layer 1: roles.judge.effort must be one of low, medium, high, xhigh, max, or an object of those keyed by host',
+      )
+    }
+    const both = errorOf([{ reviewers: [{ engine: 'agent' }] }, { reviewers: [{ engine: 'agent', effort: { omp: 'huge', pi: 'low' } }] }])
+    expect(both).toContain('config layer 2: reviewers[0].effort.omp must be one of low, medium, high, xhigh, max')
+    expect(both).toContain('config layer 2: reviewers[0].effort: unknown host "pi"')
+    expect(errorOf([{ reviewers: [{ engine: 'agent', effort: null }] }])).toContain('config layer 1: reviewers[0].effort must be one of')
+  })
+
+  it('names the last layer that set the effort, and ignores a bad one a higher layer replaced', () => {
+    expect(errorOf([{ roles: { judge: { effort: 'low' } } }, {}, { roles: { judge: { effort: { omp: 'x' } } } }, { roles: { judge: { model: 'opus' } } }])).toContain(
+      'config layer 3: roles.judge.effort.omp',
+    )
+    expect(() => resolveConfig([{ reviewers: [{ engine: 'agent', effort: 'huge' }] }, { reviewers: [{ engine: 'agent' }] }])).not.toThrow()
+    expect(() => resolveConfig([{ roles: { judge: { effort: 'huge' } } }, { roles: { judge: { effort: 'low' } } }])).not.toThrow()
   })
 })
 

@@ -1,5 +1,5 @@
 import { GrannyCancelled, isCancelled } from './cancel'
-import { judgeConfigGaps, planReviewWarning, resolveConfig, resolveModel, type CheckConfig, type GrannyConfig, type ReviewerConfig, type RoleConfig } from './config'
+import { judgeConfigGaps, planReviewWarning, resolveConfig, resolveEffort, resolveModel, type CheckConfig, type GrannyConfig, type ReviewerConfig, type RoleConfig } from './config'
 import { trimPath, workOf } from './paths'
 import {
   agentPlanReviewPrompt,
@@ -289,7 +289,7 @@ function engineParts(host: Host, config: GrannyConfig) {
         prompt,
         schema: SCHEMAS[kind],
         model: resolveModel(rc.model, host.name),
-        effort: rc.effort,
+        effort: resolveEffort(rc.effort, host.name),
         access,
         cwd,
       }),
