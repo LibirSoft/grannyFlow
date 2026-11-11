@@ -58,9 +58,11 @@ export const reviewStem = (c: GrannyConfig, stage: string, round: number, rv: Re
 /** Cuts every event but text, error and step_start down to its type, so a tool's output never reaches whoever reads the stream. */
 const OPENCODE_SHORTEN = '/^\\{"type":"(text|error|step_start)"/!s/^(\\{"type":"[a-z_]+").*/\\1}/'
 
+export const opencodeModel = (rv: ReviewerConfig, host: HostName) => `${resolveModel(rv.model, host)}${rv.effort ? `#${rv.effort}` : ''}`
+
 /** `opencode run` as a read-only reviewer, its output the JSON event stream; `dirs` are the outside directories it may read. */
 function opencodeScript(rv: ReviewerConfig, host: HostName, prompt: string, dirs: string[], log: string): string {
-  const model = `${resolveModel(rv.model, host)}${rv.effort ? `#${rv.effort}` : ''}`
+  const model = opencodeModel(rv, host)
   const run = `OPENCODE_DISABLE_PROJECT_CONFIG=1 OPENCODE_CONFIG_CONTENT=${shellQuote(opencodeAgentConfig(dirs))} opencode run --standalone --archived --format json --agent ${OPENCODE_AGENT} -m ${shellQuote(model)} ${shellQuote(prompt)} </dev/null`
   return `{ echo ${shellQuote(`${SAID}opencode ${model} (read-only agent)`)}; ${run}; } > ${log} 2>&1`
 }

@@ -1262,8 +1262,9 @@ function companionCommand(rv, host, base) {
 }
 var reviewStem = (c, stage, round, rv) => `${c.workDir}/review-${stage}-r${round}-${rv.name}`;
 var OPENCODE_SHORTEN = '/^\\{"type":"(text|error|step_start)"/!s/^(\\{"type":"[a-z_]+").*/\\1}/';
+var opencodeModel = (rv, host) => `${resolveModel(rv.model, host)}${rv.effort ? `#${rv.effort}` : ""}`;
 function opencodeScript(rv, host, prompt, dirs, log) {
-  const model = `${resolveModel(rv.model, host)}${rv.effort ? `#${rv.effort}` : ""}`;
+  const model = opencodeModel(rv, host);
   const run = `OPENCODE_DISABLE_PROJECT_CONFIG=1 OPENCODE_CONFIG_CONTENT=${shellQuote(opencodeAgentConfig(dirs))} opencode run --standalone --archived --format json --agent ${OPENCODE_AGENT} -m ${shellQuote(model)} ${shellQuote(prompt)} </dev/null`;
   return `{ echo ${shellQuote(`${SAID}opencode ${model} (read-only agent)`)}; ${run}; } > ${log} 2>&1`;
 }
@@ -1634,7 +1635,7 @@ var listed = (status) => status.map((l) => l.trim()).join(", ");
 var entriesOf = (answer) => Array.isArray(answer?.perFinding) ? answer.perFinding.filter((x) => x && typeof x === "object" && typeof x.id === "string") : [];
 var phaseOf = (subject) => subject.kind === "plan" ? PLAN_PHASE : subject.note === WHOLE_BRANCH_NOTE ? FINAL_REVIEW_PHASE : REVIEW_PHASE;
 var reviewerMeta = (rv, host) => {
-  const model = resolveModel(rv.model, host.name);
+  const model = rv.engine === "opencode" ? opencodeModel(rv, host.name) : resolveModel(rv.model, host.name);
   return { name: rv.name, engine: rv.engine, ...model ? { model } : {} };
 };
 function checkInput(input) {

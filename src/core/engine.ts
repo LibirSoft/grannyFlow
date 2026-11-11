@@ -44,7 +44,7 @@ import {
 import { opencodeAnswer, readableDirs } from './opencode'
 import { bucketOf, countsOf, isDemoted, isJudged, renderReport, severityOf, utf8Length, type ReportMeta } from './report'
 import { decide, declinedOf, isBlocker, mergeDuplicates, parseCodexReview, reviewFailure, saysNoFindings, triage, type Policy } from './review'
-import { detachedReview, MAX_WAITS, planReviewScript, reportedBackend, reviewPlan, reviewStem, WAIT_SECONDS } from './reviewer'
+import { detachedReview, MAX_WAITS, opencodeModel, planReviewScript, reportedBackend, reviewPlan, reviewStem, WAIT_SECONDS } from './reviewer'
 import { SCHEMAS } from './schemas'
 import { heredocWriteScript, shellQuote } from './shell'
 import { trailDir, trailId, trailPath, trailRound, trailText, type RoundFacts } from './trail'
@@ -195,7 +195,7 @@ const entriesOf = (answer: any): JudgeEntry[] =>
 const phaseOf = (subject: Subject) => (subject.kind === 'plan' ? PLAN_PHASE : subject.note === WHOLE_BRANCH_NOTE ? FINAL_REVIEW_PHASE : REVIEW_PHASE)
 
 const reviewerMeta = (rv: ReviewerConfig, host: Host): TrailReviewer => {
-  const model = resolveModel(rv.model, host.name)
+  const model = rv.engine === 'opencode' ? opencodeModel(rv, host.name) : resolveModel(rv.model, host.name)
   return { name: rv.name, engine: rv.engine, ...(model ? { model } : {}) }
 }
 

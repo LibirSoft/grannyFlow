@@ -470,7 +470,7 @@ describe('an opencode reviewer in a run', () => {
     const r = await runGranny(f.host, input())
     expect(r.trail).toEqual({ dir: '/work/repo/.granny/trail', written: 2, failed: [] })
     const r1 = JSON.parse(f.trail.get('/work/repo/.granny/trail/s1-r1.json')!)
-    expect(r1.reviewers).toEqual([{ name: 'kimi', engine: 'opencode', model: 'kimi-code-plan-global/k3.1-pro' }])
+    expect(r1.reviewers).toEqual([{ name: 'kimi', engine: 'opencode', model: 'kimi-code-plan-global/k3.1-pro#max' }])
     expect(r1.findings.map((x: Record<string, unknown>) => [x.id, x.reviewer, x.title, x.file, x.route])).toEqual([['kimi-F1', 'kimi', 'Off by one', 'src/a.ts', 'sent']])
     expect(JSON.stringify(r1)).not.toContain('Planted bug')
     expect(JSON.parse(f.trail.get('/work/repo/.granny/trail/s1-r2.json')!)).toMatchObject({ findings: [], outcome: 'clean' })
