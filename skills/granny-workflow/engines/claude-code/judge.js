@@ -73,6 +73,7 @@ var isObject = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
 function resolveConfig(layers, host) {
   const config = JSON.parse(JSON.stringify(DEFAULT_CONFIG));
   const errors = [];
+  const effortLayer = {};
   layers.forEach((layer, index) => {
     if (layer === undefined || layer === null)
       return;
@@ -113,6 +114,10 @@ function resolveConfig(layers, host) {
             else
               target[k] = v;
           }
+          if (value.effort === null)
+            delete effortLayer[role];
+          else if (value.effort !== undefined)
+            effortLayer[role] = where;
         }
       }
     }
@@ -120,10 +125,12 @@ function resolveConfig(layers, host) {
       if (key === "roles" || key === "$schema" || value === undefined || !TOP_KEYS.has(key))
         continue;
       config[key] = value;
+      if (key === "reviewers")
+        effortLayer.reviewers = where;
     }
   });
-  config.reviewers = reviewers(config.reviewers, errors, host);
-  errors.push(...validate(config));
+  config.reviewers = reviewers(config.reviewers, errors, host, effortLayer.reviewers);
+  errors.push(...validate(config, effortLayer));
   if (errors.length)
     throw new Error(`Invalid granny config:
 - ${errors.join(`
@@ -154,8 +161,25 @@ function modelErrors(path, spec) {
   }
   return errors;
 }
-var effortErrors = (path, effort) => effort !== undefined && !EFFORTS.has(effort) ? [`${path} must be one of ${[...EFFORTS].join(", ")}`] : [];
-function reviewers(list, errors, host) {
+function effortErrors(path, effort, where) {
+  if (effort === undefined)
+    return [];
+  const at = where ? `${where}: ${path}` : path;
+  const values = [...EFFORTS].join(", ");
+  if (typeof effort === "string" && EFFORTS.has(effort))
+    return [];
+  if (!isObject(effort))
+    return [`${at} must be one of ${values}, or an object of those keyed by host`];
+  const errors = [];
+  for (const [host, value] of Object.entries(effort)) {
+    if (!HOSTS.includes(host))
+      errors.push(`${at}: unknown host "${host}"`);
+    if (typeof value !== "string" || !EFFORTS.has(value))
+      errors.push(`${at}.${host} must be one of ${values}`);
+  }
+  return errors;
+}
+function reviewers(list, errors, host, where) {
   if (!Array.isArray(list) || !list.length) {
     errors.push("reviewers must be a non-empty array of reviewer objects");
     return [];
@@ -181,7 +205,7 @@ function reviewers(list, errors, host) {
       errors.push(`${at}.name "${name}" is already used by reviewers[${named.get(name)}]`);
     else
       named.set(name, i);
-    errors.push(...modelErrors(`${at}.model`, entry.model), ...effortErrors(`${at}.effort`, entry.effort));
+    errors.push(...modelErrors(`${at}.model`, entry.model), ...effortErrors(`${at}.effort`, entry.effort, where));
     const adversarial = entry.mode === "adversarial-review";
     if (entry.mode !== undefined && !MODES.includes(entry.mode))
       errors.push(`${at}.mode must be "review" or "adversarial-review"`);
@@ -210,7 +234,7 @@ function reviewers(list, errors, host) {
     return { ...entry, name, engine };
   });
 }
-function validate(c) {
+function validate(c, effortLayer) {
   const errors = [];
   if (typeof c.threshold !== "number" || !(c.threshold >= 0 && c.threshold <= 100)) {
     errors.push("threshold must be a number between 0 and 100");
@@ -260,7 +284,7 @@ function validate(c) {
     errors.push("maxRepairs must be an integer >= 0");
   errors.push(...checkErrors(c.checks));
   for (const role of ROLES) {
-    errors.push(...modelErrors(`roles.${role}.model`, c.roles[role].model), ...effortErrors(`roles.${role}.effort`, c.roles[role].effort));
+    errors.push(...modelErrors(`roles.${role}.model`, c.roles[role].model), ...effortErrors(`roles.${role}.effort`, c.roles[role].effort, effortLayer[role]));
   }
   return errors;
 }
@@ -321,6 +345,13 @@ function metricErrors(at, m) {
   return errors;
 }
 function resolveModel(spec, host) {
+  if (spec === undefined)
+    return;
+  if (typeof spec === "string")
+    return spec;
+  return spec[host];
+}
+function resolveEffort(spec, host) {
   if (spec === undefined)
     return;
   if (typeof spec === "string")
@@ -1116,7 +1147,7 @@ function engineParts(host, config) {
     prompt,
     schema: SCHEMAS[kind],
     model: resolveModel(rc.model, host.name),
-    effort: rc.effort,
+    effort: resolveEffort(rc.effort, host.name),
     access,
     cwd
   }));

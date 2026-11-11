@@ -200,7 +200,7 @@ The plan review runs after the worktree step and before stage 1 ([config.md](con
 
 ## Models and permissions
 
-Models are `provider/model[#variant]` (`opencode models`). A role or agent reviewer without a model uses the model of the session that called `granny_run`. `effort` is ignored here; use the `#variant` suffix.
+Models are `provider/model[#variant]` (`opencode models`). A role or agent reviewer without a model uses the model of the session that called `granny_run`. `effort` is ignored here; use the `#variant` suffix. An `opencode` key in a host-keyed `effort` is accepted and has no effect; its value must still be one of `low` … `max`.
 
 `granny_run` checks every role's and every `agent` reviewer's model before anything starts. Any other form, such as a Claude Code alias like `sonnet` written as one string for every host, gets `granny_run refused:` with one line per entry, the config layer it came from and the fix, a host-keyed model: `{ "claude-code": "sonnet", "opencode": "<provider/model>" }`.
 

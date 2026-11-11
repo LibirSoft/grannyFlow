@@ -755,6 +755,15 @@ describe('opencode plugin', () => {
     expect(git(repo, 'status', '--porcelain')).toBe('')
   })
 
+  it('accepts an opencode key in a host-keyed effort and ignores it, adding no variant to the model', async () => {
+    const f = fakeContext()
+    await plugin.setup(f.ctx)
+    const { dir } = await startRun(repo, f, { roles: { implementer: { effort: { opencode: 'high', omp: 'low' } } } })
+    await finished(dir)
+    expect(f.created[0]).toMatchObject({ metadata: { 'granny-workflow': { label: 'implement one' } } })
+    expect(f.created[0].model).toEqual({ providerID: 'opencode', id: 'parent-model' })
+  })
+
   it('leaves the heartbeats out of granny_status, so a long command does not push out the real entries', async () => {
     const f = fakeContext({ hangUntilInterrupted: title => title === 'granny · implement one' })
     await plugin.setup(f.ctx)

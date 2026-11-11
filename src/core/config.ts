@@ -1,10 +1,11 @@
 import { HOSTS, IMPACTS, type HostName, type Impact } from './types'
 
 export type ModelSpec = string | Partial<Record<HostName, string>>
+export type EffortSpec = string | Partial<Record<HostName, string>>
 
 export interface RoleConfig {
   model?: ModelSpec
-  effort?: string
+  effort?: EffortSpec
 }
 
 export type ConfigRole = 'granny' | 'helper' | 'planner' | 'implementer' | 'judge'
@@ -116,6 +117,7 @@ const isObject = (v: unknown): v is Record<string, any> => typeof v === 'object'
 export function resolveConfig(layers: unknown[], host?: HostName): GrannyConfig {
   const config: GrannyConfig = JSON.parse(JSON.stringify(DEFAULT_CONFIG))
   const errors: string[] = []
+  const effortLayer: Partial<Record<ConfigRole | 'reviewers', string>> = {}
 
   layers.forEach((layer, index) => {
     if (layer === undefined || layer === null) return
@@ -153,17 +155,20 @@ export function resolveConfig(layers: unknown[], host?: HostName): GrannyConfig 
             if (v === null) delete target[k]
             else target[k] = v
           }
+          if (value.effort === null) delete effortLayer[role as ConfigRole]
+          else if (value.effort !== undefined) effortLayer[role as ConfigRole] = where
         }
       }
     }
     for (const [key, value] of Object.entries(layer)) {
       if (key === 'roles' || key === '$schema' || value === undefined || !TOP_KEYS.has(key)) continue
       ;(config as unknown as Record<string, unknown>)[key] = value
+      if (key === 'reviewers') effortLayer.reviewers = where
     }
   })
 
-  config.reviewers = reviewers(config.reviewers, errors, host)
-  errors.push(...validate(config))
+  config.reviewers = reviewers(config.reviewers, errors, host, effortLayer.reviewers)
+  errors.push(...validate(config, effortLayer))
   if (errors.length) throw new Error(`Invalid granny config:\n- ${errors.join('\n- ')}`)
   return config
 }
@@ -192,10 +197,21 @@ function modelErrors(path: string, spec: unknown): string[] {
   return errors
 }
 
-const effortErrors = (path: string, effort: unknown): string[] =>
-  effort !== undefined && !EFFORTS.has(effort as string) ? [`${path} must be one of ${[...EFFORTS].join(', ')}`] : []
+function effortErrors(path: string, effort: unknown, where?: string): string[] {
+  if (effort === undefined) return []
+  const at = where ? `${where}: ${path}` : path
+  const values = [...EFFORTS].join(', ')
+  if (typeof effort === 'string' && EFFORTS.has(effort)) return []
+  if (!isObject(effort)) return [`${at} must be one of ${values}, or an object of those keyed by host`]
+  const errors: string[] = []
+  for (const [host, value] of Object.entries(effort)) {
+    if (!(HOSTS as readonly string[]).includes(host)) errors.push(`${at}: unknown host "${host}"`)
+    if (typeof value !== 'string' || !EFFORTS.has(value)) errors.push(`${at}.${host} must be one of ${values}`)
+  }
+  return errors
+}
 
-function reviewers(list: unknown, errors: string[], host?: HostName): ReviewerConfig[] {
+function reviewers(list: unknown, errors: string[], host?: HostName, where?: string): ReviewerConfig[] {
   if (!Array.isArray(list) || !list.length) {
     errors.push('reviewers must be a non-empty array of reviewer objects')
     return []
@@ -217,7 +233,7 @@ function reviewers(list: unknown, errors: string[], host?: HostName): ReviewerCo
     else if (named.has(name)) errors.push(`${at}.name "${name}" is already used by reviewers[${named.get(name)}]`)
     else named.set(name, i)
 
-    errors.push(...modelErrors(`${at}.model`, entry.model), ...effortErrors(`${at}.effort`, entry.effort))
+    errors.push(...modelErrors(`${at}.model`, entry.model), ...effortErrors(`${at}.effort`, entry.effort, where))
     const adversarial = entry.mode === 'adversarial-review'
     if (entry.mode !== undefined && !MODES.includes(entry.mode)) errors.push(`${at}.mode must be "review" or "adversarial-review"`)
     else if (entry.mode !== undefined && !PLUGIN_ENGINES.includes(engine)) {
@@ -246,7 +262,7 @@ function reviewers(list: unknown, errors: string[], host?: HostName): ReviewerCo
   })
 }
 
-function validate(c: GrannyConfig): string[] {
+function validate(c: GrannyConfig, effortLayer: Partial<Record<ConfigRole, string>>): string[] {
   const errors: string[] = []
   if (typeof c.threshold !== 'number' || !(c.threshold >= 0 && c.threshold <= 100)) {
     errors.push('threshold must be a number between 0 and 100')
@@ -281,7 +297,7 @@ function validate(c: GrannyConfig): string[] {
   errors.push(...checkErrors(c.checks))
 
   for (const role of ROLES) {
-    errors.push(...modelErrors(`roles.${role}.model`, c.roles[role].model), ...effortErrors(`roles.${role}.effort`, c.roles[role].effort))
+    errors.push(...modelErrors(`roles.${role}.model`, c.roles[role].model), ...effortErrors(`roles.${role}.effort`, c.roles[role].effort, effortLayer[role]))
   }
   return errors
 }
@@ -330,6 +346,12 @@ function metricErrors(at: string, m: unknown): string[] {
 }
 
 export function resolveModel(spec: ModelSpec | undefined, host: HostName): string | undefined {
+  if (spec === undefined) return undefined
+  if (typeof spec === 'string') return spec
+  return spec[host]
+}
+
+export function resolveEffort(spec: EffortSpec | undefined, host: HostName): string | undefined {
   if (spec === undefined) return undefined
   if (typeof spec === 'string') return spec
   return spec[host]
