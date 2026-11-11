@@ -113,6 +113,18 @@ describe('skill docs', () => {
     expect(entry).not.toContain('one string for every host')
     expect(entry).toContain('an object keyed by host')
     expect(entry).toContain('of the absolute file paths named in `context` - each whole directory')
+    expect(config).not.toContain('only the paths named in `context`')
+    const judgeRuns = config.split('## Judge runs')[1]!.split('\n## ')[0]!
+    expect(judgeRuns).toContain('only the directories of the absolute file paths named in `context` - each whole directory')
+    const setup = read('references/setup.md').split('2. **Reviewers**')[1]!.split('\n3. ')[0]!
+    expect(setup).not.toContain('offer only the host model')
+    expect(setup).not.toContain('offer the host model only')
+    expect(setup).toContain('the `opencode` reviewer above')
+    expect(setup).toContain('Ask its `effort` with it')
+    for (const host of ['opencode', 'omp']) {
+      const env = read(`references/${host}.md`).split('\n').find(l => / reviewer must be on that `?PATH`? and logged in/.test(l))!
+      expect({ host, env }).toEqual({ host, env: expect.stringContaining('the `opencode` binary of every `opencode` reviewer') })
+    }
     const write = read('references/judge.md').split('## 3. Write')[1]!.split('\n## ')[0]!
     expect(write).toContain('An `opencode` reviewer\'s `model`: one string, not keyed by host')
   })

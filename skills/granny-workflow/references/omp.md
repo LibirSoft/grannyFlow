@@ -203,7 +203,7 @@ Role processes run with `--approval-mode yolo`: they never wait for an approval,
 
 Read-only roles (the judge, `agent` reviewers, the extraction agent) may call only `read`, `grep`, `glob`, `find`, `ast_grep`, `lsp`, `bash`, `web_search`, `todo`, `think`, `wait`, `yield` and their submit tool. Their `bash` commands additionally cannot `git add` or `git commit`. The guard reads only the `bash` tool's command line: it does not see code a writing role runs through `eval`, and a read-only role's `bash` can still write files. That matches opencode, whose rules cover the same commands.
 
-Review commands and checks run in your omp process's environment: the CLI of every `command` reviewer must be on that `PATH` and logged in.
+Review commands and checks run in your omp process's environment: the CLI of every `command` reviewer and the `opencode` binary of every `opencode` reviewer must be on that `PATH` and logged in (an `opencode` reviewer to its model's provider).
 
 ## When the omp session exits mid-run
 

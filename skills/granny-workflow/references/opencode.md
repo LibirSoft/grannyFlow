@@ -208,7 +208,7 @@ Models are `provider/model[#variant]` (`opencode models`). A role or agent revie
 
 Every child session runs the `build` agent with these session rules: everything allowed except questions, `git push`, `git remote add`, `git stash`, `git rebase`, `git reset --hard` and `gh pr`. Read-only roles (judge, agent reviewers, extraction) additionally cannot edit, `git add` or `git commit`.
 
-Review commands run in the opencode server's environment: `codex`, and the CLI of every `command` reviewer, must be on that PATH and logged in.
+Review commands run in the opencode server's environment: `codex`, the CLI of every `command` reviewer and the `opencode` binary of every `opencode` reviewer must be on that PATH and logged in (an `opencode` reviewer to its model's provider).
 
 ## When the server stops mid-run
 
