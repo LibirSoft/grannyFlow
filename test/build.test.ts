@@ -280,6 +280,7 @@ describe('pr-comments.mjs', () => {
       }
       mkdirSync(repo)
       git('init', '-q', '-b', 'main')
+      git('config', 'remote.origin.url', 'https://github.com/o/r.git')
       writeFileSync(join(repo, 'a.ts'), 'one\n')
       git('add', 'a.ts')
       git('commit', '-q', '-m', 'base')
@@ -318,6 +319,116 @@ esac
       expect({ code: r.status, stdout: r.stdout, stderr: r.stderr }).toEqual({ code: 0, stdout: 's1 r1: posted 1 line comment, 0 in body\nhttps://github.com/o/r/pull/3\n', stderr: '' })
       const review = JSON.parse(readFileSync(posted, 'utf8'))
       expect(review).toMatchObject({ commit_id: head, event: 'COMMENT', comments: [{ path: 'a.ts', line: 2, side: 'RIGHT' }] })
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('posts a round through glab when node runs it in a checkout with a GitLab remote', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'granny-mr-'))
+    try {
+      const repo = join(dir, 'repo')
+      const bin = join(dir, 'bin')
+      mkdirSync(bin)
+      const git = (...args: string[]) => {
+        const r = spawnSync('git', ['-C', repo, '-c', 'commit.gpgsign=false', ...args], { encoding: 'utf8', env: { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' } })
+        expect(r.status).toBe(0)
+        return r.stdout.trim()
+      }
+      mkdirSync(repo)
+      git('init', '-q', '-b', 'main')
+      git('config', 'remote.origin.url', 'git@gitlab.com:o/r.git')
+      writeFileSync(join(repo, 'a.ts'), 'one\nthree\n')
+      git('add', 'a.ts')
+      git('commit', '-q', '-m', 'base')
+      const base = git('rev-parse', 'HEAD')
+      git('checkout', '-q', '-b', 'feat')
+      writeFileSync(join(repo, 'a.ts'), 'one\ntwo\nthree\n')
+      git('commit', '-q', '-am', 'two')
+      const head = git('rev-parse', 'HEAD')
+      const residual = { route: 'residual', decision: { rule: 8, action: 'residual', why: 'low' } }
+      const record = {
+        version: 1,
+        loop: 's1',
+        name: 'one',
+        round: 1,
+        base,
+        reviewedSha: head,
+        reviewers: [{ name: 'codex', engine: 'auto' }],
+        findings: [
+          { id: 'codex-F1', reviewer: 'codex', severity: 'P2', file: 'a.ts', line: 2, title: 'Two', detail: 'd', ...residual },
+          { id: 'codex-F2', reviewer: 'codex', severity: 'P2', file: 'a.ts', line: 3, title: 'Three', detail: 'd', ...residual },
+        ],
+        outcome: 'residual-only',
+      }
+      mkdirSync(join(repo, '.granny/trail'), { recursive: true })
+      writeFileSync(join(repo, '.granny/trail/s1-r1.json'), JSON.stringify(record))
+      const mr = `projects/:id/merge_requests/4`
+      writeFileSync(
+        join(bin, 'glab'),
+        `#!/bin/sh
+case "$2 $4" in
+  "projects/:id/merge_requests GET") echo '{"iid":4,"web_url":"https://gitlab.com/o/r/-/merge_requests/4"}' ;;
+  "${mr} ") echo '{"iid":4,"web_url":"https://gitlab.com/o/r/-/merge_requests/4","sha":"${head}","diff_refs":{"start_sha":"${base}"}}' ;;
+  "${mr}/notes GET"|"${mr}/draft_notes GET") ;;
+  "${mr}/draft_notes POST") cat >> '${join(dir, 'drafts.ndjson')}'; echo >> '${join(dir, 'drafts.ndjson')}'; echo '{"id":1}' ;;
+  "${mr}/draft_notes/bulk_publish POST") cat > '${join(dir, 'publish.json')}' ;;
+  *) echo "unexpected glab $*" >&2; exit 9 ;;
+esac
+`,
+      )
+      chmodSync(join(bin, 'glab'), 0o755)
+      const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, GRANNY_CONFIG: join(dir, 'none.json') }
+      const r = spawnSync('node', [script], { cwd: repo, encoding: 'utf8', env })
+      expect({ code: r.status, stdout: r.stdout, stderr: r.stderr }).toEqual({ code: 0, stdout: 's1 r1: posted 2 line comments, 0 in body\nhttps://gitlab.com/o/r/-/merge_requests/4\n', stderr: '' })
+      const position = { position_type: 'text', base_sha: base, start_sha: base, head_sha: head, old_path: 'a.ts', new_path: 'a.ts' }
+      const drafts = readFileSync(join(dir, 'drafts.ndjson'), 'utf8').trim().split('\n').map(line => JSON.parse(line).position)
+      expect(drafts).toEqual([
+        { ...position, new_line: 2 },
+        { ...position, new_line: 3, old_line: 2 },
+      ])
+      expect(JSON.parse(readFileSync(join(dir, 'publish.json'), 'utf8')).note).toEndWith('<!-- granny-trail s1/r1@' + head.slice(0, 8) + ' -->')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('writes the planned reviews with --out when node runs it in a checkout with no remote', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'granny-pr-out-'))
+    try {
+      const repo = join(dir, 'repo')
+      const git = (...args: string[]) => {
+        const r = spawnSync('git', ['-C', repo, '-c', 'commit.gpgsign=false', ...args], { encoding: 'utf8', env: { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' } })
+        expect(r.status).toBe(0)
+        return r.stdout.trim()
+      }
+      mkdirSync(repo)
+      git('init', '-q', '-b', 'main')
+      writeFileSync(join(repo, 'a.ts'), 'one\n')
+      git('add', 'a.ts')
+      git('commit', '-q', '-m', 'base')
+      git('checkout', '-q', '-b', 'feat')
+      writeFileSync(join(repo, 'a.ts'), 'one\ntwo\n')
+      git('commit', '-q', '-am', 'two')
+      const head = git('rev-parse', 'HEAD')
+      const record = {
+        version: 1,
+        loop: 's1',
+        name: 'one',
+        round: 1,
+        base: 'main',
+        reviewedSha: head,
+        reviewers: [{ name: 'codex', engine: 'auto' }],
+        findings: [{ id: 'codex-F1', reviewer: 'codex', severity: 'P2', file: 'a.ts', line: 2, title: 'Two', detail: 'd', route: 'residual', decision: { rule: 8, action: 'residual', why: 'low' } }],
+        outcome: 'residual-only',
+      }
+      mkdirSync(join(repo, '.granny/trail'), { recursive: true })
+      writeFileSync(join(repo, '.granny/trail/s1-r1.json'), JSON.stringify(record))
+      const env = { ...process.env, GRANNY_CONFIG: join(dir, 'none.json') }
+      const r = spawnSync('node', [script, '--out', 'plan.json', '--base', 'main'], { cwd: repo, encoding: 'utf8', env })
+      expect({ code: r.status, stdout: r.stdout, stderr: r.stderr }).toEqual({ code: 0, stdout: 'wrote 1 review to plan.json\n', stderr: '' })
+      const plan = JSON.parse(readFileSync(join(repo, 'plan.json'), 'utf8'))
+      expect(plan).toMatchObject({ version: 1, reviews: [{ loop: 's1', round: 1, commit: head, comments: [{ path: 'a.ts', oldPath: 'a.ts', line: 2, kind: 'added' }] }] })
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }

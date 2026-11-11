@@ -1,72 +1,50 @@
 import { trimSlashes } from '../core/paths'
-import type { TrailFinding, TrailRound } from '../core/types'
-import { type Hunks, onChangedLine, parseHunks } from './hunks'
+import type { TrailRound } from '../core/types'
+import { postGithub, prOf, prTarget } from './github'
+import { mrOf, mrTarget, postGitlab } from './gitlab'
+import { failure, plural, type PosterIo } from './io'
+import { type PlannedReview, planRound, type Target } from './plan'
+import { detectPlatform, type Platform, PLATFORMS } from './platform'
 import { byTrailOrder, trailProblem } from './records'
-import { cleanBody, findingComment, roundBody, roundMarker, short } from './render'
 
-export interface ExecResult {
-  code: number
-  stdout: string
-  stderr: string
-}
+export type { ExecResult, PosterIo } from './io'
 
-/** Everything the poster touches outside itself: git, gh, the trail files and its output. */
-export interface PosterIo {
-  exec(cmd: 'git' | 'gh', args: string[], input?: string): ExecResult
-  /** The `*.json` names in `dir`, or undefined when it does not exist. */
-  list(dir: string): string[] | undefined
-  read(path: string): string
-  /** The config's work dir for the checkout at `toplevel`; throws on an invalid config. */
-  workDir(toplevel: string): string
-  print(line: string): void
-}
-
-export interface PrInfo {
-  number: number
-  url: string
-  headRefOid: string
-  baseRefOid: string
-}
-
-export interface LineComment {
-  path: string
-  line: number
-  side: 'RIGHT'
-  body: string
-}
-
-export interface ReviewPayload {
-  commit_id: string
-  event: 'COMMENT'
-  body: string
-  comments: LineComment[]
-}
-
-export const USAGE = 'usage: node pr-comments.mjs [--pr <number>] [--trail <dir>] [--dry-run]'
+export const USAGE = 'usage: node pr-comments.mjs [--platform github|gitlab] [--pr <number>] [--trail <dir>] [--out <file> [--base <ref>]] [--dry-run]'
 
 interface Options {
+  platform?: Platform
   pr?: number
   trail?: string
+  out?: string
+  base?: string
   dryRun: boolean
 }
+
+const VALUED = ['--pr', '--trail', '--platform', '--out', '--base']
 
 function parseArgs(argv: string[]): Options | string {
   const options: Options = { dryRun: false }
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]!
-    if (arg === '--dry-run') options.dryRun = true
-    else if (arg === '--pr' || arg === '--trail') {
-      const value = argv[++i]
-      if (value === undefined || value.startsWith('--')) return `${arg} needs a value`
-      if (arg === '--trail') options.trail = value
-      else if (/^[1-9]\d*$/.test(value)) options.pr = Number(value)
-      else return `--pr takes a PR number, got ${value}`
-    } else return `unknown argument ${arg}`
+    if (arg === '--dry-run') {
+      options.dryRun = true
+      continue
+    }
+    if (!VALUED.includes(arg)) return `unknown argument ${arg}`
+    const value = argv[++i]
+    if (value === undefined || value.startsWith('--')) return `${arg} needs a value`
+    if (arg === '--trail') options.trail = value
+    else if (arg === '--out') options.out = value
+    else if (arg === '--base') options.base = value
+    else if (arg === '--platform') {
+      if (!(PLATFORMS as readonly string[]).includes(value)) return `--platform takes github or gitlab, got ${value}`
+      options.platform = value as Platform
+    } else if (/^[1-9]\d*$/.test(value)) options.pr = Number(value)
+    else return `--pr takes a PR number, got ${value}`
   }
+  if (options.base !== undefined && options.out === undefined) return '--base goes with --out <file>'
   return options
 }
-
-const failure = (r: ExecResult) => (r.stderr || r.stdout).trim().split('\n').slice(-3).join(' / ') || `exit ${r.code}`
 
 function readRecords(io: PosterIo, dir: string): TrailRound[] | undefined {
   const names = io.list(dir)
@@ -87,73 +65,57 @@ function readRecords(io: PosterIo, dir: string): TrailRound[] | undefined {
   return records.sort(byTrailOrder)
 }
 
-function prOf(io: PosterIo, pr: number | undefined): PrInfo | string {
-  const r = io.exec('gh', ['pr', 'view', ...(pr === undefined ? [] : [String(pr)]), '--json', 'number,url,headRefOid,baseRefOid'])
-  if (r.code !== 0) return failure(r)
+const commitOf = (io: PosterIo, ref: string) => {
+  const r = io.exec('git', ['rev-parse', '--verify', '--quiet', `${ref}^{commit}`])
+  return r.code === 0 ? r.stdout.trim() : undefined
+}
+
+/** What `--out` plans against: the PR when the platform has one, else `--base` and the checked-out commit. */
+function outTarget(io: PosterIo, options: Options): Target | { error: string; code: number } {
+  const platform = options.platform ?? detectPlatform(io)
+  if (platform === 'github') {
+    const pr = prOf(io, options.pr)
+    if (typeof pr !== 'string') return prTarget(pr)
+    if (options.pr !== undefined) return { error: `open the PR first (${pr})`, code: 2 }
+  }
+  if (platform === 'gitlab') {
+    const mr = mrOf(io, options.pr)
+    if (!('error' in mr)) return mrTarget(io, mr)
+    if (options.pr !== undefined || mr.code !== 2) return mr
+  }
+  if (options.base === undefined) return { error: '--out needs the target branch: open the PR, or pass --base <ref>', code: 1 }
+  const base = commitOf(io, options.base)
+  if (base === undefined) return { error: `--base ${options.base} is not a commit`, code: 1 }
+  const head = commitOf(io, 'HEAD')
+  if (head === undefined) return { error: 'HEAD is not a commit', code: 1 }
+  return { head, base, ...(platform === 'gitlab' ? { platform } : {}) }
+}
+
+/** Writes `{ version: 1, reviews }` for any other client to post; posts nothing. */
+function writeOut(io: PosterIo, options: Options & { out: string }, records: TrailRound[], toplevel: string): number {
+  const target = outTarget(io, options)
+  if ('error' in target) {
+    io.print(target.error)
+    return target.code
+  }
+  const reviews = records.map(r => planRound(io, r, records, target, toplevel)).filter((p): p is PlannedReview => p !== undefined)
+  const text = `${JSON.stringify({ version: 1, reviews }, null, 2)}\n`
+  if (options.dryRun) {
+    io.print(text.trimEnd())
+    io.print(`would write ${plural(reviews.length, 'review')} to ${options.out}`)
+    return 0
+  }
   try {
-    const info = JSON.parse(r.stdout) as PrInfo
-    if (Number.isInteger(info.number) && typeof info.headRefOid === 'string' && typeof info.baseRefOid === 'string') return info
-  } catch {}
-  return `gh pr view printed no PR: ${r.stdout.trim().slice(0, 200)}`
-}
-
-const reviewsPath = (pr: PrInfo) => `repos/{owner}/{repo}/pulls/${pr.number}/reviews`
-
-/** The PR's review bodies as one text, to find the markers of the rounds already posted. */
-function postedBodies(io: PosterIo, pr: PrInfo): string | { error: string } {
-  const r = io.exec('gh', ['api', '--paginate', reviewsPath(pr), '--jq', '.[].body'])
-  return r.code === 0 ? r.stdout : { error: failure(r) }
-}
-
-/** Pin every diff setting a user's git config could change, so the hunks are the ones GitHub shows. */
-const DIFF_FLAGS = ['--unified=3', '--no-color', '--no-ext-diff', '--no-textconv', '--no-relative', '--src-prefix=a/', '--dst-prefix=b/']
-
-/** A round's review commit: its reviewed commit when the PR contains it, else the PR's head. */
-function commitFor(io: PosterIo, r: TrailRound, pr: PrInfo): { commit: string; notInPr: boolean } {
-  const sha = r.reviewedSha
-  const inPr = sha !== undefined && io.exec('git', ['merge-base', '--is-ancestor', sha, pr.headRefOid]).code === 0
-  return inPr ? { commit: sha!, notInPr: false } : { commit: pr.headRefOid, notInPr: true }
-}
-
-/** Where a round's comments anchor, and the PR's hunks at that commit. */
-function anchorOf(io: PosterIo, r: TrailRound, pr: PrInfo): { commit: string; notInPr: boolean; hunks: Hunks } {
-  const { commit, notInPr } = commitFor(io, r, pr)
-  const base = io.exec('git', ['merge-base', pr.baseRefOid, commit])
-  const diff = base.code === 0 ? io.exec('git', ['-c', 'core.quotePath=false', 'diff', ...DIFF_FLAGS, base.stdout.trim(), commit]) : undefined
-  return { commit, notInPr, hunks: diff?.code === 0 ? parseHunks(diff.stdout) : new Map() }
-}
-
-function relative(file: string, toplevel: string): string {
-  const root = `${trimSlashes(toplevel)}/`
-  return (file.startsWith(root) ? file.slice(root.length) : file).replace(/^(\.\/)+/, '')
-}
-
-const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`
-
-/** `refused` (GitHub's error on the first try) puts every finding in the body, with no line comment. */
-export function buildReview(io: PosterIo, r: TrailRound, records: TrailRound[], pr: PrInfo, toplevel: string, refused?: string): ReviewPayload | undefined {
-  if (!r.findings.length) {
-    const earlier = records.some(x => x.loop === r.loop && x.round < r.round && x.findings.length)
-    if (r.outcome === 'clean' || r.outcome === undefined) {
-      if (!earlier) return undefined
-      return { commit_id: commitFor(io, r, pr).commit, event: 'COMMENT', body: cleanBody(r), comments: [] }
-    }
+    io.write(options.out, text)
+  } catch (e) {
+    io.print(`could not write ${options.out}: ${(e as Error).message}`)
+    return 1
   }
-  if (r.loop === 'plan') {
-    return { commit_id: pr.headRefOid, event: 'COMMENT', body: roundBody(r, records, { inBody: r.findings }), comments: [] }
-  }
-  const { commit, notInPr, hunks } = anchorOf(io, r, pr)
-  const comments: LineComment[] = []
-  const inBody: TrailFinding[] = []
-  for (const f of r.findings) {
-    const path = relative(f.file, toplevel)
-    if (refused === undefined && onChangedLine(hunks, path, f.line)) comments.push({ path, line: f.line!, side: 'RIGHT', body: findingComment(f, r, records) })
-    else inBody.push(f)
-  }
-  return { commit_id: commit, event: 'COMMENT', body: roundBody(r, records, { inBody, notInPr, ...(refused === undefined ? {} : { refused }) }), comments }
+  io.print(`wrote ${plural(reviews.length, 'review')} to ${options.out}`)
+  return 0
 }
 
-/** Posts one GitHub review per trail round not yet on the PR; returns the exit code. */
+/** Reads the trail and posts each round not yet on the PR, or writes the plan with `--out`; returns the exit code. */
 export function postTrail(argv: string[], io: PosterIo): number {
   const options = parseArgs(argv)
   if (typeof options === 'string') {
@@ -180,55 +142,13 @@ export function postTrail(argv: string[], io: PosterIo): number {
     io.print(`no trail at ${dir} - a granny run writes it there (config trail: true)`)
     return 1
   }
-  const pr = prOf(io, options.pr)
-  if (typeof pr === 'string') {
-    io.print(`open the PR first (${pr})`)
-    return 2
-  }
-  const posted = postedBodies(io, pr)
-  if (typeof posted !== 'string') {
-    io.print(`could not list the PR's reviews: ${posted.error}`)
+  if (options.out !== undefined) return writeOut(io, { ...options, out: options.out }, records, toplevel)
+  const platform = options.platform ?? detectPlatform(io)
+  if (typeof platform !== 'string') {
+    io.print(platform.error)
     return 1
   }
   if (!records.length) io.print(`no trail records in ${dir}`)
-  const failed: string[] = []
-  for (const r of records) {
-    const at = `${r.loop} r${r.round}`
-    if (posted.includes(roundMarker(r))) {
-      io.print(`${at}: skipped, already posted`)
-      continue
-    }
-    const review = buildReview(io, r, records, pr, toplevel)
-    if (!review) {
-      io.print(`${at}: clean, nothing to post`)
-      continue
-    }
-    const moved = r.loop !== 'plan' && review.commit_id !== r.reviewedSha ? `, on the PR head ${short(pr.headRefOid)}` : ''
-    const what = r.findings.length ? `${plural(review.comments.length, 'line comment')}, ${r.findings.length - review.comments.length} in body${moved}` : `the round's ${r.outcome ?? 'clean'} note`
-    if (options.dryRun) {
-      io.print(`${at}: would post ${what}`)
-      io.print(JSON.stringify(review, null, 2))
-      continue
-    }
-    const post = (payload: ReviewPayload) => io.exec('gh', ['api', '--method', 'POST', reviewsPath(pr), '--input', '-'], JSON.stringify(payload))
-    const sent = post(review)
-    if (sent.code === 0) {
-      io.print(`${at}: posted ${what}`)
-      continue
-    }
-    // One line GitHub cannot place rejects the whole review: post the round once more with every finding in its body.
-    const flat = review.comments.length ? buildReview(io, r, records, pr, toplevel, failure(sent)) : undefined
-    const again = flat ? post(flat) : undefined
-    if (again?.code === 0) io.print(`${at}: posted with all ${r.findings.length} in body - GitHub refused the line comments: ${failure(sent)}`)
-    else {
-      io.print(`${at}: FAILED to post - ${failure(again ?? sent)}`)
-      failed.push(at)
-    }
-  }
-  io.print(pr.url)
-  if (failed.length) {
-    io.print(`not posted: ${failed.join(', ')} - run the script again to post only what is missing`)
-    return 1
-  }
-  return 0
+  const request = { records, toplevel, ...(options.pr === undefined ? {} : { pr: options.pr }), dryRun: options.dryRun }
+  return platform === 'gitlab' ? postGitlab(io, request) : postGithub(io, request)
 }
