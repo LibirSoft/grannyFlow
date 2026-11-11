@@ -195,6 +195,20 @@ describe('skill docs', () => {
     expect(readRoot('README.md')).toMatch(/^\| `planReview` \| `false` \|/m)
   })
 
+  it('names in cursor.md only prompts that prompts.md has under that heading', () => {
+    const headings = [...read('references/prompts.md').matchAll(/^## (.+)$/gm)].map(m => m[1]!)
+    const names = [...new Set([...read('references/cursor.md').matchAll(/"([^"]+)" prompt/g)].map(m => m[1]!))]
+    expect(names.length).toBeGreaterThan(10)
+    const missing = names.filter(n => !headings.some(h => h === n || h.startsWith(`${n},`) || h.startsWith(`${n} (`) || h.startsWith(`${n} - `)))
+    expect(missing).toEqual([])
+  })
+
+  it('tells a Cursor run what to do with an opencode reviewer', () => {
+    const cursor = read('references/cursor.md')
+    expect(cursor).toContain('An `engine: "opencode"` reviewer is not supported here')
+    expect(cursor).toContain('engine `opencode`: not supported on Cursor')
+  })
+
   it('says wherever plan review can be turned on that it costs many tokens and time, and to turn it on only when asked', () => {
     for (const file of ['SKILL.md', 'references/config.md', 'references/claude-code.md', 'references/opencode.md', 'references/omp.md', 'references/cursor.md']) {
       const text = read(file)
