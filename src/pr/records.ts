@@ -1,7 +1,10 @@
+import { FIX_COSTS, IMPACTS, LIKELIHOODS, SCOPES, VERDICTS } from '../core/types'
 import type { TrailRound } from '../core/types'
 
 const SAFE = /^[A-Za-z0-9._-]+$/
-const SHA = /^[0-9a-f]{4,64}$/i
+/** A full commit id: an abbreviation may be ambiguous, and a platform takes it as given. */
+const SHA = /^([0-9a-f]{40}|[0-9a-f]{64})$/i
+const TAGS: Record<string, readonly string[]> = { verdict: VERDICTS, impact: IMPACTS, likelihood: LIKELIHOODS, fixCost: FIX_COSTS, scope: SCOPES }
 const ROUTES = ['sent', 'residual']
 const OUTCOMES = ['clean', 'residual-only', 'round-cap', 'review-failed', 'checks-failed']
 
@@ -18,7 +21,7 @@ export function trailProblem(value: unknown): string | undefined {
   if (!isString(value.name)) return 'name is missing'
   if (!isCount(value.round)) return 'round is not a positive integer'
   if (!isString(value.base)) return 'base is missing'
-  if (!optional(value.reviewedSha, v => isString(v) && SHA.test(v))) return 'reviewedSha is not a commit id'
+  if (!optional(value.reviewedSha, v => isString(v) && SHA.test(v))) return 'reviewedSha is not a full commit id'
   if (!Array.isArray(value.reviewers) || !value.reviewers.every(r => isObject(r) && isString(r.name))) return 'reviewers is not a list of named reviewers'
   if (!Array.isArray(value.findings)) return 'findings is not a list'
   for (const [i, f] of value.findings.entries()) {
@@ -27,6 +30,9 @@ export function trailProblem(value: unknown): string | undefined {
     if (!isString(f.id) || !SAFE.test(f.id)) return `${at}.id is missing or not a plain id`
     for (const key of ['severity', 'file', 'title', 'detail']) if (!isString(f[key])) return `${at}.${key} is not a string`
     if (!optional(f.line, isCount)) return `${at}.line is not a positive integer`
+    for (const [key, known] of Object.entries(TAGS)) if (!optional(f[key], v => known.includes(v as string))) return `${at}.${key} ${JSON.stringify(f[key])} is unknown`
+    if (!optional(f.priority, v => typeof v === 'number' && Number.isFinite(v))) return `${at}.priority is not a number`
+    if (!optional(f.reviewer, isString)) return `${at}.reviewer is not a string`
     if (!optional(f.route, v => ROUTES.includes(v as string))) return `${at}.route is not sent or residual`
     if (!optional(f.decision, d => isObject(d) && Number.isInteger(d.rule) && isString(d.action) && isString(d.why))) return `${at}.decision is malformed`
     if (!optional(f.duplicates, d => Array.isArray(d) && d.every(isString))) return `${at}.duplicates is not a list of ids`

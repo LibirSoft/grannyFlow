@@ -124,7 +124,7 @@ Each round becomes one review on the PR, in order. A finding sits on its line, a
 **What happened:** fixed in fix r1: a1b2c3d..d4e5f6a (2 commits)
 ```
 
-A script posts it, not an agent, and a rerun posts only what is missing. Details: [references/config.md](skills/granny-workflow/references/config.md#review-trail).
+A script posts it, not an agent, and a rerun posts only what is missing. It posts to a GitHub PR or a GitLab MR, whichever your remote is on; for any other platform, `--out <file>` writes the rounds as JSON for another client to post. Details: [references/config.md](skills/granny-workflow/references/config.md#review-trail).
 
 ## How it works
 
