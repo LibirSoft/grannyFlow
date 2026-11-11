@@ -8,6 +8,7 @@ import { type ConfigRole, type GrannyConfig, judgeConfigGaps, type ModelSpec, pl
 export { planReviewWarning } from '../core/config'
 import { checkJudgeInput, type JudgeInput, type RunInput } from '../core/engine'
 import { noteLine, oneLine } from '../core/report'
+import { opencodeModel } from '../core/reviewer'
 import type { RunOutline } from './runview/outline'
 import type { CommandResult, Host, HostName, JudgeResult, PlanResult, Recheck, ResultKind, RunResult } from '../core/types'
 
@@ -208,7 +209,7 @@ const shown = (value: unknown): string => {
 }
 
 const reviewersText = (list: GrannyConfig['reviewers'], host: HostName) =>
-  list.map(rv => `${rv.name} (${[rv.engine, resolveModel(rv.model, host)].filter(Boolean).join(', ')})`).join(', ')
+  list.map(rv => `${rv.name} (${[rv.engine, rv.engine === 'opencode' ? opencodeModel(rv, host) : resolveModel(rv.model, host)].filter(Boolean).join(', ')})`).join(', ')
 
 /** The start reply's line naming what the run's own config changed from the config files; empty when it changed nothing. */
 export function overridesNotice(layers: unknown[], host: HostName): string {

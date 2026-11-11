@@ -2,7 +2,7 @@ import { describe, expect, it } from 'bun:test'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { dropPlaceholders, HEARTBEAT_MS, hostModelErrors, JUDGE_INPUT_SCHEMA, JUDGE_ROLES, JUDGE_TOOL_DESCRIPTION, overridesNotice, planReviewWarning, RUN_INPUT_SCHEMA, summarize, RUN_TOOL_DESCRIPTION, runStatus, SAME_MODEL_HINT, sameModelNotice, summarizeJudge, withHeartbeat } from '../src/adapters/common'
+import { dropPlaceholders, HEARTBEAT_MS, hostModelErrors, JUDGE_INPUT_SCHEMA, JUDGE_ROLES, JUDGE_TOOL_DESCRIPTION, judgeStartLine, overridesNotice, planReviewWarning, RUN_INPUT_SCHEMA, summarize, RUN_TOOL_DESCRIPTION, runStatus, SAME_MODEL_HINT, sameModelNotice, summarizeJudge, withHeartbeat } from '../src/adapters/common'
 import { resolveConfig } from '../src/core/config'
 import { checkInput, type JudgeInput, type RunInput } from '../src/core/engine'
 import { noteLine, renderReport } from '../src/core/report'
@@ -95,9 +95,21 @@ describe('overridesNotice', () => {
     )
   })
 
+  it('names an opencode reviewer by the model and variant it runs', () => {
+    const run = { reviewers: [{ name: 'kimi', engine: 'opencode', model: 'kimi-code-plan-global/k3.1-pro', effort: 'max' }] }
+    expect(overridesNotice([...files, run], 'omp')).toContain('reviewers kimi (opencode, kimi-code-plan-global/k3.1-pro#max) (config: ')
+  })
+
   it('says nothing without a run config, or when it changes nothing', () => {
     expect(overridesNotice([...files, undefined], 'omp')).toBe('')
     expect(overridesNotice([...files, { threshold: 70 }], 'omp')).toBe('')
+  })
+})
+
+describe('judgeStartLine', () => {
+  it('names an opencode reviewer by the model and variant it runs', () => {
+    const config = resolveConfig([{ reviewers: [{ name: 'kimi', engine: 'opencode', model: 'kimi-code-plan-global/k3.1-pro', effort: 'max' }], roles: { judge: { model: 'j/j' } } }], 'omp')
+    expect(judgeStartLine('id1', { repo: '/r' }, 'feat/x', config, 'omp')).toContain('by kimi (opencode, kimi-code-plan-global/k3.1-pro#max), tagged by j/j')
   })
 })
 

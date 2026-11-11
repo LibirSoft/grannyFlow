@@ -472,6 +472,7 @@ describe('runJudge: an opencode reviewer', () => {
       expect(r.findings.map(x => [x.id, x.title, x.file])).toEqual([['kimi-F1', 'Off by one', 'src/a.ts']])
       expect(under(r.report!, 'P2')).toContain('### Off by one')
       expect(r.report).not.toContain('Planted')
+      expect(r.report).toContain('- Reviewers: kimi (opencode, kimi-code-plan-global/k3.1-pro#max) · Judge: ')
       expect(f.logs).toContain(`feat/x r1 kimi: reviewer: ${BACKEND.slice('[granny] reviewer: '.length)}`)
       expect(f.commands.filter(isRun)).toHaveLength(1)
       if (!direct) expect(f.requests.filter(c => c.label.startsWith('review feat/x r1 kimi')).map(c => c.label)).toEqual(['review feat/x r1 kimi', 'review feat/x r1 kimi wait 1', 'review feat/x r1 kimi read', 'review feat/x r1 kimi save'])

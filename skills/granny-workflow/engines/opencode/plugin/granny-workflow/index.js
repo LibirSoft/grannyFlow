@@ -3281,7 +3281,7 @@ var shown = (value) => {
     return value;
   return JSON.stringify(value);
 };
-var reviewersText = (list, host) => list.map((rv) => `${rv.name} (${[rv.engine, resolveModel(rv.model, host)].filter(Boolean).join(", ")})`).join(", ");
+var reviewersText = (list, host) => list.map((rv) => `${rv.name} (${[rv.engine, rv.engine === "opencode" ? opencodeModel(rv, host) : resolveModel(rv.model, host)].filter(Boolean).join(", ")})`).join(", ");
 function overridesNotice(layers, host) {
   if (layers.at(-1) === undefined)
     return "";
