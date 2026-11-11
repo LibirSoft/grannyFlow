@@ -8,6 +8,7 @@ import { runGranny, type RunInput } from '../src/core/engine'
 import { OPENCODE_AGENT, opencodeAgentConfig, opencodeAnswer, readableDirs } from '../src/core/opencode'
 import { parseCodexReview, saysNoFindings } from '../src/core/review'
 import { planReviewScript, reportedBackend, reviewPlan } from '../src/core/reviewer'
+import { shellQuote } from '../src/core/shell'
 import type { CommandResult, HostName } from '../src/core/types'
 import { fakeHost, finding, review } from './fake-host'
 
@@ -50,6 +51,14 @@ describe('opencodeAnswer', () => {
   it('keeps the last text when the final step has none, and a blank part never starts a new stretch', () => {
     expect(opencodeAnswer([event('step_start'), text('No findings.'), event('step_finish'), event('step_start'), event('step_finish')].join('\n'))).toEqual({ text: 'No findings.' })
     expect(opencodeAnswer([text('No findings.'), event('step_start'), text('  ')].join('\n'))).toEqual({ text: 'No findings.' })
+  })
+
+  it('falls back to every text part when the last stretch has no finding and is not the no-findings sentence', () => {
+    const stream = [text('- [P1] Off by one — src/a.ts:3'), toolUse('x'), text('That is all.')].join('\n')
+    const answer = opencodeAnswer(stream).text!
+    expect(answer).toBe('- [P1] Off by one — src/a.ts:3\nThat is all.')
+    expect(parseCodexReview(answer).findings.map(f => [f.severity, f.file, f.line])).toEqual([['P1', 'src/a.ts', 3]])
+    expect(opencodeAnswer([text('Let me look.'), toolUse('x'), text('- [P2] Typo — b.ts:1')].join('\n'))).toEqual({ text: '- [P2] Typo — b.ts:1' })
   })
 
   it('skips lines that are not JSON events, the backend line and CRLF included', () => {
@@ -102,7 +111,7 @@ describe('readableDirs', () => {
 })
 
 describe('opencodeAgentConfig', () => {
-  it('defines one primary agent that may only read and run read-only git, with --output denied after the allows', () => {
+  it('defines one primary agent that may only read and run read-only git, with --output, redirects and outside paths denied after the allows', () => {
     const config = JSON.parse(opencodeAgentConfig([]))
     expect(Object.keys(config.agent)).toEqual([OPENCODE_AGENT])
     const agent = config.agent[OPENCODE_AGENT]
@@ -124,10 +133,73 @@ describe('opencodeAgentConfig', () => {
         'git merge-base*': 'allow',
         'git ls-files*': 'allow',
         'git * --output*': 'deny',
+        '*>*': 'deny',
+        '*<*': 'deny',
+        '*--no-index*': 'deny',
+        '* /*': 'deny',
+        "*'/*": 'deny',
+        '*"/*': 'deny',
+        '*=/*': 'deny',
+        '* ~*': 'deny',
+        "*'~*": 'deny',
+        '*"~*': 'deny',
+        '*=~*': 'deny',
+        '*../*': 'deny',
+        '* ..': 'deny',
+        '* .. *': 'deny',
+        "*'..*": 'deny',
+        '*"..*': 'deny',
+        '*$*': 'deny',
+        '*`*': 'deny',
+        '*{*': 'deny',
+        '*.?/*': 'deny',
+        '*.[*': 'deny',
       },
     })
-    expect(Object.keys(agent.permission.bash).at(-1)).toBe('git * --output*')
+    const rules = Object.entries(agent.permission.bash as Record<string, string>)
+    expect(rules.map(([, effect]) => effect).lastIndexOf('allow')).toBe(8)
     expect(Object.keys(agent.permission)[0]).toBe('*')
+  })
+
+  const OPENCODE_WILDCARD = (command: string, pattern: string) => {
+    let re = pattern.replaceAll('\\', '/').replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.')
+    if (re.endsWith(' .*')) re = `${re.slice(0, -3)}( .*)?`
+    return new RegExp(`^${re}$`, 's').test(command.replaceAll('\\', '/'))
+  }
+  const bashDecision = (command: string) => {
+    const rules = Object.entries(JSON.parse(opencodeAgentConfig([])).agent[OPENCODE_AGENT].permission.bash as Record<string, string>)
+    return rules.reverse().find(([pattern]) => OPENCODE_WILDCARD(command, pattern))?.[1]
+  }
+
+  it('lets the reviewer run read-only git on the worktree', () => {
+    for (const command of ['git diff main...HEAD', 'git diff main...HEAD -- src/a.ts', 'git log --oneline main..HEAD', 'git show HEAD:src/a.ts', 'git status --short', 'git blame -L 1,9 src/a.ts', 'git ls-files src', 'git rev-parse HEAD', 'git merge-base main HEAD'])
+      expect([command, bashDecision(command)]).toEqual([command, 'allow'])
+  })
+
+  it('denies a redirect, so an allowed git command never writes a file', () => {
+    for (const command of ['git log > leak.txt', 'git diff main...HEAD >> src/a.ts', 'git log>x', 'git show HEAD 2>err.txt', 'git diff --no-index /dev/stdin x < y', 'git diff HEAD --output=leak.txt'])
+      expect([command, bashDecision(command)]).toEqual([command, 'deny'])
+  })
+
+  it('denies a git command that names a path outside the worktree, so git never reads a file the external_directory rules refuse', () => {
+    for (const command of [
+      'git diff /home/u/.ssh/id_ed25519 /dev/null',
+      'git diff --no-index a b',
+      'git diff ~/.aws/credentials src/a.ts',
+      "git diff '/etc/passwd' src/a.ts",
+      'git diff "~/.aws/config" src/a.ts',
+      'git diff ../outside/secret.txt src/a.ts',
+      'git diff src/../../outside.txt src/a.ts',
+      'git diff -- .. src',
+      'git blame --contents=/etc/passwd src/a.ts',
+      'git diff $HOME/.aws/config src/a.ts',
+      'git diff `echo /etc/passwd` src/a.ts',
+      'git diff \\/etc/passwd src/a.ts',
+      'git diff {/etc/passwd,src/a.ts}',
+      'git diff .?/outside.txt src/a.ts',
+      'git diff .[.]/outside.txt src/a.ts',
+    ])
+      expect([command, bashDecision(command)]).toEqual([command, 'deny'])
   })
 
   it('allows reading in the given directories outside the worktree, after the deny-all', () => {
@@ -148,7 +220,7 @@ describe('the opencode review script', () => {
   for (const host of ['claude-code', 'opencode', 'omp'] as const) {
     it(`runs opencode run standalone with the generated agent, the prompt and the model on ${host}`, () => {
       const s = reviewPlan(rv({}, host), config, host, 'abc', stem, PROMPT, ['/repo/.granny/plans'])
-      const agent = `'${opencodeAgentConfig(['/repo/.granny/plans'])}'`
+      const agent = shellQuote(opencodeAgentConfig(['/repo/.granny/plans']))
       expect(s.script).toBe(
         `mkdir -p .granny && rm -f ${stem}.md ${stem}.log && { echo '[granny] reviewer: opencode kimi-code-plan-global/k3.1-pro (read-only agent)'; OPENCODE_DISABLE_PROJECT_CONFIG=1 OPENCODE_CONFIG_CONTENT=${agent} opencode run --standalone --archived --format json --agent granny-reviewer -m kimi-code-plan-global/k3.1-pro 'Review \`git diff abc...HEAD\`; it'\\''s $HOME' </dev/null; } > ${stem}.log 2>&1; code=$?; sed -E '/^\\{"type":"(text|error|step_start)"/!s/^(\\{"type":"[a-z_]+").*/\\1}/' ${stem}.log; exit $code`,
       )
@@ -171,7 +243,7 @@ describe('the opencode review script', () => {
   it('runs the plan review the same way, with the plan review prompt', () => {
     const s = planReviewScript(rv({}), config, 'claude-code', 'main', '.granny/review-plan-review-r1-kimi', 'Review the plan /plans/v1.md', ['/plans'])!
     expect(s).toBeDefined()
-    expect(s.body).toContain(`OPENCODE_DISABLE_PROJECT_CONFIG=1 OPENCODE_CONFIG_CONTENT='${opencodeAgentConfig(['/plans'])}' opencode run --standalone --archived --format json --agent granny-reviewer -m kimi-code-plan-global/k3.1-pro 'Review the plan /plans/v1.md' </dev/null; } > .granny/review-plan-review-r1-kimi.log 2>&1`)
+    expect(s.body).toContain(`OPENCODE_DISABLE_PROJECT_CONFIG=1 OPENCODE_CONFIG_CONTENT=${shellQuote(opencodeAgentConfig(['/plans']))} opencode run --standalone --archived --format json --agent granny-reviewer -m kimi-code-plan-global/k3.1-pro 'Review the plan /plans/v1.md' </dev/null; } > .granny/review-plan-review-r1-kimi.log 2>&1`)
     expect(s.body).not.toContain('codex')
   })
 
@@ -339,7 +411,7 @@ describe('an opencode reviewer in a run', () => {
     const f = fakeHost({ reviews: o.reviews, worktree: '/wt/feat-x' })
     await runGranny(f.host, input({ plan: ['/work/repo/.granny/plans/feat-x.md', '/wt/feat-x/docs/plan-2.md'], context: 'Work orders in /srv/orders/wo-1.md' }))
     const run = f.commands.find(c => c.includes('opencode run'))!
-    expect(run).toContain(`OPENCODE_CONFIG_CONTENT='${opencodeAgentConfig(['/work/repo/.granny/plans', '/srv/orders'])}' opencode run`)
+    expect(run).toContain(`OPENCODE_CONFIG_CONTENT=${shellQuote(opencodeAgentConfig(['/work/repo/.granny/plans', '/srv/orders']))} opencode run`)
     expect(f.cwds[f.commands.indexOf(run)]).toBe('/wt/feat-x')
   })
 
@@ -348,7 +420,7 @@ describe('an opencode reviewer in a run', () => {
     const f = fakeHost({ reviews: o.reviews, worktree: '/wt/feat-x' })
     await runGranny(f.host, input({ plan: '/srv/plans/v1.md', config: { reviewers: [KIMI], planReview: true } }))
     const plan = f.commands.find(c => c.includes('review-plan-review-r1-kimi.log'))!
-    expect(plan).toContain(`OPENCODE_CONFIG_CONTENT='${opencodeAgentConfig(['/srv/plans'])}' opencode run`)
+    expect(plan).toContain(`OPENCODE_CONFIG_CONTENT=${shellQuote(opencodeAgentConfig(['/srv/plans']))} opencode run`)
     expect(o.saves[0]).toContain('cat > .granny/review-plan-review-r1-kimi.md')
   })
 

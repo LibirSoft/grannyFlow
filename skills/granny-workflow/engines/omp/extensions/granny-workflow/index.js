@@ -1034,6 +1034,8 @@ First read ${branchLog(p)} and \`git log --oneline HEAD..${shellQuote(lane)}\`. 
 // src/core/opencode.ts
 var OPENCODE_AGENT = "granny-reviewer";
 var READ_ONLY_GIT = ["git diff*", "git log*", "git show*", "git status*", "git blame*", "git rev-parse*", "git merge-base*", "git ls-files*"];
+var REDIRECT = ["*>*", "*<*"];
+var OUTSIDE_PATH = ["*--no-index*", "* /*", "*'/*", '*"/*', "*=/*", "* ~*", "*'~*", '*"~*', "*=~*", "*../*", "* ..", "* .. *", "*'..*", '*"..*', "*$*", "*`*", "*{*", "*.?/*", "*.[*"];
 var ABSOLUTE_PATH = /(?<=^|[\s,;(\[{"'`])\/[^\s,;)\]}"'`]*/g;
 var isObject2 = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
 function errorText(error) {
@@ -1044,6 +1046,7 @@ function errorText(error) {
   return kind ? `${kind}: ${message}` : message;
 }
 function opencodeAnswer(jsonl) {
+  const all = [];
   let parts = [];
   let boundary = false;
   const errors = [];
@@ -1065,12 +1068,15 @@ function opencodeAnswer(jsonl) {
       if (boundary && event.part.text.trim())
         [parts, boundary] = [[], false];
       parts.push(event.part.text);
+      all.push(event.part.text);
     } else if (event.type === "tool_use" || event.type === "step_start")
       boundary = true;
     else if (event.type === "error")
       errors.push(errorText(event.error));
   }
-  const text = parts.join(`
+  const last = parts.join(`
+`).trim();
+  const text = parseCodexReview(last).markers || saysNoFindings(last) ? last : all.join(`
 `).trim();
   const error = [...new Set(errors)].join("; ");
   return { ...text ? { text } : {}, ...error ? { error } : {} };
@@ -1104,7 +1110,7 @@ function opencodeAgentConfig(dirs) {
     grep: "allow",
     glob: "allow",
     list: "allow",
-    bash: { "*": "deny", ...Object.fromEntries(READ_ONLY_GIT.map((p) => [p, "allow"])), "git * --output*": "deny" },
+    bash: { "*": "deny", ...Object.fromEntries(READ_ONLY_GIT.map((p) => [p, "allow"])), ...Object.fromEntries(["git * --output*", ...REDIRECT, ...OUTSIDE_PATH].map((p) => [p, "deny"])) },
     ...dirs.length ? { external_directory: Object.fromEntries(dirs.map((d) => [`${d}/*`, "allow"])) } : {}
   };
   return JSON.stringify({ agent: { [OPENCODE_AGENT]: { mode: "primary", permission } } });

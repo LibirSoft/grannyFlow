@@ -1,6 +1,12 @@
+import { parseCodexReview, saysNoFindings } from './review'
+
 export const OPENCODE_AGENT = 'granny-reviewer'
 
 const READ_ONLY_GIT = ['git diff*', 'git log*', 'git show*', 'git status*', 'git blame*', 'git rev-parse*', 'git merge-base*', 'git ls-files*']
+// opencode v2.2.6 matches each simple command's whole text, redirect words included, after turning `\` into `/`;
+// git reads any path outside the repo it is given (no-index mode), which external_directory does not cover.
+const REDIRECT = ['*>*', '*<*']
+const OUTSIDE_PATH = ['*--no-index*', '* /*', "*'/*", '*"/*', '*=/*', '* ~*', "*'~*", '*"~*', '*=~*', '*../*', '* ..', '* .. *', "*'..*", '*"..*', '*$*', '*`*', '*{*', '*.?/*', '*.[*']
 const ABSOLUTE_PATH = /(?<=^|[\s,;(\[{"'`])\/[^\s,;)\]}"'`]*/g
 
 const isObject = (v: unknown): v is Record<string, any> => typeof v === 'object' && v !== null && !Array.isArray(v)
@@ -17,8 +23,9 @@ function errorText(error: unknown): string {
   return kind ? `${kind}: ${message}` : message
 }
 
-/** The answer in `opencode run --format json` output: the text parts after the last tool call or step start, never a tool's output. */
+/** The answer in `opencode run --format json` output: the text parts after the last tool call or step start, or every text part when those hold no finding and are not the no-findings sentence; never a tool's output. */
 export function opencodeAnswer(jsonl: string): OpencodeAnswer {
+  const all: string[] = []
   let parts: string[] = []
   let boundary = false
   const errors: string[] = []
@@ -36,10 +43,12 @@ export function opencodeAnswer(jsonl: string): OpencodeAnswer {
     if (event.type === 'text' && isObject(event.part) && event.part.type === 'text' && typeof event.part.text === 'string') {
       if (boundary && event.part.text.trim()) [parts, boundary] = [[], false]
       parts.push(event.part.text)
+      all.push(event.part.text)
     } else if (event.type === 'tool_use' || event.type === 'step_start') boundary = true
     else if (event.type === 'error') errors.push(errorText(event.error))
   }
-  const text = parts.join('\n').trim()
+  const last = parts.join('\n').trim()
+  const text = parseCodexReview(last).markers || saysNoFindings(last) ? last : all.join('\n').trim()
   const error = [...new Set(errors)].join('; ')
   return { ...(text ? { text } : {}), ...(error ? { error } : {}) }
 }
@@ -76,7 +85,7 @@ export function opencodeAgentConfig(dirs: string[]): string {
     grep: 'allow',
     glob: 'allow',
     list: 'allow',
-    bash: { '*': 'deny', ...Object.fromEntries(READ_ONLY_GIT.map(p => [p, 'allow'])), 'git * --output*': 'deny' },
+    bash: { '*': 'deny', ...Object.fromEntries(READ_ONLY_GIT.map(p => [p, 'allow'])), ...Object.fromEntries(['git * --output*', ...REDIRECT, ...OUTSIDE_PATH].map(p => [p, 'deny'])) },
     ...(dirs.length ? { external_directory: Object.fromEntries(dirs.map(d => [`${d}/*`, 'allow'])) } : {}),
   }
   return JSON.stringify({ agent: { [OPENCODE_AGENT]: { mode: 'primary', permission } } })
