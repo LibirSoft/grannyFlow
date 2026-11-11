@@ -193,7 +193,7 @@ describe('reviewers', () => {
     ['a command on the Codex plugin', [{ engine: 'codex-plugin', command: 'r {base}' }], 'reviewers[0].command needs "engine": "command"'],
     ['a command on an agent reviewer', [{ engine: 'agent', command: 'r {prompt}' }], 'reviewers[0].command needs "engine": "command"'],
     ['adversarial-review on auto on opencode', [{ name: 'c' }, { mode: 'adversarial-review' }], 'reviewers[1].mode "adversarial-review" needs the Codex plugin, and on opencode engine "auto" means the Codex CLI - set reviewers[1].engine to "codex-plugin"', 'opencode'],
-    ['an entry without engine on omp', [{ engine: 'agent' }, { name: 'c' }], 'reviewers[1].engine "auto" (the engine of an entry that names none) runs Codex, which granny does not run on omp - use "engine": "agent"', 'omp'],
+    ['an entry without engine on omp', [{ engine: 'agent' }, { name: 'c' }], 'reviewers[1].engine "auto" (the engine of an entry that names none) runs Codex, which granny does not run on omp - use "engine": "agent" with an omp model, e.g. "model": { "omp": "openai-codex/gpt-6.1-sol" }, "engine": "opencode" for a model opencode reaches and omp does not, e.g. "model": "openai/gpt-6.1-sol", or "engine": "command"', 'omp'],
     ['engine auto on omp', [{ engine: 'auto', mode: 'adversarial-review' }], 'reviewers[0].engine "auto" runs Codex, which granny does not run on omp', 'omp'],
     ['the Codex CLI on omp', [{ engine: 'codex' }], 'reviewers[0].engine "codex" runs Codex, which granny does not run on omp', 'omp'],
     ['the Codex plugin on omp', [{ engine: 'codex-plugin' }], 'reviewers[0].engine "codex-plugin" runs Codex, which granny does not run on omp', 'omp'],

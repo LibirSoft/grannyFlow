@@ -206,7 +206,7 @@ function reviewers(list, errors, host) {
     if (engine === "opencode")
       errors.push(...opencodeModelErrors(at, entry.model, entry.effort, host));
     if (host === "omp" && CODEX_ENGINES.includes(engine)) {
-      errors.push(`${at}.engine "${engine}"${entry.engine === undefined ? " (the engine of an entry that names none)" : ""} runs Codex, which granny does not run on omp - use "engine": "agent" with an omp model, e.g. "model": { "omp": "openai-codex/gpt-6.1-sol" }, or "engine": "command"`);
+      errors.push(`${at}.engine "${engine}"${entry.engine === undefined ? " (the engine of an entry that names none)" : ""} runs Codex, which granny does not run on omp - use "engine": "agent" with an omp model, e.g. "model": { "omp": "openai-codex/gpt-6.1-sol" }, "engine": "opencode" for a model opencode reaches and omp does not, e.g. "model": "openai/gpt-6.1-sol", or "engine": "command"`);
     } else if (host === "opencode" && adversarial && engine === "auto") {
       errors.push(`${at}.mode "adversarial-review" needs the Codex plugin, and on opencode engine "auto" means the Codex CLI - set ${at}.engine to "codex-plugin"`);
     }

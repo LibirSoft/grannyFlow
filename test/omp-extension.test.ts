@@ -854,6 +854,7 @@ describe('omp extension in the user session (parent mode)', () => {
     for (const reviewer of [{ name: 'c' }, { engine: 'codex' }, { engine: 'codex-plugin', mode: 'adversarial-review' }]) {
       const refused = textOf(await exec(f.tools.get('granny_run'), { repo, branch: 'feat/x', stages: [{ task: 't' }], config: { reviewers: [reviewer] } }))
       expect(refused).toContain('runs Codex, which granny does not run on omp - use "engine": "agent" with an omp model')
+      expect(refused).toContain('"engine": "opencode" for a model opencode reaches and omp does not')
     }
     expect(existsSync(join(repo, '.granny/runs'))).toBe(false)
   })
