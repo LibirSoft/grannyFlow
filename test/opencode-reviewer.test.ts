@@ -371,64 +371,73 @@ describe('the opencode review script', () => {
     expect(opencodeAnswer(r.stdout)).toEqual({ text: 'No findings.' })
   })
 
-  const printed = (events: string[]) => {
+  const printed = (events: string[], flag = '') => {
     const dir = mkdtempSync(join(tmpdir(), 'granny-opencode-'))
     spawnSync('mkdir', ['-p', join(dir, 'bin')])
     writeFileSync(join(dir, 'events.jsonl'), `${events.join('\n')}\n`)
     writeFileSync(join(dir, 'bin/opencode'), `#!/usr/bin/env bash\ncat "${dir}/events.jsonl"\n`)
     chmodSync(join(dir, 'bin/opencode'), 0o755)
+    if (flag) {
+      writeFileSync(join(dir, 'bin/awk'), `#!/bin/sh\nexec gawk ${flag} "$@"\n`)
+      chmodSync(join(dir, 'bin/awk'), 0o755)
+    }
     const s = reviewPlan(rv({}), config, 'opencode', 'abc', stem, 'p')
     const r = spawnSync('bash', ['-c', s.script], { cwd: dir, encoding: 'utf8', env: { ...process.env, PATH: `${join(dir, 'bin')}:${process.env.PATH}` } })
     return { ...r, log: readFileSync(join(dir, `${stem}.log`), 'utf8') }
   }
 
-  it('prints the answer decoded, every tool output cut away, so a large one never reaches the reader, and keeps the full stream in the log', () => {
-    const big = `${DIFF_WITH_FINDING}${'+ a line of a large diff with "quotes" and \\ backslashes\n'.repeat(20000)}`
-    const reasoning = event('reasoning', { type: 'reasoning', text: 'x'.repeat(50000) })
-    const error = JSON.stringify({ type: 'error', error: { type: 'provider.quota', message: 'quota' } })
-    const events = [event('step_start', { type: 'step-start' }), text('Let me look.'), toolUse(big), event('step_finish', { type: 'step-finish', tokens: { input: 1 } }), event('step_start'), reasoning, text('- [P2] Off by one — src/a.ts:3'), error, event('step_finish')]
-    const r = printed(events)
-    expect(r.status).toBe(0)
-    expect(r.log.length).toBeGreaterThan(1_000_000)
-    expect(r.stdout.length).toBeLessThan(2000)
-    expect(r.stdout).not.toContain('Planted bug')
-    expect(r.stdout.split('\n').filter(Boolean)).toEqual([
-      '[granny] reviewer: opencode kimi-code-plan-global/k3.1-pro (read-only agent)',
-      '[granny] opencode: step',
-      '[granny] opencode: text 1',
-      'Let me look.',
-      '[granny] opencode: step',
-      '[granny] opencode: step',
-      '[granny] opencode: text 1',
-      '- [P2] Off by one — src/a.ts:3',
-      `[granny] opencode: error ${error}`,
-    ])
-    expect(opencodeAnswer(r.stdout)).toEqual({ text: '- [P2] Off by one — src/a.ts:3', error: 'provider.quota: quota' })
-  })
+  const gawk = (spawnSync('awk', ['--version'], { encoding: 'utf8' }).stdout ?? '').startsWith('GNU Awk')
+  for (const flag of ['', '--posix', '--traditional']) {
+    const under = flag ? ` (gawk ${flag}; skipped when awk is not gawk)` : ''
+    const test = flag && !gawk ? it.skip : it
+    test(`prints the answer decoded, every tool output cut away, so a large one never reaches the reader, and keeps the full stream in the log${under}`, () => {
+      const big = `${DIFF_WITH_FINDING}${'+ a line of a large diff with "quotes" and \\ backslashes\n'.repeat(20000)}`
+      const reasoning = event('reasoning', { type: 'reasoning', text: 'x'.repeat(50000) })
+      const error = JSON.stringify({ type: 'error', error: { type: 'provider.quota', message: 'quota' } })
+      const events = [event('step_start', { type: 'step-start' }), text('Let me look.'), toolUse(big), event('step_finish', { type: 'step-finish', tokens: { input: 1 } }), event('step_start'), reasoning, text('- [P2] Off by one — src/a.ts:3'), error, event('step_finish')]
+      const r = printed(events, flag)
+      expect(r.status).toBe(0)
+      expect(r.log.length).toBeGreaterThan(1_000_000)
+      expect(r.stdout.length).toBeLessThan(2000)
+      expect(r.stdout).not.toContain('Planted bug')
+      expect(r.stdout.split('\n').filter(Boolean)).toEqual([
+        '[granny] reviewer: opencode kimi-code-plan-global/k3.1-pro (read-only agent)',
+        '[granny] opencode: step',
+        '[granny] opencode: text 1',
+        'Let me look.',
+        '[granny] opencode: step',
+        '[granny] opencode: step',
+        '[granny] opencode: text 1',
+        '- [P2] Off by one — src/a.ts:3',
+        `[granny] opencode: error ${error}`,
+      ])
+      expect(opencodeAnswer(r.stdout)).toEqual({ text: '- [P2] Off by one — src/a.ts:3', error: 'provider.quota: quota' })
+    })
 
-  it('prints a text part as the plain text it holds, every JSON escape decoded, so a helper relays markdown and not an escaped JSON line', () => {
-    const answer = '- [P1] Quote "a" \\ back — src/a.ts:3-3\n  Tab\there, slash /, bell \u0007, é, — and 😀.\n\n- [P3] Typo — src/b.ts:1\n'
-    const escaped = JSON.stringify({ type: 'text', part: { id: 'p', type: 'text', text: answer, time: { start: 1 } } })
-      .replace('é', '\\u00e9')
-      .replace('😀', '\\ud83d\\ude00')
-      .replace('slash /', 'slash \\/')
-    expect(escaped).toContain('\\u00e9')
-    const r = printed([event('step_start'), escaped, text('')])
-    expect(r.status).toBe(0)
-    expect(r.stdout).not.toContain('{"type"')
-    expect(r.stdout).toContain(`[granny] opencode: text 3\n${answer}\n[granny] opencode: text 0\n\n`)
-    expect(opencodeAnswer(r.stdout)).toEqual({ text: answer.trim() })
-    expect(parseCodexReview(opencodeAnswer(r.stdout).text!).findings.map(f => [f.severity, f.file, f.line])).toEqual([
-      ['P1', 'src/a.ts', 3],
-      ['P3', 'src/b.ts', 1],
-    ])
-  })
+    test(`prints a text part as the plain text it holds, every JSON escape decoded, so a helper relays markdown and not an escaped JSON line${under}`, () => {
+      const answer = '- [P1] Quote "a" \\ back — src/a.ts:3-3\n  Tab\there, slash /, bell \u0007, é, — and 😀.\n\n- [P3] Typo — src/b.ts:1\n'
+      const escaped = JSON.stringify({ type: 'text', part: { id: 'p', type: 'text', text: answer, time: { start: 1 } } })
+        .replace('é', '\\u00e9')
+        .replace('😀', '\\ud83d\\ude00')
+        .replace('slash /', 'slash \\/')
+      expect(escaped).toContain('\\u00e9')
+      const r = printed([event('step_start'), escaped, text('')], flag)
+      expect(r.status).toBe(0)
+      expect(r.stdout).not.toContain('{"type"')
+      expect(r.stdout).toContain(`[granny] opencode: text 3\n${answer}\n[granny] opencode: text 0\n\n`)
+      expect(opencodeAnswer(r.stdout)).toEqual({ text: answer.trim() })
+      expect(parseCodexReview(opencodeAnswer(r.stdout).text!).findings.map(f => [f.severity, f.file, f.line])).toEqual([
+        ['P1', 'src/a.ts', 3],
+        ['P3', 'src/b.ts', 1],
+      ])
+    })
 
-  it('prints a frame for a text event it cannot decode, and nothing for a reasoning part or any other event', () => {
-    const r = printed(['{"type":"text","part":{"type":"text","text":"cut off', event('text', { type: 'reasoning', text: '- [P1] thinking — a.ts:1' }), event('step_finish'), text('No findings.')])
-    expect(r.stdout.split('\n').filter(Boolean).slice(1)).toEqual(['[granny] opencode: dropped', '[granny] opencode: text 1', 'No findings.'])
-    expect(opencodeAnswer(r.stdout)).toEqual({ text: 'No findings.', dropped: 1 })
-  })
+    test(`prints a frame for a text event it cannot decode, and nothing for a reasoning part or any other event${under}`, () => {
+      const r = printed(['{"type":"text","part":{"type":"text","text":"cut off', event('text', { type: 'reasoning', text: '- [P1] thinking — a.ts:1' }), event('step_finish'), text('No findings.')], flag)
+      expect(r.stdout.split('\n').filter(Boolean).slice(1)).toEqual(['[granny] opencode: dropped', '[granny] opencode: text 1', 'No findings.'])
+      expect(opencodeAnswer(r.stdout)).toEqual({ text: 'No findings.', dropped: 1 })
+    })
+  }
 
   it('finds the backend line wherever it sits among the JSON events', () => {
     const line = '[granny] reviewer: opencode zai/glm-5.3 (read-only agent)'

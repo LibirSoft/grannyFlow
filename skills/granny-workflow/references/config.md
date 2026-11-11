@@ -526,6 +526,8 @@ What comes back:
 - opencode can exit 0 on a model or provider error, so a stream with no answer is a reviewer that did not run (note `opencode returned no answer`), and so is one with an error event or an `Error:` line, even with exit 0 and text before it (note `opencode: <error>`). A text part that comes back short of its `<n>` lines, or that the script could not decode, is logged as possibly missing from the answer, with the `.log` to check. When `awk` itself fails or is not on `PATH`, the script prints `[granny] opencode: decoder failed (awk exit <code>) - the raw answer is in <log>` and the reviewer did not run, with that as the note; the script still exits with opencode's own code.
 - The log line every round: `<stage> r<n> <name>: reviewer: opencode <model[#variant]> (read-only agent)`.
 
+The decoder is a POSIX `awk` program (no `gensub`, array `length`, three-argument `match`, interval expressions or `\x` regex escapes). It is tested with gawk, plain and under `--posix` and `--traditional`; it has not been run on mawk, busybox awk or the BWK awk macOS ships. Its non-ASCII output relies on `printf "%c"` printing the byte of a code below 256 under `LC_ALL=C`, which an awk that encodes `%c` as UTF-8 regardless of locale would not do.
+
 opencode must be installed and logged in to the model's provider where the review runs: on Claude Code in the helper agent's shell, on opencode in the server's, on omp in your omp process's.
 
 ### Read-only roles
