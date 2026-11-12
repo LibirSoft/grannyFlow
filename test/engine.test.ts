@@ -1196,6 +1196,28 @@ describe('several reviewers', () => {
     expect(f.commands[0]).toContain(`glm-review '${prompt.replaceAll("'", `'\\''`)}' > .granny/review-core-r1-glm.log 2>&1;`)
   })
 
+  it('gives agent and command reviewers the same review method, with the review base in the moved-code step', () => {
+    const p = { repo: '/work/repo', branch: 'feat/x', base: 'main', config: resolveConfig([{ reviewers: [GLM] }]) }
+    for (const prompt of [agentReviewPrompt(p, 'core', 'deadbee1'), commandReviewPrompt(p, 'core', 'deadbee1')]) {
+      expect(prompt).toContain('1. What the change promises.')
+      expect(prompt).toContain('2. Promise against code.')
+      expect(prompt).toContain('3. Every changed file, top to bottom.')
+      expect(prompt).toContain('compare the old version (`git show deadbee1:<path>`) with the new one line by line')
+      expect(prompt).toContain('5. Beyond the diff.')
+      expect(prompt).toContain('A problem the change causes in a file it does not touch is a finding: cite that file and line.')
+      expect(prompt).toContain('6. The tests. For each new test ask whether it could fail if the code were wrong')
+      expect(prompt).toContain('7. Small things last')
+      expect(prompt).toContain('Do not report what you could not confirm.')
+      expect(prompt).toContain('Severity is what happens when the problem triggers; how rarely it triggers does not lower it.')
+      for (const tier of ['- P0: data loss or corruption', '- P1: something that worked before breaks', '- P2: wrong behaviour with an easy workaround', '- P3: naming, style, leftovers.']) expect(prompt).toContain(tier)
+      expect(prompt).not.toContain('Check the diff against the TASK')
+    }
+    for (const prompt of [agentReviewPrompt(p, 'core', 'deadbee1', CORE_TASK), commandReviewPrompt(p, 'core', 'deadbee1', CORE_TASK)]) {
+      expect(prompt.indexOf('2. Promise against code.')).toBeLessThan(prompt.indexOf('Check the diff against the TASK in the same way'))
+      expect(prompt.indexOf('Check the diff against the TASK in the same way')).toBeLessThan(prompt.indexOf('3. Every changed file, top to bottom.'))
+    }
+  })
+
   it('hands the stage task to an agent reviewer, a command reviewer and the judge', async () => {
     const task = 'Do WP-02: add the cache layer.\nLeave the eviction policy to stage 3.'
     const f = fakeHost({
