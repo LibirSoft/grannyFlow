@@ -509,6 +509,13 @@ describe('skill docs', () => {
     expect(read('SKILL.md')).toContain('when no final review follows')
   })
 
+  it('has the Cursor step flow read the status and log the red gates the way the engine does', () => {
+    const cursor = read('references/cursor.md')
+    expect(cursor).toContain('read `git status --porcelain` (the work dir and the plan files do not count; once more when it fails)')
+    expect(cursor).toContain('A step but the last that ends with red gates is logged (`<stage>: step <k>/<n> ended with RED gates`), and the next step still runs')
+    expect(cursor).toContain("the last step's red gates are logged as `<stage>: implementer ended with RED gates - review will see it`")
+  })
+
   it('points every repo reference at LibirSoft/grannyFlow', () => {
     expect(readRoot('README.md')).toContain('npx skills add LibirSoft/grannyFlow')
     const docs: Record<string, string> = {
