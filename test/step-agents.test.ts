@@ -187,6 +187,16 @@ describe('step agents', () => {
     expect(prompt).not.toContain('WP-01c')
   })
 
+  it('gives the commit agent after the last step the stage prompt, and keeps no commit on that step', async () => {
+    const f = fakeHost({ status: ['', '', ' M c.txt', ''] })
+    const r = await runGranny(f.host, run([{ name: 'core', task: 'WP-01', steps }], on))
+    const prompt = f.calls.find(c => c.label === 'commit core implement')!.prompt
+    expect(prompt).toContain('finishing stage "core" (implement)')
+    expect(prompt).toContain('Stage 1/1 "core" - its TASK:\nWP-01\n')
+    expect(prompt).not.toContain('after step')
+    expect(r.stages[0]!.steps!.at(-1)).not.toHaveProperty('commit')
+  })
+
   it('keeps the commit agent after a step in the result: on its step, and in the commits of the stage', async () => {
     const commit = { startSha: 'h1', headSha: 'h1b', gatesGreen: true, gates: 'g', commits: ['fix commit'], untested: '' }
     const f = fakeHost({ status: [' M a.txt', ''], override: req => (req.label === 'commit core step 1/3' ? commit : undefined) })
