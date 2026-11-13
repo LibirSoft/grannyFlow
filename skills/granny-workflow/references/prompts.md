@@ -216,7 +216,7 @@ How to build it:
 When the stage's code is committed, bring .granny/PR-BODY.md up to date in one edit (git-excluded; create its directory if missing), with sections: Title, Summary, Changes (table), Test plan (real numbers), Revised in stage N, Review fixes, Untested. Return startSha = HEAD before your first change.
 ```
 
-## Implementer - a step of a stage with steps, with stepAgents on and two or more steps (label `implement <stage> step <k>/<n>`; the first step gets the earlier-stages line of the stage, a later step the line on the earlier steps)
+## Implementer - a step of a stage with steps, with stepAgents on and two or more steps (label `implement <stage> step <k>/<n>`; every step gets the earlier-stages line of the stage, a step after the first also the line on the earlier steps; this entry is step 2)
 
 ```text
 Working repo: <repo>, branch `<branch>` (verify with `git branch --show-current`). Never touch `<base>`. NEVER push, force-push, rebase, `git remote add` or open a PR.

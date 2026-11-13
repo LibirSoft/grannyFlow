@@ -522,6 +522,12 @@ describe('skill docs', () => {
     expect(read('SKILL.md')).toContain(phrase)
   })
 
+  it('has the prompt reference say every step gets the earlier-stages line, and a step after the first also the earlier-steps line', () => {
+    const heading = read('references/prompts.md').split('\n').find(l => l.startsWith('## Implementer - a step of a stage with steps'))!
+    expect(heading).toContain('every step gets the earlier-stages line of the stage, a step after the first also the line on the earlier steps')
+    expect(heading).not.toContain('the first step gets')
+  })
+
   it('points every repo reference at LibirSoft/grannyFlow', () => {
     expect(readRoot('README.md')).toContain('npx skills add LibirSoft/grannyFlow')
     const docs: Record<string, string> = {

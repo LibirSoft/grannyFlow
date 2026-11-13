@@ -142,7 +142,7 @@ export function renderPrompts(): string {
     ['Implementer - stage', implementPrompt(p, { task: '<stage task>' }, 1, 2, '<stage name>')],
     ['Implementer - stage with steps, with stepAgents off or one step (the stage task, then its steps as one numbered list)', implementPrompt(p, stepped, 1, 2, '<stage name>')],
     [
-      'Implementer - a step of a stage with steps, with stepAgents on and two or more steps (label `implement <stage> step <k>/<n>`; the first step gets the earlier-stages line of the stage, a later step the line on the earlier steps)',
+      'Implementer - a step of a stage with steps, with stepAgents on and two or more steps (label `implement <stage> step <k>/<n>`; every step gets the earlier-stages line of the stage, a step after the first also the line on the earlier steps; this entry is step 2)',
       implementStepPrompt(p, stepped, 1, 2, '<stage name>', 1),
     ],
     ['Implementer - fix', fixPrompt(p, '<stage name>', 1, []).replace(/\[\]$/, '<accepted findings as JSON>')],
