@@ -50,6 +50,29 @@ describe('dropPlaceholders', () => {
     expect(dropPlaceholders({ repo: '/r', branch: 'b', stages: [{ task: 't' }], fromStage: 0 } as RunInput)).not.toHaveProperty('fromStage')
     expect(dropPlaceholders(undefined as unknown as RunInput)).toBeUndefined()
   })
+
+  it('drops an empty steps list and an empty step name, and keeps the step tasks', () => {
+    const clean = dropPlaceholders({ repo: '/r', branch: 'b', stages: [{ task: 't', steps: [] }, { task: 't', steps: [{ name: '', task: 'first' }, { name: 'second', task: 'second task' }] }] } as unknown as RunInput)
+    expect(clean.stages![0]).not.toHaveProperty('steps')
+    expect(clean.stages![1]!.steps).toEqual([{ task: 'first' }, { name: 'second', task: 'second task' }])
+    expect(clean.stages![1]!.steps![0]).not.toHaveProperty('name')
+  })
+
+  it('lets a placeholder-filled stage with steps through checkInput', () => {
+    const withSteps = { repo: '/r', branch: 'b', goal: '', stages: [{ name: 'a', task: 'A.', steps: [{ name: '', task: 'first' }, { name: '', task: 'second' }] }, { name: 'b', task: 'B.', implement: false, steps: [] }] } as unknown as RunInput
+    expect(checkInput(withSteps).length).toBeGreaterThan(0)
+    expect(checkInput(dropPlaceholders(withSteps))).toEqual([])
+  })
+})
+
+describe('the steps of a stage in the tool schema', () => {
+  it('describes steps as optional, with a task for each, and names the stepAgents setting', () => {
+    const steps = (RUN_INPUT_SCHEMA.properties as any).stages.items.properties.steps
+    expect(steps.type).toBe('array')
+    expect(steps.items.required).toEqual(['task'])
+    expect(Object.keys(steps.items.properties).sort()).toEqual(['name', 'task'])
+    expect(steps.description).toContain('stepAgents')
+  })
 })
 
 describe('the plan review warning', () => {
