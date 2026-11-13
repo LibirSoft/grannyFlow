@@ -463,6 +463,20 @@ describe('skill docs', () => {
     expect(changelog).not.toMatch(/used to|previously|no longer|migrat|upgrad|replaces/i)
   })
 
+  it('documents step agents in the config reference, SKILL.md, the host references and the README', () => {
+    const config = read('references/config.md')
+    expect(config).toContain('## Step agents')
+    expect(config).toMatch(/^\| `stepAgents` \| `false` \|.*\[Step agents\]\(#step-agents\)/m)
+    for (const label of ['implement <stage> step <k>/<n>', 'commit <stage> step <k>/<n>', 'status <stage> step <k>/<n>']) expect({ label, has: config.includes(label) }).toEqual({ label, has: true })
+    const md = read('SKILL.md')
+    expect(md.split('\n').find(l => l.startsWith('| `stages` |'))).toContain('steps?')
+    expect(md).toContain("only when the user's config has it or the user asks")
+    expect(md).toContain('one agent per step')
+    for (const host of ['claude-code', 'opencode', 'omp']) expect({ host, has: read(`references/${host}.md`).includes('implement <stage> step <k>/<n>') }).toEqual({ host, has: true })
+    expect(read('references/cursor.md')).toContain('one fresh agent per step')
+    expect(readRoot('README.md')).toMatch(/^\| `stepAgents` \| `false` \|/m)
+  })
+
   it('points every repo reference at LibirSoft/grannyFlow', () => {
     expect(readRoot('README.md')).toContain('npx skills add LibirSoft/grannyFlow')
     const docs: Record<string, string> = {

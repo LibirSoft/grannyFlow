@@ -38,7 +38,7 @@ Layers, later wins:
 | `language` | `"English"` | language of code, comments, commits and the PR body; the planner writes the plan and the `agent` reviewers their findings in it |
 | `aiAttribution` | `false` | `false` forbids Co-Authored-By / "Generated with" lines and the final check greps for them |
 | `readOnlyAgent` | `false` | Claude Code only: `true` runs `agent` reviewers, the judge and the extraction agent as the `granny-readonly` agent type (Read, Grep, Glob and Bash; no Edit or Write) with a PreToolUse hook that lets their Bash run only read-only git and shell commands - see [Read-only roles](#read-only-roles). Install the agent and the hook first; without the agent the run stops at the first reviewer with `agent type 'granny-readonly' not found`. opencode enforces read-only with permissions and ignores it |
-| `stepAgents` | `false` | `true`: a stage with two or more steps (its `steps` in the run's `stages`) is built by one implementer agent per step, one after the other on the same branch. Each step but the last is committed before the next one starts: the engine asks for the commit when work is left, and work it cannot commit is noted on the stage. A planner in a run with `goal` proposes the steps. `false`, or a stage with fewer than two steps: one implementer builds the whole stage, and its prompt lists its steps in order. Reviews, the judge and the checks stay per stage either way |
+| `stepAgents` | `false` | `true`: a stage with two or more steps (its `steps` in the run's `stages`) is built by one implementer agent per step, one after the other on the same branch. Each step but the last is committed before the next one starts: the engine asks for the commit when work is left, and work it cannot commit is noted on the stage. A planner in a run with `goal` proposes the steps. `false`, or a stage with fewer than two steps: one implementer builds the whole stage, and its prompt lists its steps in order. Reviews, the judge and the checks stay per stage either way - see [Step agents](#step-agents) |
 | `watch` | `"full"` | omp and opencode: how much of a running run you can watch - `"full"` everything: on omp the live panel, an event log per role and the run navigator, on opencode the sidebar section, the prompt-footer chip, toasts and the `/granny` navigator; `"panel"` the omp panel, or the opencode sidebar section and chip, only; `"off"` none of them. The run itself is the same in every mode - see [Watching a run](#watching-a-run). Claude Code accepts it and ignores it |
 | `rules` | red-green tests; code comments default none | extra house rules appended to every agent prompt that carries the run's header (the implementer's, the planner's and an `agent` reviewer's); `[]` removes them |
 | `$schema` | | accepted and ignored, so an editor can point a config file at a JSON schema of your own; granny ships none |
@@ -128,6 +128,48 @@ A run can span several repos and run stages side by side. On by default (`"paral
 **Several repos.** Each repo the stages use gets its own worktree on the run's branch, set up like the primary's ([Worktree](#worktree)); with a `worktreeDir`, other repos' worktrees are `<worktreeDir>/<repo name>-<branch-slug>` so they do not collide. Every agent prompt names the other repos' worktrees; the prompts of the agents that write forbid touching them. After the last stage, the final check runs in every repo (labels `pr-ready check` and `pr-ready check <repo name>`), and the result's `repos` lists `{ repo, base, worktree, finalReview?, checks?, recheck?, final }` for each; `worktree`, `finalReview` and `final` stay the primary's. Each stage in another repo carries `repo` in the result. Only the primary's `granny.config.json` is read: a `gates` list applies to every repo, so keep `"auto"` when the repos differ.
 
 **The same repo.** A stage whose repo is busy with another stage runs in its own worktree on the branch `<branch>--s<N>-<stage-slug>`, branched from the commit the stage busy in the run's worktree started on - not from that stage's unfinished commits, such as a failing test it commits before the fix, which would turn the lane's checks red on code it did not write (logged `<stage>: <branch> is busy in <repo> - running in parallel on <lane branch>` and `<stage>: branching <lane branch> from <sha>, where the stage still running on <branch> started, not from its unfinished commits`). When the worktree is busy with a merge or a review-only stage instead, the lane branches from the run's branch as it is then. It is implemented and reviewed there, and writes its PR-body notes to `<workDir>/PR-BODY-s<N>-<stage-slug>.md` in the run's worktree; the final check folds them into the PR body. Once its review loop ends, granny waits until no stage is working in the run's worktree, then runs `git merge --no-edit <lane branch>` there. When the merge fails, the implementer resolves the conflict (label `resolve merge <stage>`) and concludes the merge; a merge it leaves unfinished fails the run. Then granny checks that the merge really landed: `git merge-base --is-ancestor <lane branch> HEAD` in the run's worktree (label `verify merge <stage>`). A lane that is not in HEAD - a merge that failed without a conflict, such as uncommitted changes in the run's worktree that the merge would overwrite, or a merge result the Claude Code helper misreported - fails the run with `merge <stage>: <lane branch> is not merged into <branch> (git merge-base --is-ancestor exit <code>) - its worktree <path> and branch <lane branch> are left in place; merge it in <run worktree>, then resume with fromStage`, followed by the merge's output when it failed; nothing is cleaned up, so the lane's commits stay on its branch and in its worktree. A merged lane is cleaned up in one chain that starts with the same ancestry check, then requires a lane with no uncommitted change, removes the lane worktree and deletes its branch (`git branch -d`). The stage's `note` records `ran in parallel on <lane branch>, merged` (`..., merged after the implementer resolved conflicts` after a conflict). When a step of the cleanup fails, the note adds what it left: `; its worktree <path> and branch <lane branch> were left in place (<why>)` - `uncommitted changes in the worktree`, `git worktree remove failed` or `the cleanup could not confirm the merge` - or `; its worktree <path> was removed, but its branch <lane branch> was left in place`, and the log says `merge <stage>: left ... in place - remove it yourself once you have checked it`. Only stages with no shared files belong in parallel; the planner marks them with `after`.
+
+## Step agents
+
+A stage is one stop-and-review point: its implementer builds it, then the review loop, the judge and the checks run on the whole stage diff. A step is one commit point inside a stage: a change that builds, passes the gates and is committed on its own. A stage lists its steps in order:
+
+```text
+{
+  "name": "payments",
+  "task": "WP-01 to WP-04 of the plan",
+  "steps": [
+    { "name": "schema", "task": "WP-01. Read first: src/db.ts. Changes: src/db.ts, test/db.test.ts. Done when: ..." },
+    { "name": "refund route", "task": "WP-02 ..." }
+  ]
+}
+```
+
+`steps` is an optional list of `{ name?, task }` on an implementing stage, in the run's `stages`. Each `task` is required and is the work of that step. `name` is optional and is used in the result and the notes; a step without one is called `step <k>`. The stage's own `task` stays required: it is still what the reviewers and the judge check the diff against, so `steps` break it down rather than replace it. A stage with `steps` and `implement: false` is refused, and so is a step without a `task`; the error names the place, for example `stages[0].steps[1].task is required`. With `goal`, the planner proposes the steps when `stepAgents` is on.
+
+`stepAgents` (default `false`) decides how the implementer is run:
+
+| `stepAgents` | the stage's `steps` | implementer |
+|---|---|---|
+| `false` | none | one agent, with the prompt of a stage without steps |
+| `false` | one or more | one agent, labelled `implement <stage>`; its prompt lists the steps in order |
+| `true` | none or one | as with `false` |
+| `true` | two or more | one agent per step, in order, on the same branch |
+
+With `stepAgents` on and two or more steps, each step but the last is committed before the next one starts. After a step, granny reads the working tree; when work is left, a commit agent commits it. Work that cannot be committed is noted on the stage, and the next step starts on it anyway. A step that ends with red gates is logged, and the next step still runs. After the last step the stage goes on as a stage with one agent: the checks, the review loop and the judge run once, on the whole diff, and the stage reports the gates of its last step, or of the commit agent after it. Reviews, the judge and the checks stay per stage however many steps there are.
+
+Each step agent gets the plan, the branch, its own step's task and the names of the stage's steps in order, with its own marked. It does not get the other steps' task texts, and it does not see the conversation of any other agent. From the second step on, it reads the branch's log, the code and the PR body to see what the earlier steps built.
+
+**Why.** Some models charge more per token once the prompt is above a size: Haiku 5.5 does above 100K tokens. One long implementer conversation that builds a whole stage grows past that size, and most of its price comes from the requests above it. A fresh agent per step starts small again. Whether this lowers what a stage costs, and what it does to the result, is not measured yet, which is why `stepAgents` is off by default.
+
+**What it costs.** Every step agent reads the code again, so a stage with steps reads more than a stage built by one agent does. The steps do not share a conversation: a step's agent knows its own task and what the branch and the PR body say, not how the earlier agents reasoned.
+
+**Labels.** In the run view and the journal:
+
+- `implement <stage> step <k>/<n>`: the step's implementer agent. The run view lists it in the stage's group as `implement step <k>/<n>`.
+- `commit <stage> step <k>/<n>`: the commit agent after a step that left work. The run view lists it as `commit`.
+- `status <stage> step <k>/<n>` and `status <stage> step <k>/<n> after commit`: the working tree reads before and after that commit.
+
+**Resume.** A resume with `fromStage` runs every step of that stage again. The step prompt tells an agent whose step is already committed on the branch to change nothing and to say so in its `deviations`. That is prompt text only: the engine does not check it.
 
 ## Final review
 
