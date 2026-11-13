@@ -118,4 +118,20 @@ describe('step agents', () => {
     expect(r.stages[0]!.steps!.map(s => s.name)).toEqual(['schema', 'route', 'docs'])
     expect(r.stages[0]!.note).toContain('uncommitted changes after step 1/3: M b.txt - step 2/3 started on them')
   })
+
+  it('runs the next step when the status cannot be read after a step, and says so in the stage note', async () => {
+    const failed = { code: 128, output: 'fatal: index file corrupt\n' }
+    const f = fakeHost({ status: [failed, failed, ''] })
+    const r = await runGranny(f.host, run([{ name: 'core', task: 'WP-01', steps }], on))
+    expect(implementations(f)).toEqual(['implement core step 1/3', 'implement core step 2/3', 'implement core step 3/3'])
+    expect(r.stages[0]!.note).toContain('working tree status unreadable after step 1/3 (exit 128: fatal: index file corrupt)')
+  })
+
+  it('logs a step that ends with red gates, and still runs the next step', async () => {
+    const red = { startSha: 'deadbee1', headSha: 'head1', gatesGreen: false, gates: 'lint RED', commits: ['c1'], untested: '' }
+    const f = fakeHost({ override: req => (req.label === 'implement core step 1/3' ? red : undefined) })
+    await runGranny(f.host, run([{ name: 'core', task: 'WP-01', steps }], on))
+    expect(f.logs).toContain('core: step 1/3 ended with RED gates')
+    expect(implementations(f)).toEqual(['implement core step 1/3', 'implement core step 2/3', 'implement core step 3/3'])
+  })
 })
