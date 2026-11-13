@@ -34,21 +34,38 @@ describe('runGranny', () => {
     expect(r.final?.gatesGreen).toBe(true)
   })
 
-  it('sends P0/P1 unjudged and others above the threshold, keeps the rest as residual', async () => {
+  it('sends P0/P1 unjudged and others above the threshold, lets the ones just under it ride along, keeps the rest as residual', async () => {
     const f = fakeHost({
-      reviews: [review(finding('P1', 'Blocker bug'), finding('P2', 'Borderline'), finding('P2', 'Real issue')), 'No findings.'],
-      scores: [{ 'codex-F2': 70, 'codex-F3': 75 }],
+      reviews: [review(finding('P1', 'Blocker bug'), finding('P2', 'Borderline'), finding('P2', 'Real issue'), finding('P3', 'Small thing')), 'No findings.'],
+      scores: [{ 'codex-F2': 70, 'codex-F3': 75, 'codex-F4': 50 }],
     })
     const r = await runGranny(f.host, input())
     expect(r.stages[0]).toMatchObject({ outcome: 'clean', rounds: 2 })
     const fix = f.calls.find(c => c.label === 'fix core r1')!
     expect(fix.prompt).toContain('Blocker bug')
     expect(fix.prompt).toContain('Real issue')
-    expect(fix.prompt).not.toContain('Borderline')
-    expect(f.logs.some(l => l.includes('not sent: codex-F2 (rule 8: under the bar: moderate/edge/trivial -> 70)'))).toBe(true)
-    expect(r.stages[0]!.history[0]!.findings.map(x => x.priority)).toEqual([undefined, 70, 75])
+    expect(fix.prompt).toContain('Borderline')
+    expect(fix.prompt).not.toContain('Small thing')
+    expect(f.logs.some(l => l.includes("codex-F2 (rule 9: rides along with this round's fixes: priority 70 >= rideAlong 55 (moderate/edge/trivial))"))).toBe(true)
+    expect(f.logs.some(l => l.includes('not sent: codex-F4 (rule 8: under the bar: minor/common/trivial -> 50)'))).toBe(true)
+    expect(r.stages[0]!.history[0]!.findings.map(x => x.priority)).toEqual([undefined, 70, 75, 50])
     expect(r.stages[0]!.residual).toHaveLength(1)
-    expect(r.stages[0]!.residual[0]).toMatchObject({ id: 'codex-F2', title: 'Borderline', priority: 70 })
+    expect(r.stages[0]!.residual[0]).toMatchObject({ id: 'codex-F4', title: 'Small thing', priority: 50 })
+  })
+
+  it('starts no fix round for findings that only ride along, and keeps them residual with rideAlong off', async () => {
+    const alone = fakeHost({ reviews: [review(finding('P2', 'Borderline'))], scores: [{ 'codex-F1': 70 }] })
+    const a = await runGranny(alone.host, input())
+    expect(a.stages[0]).toMatchObject({ outcome: 'residual-only', rounds: 1 })
+    expect(alone.calls.some(c => c.label === 'fix core r1')).toBe(false)
+    expect(a.stages[0]!.residual[0]).toMatchObject({ id: 'codex-F1', decision: { rule: 8, action: 'residual' } })
+
+    const off = fakeHost({ reviews: [review(finding('P2', 'Borderline'), finding('P2', 'Real issue')), 'No findings.'], scores: [{ 'codex-F1': 70, 'codex-F2': 75 }] })
+    const o = await runGranny(off.host, input({ config: [{ rideAlong: false }] }))
+    const fix = off.calls.find(c => c.label === 'fix core r1')!
+    expect(fix.prompt).toContain('Real issue')
+    expect(fix.prompt).not.toContain('Borderline')
+    expect(o.stages[0]!.residual[0]).toMatchObject({ id: 'codex-F1', decision: { rule: 8 } })
   })
 
   it('keeps an earlier round\'s residual when a later round repeats it, once and in its latest version', async () => {
@@ -2209,8 +2226,12 @@ describe('the judge rubric', () => {
     const f = fakeHost({ reviews: [review(finding('P2', 'Meh')), 'No findings.'], scores: [{ 'codex-F1': 90 }] })
     await runGranny(f.host, input())
     const judge = f.calls.find(c => c.role === 'judge')!
-    expect(judge.prompt).toContain('Judge impact assuming the trigger happens. Likelihood never lowers impact; it is its own field.')
-    expect(judge.prompt).toContain('- critical: data loss or corruption, writing to the wrong record')
+    expect(judge.prompt).toContain('Judge impact assuming the trigger happens. Likelihood never lowers impact; it is its own field: a narrow window, a forced input or "the caller can retry" count there, not here.')
+    expect(judge.prompt).toContain('Take the first class that fits, from the top:')
+    expect(judge.prompt).toContain('- critical: data or money lost, corrupted or given to the wrong party; writing to the wrong record')
+    expect(judge.prompt).toContain('a record others rely on (audit trail, ledger, export, log, notification) that is missing, duplicated or false')
+    expect(judge.prompt).toContain("a required part of the stage's TASK is missing.")
+    expect(judge.prompt).toContain('Upkeep has no trigger: use edge.')
     expect(judge.prompt).toContain('evidence: path:line plus the concrete trigger steps')
     expect(judge.schema.properties.perFinding).toMatchObject({
       items: { required: ['id', 'verdict', 'impact', 'likelihood', 'fixCost', 'scope', 'evidence', 'reason'] },

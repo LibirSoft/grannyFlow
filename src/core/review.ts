@@ -148,6 +148,7 @@ export function mergeDuplicates(findings: Finding[], duplicateOf: Map<string, st
 export interface Policy {
   threshold: number
   alwaysFix: Impact[]
+  rideAlong?: number | false
 }
 
 const PRIORITY: Record<Impact, Record<Likelihood, number>> = {
@@ -267,6 +268,21 @@ export function decide(
   if (policy.alwaysFix.includes(impact)) return done(6, 'fix', `impact ${impact} is in alwaysFix (${classes} -> ${p})${c.note}`)
   if (p > policy.threshold) return done(7, 'fix', `priority ${p} > threshold ${policy.threshold} (${classes})${c.note}`)
   return done(8, 'residual', `under the bar: ${classes} -> ${p}${c.note}`)
+}
+
+/**
+ * A fix round is paid for once one finding goes to the implementer, so the findings rule 8 kept just under the bar
+ * (priority >= policy.rideAlong) go along with it (rule 9). Alone they never start a round. `except` names the
+ * findings that stay residual, such as a repeat of one the fixer declined.
+ */
+export function rideAlong(findings: Finding[], policy: Policy, except: (f: Finding) => boolean = () => false): Finding[] {
+  const bar = policy.rideAlong
+  if (typeof bar !== 'number' || !findings.some(fixes)) return findings
+  return findings.map(f => {
+    if (f.decision?.rule !== 8 || f.priority === undefined || f.priority < bar || except(f)) return f
+    const why = `rides along with this round's fixes: priority ${f.priority} >= rideAlong ${bar} (${f.impact}/${f.likelihood}/${f.fixCost})`
+    return { ...f, decision: { ...f.decision, rule: 9, action: 'fix' as const, why } }
+  })
 }
 
 /** Splits decided findings; one without a decision is fixed. */

@@ -139,7 +139,7 @@ A script posts it, not an agent, and a rerun posts only what is missing. It post
 - **Implementer** - builds one stage, commits, and later fixes the findings sent back to it.
 - **Checks** (optional) - commands granny runs itself; a red one goes back to the implementer before any review.
 - **Reviewers** - all of them review every stage at the same time.
-- **Judge** - P0/P1 findings skip it and go straight back. For the rest it rates impact, likelihood and fix cost; code turns that into a priority. Critical and major issues are always fixed, the others when their priority is above the threshold. What is not fixed is listed for you, with the reason.
+- **Judge** - P0/P1 findings skip it and go straight back. For the rest it rates impact, likelihood and fix cost; code turns that into a priority. Critical and major issues are always fixed, the others when their priority is above the threshold; the ones just under it go along when the round has a fix anyway. What is not fixed is listed for you, with the reason.
 - **Final review** - after the last stage, the whole branch is reviewed once more for problems between stages.
 - **Parallel stages** - stages that do not depend on each other, also in other repos, run at the same time.
 
@@ -168,6 +168,7 @@ The full rules: [the decision table](skills/granny-workflow/references/config.md
 |---|---|---|
 | `threshold` | `70` | findings with a priority above it are fixed |
 | `alwaysFix` | `["critical", "major"]` | impact classes that are always fixed |
+| `rideAlong` | `55` | findings at or above it go along with a round that already has a fix |
 | `maxRounds` | `4` | review rounds per stage |
 | `reviewers` | the host model | any mix of host models, Codex, opencode models and other CLIs |
 | `checks` | none | commands granny runs before every review |

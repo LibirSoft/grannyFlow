@@ -43,7 +43,7 @@ import {
 } from './prompts'
 import { opencodeAnswer, readGrant } from './opencode'
 import { bucketOf, countsOf, isDemoted, isJudged, renderReport, severityOf, utf8Length, type ReportMeta } from './report'
-import { decide, declinedOf, isBlocker, mergeDuplicates, parseCodexReview, reviewFailure, saysNoFindings, triage, type Policy } from './review'
+import { decide, declinedOf, isBlocker, mergeDuplicates, parseCodexReview, reviewFailure, rideAlong, saysNoFindings, triage, type Policy } from './review'
 import { detachedReview, MAX_WAITS, planReviewScript, reportedBackend, reviewerModel, reviewPlan, reviewStem, WAIT_SECONDS } from './reviewer'
 import { SCHEMAS } from './schemas'
 import { heredocWriteScript, shellQuote } from './shell'
@@ -890,7 +890,7 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
         host.log(`${name} r${round}: ${blockers.length} P0/P1 finding(s) go to the implementer without the judge: ${blockers.map(f => f.id).join(', ')}`)
       }
       const declinedBefore = (f: Finding) => f.repeatOf !== undefined && declined.has(f.repeatOf)
-      const policy = { threshold: config.threshold, alwaysFix: config.alwaysFix }
+      const policy = { threshold: config.threshold, alwaysFix: config.alwaysFix, rideAlong: config.rideAlong }
       let findings = found.map(f => decide(f, undefined, policy, declinedBefore))
       unmerged = findings
       if (judged.length) {
@@ -922,7 +922,7 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
         const merge = mergeDuplicates(withScores, duplicateOf)
         for (const m of merge.merged) host.log(`${name} r${round}: judge merged ${m.id} into ${m.into} (duplicate)`)
         unmerged = withScores
-        findings = merge.findings
+        findings = rideAlong(merge.findings, policy, declinedBefore)
       }
       history.push({ round, findings })
       host.log(`${name} r${round}: ${findings.length} finding(s)`)

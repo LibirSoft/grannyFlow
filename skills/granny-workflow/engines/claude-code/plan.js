@@ -35,6 +35,7 @@ var DEFAULT_CONFIG = {
   reviewers: [{ name: "reviewer", engine: "agent" }],
   threshold: 70,
   alwaysFix: ["critical", "major"],
+  rideAlong: 55,
   maxRounds: 4,
   base: "main",
   gates: "auto",
@@ -262,6 +263,9 @@ function validate(c, effortLayer) {
   }
   if (!Array.isArray(c.alwaysFix) || !c.alwaysFix.every((i) => IMPACTS.includes(i))) {
     errors.push(`alwaysFix must be an array of impact classes (${IMPACTS.join(", ")})`);
+  }
+  if (c.rideAlong !== false && (typeof c.rideAlong !== "number" || !(c.rideAlong >= 0 && c.rideAlong <= 100))) {
+    errors.push("rideAlong must be false or a number between 0 and 100");
   }
   if (!Number.isInteger(c.maxRounds) || c.maxRounds < 1)
     errors.push("maxRounds must be an integer >= 1");
@@ -638,6 +642,17 @@ function decide(f, entry, policy, repeatsDeclined = () => false, earlierOf = () 
     return done(7, "fix", `priority ${p} > threshold ${policy.threshold} (${classes})${c.note}`);
   return done(8, "residual", `under the bar: ${classes} -> ${p}${c.note}`);
 }
+function rideAlong(findings, policy, except = () => false) {
+  const bar = policy.rideAlong;
+  if (typeof bar !== "number" || !findings.some(fixes))
+    return findings;
+  return findings.map((f) => {
+    if (f.decision?.rule !== 8 || f.priority === undefined || f.priority < bar || except(f))
+      return f;
+    const why = `rides along with this round's fixes: priority ${f.priority} >= rideAlong ${bar} (${f.impact}/${f.likelihood}/${f.fixCost})`;
+    return { ...f, decision: { ...f.decision, rule: 9, action: "fix", why } };
+  });
+}
 function triage(findings) {
   return { accepted: findings.filter(fixes), residual: findings.filter((f) => !fixes(f)) };
 }
@@ -673,15 +688,21 @@ var judgeRouting = (findings) => findings.some(isBlocker) ? "P0/P1 findings are 
 var rubric = (task) => `Classify every finding with exactly these fields:
 - verdict: confirmed (the code shows the problem) | refuted (the code shows it is absent or not a problem) | unverified (you cannot tell either way).
 - impact, how bad IF it triggers: critical | major | moderate | minor | none.
-  Judge impact assuming the trigger happens. Likelihood never lowers impact; it is its own field.
-  - critical: data loss or corruption, writing to the wrong record, security or authorization bypass, secret or personal data leak, a draft going public, an irreversible operation, stored data silently read differently.
-  - major: the user cannot get out from inside the app (a lock only a reload clears, endless loading, a crash); something that worked silently breaks; an API or contract break; a required part of ${task} is missing.
-  - moderate: wrong behaviour with an easy workaround; wrong or missing error message; missing test for changed behaviour; duplicated logic.
-  - minor: visual defect, naming, style.
+  Judge impact assuming the trigger happens. Likelihood never lowers impact; it is its own field: a narrow window, a forced input or "the caller can retry" count there, not here.
+  Take the first class that fits, from the top:
+  - critical: data or money lost, corrupted or given to the wrong party; writing to the wrong record; security or authorization bypass; secret or personal data leak; a draft going public; an irreversible operation; stored data silently read differently.
+  - major, any of:
+    - something stays wrong after the trigger until someone repairs it by hand: a record others rely on (audit trail, ledger, export, log, notification) that is missing, duplicated or false; work the system accepted or owes that is stuck, dropped or refused for good; two stores that disagree.
+    - a well-formed request or a job fails where it should succeed: a crash, a 5xx, a hang, a lock only a reload clears, endless loading; or input anyone can send takes the service down or exhausts it.
+    - a call reports success without having done what was asked.
+    - something that worked before the change silently breaks; an API or contract break; an existing test edited or removed so that the change passes.
+    - a required part of ${task} is missing.
+  - moderate: one call gives a wrong result and nothing stays wrong: a wrong status code, error message or figure that a retry or the next read gets right; odd or malformed input refused more strictly than documented. Also upkeep, which breaks nothing today and lets a defect through later: a missing or hollow test for changed behaviour, duplicated logic, user docs that describe behaviour the code does not have, a problem that needs a future code change to appear.
+  - minor: no effect on behaviour: visual defect, naming, style, wording, a wrong comment, where a file or test lives, dead code.
   - none: not a problem.
-- likelihood: common (the normal flow) | edge (special timing or state: a race, an expired session, a boundary value) | rare (forced input, a rarely used feature).
+- likelihood: common (the normal flow) | edge (special timing or state: a race, a retry, an expired session, a boundary value, a dependency that fails) | rare (forced or malformed input, a rarely used feature). Upkeep has no trigger: use edge.
 - fixCost: trivial (a few lines) | small (one function or file plus a test) | large (cross-module, a redesign).
-- scope: in-scope | pre-existing (there before this change) | other-stage (another stage's job).
+- scope: in-scope | pre-existing (there before this change, and the change neither causes it nor opens a new way to reach it) | other-stage (another stage's job).
 - evidence: path:line plus the concrete trigger steps, e.g. \`Editor.tsx:225\` + "save -> go back -> late response arrives -> save again". Always give a path:line: without one the finding counts as unverified, which lowers its impact one class.
 - reason: one line.
 Example: a late save response re-binds the editor to another post's id, so the next save can overwrite the wrong post: confirmed, critical, edge, small, in-scope, though the window is narrow.`;
@@ -2313,7 +2334,7 @@ the last repair's deviations: ${deviations}` : ""}`;
         host.log(`${name} r${round}: ${blockers.length} P0/P1 finding(s) go to the implementer without the judge: ${blockers.map((f) => f.id).join(", ")}`);
       }
       const declinedBefore = (f) => f.repeatOf !== undefined && declined.has(f.repeatOf);
-      const policy = { threshold: config.threshold, alwaysFix: config.alwaysFix };
+      const policy = { threshold: config.threshold, alwaysFix: config.alwaysFix, rideAlong: config.rideAlong };
       let findings = found.map((f) => decide(f, undefined, policy, declinedBefore));
       unmerged = findings;
       if (judged.length) {
@@ -2340,7 +2361,7 @@ the last repair's deviations: ${deviations}` : ""}`;
         for (const m of merge.merged)
           host.log(`${name} r${round}: judge merged ${m.id} into ${m.into} (duplicate)`);
         unmerged = withScores;
-        findings = merge.findings;
+        findings = rideAlong(merge.findings, policy, declinedBefore);
       }
       history.push({ round, findings });
       host.log(`${name} r${round}: ${findings.length} finding(s)`);

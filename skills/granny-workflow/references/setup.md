@@ -31,7 +31,7 @@ Ask these five, each with the current value (or the default) marked:
    | normal (default) | `70` | `moderate` issues on the common path, unless the fix is large |
    | relaxed | `85` | `moderate` issues on the common path only when the fix is trivial |
 
-   `minor` findings are never fixed by the threshold in any preset (at most 50); they are listed for the user. Stricter means more fix rounds and more tokens. A number of their own (0-100) is fine too.
+   `minor` findings are never fixed by the threshold in any preset (at most 50); they are listed for the user. In every preset, a finding at or above `rideAlong` (default 55) that stayed under the threshold goes along with a round that already has a fix, and never starts one. Stricter means more fix rounds and more tokens. A number of their own (0-100) is fine too.
 
 2. **Reviewers** - offer only what step 1.3 found working:
    - the host model only (default): `[{ "name": "reviewer", "engine": "agent" }]`

@@ -42,6 +42,14 @@ describe('resolveConfig', () => {
     expect(resolveConfig([{ roles: { judge: { model: 'sonnet' } } }]).roles.judge).toEqual({ model: 'sonnet' })
   })
 
+  it('lets findings just under the bar ride along from priority 55 by default, and takes false or another number', () => {
+    expect(DEFAULT_CONFIG.rideAlong).toBe(55)
+    expect(resolveConfig([{ rideAlong: false }]).rideAlong).toBe(false)
+    expect(resolveConfig([{ rideAlong: 40 }]).rideAlong).toBe(40)
+    expect(() => resolveConfig([{ rideAlong: true }])).toThrow(/rideAlong must be false or a number between 0 and 100/)
+    expect(() => resolveConfig([{ rideAlong: 101 }])).toThrow(/rideAlong must be false or a number between 0 and 100/)
+  })
+
   it('drops a role key set to null', () => {
     expect(resolveConfig([{ roles: { judge: { model: null } } }]).roles.judge).toEqual({})
   })
