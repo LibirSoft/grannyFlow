@@ -631,6 +631,20 @@ describe('runGranny', () => {
       }
     })
 
+    it('gives the implementer a build method between the task and the PR body, and not the fixer', () => {
+      const prompt = implementPrompt(p, { task: 'WP-01' }, 0, 1, 'core')
+      const steps = ['1. Work in few, large steps', '2. Every input you add', '3. Everything that can run twice', '4. Every failure path', '5. Where the task is silent']
+      const at = [prompt.indexOf('Do ONLY this stage, then stop:\nWP-01'), prompt.indexOf('How to build it:'), ...steps.map(step => prompt.indexOf(step)), prompt.indexOf("When the stage's code is committed, bring ")]
+      expect(at.every(i => i >= 0)).toBe(true)
+      expect([...at].sort((a, b) => a - b)).toEqual(at)
+      expect(prompt).toContain('a stage with several of them is never one commit')
+      expect(prompt).toContain('Take the work orders or logical steps one at a time')
+      expect(prompt).toContain('up to date in one edit (git-excluded; create its directory if missing), with sections: Title, Summary, Changes (table), Test plan (real numbers), Revised in stage N, Review fixes, Untested.')
+      expect(prompt).not.toContain('Commit per logical step')
+      expect(fixPrompt(p, 'core', 1, [])).not.toContain('How to build it:')
+      expect(fixPrompt(p, 'core', 1, [])).toContain('"Review fixes" in .granny/PR-BODY.md (git-excluded: never stage or commit it).')
+    })
+
     it('asks the judge only for classes, no score, and names the diff it judges', () => {
       for (const prompt of [judgePrompt(p, 'abc', [], [], stage), planJudgePrompt(p, ['/r/plan.md'], [])]) {
         expect(prompt).toContain('Classify every finding with exactly these fields:')

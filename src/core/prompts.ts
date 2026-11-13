@@ -175,6 +175,14 @@ Split the work orders into stages, one per stop-and-review point: one stage for 
 Return files (the absolute paths you wrote), stages ([{ name, task, after${repos.length ? ', repo' : ''} }]), summary (a few lines for the user: the approach and the work orders) and questions (decisions only the user can make, each with the default the plan assumes; empty when none).`
 }
 
+/** How the implementer works: few round trips, and the three places where a first version usually goes wrong. */
+const BUILD_METHOD = `How to build it:
+1. Work in few, large steps: every round trip costs. Read the task, the code you will change and the code that will meet yours without being changed (whatever reads the data you write, calls what you alter, logs it, or runs beside it) in one or two commands. Take the work orders or logical steps one at a time: write all the files and tests of one in one command, run the gates and commit it in the next, then start the following one - a stage with several of them is never one commit. Do not re-read what you already have, and do not run a gate twice on the same tree.
+2. Every input you add (a body field, header, query, argument, file, setting): decide what is valid and refuse the rest where it enters - the wrong type, a value the parser accepts but that means something else, the far ends of its range.
+3. Everything that can run twice, beside itself or beside a request (a job, a retry, a second process): act only on state read in the same transaction, decide what a crash between two steps leaves behind, and let one bad item fail alone.
+4. Every failure path: what is stored and what the caller is told must agree with what really happened.
+5. Where the task is silent, do what the nearest existing code does, and note the choice.`
+
 export function implementPrompt(p: PromptContext, stage: StageSpec, index: number, total: number, name: string, builds = index > 0): string {
   const pr = prBodyOf(p)
   const earlier = builds
@@ -188,14 +196,16 @@ You are the IMPLEMENTER. Stage ${index + 1}/${total}: "${name}".
 ${earlier}Do ONLY this stage, then stop:
 ${stage.task ?? ''}
 
-Commit per logical step. Keep ${pr} (git-excluded; create its directory if missing) current, with sections: Title, Summary, Changes (table), Test plan (real numbers), Revised in stage N, Review fixes, Untested. Return startSha = HEAD before your first change.`
+${BUILD_METHOD}
+
+When the stage's code is committed, bring ${pr} up to date in one edit (git-excluded; create its directory if missing), with sections: Title, Summary, Changes (table), Test plan (real numbers), Revised in stage N, Review fixes, Untested. Return startSha = HEAD before your first change.`
 }
 
 export function fixPrompt(p: PromptContext, name: string, round: number, accepted: Finding[], overruled: Overruled[] = []): string {
   return `${common(p)}
 
 You are the IMPLEMENTER, fixing review round ${round} of stage "${name}".
-First read ${branchLog(p)} and the code. Fix every finding below on the current branch, red-green where it changes behaviour, gates green, and commit (\`fix(...)\`). Add each finding id and what you did to "Review fixes" in ${prBodyOf(p)}. If you believe a finding is wrong, do not fix it: ${DECLINE}.
+First read ${branchLog(p)} and the code. Fix every finding below on the current branch, red-green where it changes behaviour, gates green, and commit (\`fix(...)\`). Add each finding id and what you did to "Review fixes" in ${prBodyOf(p)} (git-excluded: never stage or commit it). If you believe a finding is wrong, do not fix it: ${DECLINE}.
 ${overruledSection(overruled)}
 ${findingsList(accepted)}`
 }
@@ -329,7 +339,7 @@ export function repairPrompt(p: PromptContext, name: string, at: string, attempt
   return `${common(p)}
 
 You are the IMPLEMENTER, repairing failed checks of stage "${name}" (${at}, repair ${attempt}). Granny ran the checks below on the current branch and they failed; review waits until they pass.
-${taskSection(stage)}Read ${branchLog(p)} and the code, find why each check fails, and fix the code until it passes. Rerun the checks, commit (\`fix(...)\`), and note what you changed under "Review fixes" in ${prBodyOf(p)}.
+${taskSection(stage)}Read ${branchLog(p)} and the code, find why each check fails, and fix the code until it passes. Rerun the checks, commit (\`fix(...)\`), and note what you changed under "Review fixes" in ${prBodyOf(p)} (git-excluded: never stage or commit it).
 NEVER delete, skip, disable or weaken a test, a check, a threshold, the granny config or a check script to get green - granny reruns the same commands and the reviewers see the diff. If a check cannot pass without that, leave it failing and explain why in deviations.
 
 FAILED CHECKS:

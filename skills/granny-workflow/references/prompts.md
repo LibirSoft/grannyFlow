@@ -140,7 +140,14 @@ Earlier stages are done and reviewed: first read `git log --oneline '<base>'..HE
 Do ONLY this stage, then stop:
 <stage task>
 
-Commit per logical step. Keep .granny/PR-BODY.md (git-excluded; create its directory if missing) current, with sections: Title, Summary, Changes (table), Test plan (real numbers), Revised in stage N, Review fixes, Untested. Return startSha = HEAD before your first change.
+How to build it:
+1. Work in few, large steps: every round trip costs. Read the task, the code you will change and the code that will meet yours without being changed (whatever reads the data you write, calls what you alter, logs it, or runs beside it) in one or two commands. Take the work orders or logical steps one at a time: write all the files and tests of one in one command, run the gates and commit it in the next, then start the following one - a stage with several of them is never one commit. Do not re-read what you already have, and do not run a gate twice on the same tree.
+2. Every input you add (a body field, header, query, argument, file, setting): decide what is valid and refuse the rest where it enters - the wrong type, a value the parser accepts but that means something else, the far ends of its range.
+3. Everything that can run twice, beside itself or beside a request (a job, a retry, a second process): act only on state read in the same transaction, decide what a crash between two steps leaves behind, and let one bad item fail alone.
+4. Every failure path: what is stored and what the caller is told must agree with what really happened.
+5. Where the task is silent, do what the nearest existing code does, and note the choice.
+
+When the stage's code is committed, bring .granny/PR-BODY.md up to date in one edit (git-excluded; create its directory if missing), with sections: Title, Summary, Changes (table), Test plan (real numbers), Revised in stage N, Review fixes, Untested. Return startSha = HEAD before your first change.
 ```
 
 ## Implementer - fix
@@ -160,7 +167,7 @@ Plan files - read them first: <plan files>
 <context: work-order files and override notes>
 
 You are the IMPLEMENTER, fixing review round 1 of stage "<stage name>".
-First read `git log --oneline '<base>'..HEAD` and the code. Fix every finding below on the current branch, red-green where it changes behaviour, gates green, and commit (`fix(...)`). Add each finding id and what you did to "Review fixes" in .granny/PR-BODY.md. If you believe a finding is wrong, do not fix it: list it in declined with its id and your reason.
+First read `git log --oneline '<base>'..HEAD` and the code. Fix every finding below on the current branch, red-green where it changes behaviour, gates green, and commit (`fix(...)`). Add each finding id and what you did to "Review fixes" in .granny/PR-BODY.md (git-excluded: never stage or commit it). If you believe a finding is wrong, do not fix it: list it in declined with its id and your reason.
 
 FINDINGS (P0/P1, or sent by the judge's classification; decision names the rule):
 <accepted findings as JSON>
@@ -183,7 +190,7 @@ Plan files - read them first: <plan files>
 <context: work-order files and override notes>
 
 You are the IMPLEMENTER, fixing review round 2 of stage "<stage name>".
-First read `git log --oneline '<base>'..HEAD` and the code. Fix every finding below on the current branch, red-green where it changes behaviour, gates green, and commit (`fix(...)`). Add each finding id and what you did to "Review fixes" in .granny/PR-BODY.md. If you believe a finding is wrong, do not fix it: list it in declined with its id and your reason.
+First read `git log --oneline '<base>'..HEAD` and the code. Fix every finding below on the current branch, red-green where it changes behaviour, gates green, and commit (`fix(...)`). Add each finding id and what you did to "Review fixes" in .granny/PR-BODY.md (git-excluded: never stage or commit it). If you believe a finding is wrong, do not fix it: list it in declined with its id and your reason.
 
 OVERRULED - you declined these in an earlier round; the judge checked your reason against the code and disagreed:
 - <id> (repeat of r1/<reviewer>-F<n>): <the judge's reason>
@@ -225,7 +232,7 @@ Plan files - read them first: <plan files>
 You are the IMPLEMENTER, repairing failed checks of stage "<stage name>" (implement, repair 1). Granny ran the checks below on the current branch and they failed; review waits until they pass.
 Stage 2/2 "<stage name>" - its TASK:
 <stage task>
-Read `git log --oneline '<base>'..HEAD` and the code, find why each check fails, and fix the code until it passes. Rerun the checks, commit (`fix(...)`), and note what you changed under "Review fixes" in .granny/PR-BODY.md.
+Read `git log --oneline '<base>'..HEAD` and the code, find why each check fails, and fix the code until it passes. Rerun the checks, commit (`fix(...)`), and note what you changed under "Review fixes" in .granny/PR-BODY.md (git-excluded: never stage or commit it).
 NEVER delete, skip, disable or weaken a test, a check, a threshold, the granny config or a check script to get green - granny reruns the same commands and the reviewers see the diff. If a check cannot pass without that, leave it failing and explain why in deviations.
 
 FAILED CHECKS:
