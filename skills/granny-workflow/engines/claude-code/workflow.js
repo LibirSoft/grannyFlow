@@ -815,6 +815,7 @@ function readOnlyHeader(p, writes, extra = []) {
 var repoAsk = (p, repos) => (repos.length ? `
 The goal spans several repos: ${p.repo} (the primary) and ${repos.join(", ")}. Explore each one it touches. A stage works in exactly one repo: set its repo to that repo's absolute path (omit it for the primary). The same change in several repos gets one stage per repo.` : "") + `
 Independent stages run in parallel, each in its own git worktree. Set after on every stage: the 1-based numbers of the earlier stages it builds on, [] if it can start right away. Stages are independent when neither needs the other's code and they edit different files${repos.length ? " (the same change in several repos usually is)" : ""}; when in doubt, make the later one wait.`;
+var PLANNER_STEPS = `Each step of a stage is built by its own implementer agent, which has not seen the other steps' conversations and knows only the plan, the branch and its step's task. Split every stage into steps, one per logical commit point: a change that builds, passes the gates and is committed on its own, in the order they must land. A step's task names its work orders or the part of one, the files to read first, the files it changes and the acceptance criteria a test can check, and it never needs code a later step writes. A stage that is one commit gets one step.`;
 function draftPrompt(p, goal, plans, repos = []) {
   return `${readOnlyHeader(p, "the plan", [`The implementer's gates: ${gateList(p.config)}; all must pass before every commit.`])}
 
@@ -824,8 +825,9 @@ ${goal}
 
 First explore the code, configs, lockfiles, tests and docs the goal touches. Then write the plan to ${plans.join(", ")} (absolute paths; create missing directories). If a plan file already exists there, revise it toward the goal instead of starting over. Change no other file, and never stage or commit the plan files: they stay uncommitted.
 Write it for an implementer who has not seen this conversation: the goal and the current state of the code (with file paths); the approach and why, with the alternatives you rejected; work orders WP-01, WP-02, ..., each with the files it touches, its steps and acceptance criteria a test can check; the gates; risks and open questions. Name versions, APIs, flags and files as the repo has them, not from memory.
-Split the work orders into stages, one per stop-and-review point: one stage for a small plan; for a larger one, a checkpoint where later work builds on earlier foundations. Each stage's task names exactly which work orders it does.${repoAsk(p, repos)}
-Return files (the absolute paths you wrote), stages ([{ name, task, after${repos.length ? ", repo" : ""} }]), summary (a few lines for the user: the approach and the work orders) and questions (decisions only the user can make, each with the default the plan assumes; empty when none).`;
+Split the work orders into stages, one per stop-and-review point: one stage for a small plan; for a larger one, a checkpoint where later work builds on earlier foundations. Each stage's task names exactly which work orders it does.${repoAsk(p, repos)}${p.config.stepAgents ? `
+${PLANNER_STEPS}` : ""}
+Return files (the absolute paths you wrote), stages ([{ name, task, after${repos.length ? ", repo" : ""}${p.config.stepAgents ? ", steps" : ""} }]), summary (a few lines for the user: the approach and the work orders) and questions (decisions only the user can make, each with the default the plan assumes; empty when none).`;
 }
 var BUILD_METHOD = `How to build it:
 1. Work in few, large steps: every round trip costs. Read the task, the code you will change and the code that will meet yours without being changed (whatever reads the data you write, calls what you alter, logs it, or runs beside it) in one or two commands. Take the work orders or logical steps one at a time: write all the files and tests of one in one command, run the gates and commit it in the next, then start the following one - a stage with several of them is never one commit. Do not re-read what you already have, and do not run a gate twice on the same tree.
@@ -833,16 +835,26 @@ var BUILD_METHOD = `How to build it:
 3. Everything that can run twice, beside itself or beside a request (a job, a retry, a second process): act only on state read in the same transaction, decide what a crash between two steps leaves behind, and let one bad item fail alone.
 4. Every failure path: what is stored and what the caller is told must agree with what really happened.
 5. Where the task is silent, do what the nearest existing code does, and note the choice.`;
+var stepName = (step, k) => step.name ?? `step ${k + 1}`;
+function earlierLine(p, index, builds) {
+  if (builds)
+    return `${p.others?.length ? "Earlier stages in this repo are done and reviewed" : "Earlier stages are done and reviewed"}: first read ${branchLog(p)}, the code and ${prBodyOf(p)}.
+`;
+  return index === 0 ? "" : `This stage does not build on the other stages (they run in parallel, elsewhere or later): expect no commits from them on this branch.
+`;
+}
 function implementPrompt(p, stage, index, total, name, builds = index > 0) {
   const pr = prBodyOf(p);
-  const earlier = builds ? `${p.others?.length ? "Earlier stages in this repo are done and reviewed" : "Earlier stages are done and reviewed"}: first read ${branchLog(p)}, the code and ${pr}.
-` : index === 0 ? "" : `This stage does not build on the other stages (they run in parallel, elsewhere or later): expect no commits from them on this branch.
-`;
+  const steps = stage.steps?.length ? `
+
+Its steps, in this order - commit each one before you start the next:
+${stage.steps.map((s, k) => `${k + 1}. ${stepName(s, k)}: ${s.task}`).join(`
+`)}` : "";
   return `${common(p)}
 
 You are the IMPLEMENTER. Stage ${index + 1}/${total}: "${name}".
-${earlier}Do ONLY this stage, then stop:
-${stage.task ?? ""}
+${earlierLine(p, index, builds)}Do ONLY this stage, then stop:
+${stage.task ?? ""}${steps}
 
 ${BUILD_METHOD}
 
@@ -1424,7 +1436,19 @@ var SCHEMAS = {
             name: { type: "string" },
             task: { type: "string", description: "exactly which work orders or sections of the plan this stage does" },
             repo: { type: "string", description: "absolute path of the repo this stage works in, when the run spans several repos; omit for the primary repo" },
-            after: { type: "array", items: { type: "number" }, description: "1-based numbers of the earlier stages this stage builds on; [] when it can start right away (independent stages run in parallel)" }
+            after: { type: "array", items: { type: "number" }, description: "1-based numbers of the earlier stages this stage builds on; [] when it can start right away (independent stages run in parallel)" },
+            steps: {
+              type: "array",
+              description: "the steps of this stage, in order, one per commit point; the planner is asked for them only when config stepAgents is on",
+              items: {
+                type: "object",
+                properties: {
+                  name: { type: "string", description: "a short name for the step" },
+                  task: { type: "string", description: "which work orders, or the part of one, this step does; the files to read first and the files it changes" }
+                },
+                required: ["task"]
+              }
+            }
           },
           required: ["name", "task"]
         }

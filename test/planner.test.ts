@@ -111,4 +111,16 @@ describe('a planning run', () => {
     const prompt = draftPrompt({ repo: '/r', branch: 'b', base: 'main', config: resolveConfig([]) }, 'G', ['/r/.granny/plans/b.md'])
     expect(prompt).toContain('Change no other file, and never stage or commit the plan files')
   })
+
+  it('asks the planner for steps only with stepAgents on', () => {
+    const off = draftPrompt({ repo: '/r', branch: 'b', base: 'main', config: resolveConfig([]) }, 'G', ['/r/.granny/plans/b.md'])
+    expect(off).toContain('stages ([{ name, task, after }])')
+    expect(off).not.toContain('Split every stage into steps')
+    const on = draftPrompt({ repo: '/r', branch: 'b', base: 'main', config: resolveConfig([{ stepAgents: true }]) }, 'G', ['/r/.granny/plans/b.md'])
+    expect(on).toContain('Split every stage into steps, one per logical commit point')
+    expect(on).toContain('A stage that is one commit gets one step.')
+    expect(on).toContain('stages ([{ name, task, after, steps }])')
+    const several = draftPrompt({ repo: '/r', branch: 'b', base: 'main', config: resolveConfig([{ stepAgents: true }]) }, 'G', ['/r/.granny/plans/b.md'], ['/other'])
+    expect(several).toContain('stages ([{ name, task, after, repo, steps }])')
+  })
 })
