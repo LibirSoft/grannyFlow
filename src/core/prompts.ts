@@ -168,7 +168,6 @@ The goal spans several repos: ${p.repo} (the primary) and ${repos.join(', ')}. E
   `
 Independent stages run in parallel, each in its own git worktree. Set after on every stage: the 1-based numbers of the earlier stages it builds on, [] if it can start right away. Stages are independent when neither needs the other's code and they edit different files${repos.length ? ' (the same change in several repos usually is)' : ''}; when in doubt, make the later one wait.`
 
-/** The planner's paragraph on steps: added only when stepAgents is on. */
 const PLANNER_STEPS = `Each step of a stage is built by its own implementer agent, which has not seen the other steps' conversations and knows only the plan, the branch and its step's task. Split every stage into steps, one per logical commit point: a change that builds, passes the gates and is committed on its own, in the order they must land. A step's task names its work orders or the part of one, the files to read first, the files it changes and the acceptance criteria a test can check, and it never needs code a later step writes. A stage that is one commit gets one step.`
 
 export function draftPrompt(p: PromptContext, goal: string, plans: string[], repos: string[] = []): string {
@@ -195,7 +194,6 @@ const BUILD_METHOD = `How to build it:
 /** The name a step is shown by: its own, or `step <k>` (1-based) when it has none. */
 export const stepName = (step: { name?: string }, k: number): string => step.name ?? `step ${k + 1}`
 
-/** The line that opens an implementer prompt: the earlier stages the stage builds on, or that it builds on none of them. */
 function earlierLine(p: PromptContext, index: number, builds: boolean): string {
   if (builds) return `${p.others?.length ? 'Earlier stages in this repo are done and reviewed' : 'Earlier stages are done and reviewed'}: first read ${branchLog(p)}, the code and ${prBodyOf(p)}.\n`
   return index === 0 ? '' : 'This stage does not build on the other stages (they run in parallel, elsewhere or later): expect no commits from them on this branch.\n'

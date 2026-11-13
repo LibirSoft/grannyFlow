@@ -130,7 +130,6 @@ export interface StageSpec {
   repo?: string
   after?: number[]
   checks?: string[]
-  /** The commit points of an implementing stage, in order; see the Step agents section of the config reference. */
   steps?: Array<{ name?: string; task: string }>
 }
 

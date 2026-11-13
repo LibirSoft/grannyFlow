@@ -256,7 +256,6 @@ function stageErrors(stages: StageSpec[], known: Set<string>): string[] {
   return errors
 }
 
-/** The errors of a stage's `steps`: a non-empty list of { name?, task }, on a stage that implements. */
 function stepErrors(i: number, s: StageSpec): string[] {
   const at = `stages[${i}].steps`
   if (!Array.isArray(s.steps) || !s.steps.length) return [`${at} must be a non-empty array of { name?, task }`]
@@ -271,7 +270,6 @@ function stepErrors(i: number, s: StageSpec): string[] {
   })
 }
 
-/** The steps a planner proposed that have a task; a name that is not a non-empty string is left out. */
 function plannedSteps(list: unknown): Array<{ name?: string; task: string }> | undefined {
   if (!Array.isArray(list)) return undefined
   const kept = list.flatMap((step: unknown) => {
@@ -285,7 +283,6 @@ function plannedSteps(list: unknown): Array<{ name?: string; task: string }> | u
 
 type StepRun = { name: string; implementation: Implementation }
 
-/** One implementation for a stage built in steps: the first step's start, the last step's head and gates, every step's commits, and what the steps said, each prefixed by its step. */
 function mergeSteps(ran: StepRun[]): Implementation {
   const first = ran[0]!.implementation
   const last = ran.at(-1)!.implementation
@@ -1127,7 +1124,6 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
   /** A stage is built in steps when stepAgents is on and it has two or more steps; one step is built as a stage without steps. */
   const stepAgentsOf = (st: StageSpec): boolean => config.stepAgents && (st.steps?.length ?? 0) > 1
 
-  /** Built in steps: one implementer agent per step, in order. Each step but the last is committed before the next one starts; work it leaves uncommitted is noted, and the next step runs on it. */
   const implementSteps = async (lane: Lane, st: StageSpec, i: number, name: string, task: StageTask | undefined, notes: string[], ran: StepRun[]): Promise<Implementation> => {
     const steps = st.steps!
     for (let k = 0; k < steps.length; k++) {
