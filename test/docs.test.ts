@@ -523,6 +523,13 @@ describe('skill docs', () => {
     expect(read('SKILL.md')).toContain('and, with step agents, when no final review follows it')
   })
 
+  it('says an unreadable count widens a resume review only when <base>..HEAD does not read 0, in config.md, cursor.md and CHANGELOG.md', () => {
+    expect(read('references/config.md').split('**Resume.**')[1]!.split('\n\n')[0]).toContain("when `<base>..HEAD` does not read 0 and either differs from the count since the stage's start or one of the two counts cannot be read")
+    expect(read('references/config.md')).toContain('so when `<base>..HEAD` does not read 0 and either differs from the count since the HEAD or one of the two counts cannot be read')
+    expect(read('references/cursor.md')).toContain('When `<base>..HEAD` does not read 0 and either differs from the count since `<startSha>` or one of the two counts cannot be read')
+    expect(readRoot('CHANGELOG.md')).toContain('A count that cannot be read widens the review to `<base>...HEAD` unless `<base>..HEAD` reads 0, and the widening is logged on a line of its own.')
+  })
+
   it('has the Cursor step flow read the status and log the red gates the way the engine does', () => {
     const cursor = read('references/cursor.md')
     expect(cursor).toContain('read `git status --porcelain` (the work dir and the plan files do not count; once more when it fails)')
