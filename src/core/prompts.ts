@@ -194,7 +194,6 @@ const BUILD_METHOD = `How to build it:
 /** The name a step is shown by: its own, or `step <k>` (1-based) when it has none. */
 export const stepName = (step: { name?: string }, k: number): string => step.name ?? `step ${k + 1}`
 
-/** The line on the earlier stages; `withSteps`, for a step after the first, joins the earlier steps of the stage into the same read. */
 function earlierLine(p: PromptContext, index: number, builds: boolean, withSteps = false): string {
   if (builds) return `${p.others?.length ? 'Earlier stages in this repo are done and reviewed' : 'Earlier stages are done and reviewed'}${withSteps ? ', and the earlier steps of this stage are committed by other agents' : ''}: first read ${branchLog(p)}, the code and ${prBodyOf(p)}.\n`
   return index === 0 ? '' : 'This stage does not build on the other stages (they run in parallel, elsewhere or later): expect no commits from them on this branch.\n'
