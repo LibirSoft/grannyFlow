@@ -541,6 +541,10 @@ describe('skill docs', () => {
     expect(heading).not.toContain('the first step gets')
   })
 
+  it('names the commit agent of a step in the result, in the step section of config.md', () => {
+    expect(read('references/config.md')).toContain("that agent's `commit`")
+  })
+
   it('points every repo reference at LibirSoft/grannyFlow', () => {
     expect(readRoot('README.md')).toContain('npx skills add LibirSoft/grannyFlow')
     const docs: Record<string, string> = {

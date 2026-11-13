@@ -1837,7 +1837,7 @@ function mergeSteps(ran) {
     headSha: last.headSha,
     gatesGreen: last.gatesGreen,
     gates: last.gates,
-    commits: ran.flatMap((s) => s.implementation.commits ?? []),
+    commits: ran.flatMap((s) => [...s.implementation.commits ?? [], ...s.commit?.commits ?? []]),
     untested: said((r) => r.untested?.trim() || undefined) ?? "",
     ...deviations ? { deviations } : {},
     ...declined.length ? { declined } : {}
@@ -2634,12 +2634,16 @@ the last repair's deviations: ${deviations}` : ""}`;
     for (let k = 0;k < steps.length; k++) {
       const at = `step ${k + 1}/${steps.length}`;
       const impl = await implement(lane, `implement ${name} ${at}`, implementStepPrompt(lane.p, st, i, specs.length, name, k, buildsOnEarlier(i)));
-      ran.push({ name: stepName(steps[k], k), implementation: impl });
+      const stepRun = { name: stepName(steps[k], k), implementation: impl };
+      ran.push(stepRun);
       if (k === steps.length - 1)
         break;
       if (!impl.gatesGreen)
         host.log(`${name}: ${at} ended with RED gates`);
-      const { left, unread } = await commitWork(lane, name, at, task, { number: k + 1, total: steps.length, name: stepName(steps[k], k), task: steps[k].task });
+      const committed = await commitWork(lane, name, at, task, { number: k + 1, total: steps.length, name: stepName(steps[k], k), task: steps[k].task });
+      if (committed.impl)
+        stepRun.commit = committed.impl;
+      const { left, unread } = committed;
       if (left || unread) {
         const note = unread ? `working tree status unreadable after ${at} (${unread})` : `uncommitted changes after ${at}: ${listed(left)} - step ${k + 2}/${steps.length} started on them`;
         host.log(`${name}: ${note}`);

@@ -173,6 +173,12 @@ export interface Recheck {
   note?: string
 }
 
+export interface StepResult {
+  name: string
+  implementation: Implementation
+  commit?: Implementation
+}
+
 export interface StageResult {
   stage: string
   repo?: string
@@ -180,7 +186,7 @@ export interface StageResult {
   rounds: number
   implementation?: Implementation
   /** One entry per step, in order, only when step agents built the stage (stepAgents on, two or more steps). */
-  steps?: Array<{ name: string; implementation: Implementation }>
+  steps?: StepResult[]
   residual: Finding[]
   unresolved: Finding[]
   history: RoundRecord[]

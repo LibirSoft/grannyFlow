@@ -177,4 +177,12 @@ describe('step agents', () => {
     expect(prompt).not.toContain('WP-01b')
     expect(prompt).not.toContain('WP-01c')
   })
+
+  it('keeps the commit agent after a step in the result: on its step, and in the commits of the stage', async () => {
+    const commit = { startSha: 'h1', headSha: 'h1b', gatesGreen: true, gates: 'g', commits: ['fix commit'], untested: '' }
+    const f = fakeHost({ status: [' M a.txt', ''], override: req => (req.label === 'commit core step 1/3' ? commit : undefined) })
+    const r = await runGranny(f.host, run([{ name: 'core', task: 'WP-01', steps }], on))
+    expect(r.stages[0]!.steps!.map(s => s.commit)).toEqual([commit, undefined, undefined])
+    expect(r.stages[0]!.implementation!.commits).toEqual(['commit 1', 'fix commit', 'commit 2', 'commit 3'])
+  })
 })
