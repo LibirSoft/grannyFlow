@@ -233,10 +233,9 @@ Plan files - read them first: <plan files>
 <context: work-order files and override notes>
 
 You are the IMPLEMENTER. Stage 2/2: "<stage name>", step 2 of 2: "<next step name>".
-Earlier stages are done and reviewed: first read `git log --oneline '<base>'..HEAD`, the code and .granny/PR-BODY.md.
-The earlier steps of this stage are committed by other agents: first read `git log --oneline '<base>'..HEAD`, the code and .granny/PR-BODY.md.
+Earlier stages are done and reviewed, and the earlier steps of this stage are committed by other agents: first read `git log --oneline '<base>'..HEAD`, the code and .granny/PR-BODY.md.
 The steps of this stage are built by one agent each, in this order: 1. <step name>, 2. <next step name> (yours).
-Do ONLY step 2, then stop; the later steps are other agents' work:
+Do ONLY step 2, then stop; the other steps are other agents' work:
 <next step task>
 If the branch log shows this step is already committed, change nothing and say so in deviations.
 

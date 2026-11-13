@@ -185,4 +185,24 @@ describe('step agents', () => {
     expect(r.stages[0]!.steps!.map(s => s.commit)).toEqual([commit, undefined, undefined])
     expect(r.stages[0]!.implementation!.commits).toEqual(['commit 1', 'fix commit', 'commit 2', 'commit 3'])
   })
+
+  it('gives each step agent the prompt of its own step, and no other step task', async () => {
+    const f = fakeHost()
+    await runGranny(f.host, run([{ name: 'core', task: 'WP-01', steps }], on))
+    steps.forEach((s, k) => {
+      const prompt = f.calls.find(c => c.label === `implement core step ${k + 1}/3`)!.prompt
+      expect(prompt).toContain(`step ${k + 1} of 3: "${s.name}".`)
+      expect(prompt).toContain(`${s.task}\n`)
+      steps.filter((_, j) => j !== k).forEach(other => expect(prompt).not.toContain(other.task))
+    })
+  })
+
+  it('gives the step agents of a stage that builds on an earlier stage the earlier-stages line, and the earlier steps from step 2 on', async () => {
+    const f = fakeHost()
+    await runGranny(f.host, run([{ name: 'a', task: 'A' }, { name: 'core', task: 'WP-01', steps }], on))
+    const prompt = (k: number) => f.calls.find(c => c.label === `implement core step ${k}/3`)!.prompt
+    expect(prompt(1)).toContain('Earlier stages are done and reviewed: first read `git log --oneline main..HEAD`')
+    expect(prompt(2)).toContain('Earlier stages are done and reviewed, and the earlier steps of this stage are committed by other agents: first read `git log --oneline main..HEAD`')
+    expect(prompt(3)).toContain('Earlier stages are done and reviewed, and the earlier steps of this stage are committed by other agents')
+  })
 })

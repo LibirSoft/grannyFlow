@@ -194,8 +194,9 @@ const BUILD_METHOD = `How to build it:
 /** The name a step is shown by: its own, or `step <k>` (1-based) when it has none. */
 export const stepName = (step: { name?: string }, k: number): string => step.name ?? `step ${k + 1}`
 
-function earlierLine(p: PromptContext, index: number, builds: boolean): string {
-  if (builds) return `${p.others?.length ? 'Earlier stages in this repo are done and reviewed' : 'Earlier stages are done and reviewed'}: first read ${branchLog(p)}, the code and ${prBodyOf(p)}.\n`
+/** The line on the earlier stages; `withSteps`, for a step after the first, joins the earlier steps of the stage into the same read. */
+function earlierLine(p: PromptContext, index: number, builds: boolean, withSteps = false): string {
+  if (builds) return `${p.others?.length ? 'Earlier stages in this repo are done and reviewed' : 'Earlier stages are done and reviewed'}${withSteps ? ', and the earlier steps of this stage are committed by other agents' : ''}: first read ${branchLog(p)}, the code and ${prBodyOf(p)}.\n`
   return index === 0 ? '' : 'This stage does not build on the other stages (they run in parallel, elsewhere or later): expect no commits from them on this branch.\n'
 }
 
@@ -222,13 +223,14 @@ export function implementStepPrompt(p: PromptContext, stage: StageSpec, index: n
   const steps = stage.steps ?? []
   const step = steps[k]
   const pr = prBodyOf(p)
-  const earlier = `${earlierLine(p, index, builds)}${k === 0 ? '' : `The earlier steps of this stage are committed by other agents: first read ${branchLog(p)}, the code and ${pr}.\n`}`
+  const earlierSteps = `The earlier steps of this stage are committed by other agents: first read ${branchLog(p)}, the code and ${pr}.\n`
+  const earlier = builds ? earlierLine(p, index, true, k > 0) : `${earlierLine(p, index, false)}${k === 0 ? '' : earlierSteps}`
   const order = steps.map((s, j) => `${j + 1}. ${stepName(s, j)}${j === k ? ' (yours)' : ''}`).join(', ')
   return `${common(p)}
 
 You are the IMPLEMENTER. Stage ${index + 1}/${total}: "${name}", step ${k + 1} of ${steps.length}: "${stepName(step!, k)}".
 ${earlier}The steps of this stage are built by one agent each, in this order: ${order}.
-Do ONLY step ${k + 1}, then stop; the later steps are other agents' work:
+Do ONLY step ${k + 1}, then stop; the other steps are other agents' work:
 ${step!.task}
 If the branch log shows this step is already committed, change nothing and say so in deviations.
 

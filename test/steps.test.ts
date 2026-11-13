@@ -27,20 +27,22 @@ describe('the step prompt', () => {
     const prompt = implementStepPrompt(p, stage, 0, 1, 'core', 1)
     expect(prompt).toContain('You are the IMPLEMENTER. Stage 1/1: "core", step 2 of 3: "step 2".')
     expect(prompt).toContain('The steps of this stage are built by one agent each, in this order: 1. schema, 2. step 2 (yours), 3. docs.')
-    expect(prompt).toContain("Do ONLY step 2, then stop; the later steps are other agents' work:\nWP-01b: the route\n")
+    expect(prompt).toContain("Do ONLY step 2, then stop; the other steps are other agents' work:\nWP-01b: the route\n")
     expect(prompt).not.toContain('WP-01a')
     expect(prompt).not.toContain('WP-01c')
     expect(prompt).toContain('If the branch log shows this step is already committed, change nothing and say so in deviations.')
     expect(prompt).toContain('How to build it:')
   })
 
-  it('has the first step read the earlier stages, and a later step read the earlier stages and what the earlier steps committed', () => {
+  it('has the first step read the earlier stages, and a later step read the earlier stages and the earlier steps in one line', () => {
     const first = implementStepPrompt(p, stage, 1, 2, 'core', 0, true)
     expect(first).toContain('Earlier stages are done and reviewed: first read `git log --oneline main..HEAD`, the code and .granny/PR-BODY.md.')
     expect(first).not.toContain('The earlier steps of this stage')
     const later = implementStepPrompt(p, stage, 1, 2, 'core', 2, true)
-    expect(later).toContain('Earlier stages are done and reviewed: first read `git log --oneline main..HEAD`, the code and .granny/PR-BODY.md.')
-    expect(later).toContain('The earlier steps of this stage are committed by other agents: first read `git log --oneline main..HEAD`, the code and .granny/PR-BODY.md.')
+    expect(later).toContain(
+      'Earlier stages are done and reviewed, and the earlier steps of this stage are committed by other agents: first read `git log --oneline main..HEAD`, the code and .granny/PR-BODY.md.',
+    )
+    expect(later.split('first read').length - 1).toBe(1)
   })
 
   it('keeps the parallel-lane line in a later step too: the other stages commit nothing on this branch', () => {
@@ -51,6 +53,14 @@ describe('the step prompt', () => {
 
   it('writes the PR body when this step is committed', () => {
     expect(implementStepPrompt(p, stage, 0, 1, 'core', 2)).toContain("When this step's code is committed, bring .granny/PR-BODY.md up to date in one edit")
+  })
+
+  it("tells every step's agent that the other steps are other agents' work, the last step included", () => {
+    for (let k = 0; k < 3; k++) {
+      const prompt = implementStepPrompt(p, stage, 0, 1, 'core', k)
+      expect(prompt).toContain("then stop; the other steps are other agents' work:")
+      expect(prompt).not.toContain('later steps')
+    }
   })
 })
 

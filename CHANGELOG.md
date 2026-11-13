@@ -40,6 +40,7 @@
 - Step agents: a stage with `steps` that step agents built, resumed with `fromStage`, reviews `<base>...HEAD` when no final review follows it (`finalReview` off, or no other stage in its repo) and the branch has commits below the stage's HEAD, as a resumed stage that made no commit already did, so the commits an interrupted run made for it (such as steps committed before the stop) are reviewed too. A count that cannot be read is logged on a line of its own, and the review still runs from `<base>`. With a final review the stage keeps reviewing from its HEAD, and the final review covers the branch. A stage without step agents resumes as before this feature.
 - Step agents: every step of a stage gets the "Earlier stages are done and reviewed" line (or, in a parallel lane, the "expect no commits from them on this branch" line), not only the first. Without it a later step read the branch log, which holds the earlier stages' commits, with no word that those are reviewed or belong to another stage.
 - Step agents: the commit agent after a step gets that step's prompt - its number, name and task, and the rule that the later steps are other agents' work - instead of the stage's whole task and a prompt that says it finishes the stage.
+- Step agents: every step's prompt says the other steps are other agents' work (the last step said "the later steps"), and a step after the first names the earlier stages and the earlier steps in one line, so its branch read is asked for once.
 
 ## 1.6.0
 
