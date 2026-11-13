@@ -742,13 +742,13 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
 
   const detail = (r: CheckResult) => r.note ?? `exit ${r.code}`
 
-  const commitWork = async (lane: Lane, name: string, at: string, stage?: StageTask): Promise<Committed> => {
+  const commitWork = async (lane: Lane, name: string, at: string, stage?: StageTask, step?: StageTask): Promise<Committed> => {
     const dirty = await uncommitted(`status ${name} ${at}`, 'Implement', lane.cwd)
     if (!Array.isArray(dirty)) return { unread: dirty.unreadable }
     if (!dirty.length) return {}
     host.log(`${name}: uncommitted changes after ${at} - asking the implementer to commit them: ${listed(dirty)}`)
     const label = `commit ${name} ${at}`
-    const impl = await implement(lane, label, commitPrompt(lane.p, name, at, dirty.join('\n'), plansIn(lane.cwd), stage))
+    const impl = await implement(lane, label, commitPrompt(lane.p, name, at, dirty.join('\n'), plansIn(lane.cwd), stage, step))
     const left = await uncommitted(`status ${name} ${at} after commit`, 'Implement', lane.cwd)
     return { impl, by: `the commit step (${label})`, ...(!Array.isArray(left) ? { unread: left.unreadable } : left.length ? { left } : {}) }
   }
@@ -1134,7 +1134,7 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
       ran.push({ name: stepName(steps[k], k), implementation: impl })
       if (k === steps.length - 1) break
       if (!impl.gatesGreen) host.log(`${name}: ${at} ended with RED gates`)
-      const { left, unread } = await commitWork(lane, name, at, task)
+      const { left, unread } = await commitWork(lane, name, at, task, { number: k + 1, total: steps.length, name: stepName(steps[k], k), task: steps[k].task })
       if (left || unread) {
         const note = unread ? `working tree status unreadable after ${at} (${unread})` : `uncommitted changes after ${at}: ${listed(left!)} - step ${k + 2}/${steps.length} started on them`
         host.log(`${name}: ${note}`)

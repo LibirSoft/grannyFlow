@@ -950,18 +950,20 @@ ${list.join(`
 
 `)}`;
 }
-function commitPrompt(p, name, at, status, plans, stage) {
+function commitPrompt(p, name, at, status, plans, stage, step) {
+  const opening = step ? `You are the IMPLEMENTER, after step ${step.number}/${step.total} ("${step.name}") of stage "${name}". The working tree has uncommitted changes; granny checks and reviews only committed work.` : `You are the IMPLEMENTER, finishing stage "${name}" (${at}). The working tree has uncommitted changes; granny checks and reviews only committed work.`;
+  const commit = step ? "Commit this step's work with explicit paths, gates green. Build nothing of the later steps: other agents do them." : "Commit the stage's work with explicit paths, gates green.";
   return `${common(p)}
 
-You are the IMPLEMENTER, finishing stage "${name}" (${at}). The working tree has uncommitted changes; granny checks and reviews only committed work.
-${taskSection(stage)}\`git status --porcelain\` printed:
+${opening}
+${step ? taskSection(step, "Step") : taskSection(stage)}\`git status --porcelain\` printed:
 \`\`\`
 ${status.slice(-3000)}
 \`\`\`
-Read \`git diff\`, ${branchLog(p)} and the files above. Commit the stage's work with explicit paths, gates green. Delete only stray files you created that do not belong in the repo (scratch files, build output). Do not hide changes to get a clean tree: never \`git stash\`, \`git reset\`, \`git checkout -- <path>\` or \`git clean\`.${plans.length ? ` Leave the plan files ${plans.join(", ")} as they are and never stage or commit them (granny left them out of the status above).` : ""} When you are done, \`git status --porcelain\` prints nothing (${p.config.workDir}/ is git-excluded and does not count${plans.length ? ", nor do the plan files" : ""}); explain any change you cannot commit in deviations. Return startSha = HEAD before your first commit.`;
+Read \`git diff\`, ${branchLog(p)} and the files above. ${commit} Delete only stray files you created that do not belong in the repo (scratch files, build output). Do not hide changes to get a clean tree: never \`git stash\`, \`git reset\`, \`git checkout -- <path>\` or \`git clean\`.${plans.length ? ` Leave the plan files ${plans.join(", ")} as they are and never stage or commit them (granny left them out of the status above).` : ""} When you are done, \`git status --porcelain\` prints nothing (${p.config.workDir}/ is git-excluded and does not count${plans.length ? ", nor do the plan files" : ""}); explain any change you cannot commit in deviations. Return startSha = HEAD before your first commit.`;
 }
 var WHOLE_BRANCH_NOTE = "This is the whole-branch review: each stage was already reviewed alone, so look across them - duplicated code or helpers several stages added, inconsistencies between stages (naming, contracts, config, docs, tests) - and especially at the merge commits and their conflict resolutions (`git log --merges`, `git show <merge>`): both sides' intent must survive.";
-var taskSection = (stage) => stage ? `Stage ${stage.number}/${stage.total} "${stage.name}" - its TASK:
+var taskSection = (stage, unit = "Stage") => stage ? `${unit} ${stage.number}/${stage.total} "${stage.name}" - its TASK:
 ${stage.task}
 ` : "";
 var reviewAsks = (stage, base) => [
@@ -2257,7 +2259,7 @@ async function runGranny(host, input) {
     return { ...base, ...metric, passed: true };
   };
   const detail = (r) => r.note ?? `exit ${r.code}`;
-  const commitWork = async (lane, name, at, stage) => {
+  const commitWork = async (lane, name, at, stage, step) => {
     const dirty = await uncommitted(`status ${name} ${at}`, "Implement", lane.cwd);
     if (!Array.isArray(dirty))
       return { unread: dirty.unreadable };
@@ -2266,7 +2268,7 @@ async function runGranny(host, input) {
     host.log(`${name}: uncommitted changes after ${at} - asking the implementer to commit them: ${listed(dirty)}`);
     const label = `commit ${name} ${at}`;
     const impl = await implement(lane, label, commitPrompt(lane.p, name, at, dirty.join(`
-`), plansIn(lane.cwd), stage));
+`), plansIn(lane.cwd), stage, step));
     const left = await uncommitted(`status ${name} ${at} after commit`, "Implement", lane.cwd);
     return { impl, by: `the commit step (${label})`, ...!Array.isArray(left) ? { unread: left.unreadable } : left.length ? { left } : {} };
   };
@@ -2637,7 +2639,7 @@ the last repair's deviations: ${deviations}` : ""}`;
         break;
       if (!impl.gatesGreen)
         host.log(`${name}: ${at} ended with RED gates`);
-      const { left, unread } = await commitWork(lane, name, at, task);
+      const { left, unread } = await commitWork(lane, name, at, task, { number: k + 1, total: steps.length, name: stepName(steps[k], k), task: steps[k].task });
       if (left || unread) {
         const note = unread ? `working tree status unreadable after ${at} (${unread})` : `uncommitted changes after ${at}: ${listed(left)} - step ${k + 2}/${steps.length} started on them`;
         host.log(`${name}: ${note}`);

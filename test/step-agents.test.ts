@@ -166,4 +166,15 @@ describe('step agents', () => {
     expect(f.logs).toContain('core: the commits since its start could not be counted on this resume - reviewing main...HEAD instead')
     expect(f.logs.some(l => l.includes('may sit below'))).toBe(false)
   })
+
+  it('gives the commit agent after a step the prompt of that step, not the stage prompt', async () => {
+    const f = fakeHost({ status: [' M a.txt', ''] })
+    await runGranny(f.host, run([{ name: 'core', task: 'WP-01', steps }], on))
+    const prompt = f.calls.find(c => c.label === 'commit core step 1/3')!.prompt
+    expect(prompt).toContain('You are the IMPLEMENTER, after step 1/3 ("schema") of stage "core".')
+    expect(prompt).toContain('Step 1/3 "schema" - its TASK:\nWP-01a: the schema\n')
+    expect(prompt).not.toContain('"core" - its TASK')
+    expect(prompt).not.toContain('WP-01b')
+    expect(prompt).not.toContain('WP-01c')
+  })
 })

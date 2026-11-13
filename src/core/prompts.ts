@@ -382,15 +382,21 @@ FAILED CHECKS:
 ${list.join('\n\n')}`
 }
 
-export function commitPrompt(p: PromptContext, name: string, at: string, status: string, plans: string[], stage?: StageTask): string {
+export function commitPrompt(p: PromptContext, name: string, at: string, status: string, plans: string[], stage?: StageTask, step?: StageTask): string {
+  const opening = step
+    ? `You are the IMPLEMENTER, after step ${step.number}/${step.total} ("${step.name}") of stage "${name}". The working tree has uncommitted changes; granny checks and reviews only committed work.`
+    : `You are the IMPLEMENTER, finishing stage "${name}" (${at}). The working tree has uncommitted changes; granny checks and reviews only committed work.`
+  const commit = step
+    ? "Commit this step's work with explicit paths, gates green. Build nothing of the later steps: other agents do them."
+    : "Commit the stage's work with explicit paths, gates green."
   return `${common(p)}
 
-You are the IMPLEMENTER, finishing stage "${name}" (${at}). The working tree has uncommitted changes; granny checks and reviews only committed work.
-${taskSection(stage)}\`git status --porcelain\` printed:
+${opening}
+${step ? taskSection(step, 'Step') : taskSection(stage)}\`git status --porcelain\` printed:
 \`\`\`
 ${status.slice(-3000)}
 \`\`\`
-Read \`git diff\`, ${branchLog(p)} and the files above. Commit the stage's work with explicit paths, gates green. Delete only stray files you created that do not belong in the repo (scratch files, build output). Do not hide changes to get a clean tree: never \`git stash\`, \`git reset\`, \`git checkout -- <path>\` or \`git clean\`.${plans.length ? ` Leave the plan files ${plans.join(', ')} as they are and never stage or commit them (granny left them out of the status above).` : ''} When you are done, \`git status --porcelain\` prints nothing (${p.config.workDir}/ is git-excluded and does not count${plans.length ? ', nor do the plan files' : ''}); explain any change you cannot commit in deviations. Return startSha = HEAD before your first commit.`
+Read \`git diff\`, ${branchLog(p)} and the files above. ${commit} Delete only stray files you created that do not belong in the repo (scratch files, build output). Do not hide changes to get a clean tree: never \`git stash\`, \`git reset\`, \`git checkout -- <path>\` or \`git clean\`.${plans.length ? ` Leave the plan files ${plans.join(', ')} as they are and never stage or commit them (granny left them out of the status above).` : ''} When you are done, \`git status --porcelain\` prints nothing (${p.config.workDir}/ is git-excluded and does not count${plans.length ? ', nor do the plan files' : ''}); explain any change you cannot commit in deviations. Return startSha = HEAD before your first commit.`
 }
 
 export const WHOLE_BRANCH_NOTE =
@@ -403,8 +409,8 @@ export interface StageTask {
   task: string
 }
 
-const taskSection = (stage?: StageTask): string =>
-  stage ? `Stage ${stage.number}/${stage.total} "${stage.name}" - its TASK:\n${stage.task}\n` : ''
+const taskSection = (stage?: StageTask, unit = 'Stage'): string =>
+  stage ? `${unit} ${stage.number}/${stage.total} "${stage.name}" - its TASK:\n${stage.task}\n` : ''
 
 const reviewAsks = (stage: StageTask | undefined, base: string): string[] => [
   'Review it the way a careful senior engineer would, in this order. Take the time it needs: a problem missed here ships.',

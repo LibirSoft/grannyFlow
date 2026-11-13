@@ -499,7 +499,7 @@ describe('skill docs', () => {
     const config = read('references/config.md')
     expect(config.split('**Resume.**')[1]!.split('\n\n')[0]).toContain('a resume with `resumeFromRunId`')
     expect(config.split('## Planning')[1]!.split('\n## ')[0]).toContain('`{ files, stages: [{ name, task, after, repo?, steps? }], summary, questions? }`')
-    expect(read('references/prompts.md').split('\n').find(l => l.startsWith('## Implementer - commit'))).toContain('`commit <stage> step <k>/<n>`')
+    expect(read('references/prompts.md').split('\n').find(l => l.startsWith('## Implementer - commit after a step'))).toContain('`commit <stage> step <k>/<n>`')
   })
 
   it('documents the review base of a resumed stage with no final review in config.md, cursor.md and SKILL.md', () => {

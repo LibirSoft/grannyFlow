@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'bun:test'
 import { resolveConfig } from '../src/core/config'
 import { renderPrompts } from '../scripts/build'
-import { implementPrompt, implementStepPrompt } from '../src/core/prompts'
+import { commitPrompt, implementPrompt, implementStepPrompt } from '../src/core/prompts'
 import type { StageSpec } from '../src/core/types'
 
 const p = { repo: '/work/repo', branch: 'feat/x', base: 'main', config: resolveConfig([]) }
@@ -54,11 +54,44 @@ describe('the step prompt', () => {
   })
 })
 
+describe('the commit prompt between steps', () => {
+  const status = ' M a.txt'
+  const stageTask = { number: 1, total: 1, name: 'core', task: 'WP-01' }
+  const step = { number: 1, total: 3, name: 'schema', task: 'WP-01a: the schema' }
+
+  it('names the step and its task, and leaves out the stage task, when a step is committed', () => {
+    const prompt = commitPrompt(p, 'core', 'step 1/3', status, [], stageTask, step)
+    expect(prompt).toContain(
+      'You are the IMPLEMENTER, after step 1/3 ("schema") of stage "core". The working tree has uncommitted changes; granny checks and reviews only committed work.\nStep 1/3 "schema" - its TASK:\nWP-01a: the schema\n`git status --porcelain` printed:',
+    )
+    expect(prompt).toContain("Commit this step's work with explicit paths, gates green. Build nothing of the later steps: other agents do them.")
+    expect(prompt).not.toContain('finishing stage')
+    expect(prompt).not.toContain('Stage 1/1 "core"')
+    expect(prompt).not.toContain('its TASK:\nWP-01\n')
+    expect(prompt).not.toContain("Commit the stage's work")
+  })
+
+  it('keeps the commit prompt of a stage as it was when no step is given', () => {
+    const prompt = commitPrompt(p, 'core', 'implement', status, [], stageTask)
+    expect(prompt).toContain(
+      'You are the IMPLEMENTER, finishing stage "core" (implement). The working tree has uncommitted changes; granny checks and reviews only committed work.\nStage 1/1 "core" - its TASK:\nWP-01\n`git status --porcelain` printed:',
+    )
+    expect(prompt).toContain("Commit the stage's work with explicit paths, gates green.")
+    expect(prompt).not.toContain('after step')
+  })
+})
+
 describe('the prompt reference', () => {
   it('renders the step prompts and the planner with stepAgents on', () => {
     const rendered = renderPrompts()
     expect(rendered).toContain('## Planner - a run with goal, with stepAgents on')
     expect(rendered).toContain('## Implementer - stage with steps, with stepAgents off or one step')
     expect(rendered).toContain('## Implementer - a step of a stage with steps, with stepAgents on')
+  })
+
+  it('shows the commit prompt of a step next to the stage one, and the stage one keeps its heading on main', () => {
+    const rendered = renderPrompts()
+    expect(rendered).toContain('## Implementer - commit after a step that is not the last of a stage with steps')
+    expect(rendered).toContain('## Implementer - commit (`git status --porcelain` listed uncommitted changes before a check gate - label `commit <stage> <gate> #<n>`, a repair - or, with no checks or no commit at all, after the implementer')
   })
 })

@@ -738,7 +738,7 @@ function reviewSavePrompt(repo, step, script) {
   return oneCommand(`shell command for the "${step}" step, which saves a reviewer's answer to its review file under the work dir (the one file this step writes),`, `Do not review the code yourself. Repo ${repo}.`, VERBATIM, script);
 }
 var WHOLE_BRANCH_NOTE = "This is the whole-branch review: each stage was already reviewed alone, so look across them - duplicated code or helpers several stages added, inconsistencies between stages (naming, contracts, config, docs, tests) - and especially at the merge commits and their conflict resolutions (`git log --merges`, `git show <merge>`): both sides' intent must survive.";
-var taskSection = (stage) => stage ? `Stage ${stage.number}/${stage.total} "${stage.name}" - its TASK:
+var taskSection = (stage, unit = "Stage") => stage ? `${unit} ${stage.number}/${stage.total} "${stage.name}" - its TASK:
 ${stage.task}
 ` : "";
 var reviewAsks = (stage, base) => [
