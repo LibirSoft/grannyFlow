@@ -486,6 +486,7 @@ describe('skill docs', () => {
       'ended with RED gates',
       'uncommitted changes after step <k>/<n>: <files> - step <k+1>/<n> started on them',
       'working tree status unreadable after step <k>/<n>',
+      '"Implementer - commit after a step that is not the last of a stage with steps" prompt',
     ]) expect({ text, has: cursor.includes(text) }).toEqual({ text, has: true })
     expect(read('SKILL.md').split('\n').find(l => l.startsWith('Stage split:'))).toContain('one per logical commit point')
   })
