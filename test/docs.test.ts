@@ -516,6 +516,12 @@ describe('skill docs', () => {
     expect(cursor).toContain("the last step's red gates are logged as `<stage>: implementer ended with RED gates - review will see it`")
   })
 
+  it('has the planning hand-off pass a planning run\'s stepAgents override on to the build run, in config.md and SKILL.md', () => {
+    const phrase = 'pass that override on the second run too'
+    expect(read('references/config.md').split('## Planning')[1]!.split('\n## ')[0]).toContain(phrase)
+    expect(read('SKILL.md')).toContain(phrase)
+  })
+
   it('points every repo reference at LibirSoft/grannyFlow', () => {
     expect(readRoot('README.md')).toContain('npx skills add LibirSoft/grannyFlow')
     const docs: Record<string, string> = {
