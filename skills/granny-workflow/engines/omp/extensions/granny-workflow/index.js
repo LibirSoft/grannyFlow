@@ -4761,7 +4761,7 @@ var COMMAND_CHARS2 = 160;
 var PAD = " ".repeat(10);
 var AGENT_MARKERS = { running: "\u25CF", waiting: "\u2026", done: "\u2713", failed: "\u2717", cancelled: "\u2298" };
 var GROUP = /^(?:review|judge|fix|extract)\s+(.+?)\s+r(\d+)\b/;
-var STAGE = /^implement (.+)$/;
+var STAGE = /^implement (.+?)(?: step \d+\/\d+)?$/;
 function roundOf(label) {
   const round = GROUP.exec(label);
   if (round)
@@ -4993,8 +4993,8 @@ var VERBS = ["resolve merge", "implement", "commit", "repair", "review", "judge"
 var AT = "(?:implement|fix r\\d+|final)";
 var SHAPES = {
   "resolve merge": /^$/,
-  implement: /^$/,
-  commit: new RegExp(`^${AT}(?: (#\\d+))?$`),
+  implement: /^(step \d+\/\d+)?$/,
+  commit: new RegExp(`^(?:${AT}|step \\d+/\\d+)(?: (#\\d+))?$`),
   repair: new RegExp(`^${AT} (#\\d+)$`),
   review: /^(r\d+) (\S+)((?: #\d+)?(?: wait \d+| read| save| stop)?)$/,
   judge: /^(r\d+)((?: retry)?)$/,
@@ -5017,6 +5017,8 @@ function actionOf(verb, rest, reviewers) {
       return `fix ${m[1]}`;
     case "extract":
       return `extract ${m[1]} ${m[2]}${m[3]}`;
+    case "implement":
+      return m[1] ? `implement ${m[1]}` : verb;
     default:
       return verb;
   }
@@ -7134,7 +7136,8 @@ function runOutline(input, config) {
     name: clean(st.name || `stage ${i + 1}`),
     implement: st.implement !== false,
     review: st.review !== false,
-    checks: (st.checks === undefined ? config.checks.length : st.checks.length) > 0
+    checks: (st.checks === undefined ? config.checks.length : st.checks.length) > 0,
+    ...config.stepAgents && st.steps && st.steps.length > 1 ? { steps: st.steps.length } : {}
   }));
   return {
     kind,

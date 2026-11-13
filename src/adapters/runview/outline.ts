@@ -10,6 +10,8 @@ export interface StageOutline {
   implement: boolean
   review: boolean
   checks: boolean
+  /** The step count, when the stage's steps run as step agents (config stepAgents, two or more steps). */
+  steps?: number
 }
 
 export interface RunOutline {
@@ -35,6 +37,7 @@ export function runOutline(input: RunInput, config: GrannyConfig): RunOutline {
       implement: st.implement !== false,
       review: st.review !== false,
       checks: (st.checks === undefined ? config.checks.length : st.checks.length) > 0,
+      ...(config.stepAgents && st.steps && st.steps.length > 1 ? { steps: st.steps.length } : {}),
     }),
   )
   return {
@@ -61,7 +64,7 @@ const isCount = (v: unknown): v is number => typeof v === 'number' && Number.isI
 function readStage(v: unknown): StageOutline | undefined {
   if (!isRecord(v) || !isCount(v.number) || typeof v.name !== 'string') return undefined
   if (typeof v.implement !== 'boolean' || typeof v.review !== 'boolean' || typeof v.checks !== 'boolean') return undefined
-  return { number: v.number, name: clean(v.name), implement: v.implement, review: v.review, checks: v.checks }
+  return { number: v.number, name: clean(v.name), implement: v.implement, review: v.review, checks: v.checks, ...(isCount(v.steps) ? { steps: v.steps } : {}) }
 }
 
 /** The outline from status.json, or undefined when anything in it is malformed. */

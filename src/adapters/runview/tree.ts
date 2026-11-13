@@ -174,7 +174,7 @@ const PAD = ' '.repeat(10)
 export const AGENT_MARKERS: Record<AgentState, string> = { running: '●', waiting: '…', done: '✓', failed: '✗', cancelled: '⊘' }
 
 const GROUP = /^(?:review|judge|fix|extract)\s+(.+?)\s+r(\d+)\b/
-const STAGE = /^implement (.+)$/
+const STAGE = /^implement (.+?)(?: step \d+\/\d+)?$/
 
 function roundOf(label: string): string | undefined {
   const round = GROUP.exec(label)
@@ -420,8 +420,8 @@ type Verb = (typeof VERBS)[number]
 const AT = '(?:implement|fix r\\d+|final)'
 const SHAPES: Record<Verb, RegExp> = {
   'resolve merge': /^$/,
-  implement: /^$/,
-  commit: new RegExp(`^${AT}(?: (#\\d+))?$`),
+  implement: /^(step \d+\/\d+)?$/,
+  commit: new RegExp(`^(?:${AT}|step \\d+/\\d+)(?: (#\\d+))?$`),
   repair: new RegExp(`^${AT} (#\\d+)$`),
   review: /^(r\d+) (\S+)((?: #\d+)?(?: wait \d+| read| save| stop)?)$/,
   judge: /^(r\d+)((?: retry)?)$/,
@@ -444,6 +444,8 @@ function actionOf(verb: Verb, rest: string, reviewers: number | undefined): stri
       return `fix ${m[1]}`
     case 'extract':
       return `extract ${m[1]} ${m[2]}${m[3]}`
+    case 'implement':
+      return m[1] ? `implement ${m[1]}` : verb
     default:
       return verb
   }

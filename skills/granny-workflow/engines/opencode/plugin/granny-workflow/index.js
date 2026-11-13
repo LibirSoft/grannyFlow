@@ -3933,7 +3933,8 @@ function runOutline(input, config) {
     name: clean(st.name || `stage ${i + 1}`),
     implement: st.implement !== false,
     review: st.review !== false,
-    checks: (st.checks === undefined ? config.checks.length : st.checks.length) > 0
+    checks: (st.checks === undefined ? config.checks.length : st.checks.length) > 0,
+    ...config.stepAgents && st.steps && st.steps.length > 1 ? { steps: st.steps.length } : {}
   }));
   return {
     kind,

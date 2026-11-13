@@ -64,7 +64,7 @@ var COMMAND_CHARS = 160;
 var PAD = " ".repeat(10);
 var AGENT_MARKERS = { running: "\u25CF", waiting: "\u2026", done: "\u2713", failed: "\u2717", cancelled: "\u2298" };
 var GROUP = /^(?:review|judge|fix|extract)\s+(.+?)\s+r(\d+)\b/;
-var STAGE = /^implement (.+)$/;
+var STAGE = /^implement (.+?)(?: step \d+\/\d+)?$/;
 function roundOf(label) {
   const round = GROUP.exec(label);
   if (round)
@@ -296,8 +296,8 @@ var VERBS = ["resolve merge", "implement", "commit", "repair", "review", "judge"
 var AT = "(?:implement|fix r\\d+|final)";
 var SHAPES = {
   "resolve merge": /^$/,
-  implement: /^$/,
-  commit: new RegExp(`^${AT}(?: (#\\d+))?$`),
+  implement: /^(step \d+\/\d+)?$/,
+  commit: new RegExp(`^(?:${AT}|step \\d+/\\d+)(?: (#\\d+))?$`),
   repair: new RegExp(`^${AT} (#\\d+)$`),
   review: /^(r\d+) (\S+)((?: #\d+)?(?: wait \d+| read| save| stop)?)$/,
   judge: /^(r\d+)((?: retry)?)$/,
@@ -320,6 +320,8 @@ function actionOf(verb, rest, reviewers) {
       return `fix ${m[1]}`;
     case "extract":
       return `extract ${m[1]} ${m[2]}${m[3]}`;
+    case "implement":
+      return m[1] ? `implement ${m[1]}` : verb;
     default:
       return verb;
   }
@@ -1298,7 +1300,7 @@ function readStage(v) {
     return;
   if (typeof v.implement !== "boolean" || typeof v.review !== "boolean" || typeof v.checks !== "boolean")
     return;
-  return { number: v.number, name: clean(v.name), implement: v.implement, review: v.review, checks: v.checks };
+  return { number: v.number, name: clean(v.name), implement: v.implement, review: v.review, checks: v.checks, ...isCount(v.steps) ? { steps: v.steps } : {} };
 }
 function readOutline(value) {
   if (!isRecord2(value))
