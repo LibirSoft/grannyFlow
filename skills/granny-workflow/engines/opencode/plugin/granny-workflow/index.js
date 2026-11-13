@@ -869,6 +869,25 @@ ${BUILD_METHOD}
 
 When the stage's code is committed, bring ${pr} up to date in one edit (git-excluded; create its directory if missing), with sections: Title, Summary, Changes (table), Test plan (real numbers), Revised in stage N, Review fixes, Untested. Return startSha = HEAD before your first change.`;
 }
+function implementStepPrompt(p, stage, index, total, name, k, builds = index > 0) {
+  const steps = stage.steps ?? [];
+  const step = steps[k];
+  const pr = prBodyOf(p);
+  const earlier = k === 0 ? earlierLine(p, index, builds) : `The earlier steps of this stage are committed by other agents: first read ${branchLog(p)}, the code and ${pr}.
+`;
+  const order = steps.map((s, j) => `${j + 1}. ${stepName(s, j)}${j === k ? " (yours)" : ""}`).join(", ");
+  return `${common(p)}
+
+You are the IMPLEMENTER. Stage ${index + 1}/${total}: "${name}", step ${k + 1} of ${steps.length}: "${stepName(step, k)}".
+${earlier}The steps of this stage are built by one agent each, in this order: ${order}.
+Do ONLY step ${k + 1}, then stop; the later steps are other agents' work:
+${step.task}
+If the branch log shows this step is already committed, change nothing and say so in deviations.
+
+${BUILD_METHOD}
+
+When this step's code is committed, bring ${pr} up to date in one edit (git-excluded; create its directory if missing), with sections: Title, Summary, Changes (table), Test plan (real numbers), Revised in stage N, Review fixes, Untested. Return startSha = HEAD before your first change.`;
+}
 function fixPrompt(p, name, round, accepted, overruled = []) {
   return `${common(p)}
 
@@ -1940,6 +1959,43 @@ function stepErrors(i, s) {
     return problems;
   });
 }
+function plannedSteps(list) {
+  if (!Array.isArray(list))
+    return;
+  const kept = list.flatMap((step) => {
+    if (!step || typeof step !== "object")
+      return [];
+    const { name, task } = step;
+    if (typeof task !== "string" || !task.trim())
+      return [];
+    return [typeof name === "string" && name.trim() ? { name, task } : { task }];
+  });
+  return kept.length ? kept : undefined;
+}
+function mergeSteps(ran) {
+  const first = ran[0].implementation;
+  const last = ran.at(-1).implementation;
+  const said = (text) => {
+    const parts = ran.flatMap((s, k) => {
+      const t = text(s.implementation);
+      return t ? [`step ${k + 1} (${s.name}): ${t}`] : [];
+    });
+    return parts.length ? parts.join(`
+`) : undefined;
+  };
+  const deviations = said((r) => saidSomething(r.deviations));
+  const declined = ran.flatMap((s, k) => (s.implementation.declined ?? []).map((d) => ({ id: d.id, reason: `step ${k + 1} (${s.name}): ${d.reason}` })));
+  return {
+    startSha: first.startSha,
+    headSha: last.headSha,
+    gatesGreen: last.gatesGreen,
+    gates: last.gates,
+    commits: ran.flatMap((s) => s.implementation.commits ?? []),
+    untested: said((r) => r.untested?.trim() || undefined) ?? "",
+    ...deviations ? { deviations } : {},
+    ...declined.length ? { declined } : {}
+  };
+}
 function stageCheckErrors(stages, checks) {
   const names = new Set(checks.map((c) => c.name));
   return (stages ?? []).flatMap((st, i) => (Array.isArray(st?.checks) ? st.checks : []).filter((n) => !names.has(n)).map((n) => `stages[${i}].checks names "${n}", which is not in config checks (${[...names].join(", ") || "none configured"})`));
@@ -2280,6 +2336,9 @@ async function runGranny(host, input) {
         out.repo = st.repo;
       if (Array.isArray(st.after))
         out.after = st.after;
+      const steps = config.stepAgents ? plannedSteps(st.steps) : undefined;
+      if (steps)
+        out.steps = steps;
       return out;
     });
     const draft = { files, stages, summary: String(r.summary ?? "") };
@@ -2721,6 +2780,26 @@ the last repair's deviations: ${deviations}` : ""}`;
       ledger.set(i, []);
     return ledger.get(i);
   };
+  const stepAgentsOf = (st) => config.stepAgents && (st.steps?.length ?? 0) > 1;
+  const implementSteps = async (lane, st, i, name, task, notes, ran) => {
+    const steps = st.steps;
+    for (let k = 0;k < steps.length; k++) {
+      const at = `step ${k + 1}/${steps.length}`;
+      const impl = await implement(lane, `implement ${name} ${at}`, implementStepPrompt(lane.p, st, i, specs.length, name, k, buildsOnEarlier(i)));
+      ran.push({ name: stepName(steps[k], k), implementation: impl });
+      if (k === steps.length - 1)
+        break;
+      if (!impl.gatesGreen)
+        host.log(`${name}: ${at} ended with RED gates`);
+      const { left, unread } = await commitWork(lane, name, at, task);
+      if (left || unread) {
+        const note = unread ? `working tree status unreadable after ${at} (${unread})` : `uncommitted changes after ${at}: ${listed(left)} - step ${k + 2}/${steps.length} started on them`;
+        host.log(`${name}: ${note}`);
+        notes.push(note);
+      }
+    }
+    return mergeSteps(ran);
+  };
   const runStage = async (lane, st, i, name, began) => {
     let impl;
     let base = lane.base;
@@ -2729,6 +2808,8 @@ the last repair's deviations: ${deviations}` : ""}`;
     const checks = checksOf(st);
     const runs = [];
     const ran = () => runs.length ? { checks: runs } : {};
+    const stepRuns = [];
+    const stepsOut = () => stepRuns.length ? { steps: stepRuns } : {};
     const notes = [];
     let committed = {};
     let gates;
@@ -2741,7 +2822,7 @@ the last repair's deviations: ${deviations}` : ""}`;
         base = start;
       else
         host.log(`${name}: could not read HEAD before the implementer ran - reviewing ${lane.base}...HEAD instead (exit ${head.code}): ${head.output.slice(-500)}`);
-      impl = await implement(lane, `implement ${name}`, implementPrompt(lane.p, st, i, specs.length, name, buildsOnEarlier(i)));
+      impl = stepAgentsOf(st) ? await implementSteps(lane, st, i, name, task, notes, stepRuns) : await implement(lane, `implement ${name}`, implementPrompt(lane.p, st, i, specs.length, name, buildsOnEarlier(i)));
       if (!impl.gatesGreen)
         host.log(`${name}: implementer ended with RED gates - review will see it`);
       if (start && impl.startSha !== start)
@@ -2772,14 +2853,14 @@ the last repair's deviations: ${deviations}` : ""}`;
         const { left, unread } = committed;
         const note = left ? `the implementer made no commit: the work it left is uncommitted (${listed(left)}), so there was nothing to review` : `the implementer made no commit: ${base}..HEAD is empty${resumed ? `, and so is ${lane.base}..HEAD on this resume` : ""}, so there was nothing to review${unread ? `; the working tree status could not be read (${unread}), so uncommitted work may be left` : ""}`;
         host.log(`${name}: no-changes - ${note}`);
-        return { stage: name, ...where, implementation: impl, outcome: "no-changes", rounds: 0, residual: [], unresolved: [], history: [], note };
+        return { stage: name, ...where, implementation: impl, outcome: "no-changes", rounds: 0, residual: [], unresolved: [], history: [], note, ...stepsOut() };
       }
       const last = committed.impl ?? impl;
       gates = { green: last.gatesGreen, text: last.gates, by: committed.by ?? "the implementer" };
       if (checks.length) {
         const gate = await checkGate(lane, name, "implement", checks, runs, task, gates);
         if (!gate.passed)
-          return { stage: name, ...where, implementation: impl, outcome: "checks-failed", rounds: 0, residual: [], unresolved: [], history: [], note: gate.note, ...ran() };
+          return { stage: name, ...where, implementation: impl, outcome: "checks-failed", rounds: 0, residual: [], unresolved: [], history: [], note: gate.note, ...ran(), ...stepsOut() };
       } else {
         if (!committed.impl) {
           committed = await commitWork(lane, name, "implement", task);
@@ -2808,7 +2889,7 @@ the last repair's deviations: ${deviations}` : ""}`;
     }
     const note = [loop.note, ...notes].filter(Boolean).join(`
 `);
-    return { stage: name, ...where, ...impl ? { implementation: impl } : {}, ...loop, ...note ? { note } : {}, ...ran() };
+    return { stage: name, ...where, ...impl ? { implementation: impl } : {}, ...loop, ...note ? { note } : {}, ...ran(), ...stepsOut() };
   };
   const mergeLane = async (state, lane, name) => {
     const main = state.lane;

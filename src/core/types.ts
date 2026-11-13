@@ -180,6 +180,8 @@ export interface StageResult {
   outcome: StageOutcome
   rounds: number
   implementation?: Implementation
+  /** One entry per step, in order, only when step agents built the stage (stepAgents on, two or more steps). */
+  steps?: Array<{ name: string; implementation: Implementation }>
   residual: Finding[]
   unresolved: Finding[]
   history: RoundRecord[]
