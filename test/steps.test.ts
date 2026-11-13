@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'bun:test'
 import { resolveConfig } from '../src/core/config'
+import { renderPrompts } from '../scripts/build'
 import { implementPrompt, implementStepPrompt } from '../src/core/prompts'
 import type { StageSpec } from '../src/core/types'
 
@@ -44,5 +45,14 @@ describe('the step prompt', () => {
 
   it('writes the PR body when this step is committed', () => {
     expect(implementStepPrompt(p, stage, 0, 1, 'core', 2)).toContain("When this step's code is committed, bring .granny/PR-BODY.md up to date in one edit")
+  })
+})
+
+describe('the prompt reference', () => {
+  it('renders the step prompts and the planner with stepAgents on', () => {
+    const rendered = renderPrompts()
+    expect(rendered).toContain('## Planner - a run with goal, with stepAgents on')
+    expect(rendered).toContain('## Implementer - stage with steps, with stepAgents off or one step')
+    expect(rendered).toContain('## Implementer - a step of a stage with steps, with stepAgents on')
   })
 })

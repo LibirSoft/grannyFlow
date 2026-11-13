@@ -12,6 +12,7 @@ import {
   finalPrompt,
   fixPrompt,
   implementPrompt,
+  implementStepPrompt,
   judgePrompt,
   judgeRetryNote,
   judgeStepPrompt,
@@ -103,6 +104,7 @@ export function renderPrompts(): string {
   }
   const plans = ['<plan files>']
   const stage = { number: 2, total: 2, name: '<stage name>', task: '<stage task>' }
+  const stepped = { task: '<stage task>', steps: [{ name: '<step name>', task: '<step task>' }, { name: '<next step name>', task: '<next step task>' }] }
   const classes = { verdict: 'confirmed', impact: 'major', likelihood: 'edge', fixCost: 'small', scope: 'in-scope', priority: 80, evidence: '<path:line + trigger steps>' } as const
   const decided = (id: string, action: 'fix' | 'residual', rule: number) => ({
     id,
@@ -129,11 +131,20 @@ export function renderPrompts(): string {
   const sections: Array<[string, string]> = [
     ['Granny - worktree setup, the helper agent on Claude Code (on Cursor, run the command yourself)', worktreeCommandPrompt('<repo>', '<branch>', setup)],
     ['Planner - a run with goal (context here is the run\'s context only; the plan files do not exist yet)', draftPrompt({ ...p, context: '<context: work-order files and override notes>' }, '<goal>', ['<repo>/.granny/plans/<branch-slug>.md'])],
+    [
+      'Planner - a run with goal, with stepAgents on (the paragraph on steps comes before the return line, and the stages carry steps; the planner entry above is the prompt with it off)',
+      draftPrompt({ ...p, config: resolveConfig([{ stepAgents: true }]), context: '<context: work-order files and override notes>' }, '<goal>', ['<repo>/.granny/plans/<branch-slug>.md']),
+    ],
     ['Plan reviewer - agent engine', agentPlanReviewPrompt(p, plans)],
     ['Plan reviewer - codex exec, the Codex plugin task, the {prompt} of a command engine and the opencode engine', planReviewPrompt(p, plans)],
     ['Judge - plan review', planJudgePrompt(p, plans, []).replace(/\[\]$/, '<findings as JSON>')],
     ['Implementer - plan fix (round 1; later rounds extend the newest rN deltas section)', planFixPrompt(p, plans, 1, []).replace(/\[\]$/, '<accepted findings as JSON>')],
     ['Implementer - stage', implementPrompt(p, { task: '<stage task>' }, 1, 2, '<stage name>')],
+    ['Implementer - stage with steps, with stepAgents off or one step (the stage task, then its steps as one numbered list)', implementPrompt(p, stepped, 1, 2, '<stage name>')],
+    [
+      'Implementer - a step of a stage with steps, with stepAgents on and two or more steps (label `implement <stage> step <k>/<n>`; the first step gets the earlier-stages line of the stage, a later step the line on the earlier steps)',
+      implementStepPrompt(p, stepped, 1, 2, '<stage name>', 1),
+    ],
     ['Implementer - fix', fixPrompt(p, '<stage name>', 1, []).replace(/\[\]$/, '<accepted findings as JSON>')],
     [
       'Implementer - fix, from round 2 on when the judge overruled the fixer (the plan fix gets the same OVERRULED block)',
