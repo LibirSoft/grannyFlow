@@ -34,13 +34,19 @@ describe('the step prompt', () => {
     expect(prompt).toContain('How to build it:')
   })
 
-  it('has the first step read the earlier stages, and a later step read what the earlier steps committed', () => {
+  it('has the first step read the earlier stages, and a later step read the earlier stages and what the earlier steps committed', () => {
     const first = implementStepPrompt(p, stage, 1, 2, 'core', 0, true)
     expect(first).toContain('Earlier stages are done and reviewed: first read `git log --oneline main..HEAD`, the code and .granny/PR-BODY.md.')
     expect(first).not.toContain('The earlier steps of this stage')
     const later = implementStepPrompt(p, stage, 1, 2, 'core', 2, true)
+    expect(later).toContain('Earlier stages are done and reviewed: first read `git log --oneline main..HEAD`, the code and .granny/PR-BODY.md.')
     expect(later).toContain('The earlier steps of this stage are committed by other agents: first read `git log --oneline main..HEAD`, the code and .granny/PR-BODY.md.')
-    expect(later).not.toContain('Earlier stages are done and reviewed')
+  })
+
+  it('keeps the parallel-lane line in a later step too: the other stages commit nothing on this branch', () => {
+    const later = implementStepPrompt(p, stage, 1, 2, 'core', 2, false)
+    expect(later).toContain('This stage does not build on the other stages (they run in parallel, elsewhere or later): expect no commits from them on this branch.')
+    expect(later).toContain('The earlier steps of this stage are committed by other agents')
   })
 
   it('writes the PR body when this step is committed', () => {

@@ -878,8 +878,8 @@ function implementStepPrompt(p, stage, index, total, name, k, builds = index > 0
   const steps = stage.steps ?? [];
   const step = steps[k];
   const pr = prBodyOf(p);
-  const earlier = k === 0 ? earlierLine(p, index, builds) : `The earlier steps of this stage are committed by other agents: first read ${branchLog(p)}, the code and ${pr}.
-`;
+  const earlier = `${earlierLine(p, index, builds)}${k === 0 ? "" : `The earlier steps of this stage are committed by other agents: first read ${branchLog(p)}, the code and ${pr}.
+`}`;
   const order = steps.map((s, j) => `${j + 1}. ${stepName(s, j)}${j === k ? " (yours)" : ""}`).join(", ");
   return `${common(p)}
 
