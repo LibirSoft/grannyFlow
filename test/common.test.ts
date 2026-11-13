@@ -58,10 +58,14 @@ describe('dropPlaceholders', () => {
     expect(clean.stages![1]!.steps![0]).not.toHaveProperty('name')
   })
 
-  it('lets a placeholder-filled stage with steps through checkInput', () => {
-    const withSteps = { repo: '/r', branch: 'b', goal: '', stages: [{ name: 'a', task: 'A.', steps: [{ name: '', task: 'first' }, { name: '', task: 'second' }] }, { name: 'b', task: 'B.', implement: false, steps: [] }] } as unknown as RunInput
-    expect(checkInput(withSteps).length).toBeGreaterThan(0)
-    expect(checkInput(dropPlaceholders(withSteps))).toEqual([])
+  it('refuses the placeholder steps of a raw input, and lets them through once dropPlaceholders has cleaned them', () => {
+    const stages = [{ name: 'a', task: 'A.', steps: [{ name: '', task: 'first' }, { name: '', task: 'second' }] }, { name: 'b', task: 'B.', implement: false, steps: [] }]
+    expect(checkInput({ repo: '/r', branch: 'b', stages } as unknown as RunInput)).toEqual([
+      'stages[0].steps[0].name must be a non-empty string',
+      'stages[0].steps[1].name must be a non-empty string',
+      'stages[1].steps must be a non-empty array of { name?, task }',
+    ])
+    expect(checkInput(dropPlaceholders({ repo: '/r', branch: 'b', goal: '', stages } as unknown as RunInput))).toEqual([])
   })
 })
 
