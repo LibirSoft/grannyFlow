@@ -509,6 +509,19 @@ describe('skill docs', () => {
     expect(read('SKILL.md')).toContain('when no final review follows')
   })
 
+  it('limits the wider review base of a resume to a stage with step agents, and says which count failed, in config.md, cursor.md and SKILL.md', () => {
+    const resume = read('references/config.md').split('**Resume.**')[1]!.split('\n\n')[0]!
+    expect(resume).toContain('the stage is reviewed from the HEAD the resume read')
+    expect(resume).toContain('when the checks on the whole branch stay red')
+    expect(resume).toContain('A stage that does not run step agents resumes as before this feature.')
+    expect(read('references/config.md')).toContain('and, when it runs step agents, also when no final review follows it')
+    expect(read('references/config.md')).toContain('could not be counted on this resume')
+    expect(read('references/cursor.md')).toContain('or, for a stage with step agents, when no final review follows the stage')
+    expect(read('references/cursor.md')).toContain('could not be counted on this resume')
+    expect(read('SKILL.md')).toContain('or, with step agents, when no final review follows it')
+    expect(read('SKILL.md')).toContain('and, with step agents, when no final review follows it')
+  })
+
   it('has the Cursor step flow read the status and log the red gates the way the engine does', () => {
     const cursor = read('references/cursor.md')
     expect(cursor).toContain('read `git status --porcelain` (the work dir and the plan files do not count; once more when it fails)')
