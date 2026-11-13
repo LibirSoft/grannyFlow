@@ -854,8 +854,11 @@ function earlierLine(p, index, builds) {
   return index === 0 ? "" : `This stage does not build on the other stages (they run in parallel, elsewhere or later): expect no commits from them on this branch.
 `;
 }
+function prBodyInstruction(p, unit) {
+  const whose = unit === "stage" ? "the stage's" : "this step's";
+  return `When ${whose} code is committed, bring ${prBodyOf(p)} up to date in one edit (git-excluded; create its directory if missing), with sections: Title, Summary, Changes (table), Test plan (real numbers), Revised in stage N, Review fixes, Untested. Return startSha = HEAD before your first change.`;
+}
 function implementPrompt(p, stage, index, total, name, builds = index > 0) {
-  const pr = prBodyOf(p);
   const steps = stage.steps?.length ? `
 
 Its steps, in this order - commit each one before you start the next:
@@ -869,7 +872,7 @@ ${stage.task ?? ""}${steps}
 
 ${BUILD_METHOD}
 
-When the stage's code is committed, bring ${pr} up to date in one edit (git-excluded; create its directory if missing), with sections: Title, Summary, Changes (table), Test plan (real numbers), Revised in stage N, Review fixes, Untested. Return startSha = HEAD before your first change.`;
+${prBodyInstruction(p, "stage")}`;
 }
 function implementStepPrompt(p, stage, index, total, name, k, builds = index > 0) {
   const steps = stage.steps ?? [];
@@ -888,7 +891,7 @@ If the branch log shows this step is already committed, change nothing and say s
 
 ${BUILD_METHOD}
 
-When this step's code is committed, bring ${pr} up to date in one edit (git-excluded; create its directory if missing), with sections: Title, Summary, Changes (table), Test plan (real numbers), Revised in stage N, Review fixes, Untested. Return startSha = HEAD before your first change.`;
+${prBodyInstruction(p, "step")}`;
 }
 function fixPrompt(p, name, round, accepted, overruled = []) {
   return `${common(p)}

@@ -199,8 +199,12 @@ function earlierLine(p: PromptContext, index: number, builds: boolean): string {
   return index === 0 ? '' : 'This stage does not build on the other stages (they run in parallel, elsewhere or later): expect no commits from them on this branch.\n'
 }
 
+function prBodyInstruction(p: PromptContext, unit: 'stage' | 'step'): string {
+  const whose = unit === 'stage' ? "the stage's" : "this step's"
+  return `When ${whose} code is committed, bring ${prBodyOf(p)} up to date in one edit (git-excluded; create its directory if missing), with sections: Title, Summary, Changes (table), Test plan (real numbers), Revised in stage N, Review fixes, Untested. Return startSha = HEAD before your first change.`
+}
+
 export function implementPrompt(p: PromptContext, stage: StageSpec, index: number, total: number, name: string, builds = index > 0): string {
-  const pr = prBodyOf(p)
   const steps = stage.steps?.length ? `\n\nIts steps, in this order - commit each one before you start the next:\n${stage.steps.map((s, k) => `${k + 1}. ${stepName(s, k)}: ${s.task}`).join('\n')}` : ''
   return `${common(p)}
 
@@ -210,7 +214,7 @@ ${stage.task ?? ''}${steps}
 
 ${BUILD_METHOD}
 
-When the stage's code is committed, bring ${pr} up to date in one edit (git-excluded; create its directory if missing), with sections: Title, Summary, Changes (table), Test plan (real numbers), Revised in stage N, Review fixes, Untested. Return startSha = HEAD before your first change.`
+${prBodyInstruction(p, 'stage')}`
 }
 
 /** One step of a stage with stepAgents on: its own agent, which sees the other steps by name only. `k` is the step's 0-based index. */
@@ -230,7 +234,7 @@ If the branch log shows this step is already committed, change nothing and say s
 
 ${BUILD_METHOD}
 
-When this step's code is committed, bring ${pr} up to date in one edit (git-excluded; create its directory if missing), with sections: Title, Summary, Changes (table), Test plan (real numbers), Revised in stage N, Review fixes, Untested. Return startSha = HEAD before your first change.`
+${prBodyInstruction(p, 'step')}`
 }
 
 export function fixPrompt(p: PromptContext, name: string, round: number, accepted: Finding[], overruled: Overruled[] = []): string {
