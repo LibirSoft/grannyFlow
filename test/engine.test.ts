@@ -788,12 +788,13 @@ describe('the base a stage review diffs against', () => {
     expect(f.commands.filter(c => c.includes('review-b-r1'))).toEqual([])
   })
 
-  it('reviews <base>...HEAD on a resume with no final review, when the first resumed stage has commits below its HEAD', async () => {
+  it('reviews a plain resumed stage from its own HEAD with no final review, though it has commits below that HEAD', async () => {
     const f = fakeHost({ commits: base => (base === 'main' ? 3 : 1) })
     const r = await runGranny(f.host, input({ fromStage: 2, stages: [{ name: 'a', task: 'A' }, { name: 'b', task: 'B' }], config: { finalReview: false } }))
     expect(r.stages.map(s => [s.stage, s.outcome])).toEqual([['a', 'skipped'], ['b', 'clean']])
-    expect(f.logs).toContain('b: commits of an earlier run may sit below its HEAD - reviewing main...HEAD instead')
-    expect(f.commands[0]).toContain('codex exec review --base main -o')
+    expect(f.probes).not.toContain('git rev-list --count main..HEAD')
+    expect(f.logs.some(l => l.includes('may sit below'))).toBe(false)
+    expect(f.commands[0]).toContain('codex exec review --base deadbee1 -o')
   })
 
   it('ends a later resumed stage no-changes when it makes no commit', async () => {

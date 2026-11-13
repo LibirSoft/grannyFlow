@@ -2692,10 +2692,11 @@ the last repair's deviations: ${deviations}` : ""}`;
           count = await commits(`commits ${name} after commit`);
       }
       const resumed = fromStage > 1 && i === fromStage - 1;
-      if (resumed && (count === 0 || !finalReviewCovers(st))) {
+      if (resumed && (count === 0 || stepAgentsOf(st) && !finalReviewCovers(st))) {
         const onBranch = await commits(`commits ${name} on resume`, lane.base);
-        if (onBranch !== 0 && (onBranch === undefined || onBranch !== count)) {
-          host.log(count === 0 ? `${name}: no new commit on resume - reviewing ${lane.base}...HEAD instead` : `${name}: commits of an earlier run may sit below its HEAD - reviewing ${lane.base}...HEAD instead`);
+        if (onBranch !== 0 && (onBranch === undefined || count === undefined || onBranch !== count)) {
+          const why = count === 0 ? "no new commit on resume" : onBranch === undefined ? "the commits below its HEAD could not be counted on this resume" : count === undefined ? "the commits since its start could not be counted on this resume" : "commits of an earlier run may sit below its HEAD";
+          host.log(`${name}: ${why} - reviewing ${lane.base}...HEAD instead`);
           base = lane.base;
         }
         if (count === 0)

@@ -148,4 +148,22 @@ describe('step agents', () => {
     expect(f.calls.find(c => c.kind === 'findings')!.prompt).toContain('deadbee1...HEAD')
     expect(f.logs.some(l => l.includes('may sit below'))).toBe(false)
   })
+
+  it('reviews from the run base on a resume with no final review when the commits below the HEAD cannot be counted', async () => {
+    const failed = { code: 128, output: 'fatal: bad revision\n' }
+    const f = fakeHost({ commits: base => (base === 'main' ? failed : 1) })
+    await runGranny(f.host, run([{ name: 'a', task: 'A' }, { name: 'core', task: 'WP-01', steps }], { fromStage: 2, config: { stepAgents: true, finalReview: false } }))
+    expect(f.calls.find(c => c.kind === 'findings')!.prompt).toContain('main...HEAD')
+    expect(f.logs).toContain('core: the commits below its HEAD could not be counted on this resume - reviewing main...HEAD instead')
+    expect(f.logs.some(l => l.includes('may sit below'))).toBe(false)
+  })
+
+  it('reviews from the run base on a resume with no final review when the commits since the stage started cannot be counted', async () => {
+    const failed = { code: 128, output: 'fatal: bad revision\n' }
+    const f = fakeHost({ commits: base => (base === 'main' ? 3 : failed) })
+    await runGranny(f.host, run([{ name: 'a', task: 'A' }, { name: 'core', task: 'WP-01', steps }], { fromStage: 2, config: { stepAgents: true, finalReview: false } }))
+    expect(f.calls.find(c => c.kind === 'findings')!.prompt).toContain('main...HEAD')
+    expect(f.logs).toContain('core: the commits since its start could not be counted on this resume - reviewing main...HEAD instead')
+    expect(f.logs.some(l => l.includes('may sit below'))).toBe(false)
+  })
 })
