@@ -167,6 +167,15 @@ describe('step agents', () => {
     expect(f.logs.some(l => l.includes('may sit below'))).toBe(false)
   })
 
+  it('logs the no-new-commit line on a resume with no final review when the stage makes no commit and <base>..HEAD cannot be counted', async () => {
+    const failed = { code: 128, output: 'fatal: bad revision\n' }
+    const f = fakeHost({ commits: base => (base === 'main' ? failed : 0) })
+    await runGranny(f.host, run([{ name: 'a', task: 'A' }, { name: 'core', task: 'WP-01', steps }], { fromStage: 2, config: { stepAgents: true, finalReview: false } }))
+    expect(f.calls.find(c => c.kind === 'findings')!.prompt).toContain('main...HEAD')
+    expect(f.logs).toContain('core: no new commit on resume - reviewing main...HEAD instead')
+    expect(f.logs.some(l => l.includes('could not be counted on this resume'))).toBe(false)
+  })
+
   it('gives the commit agent after a step the prompt of that step, not the stage prompt', async () => {
     const f = fakeHost({ status: [' M a.txt', ''] })
     await runGranny(f.host, run([{ name: 'core', task: 'WP-01', steps }], on))
