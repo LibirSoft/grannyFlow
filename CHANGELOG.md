@@ -33,6 +33,8 @@
 - Review trail on GitLab: a publish GitLab refuses is reported as that, not as a refused line comment; a listed draft note without an id stops the run before anything is deleted; an MR given with `--pr` that is not open is named as such, and still gets the rounds. `--out` with `--base` on a GitLab repo names the MR and GitLab in the bodies.
 - The engine does not read HEAD before a plan review round, where no commit is anchored.
 - Step agents: a stage that ends `no-changes` or `checks-failed` keeps the notes of its steps (work a step left uncommitted) on its note, as a stage that reaches review does.
+- Step agents on Cursor: a stage with `steps` gets the prompt that lists them when `stepAgents` is off or the stage has one step, and a stage built one step at a time gets the same step notes and red-gate log lines as on the other hosts.
+- Step agents: the skill's stage split tells the launching agent to write each stage's `steps` when `stepAgents` is on for the run, as the planner does in a run with `goal`.
 
 ## 1.6.0
 

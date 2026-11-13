@@ -477,6 +477,19 @@ describe('skill docs', () => {
     expect(readRoot('README.md')).toMatch(/^\| `stepAgents` \| `false` \|/m)
   })
 
+  it('gives the Cursor flow the step prompts and the step rules, and the stage split a sentence on steps', () => {
+    const cursor = read('references/cursor.md')
+    for (const text of [
+      'Implementer - stage with steps, with stepAgents off or one step',
+      'Implementer - stage"',
+      '"(yours)"',
+      'ended with RED gates',
+      'uncommitted changes after step <k>/<n>: <files> - step <k+1>/<n> started on them',
+      'working tree status unreadable after step <k>/<n>',
+    ]) expect({ text, has: cursor.includes(text) }).toEqual({ text, has: true })
+    expect(read('SKILL.md').split('\n').find(l => l.startsWith('Stage split:'))).toContain('one per logical commit point')
+  })
+
   it('points every repo reference at LibirSoft/grannyFlow', () => {
     expect(readRoot('README.md')).toContain('npx skills add LibirSoft/grannyFlow')
     const docs: Record<string, string> = {
