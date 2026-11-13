@@ -35,6 +35,7 @@
 - Step agents: a stage that ends `no-changes` or `checks-failed` keeps the notes of its steps (work a step left uncommitted) on its note, as a stage that reaches review does.
 - Step agents on Cursor: a stage with `steps` gets the prompt that lists them when `stepAgents` is off or the stage has one step, and a stage built one step at a time gets the same step notes and red-gate log lines as on the other hosts.
 - Step agents: the skill's stage split tells the launching agent to write each stage's `steps` when `stepAgents` is on for the run, as the planner does in a run with `goal`.
+- A stage resumed with `fromStage` reviews `<base>...HEAD` when no final review follows it (`finalReview` off, or no other stage in its repo) and the branch has commits below the stage's HEAD, as a resumed stage that made no commit already did. Before, a stage that made new commits on resume reviewed only those, so the commits an interrupted run made for it (such as steps committed before the stop) were never reviewed by the stage. With a final review the stage keeps reviewing from its HEAD, and the final review covers the branch.
 - Step agents: every step of a stage gets the "Earlier stages are done and reviewed" line (or, in a parallel lane, the "expect no commits from them on this branch" line), not only the first. Without it a later step read the branch log, which holds the earlier stages' commits, with no word that those are reviewed or belong to another stage.
 
 ## 1.6.0

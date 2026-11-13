@@ -2630,6 +2630,7 @@ the last repair's deviations: ${deviations}` : ""}`;
     return ledger.get(i);
   };
   const stepAgentsOf = (st) => config.stepAgents && (st.steps?.length ?? 0) > 1;
+  const finalReviewCovers = (st) => config.finalReview && specs.filter((s) => repoOf(s) === repoOf(st)).length > 1;
   const implementSteps = async (lane, st, i, name, task, notes, ran) => {
     const steps = st.steps;
     for (let k = 0;k < steps.length; k++) {
@@ -2690,13 +2691,15 @@ the last repair's deviations: ${deviations}` : ""}`;
         if (committed.impl)
           count = await commits(`commits ${name} after commit`);
       }
-      const resumed = count === 0 && fromStage > 1 && i === fromStage - 1;
-      if (resumed) {
-        count = await commits(`commits ${name} on resume`, lane.base);
-        if (count !== 0) {
-          host.log(`${name}: no new commit on resume - reviewing ${lane.base}...HEAD instead`);
+      const resumed = fromStage > 1 && i === fromStage - 1;
+      if (resumed && (count === 0 || !finalReviewCovers(st))) {
+        const onBranch = await commits(`commits ${name} on resume`, lane.base);
+        if (onBranch !== 0 && (onBranch === undefined || onBranch !== count)) {
+          host.log(count === 0 ? `${name}: no new commit on resume - reviewing ${lane.base}...HEAD instead` : `${name}: commits of an earlier run may sit below its HEAD - reviewing ${lane.base}...HEAD instead`);
           base = lane.base;
         }
+        if (count === 0)
+          count = onBranch;
       }
       if (count === 0) {
         const { left, unread } = committed;

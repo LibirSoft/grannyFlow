@@ -134,4 +134,18 @@ describe('step agents', () => {
     expect(f.logs).toContain('core: step 1/3 ended with RED gates')
     expect(implementations(f)).toEqual(['implement core step 1/3', 'implement core step 2/3', 'implement core step 3/3'])
   })
+
+  it('reviews from the run base on a resume with no final review, when the interrupted run committed some steps below the HEAD', async () => {
+    const f = fakeHost({ commits: base => (base === 'main' ? 3 : 1) })
+    await runGranny(f.host, run([{ name: 'a', task: 'A' }, { name: 'core', task: 'WP-01', steps }], { fromStage: 2, config: { stepAgents: true, finalReview: false } }))
+    expect(f.calls.find(c => c.kind === 'findings')!.prompt).toContain('main...HEAD')
+    expect(f.logs).toContain('core: commits of an earlier run may sit below its HEAD - reviewing main...HEAD instead')
+  })
+
+  it('keeps the review from the resume HEAD on a resume that a final review covers', async () => {
+    const f = fakeHost({ commits: base => (base === 'main' ? 3 : 1) })
+    await runGranny(f.host, run([{ name: 'a', task: 'A' }, { name: 'core', task: 'WP-01', steps }], { fromStage: 2, config: { stepAgents: true } }))
+    expect(f.calls.find(c => c.kind === 'findings')!.prompt).toContain('deadbee1...HEAD')
+    expect(f.logs.some(l => l.includes('may sit below'))).toBe(false)
+  })
 })

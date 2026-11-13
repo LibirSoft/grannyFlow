@@ -502,6 +502,13 @@ describe('skill docs', () => {
     expect(read('references/prompts.md').split('\n').find(l => l.startsWith('## Implementer - commit'))).toContain('`commit <stage> step <k>/<n>`')
   })
 
+  it('documents the review base of a resumed stage with no final review in config.md, cursor.md and SKILL.md', () => {
+    const phrase = 'commits of an earlier run may sit below its HEAD - reviewing <base>...HEAD instead'
+    expect(read('references/config.md')).toContain(phrase)
+    expect(read('references/cursor.md')).toContain(phrase)
+    expect(read('SKILL.md')).toContain('when no final review follows')
+  })
+
   it('points every repo reference at LibirSoft/grannyFlow', () => {
     expect(readRoot('README.md')).toContain('npx skills add LibirSoft/grannyFlow')
     const docs: Record<string, string> = {

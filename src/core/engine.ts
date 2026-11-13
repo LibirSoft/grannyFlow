@@ -1123,6 +1123,8 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
 
   /** A stage is built in steps when stepAgents is on and it has two or more steps; one step is built as a stage without steps. */
   const stepAgentsOf = (st: StageSpec): boolean => config.stepAgents && (st.steps?.length ?? 0) > 1
+  /** The final review of a repo reviews its whole branch: finalReview on and more than one stage in the repo. A lane merge can add one; that is left out here. */
+  const finalReviewCovers = (st: StageSpec): boolean => config.finalReview && specs.filter(s => repoOf(s) === repoOf(st)).length > 1
 
   const implementSteps = async (lane: Lane, st: StageSpec, i: number, name: string, task: StageTask | undefined, notes: string[], ran: StepRun[]): Promise<Implementation> => {
     const steps = st.steps!
@@ -1179,13 +1181,14 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
         committed = await commitWork(lane, name, 'implement', task)
         if (committed.impl) count = await commits(`commits ${name} after commit`)
       }
-      const resumed = count === 0 && fromStage > 1 && i === fromStage - 1
-      if (resumed) {
-        count = await commits(`commits ${name} on resume`, lane.base)
-        if (count !== 0) {
-          host.log(`${name}: no new commit on resume - reviewing ${lane.base}...HEAD instead`)
+      const resumed = fromStage > 1 && i === fromStage - 1
+      if (resumed && (count === 0 || !finalReviewCovers(st))) {
+        const onBranch = await commits(`commits ${name} on resume`, lane.base)
+        if (onBranch !== 0 && (onBranch === undefined || onBranch !== count)) {
+          host.log(count === 0 ? `${name}: no new commit on resume - reviewing ${lane.base}...HEAD instead` : `${name}: commits of an earlier run may sit below its HEAD - reviewing ${lane.base}...HEAD instead`)
           base = lane.base
         }
+        if (count === 0) count = onBranch
       }
       if (count === 0) {
         const { left, unread } = committed
