@@ -2853,14 +2853,16 @@ the last repair's deviations: ${deviations}` : ""}`;
         const { left, unread } = committed;
         const note = left ? `the implementer made no commit: the work it left is uncommitted (${listed(left)}), so there was nothing to review` : `the implementer made no commit: ${base}..HEAD is empty${resumed ? `, and so is ${lane.base}..HEAD on this resume` : ""}, so there was nothing to review${unread ? `; the working tree status could not be read (${unread}), so uncommitted work may be left` : ""}`;
         host.log(`${name}: no-changes - ${note}`);
-        return { stage: name, ...where, implementation: impl, outcome: "no-changes", rounds: 0, residual: [], unresolved: [], history: [], note, ...stepsOut() };
+        return { stage: name, ...where, implementation: impl, outcome: "no-changes", rounds: 0, residual: [], unresolved: [], history: [], note: [note, ...notes].join(`
+`), ...stepsOut() };
       }
       const last = committed.impl ?? impl;
       gates = { green: last.gatesGreen, text: last.gates, by: committed.by ?? "the implementer" };
       if (checks.length) {
         const gate = await checkGate(lane, name, "implement", checks, runs, task, gates);
         if (!gate.passed)
-          return { stage: name, ...where, implementation: impl, outcome: "checks-failed", rounds: 0, residual: [], unresolved: [], history: [], note: gate.note, ...ran(), ...stepsOut() };
+          return { stage: name, ...where, implementation: impl, outcome: "checks-failed", rounds: 0, residual: [], unresolved: [], history: [], note: [gate.note, ...notes].filter(Boolean).join(`
+`), ...ran(), ...stepsOut() };
       } else {
         if (!committed.impl) {
           committed = await commitWork(lane, name, "implement", task);

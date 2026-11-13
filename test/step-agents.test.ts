@@ -100,4 +100,22 @@ describe('step agents', () => {
       ['docs', 'h3'],
     ])
   })
+
+  it('keeps the steps and the note of leftover work when a stage ends with no changes', async () => {
+    const f = fakeHost({ commits: 0, status: [' M b.txt', ' M b.txt', ''] })
+    const r = await runGranny(f.host, run([{ name: 'core', task: 'WP-01', steps }], on))
+    expect(r.stages[0]).toMatchObject({ outcome: 'no-changes' })
+    expect(r.stages[0]!.steps!.map(s => s.name)).toEqual(['schema', 'route', 'docs'])
+    expect(r.stages[0]!.note).toContain('the implementer made no commit')
+    expect(r.stages[0]!.note).toContain('uncommitted changes after step 1/3: M b.txt - step 2/3 started on them')
+  })
+
+  it('keeps the steps and the note of leftover work when a stage ends with checks failed', async () => {
+    const f = fakeHost({ status: [' M b.txt', ' M b.txt', '', ' M b.txt', ''] })
+    const config = { stepAgents: true, maxRepairs: 0, checks: [{ name: 'tests', run: 'run-tests' }] }
+    const r = await runGranny(f.host, run([{ name: 'core', task: 'WP-01', steps }], { config }))
+    expect(r.stages[0]).toMatchObject({ outcome: 'checks-failed' })
+    expect(r.stages[0]!.steps!.map(s => s.name)).toEqual(['schema', 'route', 'docs'])
+    expect(r.stages[0]!.note).toContain('uncommitted changes after step 1/3: M b.txt - step 2/3 started on them')
+  })
 })
