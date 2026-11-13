@@ -55,6 +55,7 @@ var DEFAULT_CONFIG = {
   checks: [],
   maxRepairs: 2,
   readOnlyAgent: false,
+  stepAgents: false,
   watch: "full"
 };
 var ROLES = ["granny", "helper", "planner", "implementer", "judge"];
@@ -309,6 +310,8 @@ function validate(c, effortLayer) {
     errors.push("aiAttribution must be a boolean");
   if (typeof c.readOnlyAgent !== "boolean")
     errors.push("readOnlyAgent must be a boolean");
+  if (typeof c.stepAgents !== "boolean")
+    errors.push("stepAgents must be a boolean");
   if (!WATCH_MODES.includes(c.watch))
     errors.push('watch must be "full", "panel" or "off"');
   if (!Array.isArray(c.rules) || !c.rules.every((r) => typeof r === "string"))
