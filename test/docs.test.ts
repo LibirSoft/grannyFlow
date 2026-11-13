@@ -490,6 +490,18 @@ describe('skill docs', () => {
     expect(read('SKILL.md').split('\n').find(l => l.startsWith('Stage split:'))).toContain('one per logical commit point')
   })
 
+  it('names the step labels, the step status reads and the resume of step agents where the hosts, the helper row, the planner and the prompt reference list them', () => {
+    const md = read('SKILL.md')
+    expect(md).toContain('with stepAgents on and two or more steps: one agent per step, in order')
+    expect(md.split('\n').find(l => l.startsWith('| helper |'))).toContain('with step agents after each step but the last, `status <stage> step <k>/<n>`, and `status <stage> step <k>/<n> after commit` when the commit agent ran')
+    for (const host of ['omp', 'opencode']) expect({ host, has: read(`references/${host}.md`).includes('With `stepAgents` on and a stage with two or more steps, its implementer is one agent per step') }).toEqual({ host, has: true })
+    expect(read('references/claude-code.md')).toContain('On a `resumeFromRunId` resume the finished steps come back from the cache')
+    const config = read('references/config.md')
+    expect(config.split('**Resume.**')[1]!.split('\n\n')[0]).toContain('a resume with `resumeFromRunId`')
+    expect(config.split('## Planning')[1]!.split('\n## ')[0]).toContain('`{ files, stages: [{ name, task, after, repo?, steps? }], summary, questions? }`')
+    expect(read('references/prompts.md').split('\n').find(l => l.startsWith('## Implementer - commit'))).toContain('`commit <stage> step <k>/<n>`')
+  })
+
   it('points every repo reference at LibirSoft/grannyFlow', () => {
     expect(readRoot('README.md')).toContain('npx skills add LibirSoft/grannyFlow')
     const docs: Record<string, string> = {

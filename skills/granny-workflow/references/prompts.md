@@ -344,7 +344,7 @@ Output (tail):
 ```
 ```
 
-## Implementer - commit (`git status --porcelain` listed uncommitted changes before a check gate - label `commit <stage> <gate> #<n>`, a repair - or, with no checks or no commit at all, after the implementer, and with no checks after a fix - label `commit <stage> implement` or `commit <stage> fix r<n>`; the plan-file parts only when a plan file sits inside the repo, outside the work dir)
+## Implementer - commit (`git status --porcelain` listed uncommitted changes before a check gate - label `commit <stage> <gate> #<n>`, a repair, or after a step but the last of a stage with steps - label `commit <stage> step <k>/<n>` - or, with no checks or no commit at all, after the implementer, and with no checks after a fix - label `commit <stage> implement` or `commit <stage> fix r<n>`; the plan-file parts only when a plan file sits inside the repo, outside the work dir)
 
 ```text
 Working repo: <repo>, branch `<branch>` (verify with `git branch --show-current`). Never touch `<base>`. NEVER push, force-push, rebase, `git remote add` or open a PR.

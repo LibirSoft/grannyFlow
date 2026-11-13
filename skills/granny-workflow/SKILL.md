@@ -23,7 +23,7 @@ optional - given a plan and "planReview": true (default false; not with fromStag
 for each stage - independent stages at the same time (config parallel, default on, up to maxParallel):
   a stage waits for the stages in its after (default: the previous stage in its repo); one in another repo
   works in that repo's worktree; one whose repo is busy works in its own worktree and is merged back after its loop
-  granny reads HEAD, the implementer builds the stage (with stepAgents on: one agent per step of its steps, in order)
+  granny reads HEAD, the implementer builds the stage (with stepAgents on and two or more steps: one agent per step, in order)
      ├─ no commit since that HEAD ─► one commit prompt when the tree is dirty; still no commit ─► stage no-changes,
      │  not reviewed; the stages that build on it are skipped
      │  (the first stage of a fromStage resume reviews base...HEAD instead; no-changes only when that is empty too)
@@ -54,7 +54,7 @@ then: granny's final check in every repo (gates, clean tree, no AI trailers, PR 
 | role | does | default model |
 |---|---|---|
 | granny | you; plus the engine's extraction fallback and the final PR-ready check | session model |
-| helper | Claude Code only, because a Workflow script has no shell: runs one given command and reports its exit code and output - worktree setup, the HEAD reads (before a stage, after each check gate), commit-count reads and working-tree status reads (before each check gate; without checks after the implementer and each fix), the timeout probe, the checks, a lane's merge and cleanup, and the start, wait, read and stop steps of a review command, and the save of an `opencode` reviewer's answer. On opencode and omp granny runs these commands itself | `haiku`, effort `low`, on Claude Code |
+| helper | Claude Code only, because a Workflow script has no shell: runs one given command and reports its exit code and output - worktree setup, the HEAD reads (before a stage, after each check gate), commit-count reads and working-tree status reads (before each check gate; without checks after the implementer and each fix; with step agents after each step but the last, `status <stage> step <k>/<n>`, and `status <stage> step <k>/<n> after commit` when the commit agent ran), the timeout probe, the checks, a lane's merge and cleanup, and the start, wait, read and stop steps of a review command, and the save of an `opencode` reviewer's answer. On opencode and omp granny runs these commands itself | `haiku`, effort `low`, on Claude Code |
 | planner | in a run with `goal`: explores the repo, writes the plan file and proposes the stages; writes nothing else | session model |
 | implementer | builds each stage, fixes accepted findings, repairs failed checks, commits; in the plan review, fixes the plan files in place without committing them | session model |
 | reviewers | config `reviewers`, a list; every reviewer reviews every stage, all at the same time. Engines: `agent` a host model (the default list is one `agent` reviewer on the session model); `auto` (an entry's engine when it names none) runs OpenAI's Codex plugin when it is installed on Claude Code and `node` is on `PATH`, otherwise the Codex CLI (`codex exec review`); `codex-plugin` forces the plugin (and allows `mode: "adversarial-review"`), `codex` the CLI, `command` any CLI, `opencode` any model opencode reaches (Kimi, GLM, ...) as a read-only agent opencode enforces, on every host | one reviewer, `reviewer`, engine `agent` on the session model |
