@@ -1735,8 +1735,28 @@ function stageErrors(stages, known) {
     if (s.checks !== undefined && !(Array.isArray(s.checks) && s.checks.every((c) => typeof c === "string" && c.trim()))) {
       errors.push(`stages[${i}].checks must be an array of check names`);
     }
+    if (s.steps !== undefined)
+      errors.push(...stepErrors(i, s));
   });
   return errors;
+}
+function stepErrors(i, s) {
+  const at = `stages[${i}].steps`;
+  if (!Array.isArray(s.steps) || !s.steps.length)
+    return [`${at} must be a non-empty array of { name?, task }`];
+  if (s.implement === false)
+    return [`${at} needs an implementing stage (implement is false)`];
+  return s.steps.flatMap((step, k) => {
+    const here = `${at}[${k}]`;
+    if (!step || typeof step !== "object")
+      return [`${here} must be an object { name?, task }`];
+    const problems = [];
+    if (step.name !== undefined && (typeof step.name !== "string" || !step.name.trim()))
+      problems.push(`${here}.name must be a non-empty string`);
+    if (typeof step.task !== "string" || !step.task.trim())
+      problems.push(`${here}.task is required`);
+    return problems;
+  });
 }
 function stageCheckErrors(stages, checks) {
   const names = new Set(checks.map((c) => c.name));

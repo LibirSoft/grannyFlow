@@ -249,8 +249,24 @@ function stageErrors(stages: StageSpec[], known: Set<string>): string[] {
     if (s.checks !== undefined && !(Array.isArray(s.checks) && s.checks.every(c => typeof c === 'string' && c.trim()))) {
       errors.push(`stages[${i}].checks must be an array of check names`)
     }
+    if (s.steps !== undefined) errors.push(...stepErrors(i, s))
   })
   return errors
+}
+
+/** The errors of a stage's `steps`: a non-empty list of { name?, task }, on a stage that implements. */
+function stepErrors(i: number, s: StageSpec): string[] {
+  const at = `stages[${i}].steps`
+  if (!Array.isArray(s.steps) || !s.steps.length) return [`${at} must be a non-empty array of { name?, task }`]
+  if (s.implement === false) return [`${at} needs an implementing stage (implement is false)`]
+  return s.steps.flatMap((step, k) => {
+    const here = `${at}[${k}]`
+    if (!step || typeof step !== 'object') return [`${here} must be an object { name?, task }`]
+    const problems: string[] = []
+    if (step.name !== undefined && (typeof step.name !== 'string' || !step.name.trim())) problems.push(`${here}.name must be a non-empty string`)
+    if (typeof step.task !== 'string' || !step.task.trim()) problems.push(`${here}.task is required`)
+    return problems
+  })
 }
 
 export function stageCheckErrors(stages: StageSpec[] | undefined, checks: CheckConfig[]): string[] {
