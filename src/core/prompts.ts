@@ -386,13 +386,58 @@ const bulletForm = (example: string, p1: string, where: string): string[] => [
   'Use that bullet form for findings only. With no findings, write "No findings." and nothing else.',
 ]
 
-export function agentReviewPrompt(p: PromptContext, name: string, reviewBase: string, stage?: StageTask, note?: string): string {
-  return `${readOnlyHeader(p, 'your findings')}
+const REVIEW_ASK =
+  'Do a thorough code review: correctness bugs, regressions, security problems, data integrity, contract breaks, missing or wrong tests, and code quality. Report every problem you can confirm in the code.'
 
-You are the REVIEWER. Do not edit, stage or commit anything.
-${taskSection(stage)}Review the changes of stage "${name}": \`cd ${shellQuote(p.repo)} && git diff ${shellQuote(reviewBase)}...HEAD\` plus \`git log --oneline ${shellQuote(reviewBase)}..HEAD\`.${note ? `\n${note}` : ''}
-${reviewAsks(stage, reviewBase).join('\n')}
-Return findings with id (F1, F2, ...), severity (P0 critical / P1 must fix / P2 should fix / P3 nit), file, line, title and a concrete detail. Zero findings means the stage is clean.`
+/** The places an agent reviewer goes back to once its first list is written; the project's rules come last, so they do not steer the first pass. */
+function secondPass(p: PromptContext, base: string): string[] {
+  const places = [
+    'what the plan, the README, comments and test names promise, against what the code does, also on the paths the tests do not take',
+    'every new or changed function with unusual input: missing, unknown, empty, huge, at a boundary, in another unit or scale, with separators, quotes or line breaks; the same call or message twice, calls out of order, a failure halfway through',
+    'who may call it, and whether that is checked on the right party and the right record',
+    `code that was moved or rewritten, against its old version (\`git show ${base}:<path>\`)`,
+    'untouched code that calls what the change touched, or reads what it writes',
+    'tests that could not fail if the code were wrong, and promised behaviour that no test covers',
+  ]
+  const rules = p.config.rules.length ? ["- the project's rules, as the author of the change was given them:", ...p.config.rules.map(rule => `  ${rule}`)] : []
+  return [
+    'When you have your list, you are not done: a first pass finds about half of what is there. Go through the change once more, this time place by place, looking only for problems that are not on your list yet, and add them:',
+    ...places.map((place, i) => `- ${place}${i < places.length - 1 || rules.length ? ';' : '.'}`),
+    ...rules,
+  ]
+}
+
+/** What P0 to P3 mean for an agent reviewer; it follows the return line, so it labels the findings without steering the search for them. */
+const SEVERITY_TIERS = [
+  'Severity is what happens when the problem triggers; how rarely it triggers does not lower it.',
+  '- P0: data loss or corruption, money or records written wrong, a security or authorization bypass, a leaked secret.',
+  '- P1: something that worked before breaks, a crash, a broken contract, a required part of the change that is missing or does not work.',
+  '- P2: wrong behaviour with an easy workaround, a wrong or missing error, a missing test for changed behaviour, duplicated logic.',
+  '- P3: naming, style, leftovers.',
+]
+
+/**
+ * The agent reviewer gets a short, open review request and then a second pass. Measured on frozen first versions of one plan
+ * (Sonnet reviewer, known defects, blind scoring): a step list, the rules or a clean-stage sentence in front of the open request
+ * each cost it known defects (21% raised with the step list, 47% with the open request alone); this form raised 48%.
+ */
+export function agentReviewPrompt(p: PromptContext, name: string, reviewBase: string, stage?: StageTask, note?: string): string {
+  return [
+    `Review a pull request. The repository is ${p.repo}, on branch \`${p.branch}\`; the base is \`${reviewBase}\`.`,
+    ...(stage ? [`The change is stage ${stage.number}/${stage.total} "${name}" of a plan. The stage's task:\n${stage.task}`] : []),
+    ...(p.context ? [`Context: ${p.context}`] : []),
+    ...(p.others?.length ? [`This run also changes other repos: ${p.others.join(', ')}; read them if needed.`] : []),
+    '',
+    `Look at the changes with \`cd ${shellQuote(p.repo)} && git diff ${shellQuote(reviewBase)}...HEAD\` and \`git log --oneline ${shellQuote(reviewBase)}..HEAD\`, and read any other file in the repository you need to judge them. Do not edit, create, stage or commit anything.`,
+    ...(note ? [note] : []),
+    '',
+    REVIEW_ASK,
+    ...(stage && stage.total > 1 ? ['Work the task leaves to other stages is not a finding.'] : []),
+    ...secondPass(p, reviewBase),
+    '',
+    `Return findings with id (F1, F2, ...), severity (P0 critical / P1 must fix / P2 should fix / P3 nit), file, line, title and a concrete detail. Write them in ${p.config.language}.`,
+    ...SEVERITY_TIERS,
+  ].join('\n')
 }
 
 /** `inWorktree`: the reviewer already runs in the worktree and its bash rules refuse `cd` and quoted arguments (the opencode engine). */

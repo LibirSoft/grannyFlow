@@ -608,18 +608,19 @@ describe('runGranny', () => {
         planReview: agentPlanReviewPrompt(p, ['/r/plan.md']),
         draft: draftPrompt(p, 'G', ['/r/plan.md']),
       }
+      const REVIEW = ['The repository is /r, on branch `feat/x`; the base is `abc`.', 'with `cd /r && git diff abc...HEAD`', 'in Turkish.', '  Use tabs.', 'Context: Read plans/x.md first.', 'This run also changes other repos: /other']
       for (const [name, prompt] of Object.entries(prompts)) {
-        for (const line of SHARED) expect({ name, line, has: prompt.includes(line) }).toEqual({ name, line, has: true })
+        for (const line of name === 'review' ? REVIEW : SHARED) expect({ name, line, has: prompt.includes(line) }).toEqual({ name, line, has: true })
         for (const rule of WRITE_RULES) expect({ name, rule, has: prompt.includes(rule) }).toEqual({ name, rule, has: false })
         expect({ name, gates: prompt.includes('Gates (all must pass before every commit') }).toEqual({ name, gates: false })
       }
-      expect(prompts.review).toContain('Do not edit, stage or commit anything.')
+      expect(prompts.review).toContain('Do not edit, create, stage or commit anything.')
       expect(prompts.planReview).toContain('Do not edit, stage or commit anything.')
       expect(prompts.draft).toContain("The implementer's gates: `make test`")
       expect(prompts.draft).toContain('never stage or commit the plan files')
       expect(prompts.draft).not.toContain('rules above are for the implementer')
       for (const prompt of Object.values(prompts)) expect(prompt).not.toContain('commit messages and the PR body')
-      expect(prompts.review).toContain('Write your findings in Turkish.')
+      expect(prompts.review).toContain('concrete detail. Write them in Turkish.')
       expect(prompts.planReview).toContain('Write your findings in Turkish.')
       expect(prompts.draft).toContain('Write the plan in Turkish.')
     })
@@ -1196,26 +1197,53 @@ describe('several reviewers', () => {
     expect(f.commands[0]).toContain(`glm-review '${prompt.replaceAll("'", `'\\''`)}' > .granny/review-core-r1-glm.log 2>&1;`)
   })
 
-  it('gives agent and command reviewers the same review method, with the review base in the moved-code step', () => {
+  it('gives a command reviewer the step-by-step review method, with the review base in the moved-code step', () => {
     const p = { repo: '/work/repo', branch: 'feat/x', base: 'main', config: resolveConfig([{ reviewers: [GLM] }]) }
-    for (const prompt of [agentReviewPrompt(p, 'core', 'deadbee1'), commandReviewPrompt(p, 'core', 'deadbee1')]) {
-      expect(prompt).toContain('1. What the change promises.')
-      expect(prompt).toContain('2. Promise against code.')
-      expect(prompt).toContain('3. Every changed file, top to bottom.')
-      expect(prompt).toContain('compare the old version (`git show deadbee1:<path>`) with the new one line by line')
-      expect(prompt).toContain('5. Beyond the diff.')
-      expect(prompt).toContain('A problem the change causes in a file it does not touch is a finding: cite that file and line.')
-      expect(prompt).toContain('6. The tests. For each new test ask whether it could fail if the code were wrong')
-      expect(prompt).toContain('7. Small things last')
-      expect(prompt).toContain('Do not report what you could not confirm.')
-      expect(prompt).toContain('Severity is what happens when the problem triggers; how rarely it triggers does not lower it.')
-      for (const tier of ['- P0: data loss or corruption', '- P1: something that worked before breaks', '- P2: wrong behaviour with an easy workaround', '- P3: naming, style, leftovers.']) expect(prompt).toContain(tier)
-      expect(prompt).not.toContain('Check the diff against the TASK')
+    const prompt = commandReviewPrompt(p, 'core', 'deadbee1')
+    expect(prompt).toContain('1. What the change promises.')
+    expect(prompt).toContain('2. Promise against code.')
+    expect(prompt).toContain('3. Every changed file, top to bottom.')
+    expect(prompt).toContain('compare the old version (`git show deadbee1:<path>`) with the new one line by line')
+    expect(prompt).toContain('5. Beyond the diff.')
+    expect(prompt).toContain('A problem the change causes in a file it does not touch is a finding: cite that file and line.')
+    expect(prompt).toContain('6. The tests. For each new test ask whether it could fail if the code were wrong')
+    expect(prompt).toContain('7. Small things last')
+    expect(prompt).toContain('Do not report what you could not confirm.')
+    expect(prompt).toContain('Severity is what happens when the problem triggers; how rarely it triggers does not lower it.')
+    for (const tier of ['- P0: data loss or corruption', '- P1: something that worked before breaks', '- P2: wrong behaviour with an easy workaround', '- P3: naming, style, leftovers.']) expect(prompt).toContain(tier)
+    expect(prompt).not.toContain('Check the diff against the TASK')
+    const staged = commandReviewPrompt(p, 'core', 'deadbee1', CORE_TASK)
+    expect(staged.indexOf('2. Promise against code.')).toBeLessThan(staged.indexOf('Check the diff against the TASK in the same way'))
+    expect(staged.indexOf('Check the diff against the TASK in the same way')).toBeLessThan(staged.indexOf('3. Every changed file, top to bottom.'))
+  })
+
+  it('gives an agent reviewer an open review request first, then a second pass along a list of places that ends with the rules', () => {
+    const p = { repo: '/work/repo', branch: 'feat/x', base: 'main', config: resolveConfig([{ reviewers: [GLM], rules: ['Use tabs.', 'No default exports.'] }]) }
+    const prompt = agentReviewPrompt(p, 'core', 'deadbee1')
+    const order = [
+      'Review a pull request. The repository is /work/repo, on branch `feat/x`; the base is `deadbee1`.',
+      'Look at the changes with `cd /work/repo && git diff deadbee1...HEAD` and `git log --oneline deadbee1..HEAD`',
+      'Do a thorough code review: correctness bugs, regressions, security problems, data integrity, contract breaks, missing or wrong tests, and code quality. Report every problem you can confirm in the code.',
+      'When you have your list, you are not done: a first pass finds about half of what is there.',
+      '- what the plan, the README, comments and test names promise, against what the code does',
+      '- code that was moved or rewritten, against its old version (`git show deadbee1:<path>`);',
+      '- tests that could not fail if the code were wrong, and promised behaviour that no test covers;',
+      "- the project's rules, as the author of the change was given them:\n  Use tabs.\n  No default exports.",
+      'Return findings with id (F1, F2, ...), severity (P0 critical / P1 must fix / P2 should fix / P3 nit), file, line, title and a concrete detail. Write them in English.',
+      'Severity is what happens when the problem triggers; how rarely it triggers does not lower it.',
+      '- P0: data loss or corruption',
+      '- P3: naming, style, leftovers.',
+    ]
+    let at = -1
+    for (const part of order) {
+      expect({ part, found: prompt.indexOf(part) > at }).toEqual({ part, found: true })
+      at = prompt.indexOf(part)
     }
-    for (const prompt of [agentReviewPrompt(p, 'core', 'deadbee1', CORE_TASK), commandReviewPrompt(p, 'core', 'deadbee1', CORE_TASK)]) {
-      expect(prompt.indexOf('2. Promise against code.')).toBeLessThan(prompt.indexOf('Check the diff against the TASK in the same way'))
-      expect(prompt.indexOf('Check the diff against the TASK in the same way')).toBeLessThan(prompt.indexOf('3. Every changed file, top to bottom.'))
-    }
+    for (const gone of ['1. What the change promises.', 'Zero findings means', 'Do not report what you could not confirm.', 'scope creep', 'TASK', 'other stages']) expect(prompt).not.toContain(gone)
+
+    const bare = agentReviewPrompt({ ...p, config: resolveConfig([{ reviewers: [GLM], rules: [] }]) }, 'core', 'deadbee1')
+    expect(bare).toContain('- tests that could not fail if the code were wrong, and promised behaviour that no test covers.\n\nReturn findings')
+    expect(bare).not.toContain("the project's rules")
   })
 
   it('hands the stage task to an agent reviewer, a command reviewer and the judge', async () => {
@@ -1229,11 +1257,8 @@ describe('several reviewers', () => {
     })
     await runGranny(f.host, input({ stages: [{ name: 'one', task: 'Do WP-01.' }, { name: 'cache', task }], config: { reviewers: [{ name: 'opus', engine: 'agent' }, GLM] } }))
     const agent = f.calls.find(c => c.label === 'review cache r1 opus')!.prompt
-    expect(agent).toContain('Stage 2/2 "cache"')
-    expect(agent).toContain(`TASK:\n${task}`)
-    expect(agent).toContain('work the task leaves to other stages is not a finding')
-    expect(agent).toContain('scope creep')
-    expect(agent).toContain('needless abstraction')
+    expect(agent).toContain(`The change is stage 2/2 "cache" of a plan. The stage's task:\n${task}`)
+    expect(agent).toContain('Work the task leaves to other stages is not a finding.')
     const glm = f.commands.find(c => c.includes('review-cache-r1-glm'))!
     expect(glm).toContain('TASK: Do WP-02: add the cache layer. Leave the eviction policy to stage 3.')
     expect(glm).toContain('work the task leaves to other stages is not a finding')
@@ -1247,7 +1272,9 @@ describe('several reviewers', () => {
     const agent = { name: 'opus', engine: 'agent' }
     const withTask = fakeHost({ override: req => (req.role === 'reviewer' ? { findings: [] } : undefined) })
     await runGranny(withTask.host, input({ stages: [{ name: 'audit', task: 'Audit the auth module.', implement: false }], config: { reviewers: [agent] } }))
-    expect(withTask.calls.find(c => c.role === 'reviewer')!.prompt).toContain('TASK:\nAudit the auth module.')
+    const single = withTask.calls.find(c => c.role === 'reviewer')!.prompt
+    expect(single).toContain(`The change is stage 1/1 "audit" of a plan. The stage's task:\nAudit the auth module.`)
+    expect(single).not.toContain('leaves to other stages')
 
     const bare = fakeHost({
       name: 'claude-code',
@@ -1262,7 +1289,7 @@ describe('several reviewers', () => {
       expect(prompt).not.toContain('TASK')
       expect(prompt).not.toContain('leaves to other stages')
     }
-    expect(prompts[0]).toContain('needless abstraction')
+    expect(prompts[0]).toContain('Do a thorough code review')
   })
 
   it('prefixes finding ids with the reviewer and keeps the attribution through the judge, the fix and the residual', async () => {
@@ -2030,7 +2057,7 @@ describe('the default reviewer', () => {
       const rv = f.calls.find(c => c.label === 'review core r1 reviewer')!
       expect(rv).toMatchObject({ role: 'reviewer', kind: 'findings', access: 'read-only' })
       expect(rv.model).toBeUndefined()
-      expect(rv.prompt).toContain('TASK:\nDo WP-01.')
+      expect(rv.prompt).toContain("The stage's task:\nDo WP-01.")
       expect(f.commands.some(c => c.includes('codex'))).toBe(false)
     }
   })
