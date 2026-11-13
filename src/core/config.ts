@@ -40,6 +40,7 @@ export interface GrannyConfig {
   reviewers: ReviewerConfig[]
   threshold: number
   alwaysFix: Impact[]
+  rideAlong: number | false
   maxRounds: number
   base: string
   gates: string[] | 'auto'
@@ -71,6 +72,7 @@ export const DEFAULT_CONFIG: GrannyConfig = {
   reviewers: [{ name: 'reviewer', engine: 'agent' }],
   threshold: 70,
   alwaysFix: ['critical', 'major'],
+  rideAlong: 55,
   maxRounds: 4,
   base: 'main',
   gates: 'auto',
@@ -298,6 +300,9 @@ function validate(c: GrannyConfig, effortLayer: Partial<Record<ConfigRole, strin
   }
   if (!Array.isArray(c.alwaysFix) || !c.alwaysFix.every(i => IMPACTS.includes(i))) {
     errors.push(`alwaysFix must be an array of impact classes (${IMPACTS.join(', ')})`)
+  }
+  if (c.rideAlong !== false && (typeof c.rideAlong !== 'number' || !(c.rideAlong >= 0 && c.rideAlong <= 100))) {
+    errors.push('rideAlong must be false or a number between 0 and 100')
   }
   if (!Number.isInteger(c.maxRounds) || c.maxRounds < 1) errors.push('maxRounds must be an integer >= 1')
   if (typeof c.base !== 'string' || !c.base) errors.push('base must be a non-empty string')

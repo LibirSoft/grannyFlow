@@ -38,7 +38,8 @@ for each stage - independent stages at the same time (config parallel, default o
      ├─ a reviewer fails, then fails its one retry ─► stage review-failed
      ├─ no reviewer reports a finding ─────────────► stage clean (without checks: gates-red when the last implementer or fix left gates red)
      └─ P0/P1 findings go straight to the implementer; the judge classifies the rest and merges duplicates,
-        and a rule table decides: impact in alwaysFix, or priority > threshold, is fixed
+        and a rule table decides: impact in alwaysFix, or priority > threshold, is fixed;
+        the ones just under the bar (priority >= rideAlong) go along when the round has a fix
           ├─ any P0/P1 or finding to fix ─► implementer fixes those ─► checks again ─► review again
           └─ none ─► stage done; the rest are "residual" for the user, with the residual of earlier rounds
      cap: maxRounds reviews per stage

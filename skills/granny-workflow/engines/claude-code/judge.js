@@ -35,6 +35,7 @@ var DEFAULT_CONFIG = {
   reviewers: [{ name: "reviewer", engine: "agent" }],
   threshold: 70,
   alwaysFix: ["critical", "major"],
+  rideAlong: 55,
   maxRounds: 4,
   base: "main",
   gates: "auto",
@@ -270,6 +271,9 @@ function validate(c, effortLayer) {
   }
   if (!Array.isArray(c.alwaysFix) || !c.alwaysFix.every((i) => IMPACTS.includes(i))) {
     errors.push(`alwaysFix must be an array of impact classes (${IMPACTS.join(", ")})`);
+  }
+  if (c.rideAlong !== false && (typeof c.rideAlong !== "number" || !(c.rideAlong >= 0 && c.rideAlong <= 100))) {
+    errors.push("rideAlong must be false or a number between 0 and 100");
   }
   if (!Number.isInteger(c.maxRounds) || c.maxRounds < 1)
     errors.push("maxRounds must be an integer >= 1");
@@ -662,15 +666,21 @@ ${text}${end}
 var rubric = (task) => `Classify every finding with exactly these fields:
 - verdict: confirmed (the code shows the problem) | refuted (the code shows it is absent or not a problem) | unverified (you cannot tell either way).
 - impact, how bad IF it triggers: critical | major | moderate | minor | none.
-  Judge impact assuming the trigger happens. Likelihood never lowers impact; it is its own field.
-  - critical: data loss or corruption, writing to the wrong record, security or authorization bypass, secret or personal data leak, a draft going public, an irreversible operation, stored data silently read differently.
-  - major: the user cannot get out from inside the app (a lock only a reload clears, endless loading, a crash); something that worked silently breaks; an API or contract break; a required part of ${task} is missing.
-  - moderate: wrong behaviour with an easy workaround; wrong or missing error message; missing test for changed behaviour; duplicated logic.
-  - minor: visual defect, naming, style.
+  Judge impact assuming the trigger happens. Likelihood never lowers impact; it is its own field: a narrow window, a forced input or "the caller can retry" count there, not here.
+  Take the first class that fits, from the top:
+  - critical: data or money lost, corrupted or given to the wrong party; writing to the wrong record; security or authorization bypass; secret or personal data leak; a draft going public; an irreversible operation; stored data silently read differently.
+  - major, any of:
+    - something stays wrong after the trigger until someone repairs it by hand: a record others rely on (audit trail, ledger, export, log, notification) that is missing, duplicated or false; work the system accepted or owes that is stuck, dropped or refused for good; two stores that disagree.
+    - a well-formed request or a job fails where it should succeed: a crash, a 5xx, a hang, a lock only a reload clears, endless loading; or input anyone can send takes the service down or exhausts it.
+    - a call reports success without having done what was asked.
+    - something that worked before the change silently breaks; an API or contract break; an existing test edited or removed so that the change passes.
+    - a required part of ${task} is missing.
+  - moderate: one call gives a wrong result and nothing stays wrong: a wrong status code, error message or figure that a retry or the next read gets right; odd or malformed input refused more strictly than documented. Also upkeep, which breaks nothing today and lets a defect through later: a missing or hollow test for changed behaviour, duplicated logic, user docs that describe behaviour the code does not have, a problem that needs a future code change to appear.
+  - minor: no effect on behaviour: visual defect, naming, style, wording, a wrong comment, where a file or test lives, dead code.
   - none: not a problem.
-- likelihood: common (the normal flow) | edge (special timing or state: a race, an expired session, a boundary value) | rare (forced input, a rarely used feature).
+- likelihood: common (the normal flow) | edge (special timing or state: a race, a retry, an expired session, a boundary value, a dependency that fails) | rare (forced or malformed input, a rarely used feature). Upkeep has no trigger: use edge.
 - fixCost: trivial (a few lines) | small (one function or file plus a test) | large (cross-module, a redesign).
-- scope: in-scope | pre-existing (there before this change) | other-stage (another stage's job).
+- scope: in-scope | pre-existing (there before this change, and the change neither causes it nor opens a new way to reach it) | other-stage (another stage's job).
 - evidence: path:line plus the concrete trigger steps, e.g. \`Editor.tsx:225\` + "save -> go back -> late response arrives -> save again". Always give a path:line: without one the finding counts as unverified, which lowers its impact one class.
 - reason: one line.
 Example: a late save response re-binds the editor to another post's id, so the next save can overwrite the wrong post: confirmed, critical, edge, small, in-scope, though the window is narrow.`;
@@ -728,24 +738,70 @@ var WHOLE_BRANCH_NOTE = "This is the whole-branch review: each stage was already
 var taskSection = (stage) => stage ? `Stage ${stage.number}/${stage.total} "${stage.name}" - its TASK:
 ${stage.task}
 ` : "";
-var reviewAsks = (stage) => [
-  "Find correctness bugs, regressions, missing tests for changed behaviour, security problems and contract breaks. Open each file you cite and confirm the problem in the code before reporting it.",
-  ...stage ? ["Check the diff against the TASK: a missing part of the task is a finding, and so is a change outside it (scope creep, unrelated edits); work the task leaves to other stages is not a finding."] : [],
-  "Report clean-code and design problems (duplication, unclear naming, needless abstraction, deviations from the design the plan or context lays out) as P2/P3 unless they break something."
+var reviewAsks = (stage, base) => [
+  "Review it the way a careful senior engineer would, in this order. Take the time it needs: a problem missed here ships.",
+  "1. What the change promises. Read the commit messages and every doc, comment and test name the change adds or edits. List for yourself each behaviour, rule, limit, number and worked example they state.",
+  "2. Promise against code. For each item on that list, find the code that is meant to do it and follow it to the end. Where the docs give a number or an example, compute what the code actually returns for it. A promise the code does not keep is a finding; so is one it keeps only on the path the tests take.",
+  ...stage ? ["Check the diff against the TASK in the same way: a missing part of the task is a finding, and so is a change outside it (scope creep, unrelated edits); work the task leaves to other stages is not a finding."] : [],
+  "3. Every changed file, top to bottom. For each new or changed function ask what happens with: a missing or unknown id, a null, an empty or huge value, a boundary value, a value in another unit or scale, text with separators, quotes or line breaks, the same call or the same message arriving twice, calls arriving out of order, a failure halfway through, the end of a month or a day. Check who is allowed to call it, and whether that check is made on the right party and the right record.",
+  `4. Code that was moved or rewritten. When a commit moves code or says it changes no behaviour, compare the old version (\`git show ${base}:<path>\`) with the new one line by line. A check, a branch or a default that did not come along is a finding.`,
+  "5. Beyond the diff. For everything the change renames, removes or gives a new meaning (a function, a type, a column, a route, a config key, a stored value), search the repo for what still uses it. Read the untouched code the new code calls or relies on, and the untouched code that reads what the new code writes: does it still hold when the new code feeds it new values? A problem the change causes in a file it does not touch is a finding: cite that file and line.",
+  "6. The tests. For each new test ask whether it could fail if the code were wrong: an expectation computed with the same formula as the code, an assertion on a side effect instead of the result, only the happy path. Name the promised behaviours that no test would catch breaking.",
+  "7. Small things last: a name that breaks the convention of its file or schema, leftovers (debug output, TODOs, commented-out code), a constant that is defined and not used, duplication, needless abstraction, a deviation from the design the plan or context lays out.",
+  "Before you report a finding, open the code and confirm it; when it is cheap, run it (an existing test, or a one-line command that writes no file) instead of reasoning about it. Before you say something is missing - a test, a check, a doc line - search for it. Do not report what you could not confirm. Give each problem its own finding: do not fold two into one, and do not report one twice.",
+  "Severity is what happens when the problem triggers; how rarely it triggers does not lower it.",
+  "- P0: data loss or corruption, money or records written wrong, a security or authorization bypass, a leaked secret. A check that guards money, access or data and no longer runs is a bypass, also when it went missing in a refactor.",
+  "- P1: something that worked before breaks, a crash, a broken contract, a required part of the change that is missing or does not work.",
+  "- P2: wrong behaviour with an easy workaround, a wrong or missing error, a missing test for changed behaviour, duplicated logic.",
+  "- P3: naming, style, leftovers. What step 7 finds is P3, or P2 for duplicated logic, unless it breaks something."
 ];
 var bulletForm = (example, p1, where) => [
   `Report each finding as one bullet line in exactly this form: \`- [P1] Title — ${example}\` - severity P0 (critical), P1 (${p1}), P2 (should fix) or P3 (nit), a short title, an em dash, then ${where}. Put the detail on the following lines, indented two spaces.`,
   'Use that bullet form for findings only. With no findings, write "No findings." and nothing else.'
 ];
+var REVIEW_ASK = "Do a thorough code review: correctness bugs, regressions, security problems, data integrity, contract breaks, missing or wrong tests, and code quality. Report every problem you can confirm in the code.";
+function secondPass(p, base) {
+  const places = [
+    "what the plan, the README, comments and test names promise, against what the code does, also on the paths the tests do not take",
+    "every new or changed function with unusual input: missing, unknown, empty, huge, at a boundary, in another unit or scale, with separators, quotes or line breaks; the same call or message twice, calls out of order, a failure halfway through",
+    "who may call it, and whether that is checked on the right party and the right record",
+    `code that was moved or rewritten, against its old version (\`git show ${base}:<path>\`)`,
+    "untouched code that calls what the change touched, or reads what it writes",
+    "tests that could not fail if the code were wrong, and promised behaviour that no test covers"
+  ];
+  const rules = p.config.rules.length ? ["- the project's rules, as the author of the change was given them:", ...p.config.rules.map((rule) => `  ${rule}`)] : [];
+  return [
+    "When you have your list, you are not done: a first pass finds about half of what is there. Go through the change once more, this time place by place, looking only for problems that are not on your list yet, and add them:",
+    ...places.map((place, i) => `- ${place}${i < places.length - 1 || rules.length ? ";" : "."}`),
+    ...rules
+  ];
+}
+var SEVERITY_TIERS = [
+  "Severity is what happens when the problem triggers; how rarely it triggers does not lower it.",
+  "- P0: data loss or corruption, money or records written wrong, a security or authorization bypass, a leaked secret.",
+  "- P1: something that worked before breaks, a crash, a broken contract, a required part of the change that is missing or does not work.",
+  "- P2: wrong behaviour with an easy workaround, a wrong or missing error, a missing test for changed behaviour, duplicated logic.",
+  "- P3: naming, style, leftovers."
+];
 function agentReviewPrompt(p, name, reviewBase, stage, note) {
-  return `${readOnlyHeader(p, "your findings")}
-
-You are the REVIEWER. Do not edit, stage or commit anything.
-${taskSection(stage)}Review the changes of stage "${name}": \`cd ${shellQuote(p.repo)} && git diff ${shellQuote(reviewBase)}...HEAD\` plus \`git log --oneline ${shellQuote(reviewBase)}..HEAD\`.${note ? `
-${note}` : ""}
-${reviewAsks(stage).join(`
-`)}
-Return findings with id (F1, F2, ...), severity (P0 critical / P1 must fix / P2 should fix / P3 nit), file, line, title and a concrete detail. Zero findings means the stage is clean.`;
+  return [
+    `Review a pull request. The repository is ${p.repo}, on branch \`${p.branch}\`; the base is \`${reviewBase}\`.`,
+    ...stage ? [`The change is stage ${stage.number}/${stage.total} "${name}" of a plan. The stage's task:
+${stage.task}`] : [],
+    ...p.context ? [`Context: ${p.context}`] : [],
+    ...p.others?.length ? [`This run also changes other repos: ${p.others.join(", ")}; read them if needed.`] : [],
+    "",
+    `Look at the changes with \`cd ${shellQuote(p.repo)} && git diff ${shellQuote(reviewBase)}...HEAD\` and \`git log --oneline ${shellQuote(reviewBase)}..HEAD\`, and read any other file in the repository you need to judge them. Do not edit, create, stage or commit anything.`,
+    ...note ? [note] : [],
+    "",
+    REVIEW_ASK,
+    ...stage && stage.total > 1 ? ["Work the task leaves to other stages is not a finding."] : [],
+    ...secondPass(p, reviewBase),
+    "",
+    `Return findings with id (F1, F2, ...), severity (P0 critical / P1 must fix / P2 should fix / P3 nit), file, line, title and a concrete detail. Write them in ${p.config.language}.`,
+    ...SEVERITY_TIERS
+  ].join(`
+`);
 }
 function commandReviewPrompt(p, name, reviewBase, stage, note, inWorktree = false) {
   const diff = inWorktree ? `, from the worktree you run in: \`git diff ${reviewBase}...HEAD\` plus \`git log --oneline ${reviewBase}..HEAD\`` : `: \`cd ${shellQuote(p.repo)} && git diff ${shellQuote(reviewBase)}...HEAD\` plus \`git log --oneline ${shellQuote(reviewBase)}..HEAD\``;
@@ -755,7 +811,7 @@ function commandReviewPrompt(p, name, reviewBase, stage, note, inWorktree = fals
     note ?? "",
     p.context ? `Design context, read it first: ${p.context}` : "",
     taskSection(stage),
-    ...reviewAsks(stage),
+    ...reviewAsks(stage, reviewBase),
     ...bulletForm("path/to/file.ts:12", "must fix", "the path relative to the repo root and the line")
   ].filter(Boolean).join(" ").replace(/\s*\n\s*/g, " ");
 }

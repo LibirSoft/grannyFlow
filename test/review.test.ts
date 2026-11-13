@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'bun:test'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { decide, declinedOf, isBlocker, mergeDuplicates, parseCodexReview, priorityOf, reviewFailure, saysNoFindings, triage } from '../src/core/review'
+import { decide, declinedOf, isBlocker, mergeDuplicates, parseCodexReview, priorityOf, reviewFailure, rideAlong, saysNoFindings, triage } from '../src/core/review'
 import type { Finding, Impact } from '../src/core/types'
 
 const fixture = (name: string) => readFileSync(join(import.meta.dir, 'fixtures', name), 'utf8')
@@ -538,6 +538,48 @@ describe('mergeDuplicates', () => {
     const unjudged = decide({ id: 'b', severity: 'P2', file: 'a.ts', title: 'b', detail: '' }, undefined, policy)
     const { findings } = mergeDuplicates([keeper, unjudged], new Map([['b', 'a']]))
     expect(findings[0]).toEqual({ id: 'a', severity: 'P2', file: 'a.ts', line: 1, title: 'a', detail: '', duplicates: ['b'], decision: { rule: 2, action: 'fix', why: 'not judged' } })
+  })
+})
+
+describe('rideAlong', () => {
+  const policy = { threshold: 70, alwaysFix: ['critical', 'major'] as Impact[], rideAlong: 55 as number | false }
+  const judged = (id: string, c: Record<string, unknown>, severity = 'P2'): Finding =>
+    decide(
+      { id, severity, file: 'a.ts', line: 1, title: id, detail: '' },
+      { verdict: 'confirmed', impact: 'moderate', likelihood: 'edge', fixCost: 'small', scope: 'in-scope', evidence: 'a.ts:1 - x', reason: `reason ${id}`, ...c },
+      policy,
+    )
+  const fixed = judged('fix', { impact: 'major' })
+  const actions = (findings: Finding[]) => findings.map(f => `${f.id}:${f.decision!.rule}:${f.decision!.action}`)
+
+  it('sends the rule-8 findings at or above the bar with a round that has a fix, and says why', () => {
+    const out = rideAlong([fixed, judged('at', {}), judged('above', { fixCost: 'trivial' }), judged('below', { likelihood: 'rare', fixCost: 'trivial' }), judged('nit', { impact: 'minor', likelihood: 'common', fixCost: 'trivial' })], policy)
+    expect(actions(out)).toEqual(['fix:6:fix', 'at:9:fix', 'above:9:fix', 'below:8:residual', 'nit:8:residual'])
+    expect(out[1]!.decision!.why).toBe("rides along with this round's fixes: priority 55 >= rideAlong 55 (moderate/edge/small)")
+    expect(out[1]).toMatchObject({ impact: 'moderate', likelihood: 'edge', priority: 55, reason: 'reason at' })
+    expect(triage(out).accepted.map(f => f.id)).toEqual(['fix', 'at', 'above'])
+  })
+
+  it('sends nothing in a round without a fix: riders never start one', () => {
+    const round = [judged('at', {}), judged('above', { fixCost: 'trivial' })]
+    expect(rideAlong(round, policy)).toBe(round)
+    expect(actions(rideAlong(round, policy))).toEqual(['at:8:residual', 'above:8:residual'])
+  })
+
+  it('counts an unjudged P0/P1 as the fix that pays for the round', () => {
+    const blocker = decide({ id: 'p1', severity: 'P1', file: 'a.ts', title: 'p1', detail: '' }, undefined, policy)
+    expect(actions(rideAlong([blocker, judged('at', {})], policy))).toEqual(['p1:1:fix', 'at:9:fix'])
+  })
+
+  it('leaves refuted, pre-existing and other-stage findings and the excepted ones residual', () => {
+    const round = [fixed, judged('refuted', { verdict: 'refuted' }), judged('old', { scope: 'pre-existing' }), judged('theirs', { scope: 'other-stage' }), judged('declined', {})]
+    expect(actions(rideAlong(round, policy, f => f.id === 'declined'))).toEqual(['fix:6:fix', 'refuted:3:residual', 'old:5:residual', 'theirs:4:residual', 'declined:8:residual'])
+  })
+
+  it('is off with rideAlong false or unset', () => {
+    const round = [fixed, judged('at', {})]
+    expect(rideAlong(round, { ...policy, rideAlong: false })).toBe(round)
+    expect(rideAlong(round, { threshold: 70, alwaysFix: ['critical', 'major'] })).toBe(round)
   })
 })
 

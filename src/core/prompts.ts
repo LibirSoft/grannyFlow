@@ -30,15 +30,21 @@ const judgeRouting = (findings: Finding[]): string =>
 const rubric = (task: string) => `Classify every finding with exactly these fields:
 - verdict: confirmed (the code shows the problem) | refuted (the code shows it is absent or not a problem) | unverified (you cannot tell either way).
 - impact, how bad IF it triggers: critical | major | moderate | minor | none.
-  Judge impact assuming the trigger happens. Likelihood never lowers impact; it is its own field.
-  - critical: data loss or corruption, writing to the wrong record, security or authorization bypass, secret or personal data leak, a draft going public, an irreversible operation, stored data silently read differently.
-  - major: the user cannot get out from inside the app (a lock only a reload clears, endless loading, a crash); something that worked silently breaks; an API or contract break; a required part of ${task} is missing.
-  - moderate: wrong behaviour with an easy workaround; wrong or missing error message; missing test for changed behaviour; duplicated logic.
-  - minor: visual defect, naming, style.
+  Judge impact assuming the trigger happens. Likelihood never lowers impact; it is its own field: a narrow window, a forced input or "the caller can retry" count there, not here.
+  Take the first class that fits, from the top:
+  - critical: data or money lost, corrupted or given to the wrong party; writing to the wrong record; security or authorization bypass; secret or personal data leak; a draft going public; an irreversible operation; stored data silently read differently.
+  - major, any of:
+    - something stays wrong after the trigger until someone repairs it by hand: a record others rely on (audit trail, ledger, export, log, notification) that is missing, duplicated or false; work the system accepted or owes that is stuck, dropped or refused for good; two stores that disagree.
+    - a well-formed request or a job fails where it should succeed: a crash, a 5xx, a hang, a lock only a reload clears, endless loading; or input anyone can send takes the service down or exhausts it.
+    - a call reports success without having done what was asked.
+    - something that worked before the change silently breaks; an API or contract break; an existing test edited or removed so that the change passes.
+    - a required part of ${task} is missing.
+  - moderate: one call gives a wrong result and nothing stays wrong: a wrong status code, error message or figure that a retry or the next read gets right; odd or malformed input refused more strictly than documented. Also upkeep, which breaks nothing today and lets a defect through later: a missing or hollow test for changed behaviour, duplicated logic, user docs that describe behaviour the code does not have, a problem that needs a future code change to appear.
+  - minor: no effect on behaviour: visual defect, naming, style, wording, a wrong comment, where a file or test lives, dead code.
   - none: not a problem.
-- likelihood: common (the normal flow) | edge (special timing or state: a race, an expired session, a boundary value) | rare (forced input, a rarely used feature).
+- likelihood: common (the normal flow) | edge (special timing or state: a race, a retry, an expired session, a boundary value, a dependency that fails) | rare (forced or malformed input, a rarely used feature). Upkeep has no trigger: use edge.
 - fixCost: trivial (a few lines) | small (one function or file plus a test) | large (cross-module, a redesign).
-- scope: in-scope | pre-existing (there before this change) | other-stage (another stage's job).
+- scope: in-scope | pre-existing (there before this change, and the change neither causes it nor opens a new way to reach it) | other-stage (another stage's job).
 - evidence: path:line plus the concrete trigger steps, e.g. \`Editor.tsx:225\` + "save -> go back -> late response arrives -> save again". Always give a path:line: without one the finding counts as unverified, which lowers its impact one class.
 - reason: one line.
 Example: a late save response re-binds the editor to another post's id, so the next save can overwrite the wrong post: confirmed, critical, edge, small, in-scope, though the window is narrow.`
@@ -175,6 +181,14 @@ Split the work orders into stages, one per stop-and-review point: one stage for 
 Return files (the absolute paths you wrote), stages ([{ name, task, after${repos.length ? ', repo' : ''} }]), summary (a few lines for the user: the approach and the work orders) and questions (decisions only the user can make, each with the default the plan assumes; empty when none).`
 }
 
+/** How the implementer works: few round trips, and the three places where a first version usually goes wrong. */
+const BUILD_METHOD = `How to build it:
+1. Work in few, large steps: every round trip costs. Read the task, the code you will change and the code that will meet yours without being changed (whatever reads the data you write, calls what you alter, logs it, or runs beside it) in one or two commands. Take the work orders or logical steps one at a time: write all the files and tests of one in one command, run the gates and commit it in the next, then start the following one - a stage with several of them is never one commit. Do not re-read what you already have, and do not run a gate twice on the same tree.
+2. Every input you add (a body field, header, query, argument, file, setting): decide what is valid and refuse the rest where it enters - the wrong type, a value the parser accepts but that means something else, the far ends of its range.
+3. Everything that can run twice, beside itself or beside a request (a job, a retry, a second process): act only on state read in the same transaction, decide what a crash between two steps leaves behind, and let one bad item fail alone.
+4. Every failure path: what is stored and what the caller is told must agree with what really happened.
+5. Where the task is silent, do what the nearest existing code does, and note the choice.`
+
 export function implementPrompt(p: PromptContext, stage: StageSpec, index: number, total: number, name: string, builds = index > 0): string {
   const pr = prBodyOf(p)
   const earlier = builds
@@ -188,14 +202,16 @@ You are the IMPLEMENTER. Stage ${index + 1}/${total}: "${name}".
 ${earlier}Do ONLY this stage, then stop:
 ${stage.task ?? ''}
 
-Commit per logical step. Keep ${pr} (git-excluded; create its directory if missing) current, with sections: Title, Summary, Changes (table), Test plan (real numbers), Revised in stage N, Review fixes, Untested. Return startSha = HEAD before your first change.`
+${BUILD_METHOD}
+
+When the stage's code is committed, bring ${pr} up to date in one edit (git-excluded; create its directory if missing), with sections: Title, Summary, Changes (table), Test plan (real numbers), Revised in stage N, Review fixes, Untested. Return startSha = HEAD before your first change.`
 }
 
 export function fixPrompt(p: PromptContext, name: string, round: number, accepted: Finding[], overruled: Overruled[] = []): string {
   return `${common(p)}
 
 You are the IMPLEMENTER, fixing review round ${round} of stage "${name}".
-First read ${branchLog(p)} and the code. Fix every finding below on the current branch, red-green where it changes behaviour, gates green, and commit (\`fix(...)\`). Add each finding id and what you did to "Review fixes" in ${prBodyOf(p)}. If you believe a finding is wrong, do not fix it: ${DECLINE}.
+First read ${branchLog(p)} and the code. Fix every finding below on the current branch, red-green where it changes behaviour, gates green, and commit (\`fix(...)\`). Add each finding id and what you did to "Review fixes" in ${prBodyOf(p)} (git-excluded: never stage or commit it). If you believe a finding is wrong, do not fix it: ${DECLINE}.
 ${overruledSection(overruled)}
 ${findingsList(accepted)}`
 }
@@ -329,7 +345,7 @@ export function repairPrompt(p: PromptContext, name: string, at: string, attempt
   return `${common(p)}
 
 You are the IMPLEMENTER, repairing failed checks of stage "${name}" (${at}, repair ${attempt}). Granny ran the checks below on the current branch and they failed; review waits until they pass.
-${taskSection(stage)}Read ${branchLog(p)} and the code, find why each check fails, and fix the code until it passes. Rerun the checks, commit (\`fix(...)\`), and note what you changed under "Review fixes" in ${prBodyOf(p)}.
+${taskSection(stage)}Read ${branchLog(p)} and the code, find why each check fails, and fix the code until it passes. Rerun the checks, commit (\`fix(...)\`), and note what you changed under "Review fixes" in ${prBodyOf(p)} (git-excluded: never stage or commit it).
 NEVER delete, skip, disable or weaken a test, a check, a threshold, the granny config or a check script to get green - granny reruns the same commands and the reviewers see the diff. If a check cannot pass without that, leave it failing and explain why in deviations.
 
 FAILED CHECKS:
@@ -360,12 +376,24 @@ export interface StageTask {
 const taskSection = (stage?: StageTask): string =>
   stage ? `Stage ${stage.number}/${stage.total} "${stage.name}" - its TASK:\n${stage.task}\n` : ''
 
-const reviewAsks = (stage?: StageTask): string[] => [
-  'Find correctness bugs, regressions, missing tests for changed behaviour, security problems and contract breaks. Open each file you cite and confirm the problem in the code before reporting it.',
+const reviewAsks = (stage: StageTask | undefined, base: string): string[] => [
+  'Review it the way a careful senior engineer would, in this order. Take the time it needs: a problem missed here ships.',
+  '1. What the change promises. Read the commit messages and every doc, comment and test name the change adds or edits. List for yourself each behaviour, rule, limit, number and worked example they state.',
+  '2. Promise against code. For each item on that list, find the code that is meant to do it and follow it to the end. Where the docs give a number or an example, compute what the code actually returns for it. A promise the code does not keep is a finding; so is one it keeps only on the path the tests take.',
   ...(stage
-    ? ['Check the diff against the TASK: a missing part of the task is a finding, and so is a change outside it (scope creep, unrelated edits); work the task leaves to other stages is not a finding.']
+    ? ['Check the diff against the TASK in the same way: a missing part of the task is a finding, and so is a change outside it (scope creep, unrelated edits); work the task leaves to other stages is not a finding.']
     : []),
-  'Report clean-code and design problems (duplication, unclear naming, needless abstraction, deviations from the design the plan or context lays out) as P2/P3 unless they break something.',
+  '3. Every changed file, top to bottom. For each new or changed function ask what happens with: a missing or unknown id, a null, an empty or huge value, a boundary value, a value in another unit or scale, text with separators, quotes or line breaks, the same call or the same message arriving twice, calls arriving out of order, a failure halfway through, the end of a month or a day. Check who is allowed to call it, and whether that check is made on the right party and the right record.',
+  `4. Code that was moved or rewritten. When a commit moves code or says it changes no behaviour, compare the old version (\`git show ${base}:<path>\`) with the new one line by line. A check, a branch or a default that did not come along is a finding.`,
+  '5. Beyond the diff. For everything the change renames, removes or gives a new meaning (a function, a type, a column, a route, a config key, a stored value), search the repo for what still uses it. Read the untouched code the new code calls or relies on, and the untouched code that reads what the new code writes: does it still hold when the new code feeds it new values? A problem the change causes in a file it does not touch is a finding: cite that file and line.',
+  '6. The tests. For each new test ask whether it could fail if the code were wrong: an expectation computed with the same formula as the code, an assertion on a side effect instead of the result, only the happy path. Name the promised behaviours that no test would catch breaking.',
+  '7. Small things last: a name that breaks the convention of its file or schema, leftovers (debug output, TODOs, commented-out code), a constant that is defined and not used, duplication, needless abstraction, a deviation from the design the plan or context lays out.',
+  'Before you report a finding, open the code and confirm it; when it is cheap, run it (an existing test, or a one-line command that writes no file) instead of reasoning about it. Before you say something is missing - a test, a check, a doc line - search for it. Do not report what you could not confirm. Give each problem its own finding: do not fold two into one, and do not report one twice.',
+  'Severity is what happens when the problem triggers; how rarely it triggers does not lower it.',
+  '- P0: data loss or corruption, money or records written wrong, a security or authorization bypass, a leaked secret. A check that guards money, access or data and no longer runs is a bypass, also when it went missing in a refactor.',
+  '- P1: something that worked before breaks, a crash, a broken contract, a required part of the change that is missing or does not work.',
+  '- P2: wrong behaviour with an easy workaround, a wrong or missing error, a missing test for changed behaviour, duplicated logic.',
+  '- P3: naming, style, leftovers. What step 7 finds is P3, or P2 for duplicated logic, unless it breaks something.',
 ]
 
 /** The finding format the parser reads from a command or Codex reviewer. */
@@ -374,13 +402,58 @@ const bulletForm = (example: string, p1: string, where: string): string[] => [
   'Use that bullet form for findings only. With no findings, write "No findings." and nothing else.',
 ]
 
-export function agentReviewPrompt(p: PromptContext, name: string, reviewBase: string, stage?: StageTask, note?: string): string {
-  return `${readOnlyHeader(p, 'your findings')}
+const REVIEW_ASK =
+  'Do a thorough code review: correctness bugs, regressions, security problems, data integrity, contract breaks, missing or wrong tests, and code quality. Report every problem you can confirm in the code.'
 
-You are the REVIEWER. Do not edit, stage or commit anything.
-${taskSection(stage)}Review the changes of stage "${name}": \`cd ${shellQuote(p.repo)} && git diff ${shellQuote(reviewBase)}...HEAD\` plus \`git log --oneline ${shellQuote(reviewBase)}..HEAD\`.${note ? `\n${note}` : ''}
-${reviewAsks(stage).join('\n')}
-Return findings with id (F1, F2, ...), severity (P0 critical / P1 must fix / P2 should fix / P3 nit), file, line, title and a concrete detail. Zero findings means the stage is clean.`
+/** The places an agent reviewer goes back to once its first list is written; the project's rules come last, so they do not steer the first pass. */
+function secondPass(p: PromptContext, base: string): string[] {
+  const places = [
+    'what the plan, the README, comments and test names promise, against what the code does, also on the paths the tests do not take',
+    'every new or changed function with unusual input: missing, unknown, empty, huge, at a boundary, in another unit or scale, with separators, quotes or line breaks; the same call or message twice, calls out of order, a failure halfway through',
+    'who may call it, and whether that is checked on the right party and the right record',
+    `code that was moved or rewritten, against its old version (\`git show ${base}:<path>\`)`,
+    'untouched code that calls what the change touched, or reads what it writes',
+    'tests that could not fail if the code were wrong, and promised behaviour that no test covers',
+  ]
+  const rules = p.config.rules.length ? ["- the project's rules, as the author of the change was given them:", ...p.config.rules.map(rule => `  ${rule}`)] : []
+  return [
+    'When you have your list, you are not done: a first pass finds about half of what is there. Go through the change once more, this time place by place, looking only for problems that are not on your list yet, and add them:',
+    ...places.map((place, i) => `- ${place}${i < places.length - 1 || rules.length ? ';' : '.'}`),
+    ...rules,
+  ]
+}
+
+/** What P0 to P3 mean for an agent reviewer; it follows the return line, so it labels the findings without steering the search for them. */
+const SEVERITY_TIERS = [
+  'Severity is what happens when the problem triggers; how rarely it triggers does not lower it.',
+  '- P0: data loss or corruption, money or records written wrong, a security or authorization bypass, a leaked secret.',
+  '- P1: something that worked before breaks, a crash, a broken contract, a required part of the change that is missing or does not work.',
+  '- P2: wrong behaviour with an easy workaround, a wrong or missing error, a missing test for changed behaviour, duplicated logic.',
+  '- P3: naming, style, leftovers.',
+]
+
+/**
+ * The agent reviewer gets a short, open review request and then a second pass. Measured on frozen first versions of one plan
+ * (Sonnet reviewer, known defects, blind scoring): a step list, the rules or a clean-stage sentence in front of the open request
+ * each cost it known defects (21% raised with the step list, 47% with the open request alone); this form raised 48%.
+ */
+export function agentReviewPrompt(p: PromptContext, name: string, reviewBase: string, stage?: StageTask, note?: string): string {
+  return [
+    `Review a pull request. The repository is ${p.repo}, on branch \`${p.branch}\`; the base is \`${reviewBase}\`.`,
+    ...(stage ? [`The change is stage ${stage.number}/${stage.total} "${name}" of a plan. The stage's task:\n${stage.task}`] : []),
+    ...(p.context ? [`Context: ${p.context}`] : []),
+    ...(p.others?.length ? [`This run also changes other repos: ${p.others.join(', ')}; read them if needed.`] : []),
+    '',
+    `Look at the changes with \`cd ${shellQuote(p.repo)} && git diff ${shellQuote(reviewBase)}...HEAD\` and \`git log --oneline ${shellQuote(reviewBase)}..HEAD\`, and read any other file in the repository you need to judge them. Do not edit, create, stage or commit anything.`,
+    ...(note ? [note] : []),
+    '',
+    REVIEW_ASK,
+    ...(stage && stage.total > 1 ? ['Work the task leaves to other stages is not a finding.'] : []),
+    ...secondPass(p, reviewBase),
+    '',
+    `Return findings with id (F1, F2, ...), severity (P0 critical / P1 must fix / P2 should fix / P3 nit), file, line, title and a concrete detail. Write them in ${p.config.language}.`,
+    ...SEVERITY_TIERS,
+  ].join('\n')
 }
 
 /** `inWorktree`: the reviewer already runs in the worktree and its bash rules refuse `cd` and quoted arguments (the opencode engine). */
@@ -394,7 +467,7 @@ export function commandReviewPrompt(p: PromptContext, name: string, reviewBase: 
     note ?? '',
     p.context ? `Design context, read it first: ${p.context}` : '',
     taskSection(stage),
-    ...reviewAsks(stage),
+    ...reviewAsks(stage, reviewBase),
     ...bulletForm('path/to/file.ts:12', 'must fix', 'the path relative to the repo root and the line'),
   ]
     .filter(Boolean)
