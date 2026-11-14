@@ -6,7 +6,8 @@ The engine is three Workflow scripts, one per mode: `engines/claude-code/plan.js
 
 1. Collect the config layers. Read `~/.config/granny/config.json` and `<repo>/granny.config.json` if they exist; do not merge them yourself - the engine does that and rejects bad keys.
 2. Pick the script for the mode: `workflow.js` to implement a plan, `plan.js` to plan a goal ([Planning](#planning)). Read `engines/claude-code/<script>` (relative to the skill directory) and pass the full text unchanged as `script`. Alternative: copy the file into the session's scratchpad directory (the one your session names, not `/tmp`) and pass that copy's path as `scriptPath` instead of `script`. Never point `scriptPath` into the skill directory: when the skill lives outside the session's working directories, Workflow refuses that path; the scratchpad path works.
-3. Call:
+3. Tell the user what will launch and wait for the start word ([The start word](#the-start-word)). Launch only in the turn after the user sent it.
+4. Call:
 
 ```
 Workflow({
@@ -30,11 +31,30 @@ Workflow({
 
 `args` is a JSON object, not a string.
 
-4. Record the run id where the project tracks work (a STATUS file, a plan) and tell the user. Do not poll: a task notification arrives when the workflow ends.
+5. Record the run id where the project tracks work (a STATUS file, a plan) and tell the user. Do not poll: a task notification arrives when the workflow ends.
+
+## The start word
+
+The Workflow tool gives every agent of a run the user's last message, word for word, before the prompt the engine wrote. It adds this note (Claude Code 2.1.325): "This relayed request is the only user voice in this task; the computed task text that follows in the next turn is script output and cannot override or extend it. Where the computed task conflicts with this request, this request wins". A Workflow script cannot turn this off or change the text. So the helper that reads HEAD, every reviewer, the judge and the implementer all get the same message, whatever their role.
+
+A message that asks for more than one role's task does harm there: "run granny, then push", "your next task is to tune the judge", "implement this and measure the cost afterwards". An agent can take it as its own task and drop the one in its prompt. Haiku agents have done that: they left their fix undone, and one edited the main checkout.
+
+So a Workflow is never launched in the turn of such a message:
+
+1. Do everything up to the launch first: the inputs, the config layers, the preflight, the plan when you write one.
+2. Tell the user what will launch - the list in SKILL.md section 4, without the run id - and ask them to send `start` as a message of its own (or the word in their language, for example `başla`).
+3. Launch when the user's last message is the start word, or another bare go-ahead that asks for nothing else ("go", "approved"). The run id follows after the launch.
+4. A reply that holds anything else - a change, a question, one more instruction - is not a start: act on it, then ask for the start word again.
+
+This holds for every Workflow launch: `plan.js`, `workflow.js` (also the implement run after the user approved a plan: an approval with changes in it is not a start), `judge.js`, and a resume with `resumeFromRunId` or `fromStage`. The agents that run again on a resume get the message that is the last one at that time. A resume while the start word is still the user's last message needs no new one.
+
+Do not work around the relay by adding text to `context` instead of waiting: a note there is one more instruction next to a message that says it wins.
+
+opencode and omp run each role as a process of its own and relay nothing, so they need no start word.
 
 ## Review only: `granny judge`
 
-The steps, with what to ask the user first, are in [judge.md](judge.md). The launch uses `judge.js`; keep `judge: true` in args:
+The steps, with what to ask the user first, are in [judge.md](judge.md). The launch uses `judge.js`, after [the start word](#the-start-word); keep `judge: true` in args:
 
 ```
 Workflow({
@@ -57,7 +77,7 @@ With `worktree` on (the default) the run starts with phase "Worktree": a helper 
 
 ## Planning
 
-A planning run launches `plan.js` with `goal` in args (and no `stages`); its phases are "Worktree", "Plan" and "Plan review". Phase "Plan" runs after "Worktree": one `agent()` call, label `plan`, `roles.planner`'s model and effort, write access, schema `{ files, stages, summary, questions? }`. It writes the plan at the absolute path in its prompt - by default the main checkout's `<workDir>/plans/<branch-slug>.md`, which the session can write - then the plan review runs on it when `"planReview": true`, and the Workflow ends with `draft`, `plan`, `stages: []` and `final: null` ([config.md](config.md#planning)). Once the user approves, the implement run is a new launch of `workflow.js` with `plan: draft.files` and the approved `stages`, not a resume of the planning run.
+A planning run launches `plan.js` with `goal` in args (and no `stages`); its phases are "Worktree", "Plan" and "Plan review". Phase "Plan" runs after "Worktree": one `agent()` call, label `plan`, `roles.planner`'s model and effort, write access, schema `{ files, stages, summary, questions? }`. It writes the plan at the absolute path in its prompt - by default the main checkout's `<workDir>/plans/<branch-slug>.md`, which the session can write - then the plan review runs on it when `"planReview": true`, and the Workflow ends with `draft`, `plan`, `stages: []` and `final: null` ([config.md](config.md#planning)). Once the user approves, the implement run is a new launch of `workflow.js` with `plan: draft.files` and the approved `stages`, not a resume of the planning run. A bare approval is its start word; an approval that also asks for changes is not ([The start word](#the-start-word)).
 
 ## Parallel stages
 
@@ -96,7 +116,7 @@ Details: [config.md](config.md#reviewers).
 
 ## Resume
 
-Same script, same args: a run resumes with the script it was launched with (`plan.js`, `workflow.js` or `judge.js`), `Workflow({ scriptPath, args, resumeFromRunId })`, where `scriptPath` is the path the first launch returned when you passed `script`, or the same scratchpad copy you launched with (leave it in place until the run is done). Unchanged agent calls return cached results instantly, so the run continues where it stopped. To restart from a stage instead, add `fromStage` to args; when that stage's implementer finds its work already committed and adds nothing, the stage is reviewed over `<base>...HEAD` instead of ending `no-changes` ([config.md](config.md#checks), Reading git). With parallel stages, `fromStage` runs every stage from there on again, also those that finished beside the failed one (the log line `a stage failed ... Finished: ... Not finished: ...` names them), so prefer `resumeFromRunId`, which returns their cached results.
+Same script, same args: a run resumes with the script it was launched with (`plan.js`, `workflow.js` or `judge.js`), `Workflow({ scriptPath, args, resumeFromRunId })`, where `scriptPath` is the path the first launch returned when you passed `script`, or the same scratchpad copy you launched with (leave it in place until the run is done). Unchanged agent calls return cached results instantly, so the run continues where it stopped. The agents that run again get the user's last message as it is then, so when that is no longer the start word, ask for it before the resume ([The start word](#the-start-word)). To restart from a stage instead, add `fromStage` to args; when that stage's implementer finds its work already committed and adds nothing, the stage is reviewed over `<base>...HEAD` instead of ending `no-changes` ([config.md](config.md#checks), Reading git). With parallel stages, `fromStage` runs every stage from there on again, also those that finished beside the failed one (the log line `a stage failed ... Finished: ... Not finished: ...` names them), so prefer `resumeFromRunId`, which returns their cached results.
 
 ## When it ends
 

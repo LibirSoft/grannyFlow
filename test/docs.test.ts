@@ -230,6 +230,18 @@ describe('skill docs', () => {
     expect(cursor).toContain('engine `opencode`: not supported on Cursor')
   })
 
+  it('has the Claude Code launch wait for the start word, wherever a Workflow is launched', () => {
+    const cc = read('references/claude-code.md')
+    expect(cc).toContain('## The start word')
+    expect(cc).toContain("gives every agent of a run the user's last message, word for word")
+    expect(cc).toContain('ask them to send `start` as a message of its own')
+    expect(cc).toContain('is not a start: act on it, then ask for the start word again')
+    expect(cc.match(/\(#the-start-word\)/g)!.length).toBeGreaterThanOrEqual(4)
+    expect(cc.indexOf('wait for the start word')).toBeLessThan(cc.indexOf('4. Call:'))
+    expect(read('SKILL.md')).toContain('(references/claude-code.md#the-start-word)')
+    expect(read('references/judge.md')).toContain("after the user's start word")
+  })
+
   it('says wherever plan review can be turned on that it costs many tokens and time, and to turn it on only when asked', () => {
     for (const file of ['SKILL.md', 'references/config.md', 'references/claude-code.md', 'references/opencode.md', 'references/omp.md', 'references/cursor.md']) {
       const text = read(file)
