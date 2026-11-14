@@ -49,7 +49,7 @@ Read it back as JSON to be sure it parses. Do not commit it.
 ## 4. Launch
 
 - omp and opencode: `granny_judge({ repo, base?, context? })`. The reply names the reviewers and the judge model. Then wait as the reply says.
-- Claude Code: the Workflow script `engines/claude-code/judge.js`, launched like a normal run ([claude-code.md](claude-code.md#review-only-granny-judge)), with `args: { judge: true, repo, base, context, config: [<user>, <project>] }`. Leave out a config file that does not exist.
+- Claude Code: the Workflow script `engines/claude-code/judge.js`, launched like a normal run, after the user's start word ([claude-code.md](claude-code.md#review-only-granny-judge)), with `args: { judge: true, repo, base, context, config: [<user>, <project>] }`. Leave out a config file that does not exist.
 - Anything else: [cursor.md](cursor.md#granny-judge), by hand.
 
 `context` is optional: what the user wants looked at, or a plan to check against. A refusal or a failed Workflow that names missing models sends you back to step 2.

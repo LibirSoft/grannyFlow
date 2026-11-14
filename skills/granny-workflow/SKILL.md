@@ -149,7 +149,7 @@ Checks are off by default. When the project has commands that must pass - tests,
 
 ## 4. Launch
 
-Follow your host reference. Then tell the user, in their language: the run id, the worktree the run will work in, the stages, threshold and round cap, plan review on or off (on: its token and time cost with the round cap - omp and opencode put that warning in the `granny_run` reply), the models per role, the reviewers, any `overrides:` line of the reply, where to watch the run when the reply names it (the run navigator on omp and opencode), and that nothing will be pushed. Do not poll; you are notified when the run ends.
+Follow your host reference. On Claude Code the launch waits for the user's start word: prepare everything, say what will launch, and launch only after the user sent `start` (or the word in their language) as a message of its own, because the Workflow tool hands the user's last message to every agent of the run ([references/claude-code.md](references/claude-code.md#the-start-word)). Then tell the user, in their language: the run id, the worktree the run will work in, the stages, threshold and round cap, plan review on or off (on: its token and time cost with the round cap - omp and opencode put that warning in the `granny_run` reply), the models per role, the reviewers, any `overrides:` line of the reply, where to watch the run when the reply names it (the run navigator on omp and opencode), and that nothing will be pushed. Do not poll; you are notified when the run ends.
 
 ## 5. When it completes
 
