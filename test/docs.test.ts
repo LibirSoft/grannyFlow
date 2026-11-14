@@ -475,6 +475,103 @@ describe('skill docs', () => {
     expect(changelog).not.toMatch(/used to|previously|no longer|migrat|upgrad|replaces/i)
   })
 
+  it('documents step agents in the config reference, SKILL.md, the host references and the README', () => {
+    const config = read('references/config.md')
+    expect(config).toContain('## Step agents')
+    expect(config).toMatch(/^\| `stepAgents` \| `false` \|.*\[Step agents\]\(#step-agents\)/m)
+    for (const label of ['implement <stage> step <k>/<n>', 'commit <stage> step <k>/<n>', 'status <stage> step <k>/<n>']) expect({ label, has: config.includes(label) }).toEqual({ label, has: true })
+    const md = read('SKILL.md')
+    expect(md.split('\n').find(l => l.startsWith('| `stages` |'))).toContain('steps?')
+    expect(md).toContain("only when the user's config has it or the user asks")
+    expect(md).toContain('one agent per step')
+    for (const host of ['claude-code', 'opencode', 'omp']) expect({ host, has: read(`references/${host}.md`).includes('implement <stage> step <k>/<n>') }).toEqual({ host, has: true })
+    expect(read('references/cursor.md')).toContain('one fresh agent per step')
+    expect(readRoot('README.md')).toMatch(/^\| `stepAgents` \| `false` \|/m)
+  })
+
+  it('gives the Cursor flow the step prompts and the step rules, and the stage split a sentence on steps', () => {
+    const cursor = read('references/cursor.md')
+    for (const text of [
+      'Implementer - stage with steps, with stepAgents off or one step',
+      'Implementer - stage"',
+      '"(yours)"',
+      'ended with RED gates',
+      'uncommitted changes after step <k>/<n>: <files> - step <k+1>/<n> started on them',
+      'working tree status unreadable after step <k>/<n>',
+      '"Implementer - commit after a step that is not the last of a stage with steps" prompt',
+    ]) expect({ text, has: cursor.includes(text) }).toEqual({ text, has: true })
+    expect(read('SKILL.md').split('\n').find(l => l.startsWith('Stage split:'))).toContain('one per logical commit point')
+  })
+
+  it('names the step labels, the step status reads and the resume of step agents where the hosts, the helper row, the planner and the prompt reference list them', () => {
+    const md = read('SKILL.md')
+    expect(md).toContain('with stepAgents on and two or more steps: one agent per step, in order')
+    expect(md.split('\n').find(l => l.startsWith('| helper |'))).toContain('with step agents after each step but the last, `status <stage> step <k>/<n>`, and `status <stage> step <k>/<n> after commit` when the commit agent ran')
+    for (const host of ['omp', 'opencode']) expect({ host, has: read(`references/${host}.md`).includes('With `stepAgents` on and a stage with two or more steps, its implementer is one agent per step') }).toEqual({ host, has: true })
+    expect(read('references/claude-code.md')).toContain('On a `resumeFromRunId` resume the finished steps come back from the cache')
+    const config = read('references/config.md')
+    expect(config.split('**Resume.**')[1]!.split('\n\n')[0]).toContain('a resume with `resumeFromRunId`')
+    expect(config.split('## Planning')[1]!.split('\n## ')[0]).toContain('`{ files, stages: [{ name, task, after, repo?, steps? }], summary, questions? }`')
+    expect(read('references/prompts.md').split('\n').find(l => l.startsWith('## Implementer - commit after a step'))).toContain('`commit <stage> step <k>/<n>`')
+  })
+
+  it('documents the review base of a resumed stage with no final review in config.md, cursor.md and SKILL.md', () => {
+    const phrase = 'commits of an earlier run may sit below its HEAD - reviewing <base>...HEAD instead'
+    expect(read('references/config.md')).toContain(phrase)
+    expect(read('references/cursor.md')).toContain(phrase)
+    expect(read('SKILL.md')).toContain('when no final review follows')
+  })
+
+  it('limits the wider review base of a resume to a stage with step agents, and says which count failed, in config.md, cursor.md and SKILL.md', () => {
+    const resume = read('references/config.md').split('**Resume.**')[1]!.split('\n\n')[0]!
+    expect(resume).toContain('the stage is reviewed from the HEAD the resume read')
+    expect(resume).toContain('when the checks on the whole branch stay red')
+    expect(resume).toContain('A stage that does not run step agents resumes as before this feature.')
+    expect(read('references/config.md')).toContain('and, when it runs step agents, also when no final review follows it')
+    expect(read('references/config.md')).toContain('could not be counted on this resume')
+    expect(read('references/cursor.md')).toContain('or, for a stage with step agents, when no final review follows the stage')
+    expect(read('references/cursor.md')).toContain('could not be counted on this resume')
+    expect(read('SKILL.md')).toContain('or, with step agents, when no final review follows it')
+    expect(read('SKILL.md')).toContain('and, with step agents, when no final review follows it')
+  })
+
+  it('says an unreadable count widens a resume review only when <base>..HEAD does not read 0, in config.md, cursor.md and CHANGELOG.md', () => {
+    expect(read('references/config.md').split('**Resume.**')[1]!.split('\n\n')[0]).toContain("when `<base>..HEAD` does not read 0 and either differs from the count since the stage's start or one of the two counts cannot be read")
+    expect(read('references/config.md')).toContain('so when `<base>..HEAD` does not read 0 and either differs from the count since the HEAD or one of the two counts cannot be read')
+    expect(read('references/cursor.md')).toContain('When `<base>..HEAD` does not read 0 and either differs from the count since `<startSha>` or one of the two counts cannot be read')
+    expect(readRoot('CHANGELOG.md')).toContain('A count that cannot be read widens the review to `<base>...HEAD` unless `<base>..HEAD` reads 0, and the widening is logged on a line of its own.')
+  })
+
+  it('has the Cursor step flow read the status and log the red gates the way the engine does', () => {
+    const cursor = read('references/cursor.md')
+    expect(cursor).toContain('read `git status --porcelain` (the work dir and the plan files do not count; once more when it fails)')
+    expect(cursor).toContain('A step but the last that ends with red gates is logged (`<stage>: step <k>/<n> ended with RED gates`), and the next step still runs')
+    expect(cursor).toContain("the last step's red gates are logged as `<stage>: implementer ended with RED gates - review will see it`")
+  })
+
+  it('has the planning hand-off pass a planning run\'s stepAgents override on to the build run, in config.md and SKILL.md', () => {
+    const phrase = 'pass that override on the second run too'
+    expect(read('references/config.md').split('## Planning')[1]!.split('\n## ')[0]).toContain(phrase)
+    expect(read('SKILL.md')).toContain(phrase)
+  })
+
+  it('has the prompt reference say what step 1 leaves out, and which entry stage 1 and a parallel lane use', () => {
+    const heading = read('references/prompts.md').split('\n').find(l => l.startsWith('## Implementer - a step of a stage with steps'))!
+    expect(heading).toContain(`step 1 of such a stage leaves out ', and the earlier steps of this stage are committed by other agents' from the line after "You are the IMPLEMENTER"`)
+    expect(heading).toContain('stage 1 and a parallel lane have their own entries below')
+    expect(heading).not.toContain('the first step gets')
+  })
+
+  it('has the Cursor step loop name the step entry of stage 1 and of a parallel lane', () => {
+    const cursor = read('references/cursor.md')
+    expect(cursor).toContain('"Implementer - a step of stage 1 with steps" prompt')
+    expect(cursor).toContain('"Implementer - a step of a parallel lane with steps" prompt')
+  })
+
+  it('names the commit agent of a step in the result, in the step section of config.md', () => {
+    expect(read('references/config.md')).toContain("that agent's `commit`")
+  })
+
   it('points every repo reference at LibirSoft/grannyFlow', () => {
     expect(readRoot('README.md')).toContain('npx skills add LibirSoft/grannyFlow')
     const docs: Record<string, string> = {

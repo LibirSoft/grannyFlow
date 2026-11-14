@@ -34,8 +34,8 @@ export interface FakeOptions {
   override?: (req: AgentRequest) => unknown
   shell?: { env?: Record<string, string> }
   worktree?: string | CommandResult | 'git' | ((command: string, cwd: string) => string)
-  /** Commits the engine's base..HEAD probe sees after an implementer ran (default 1); 'git' runs the probes in a real shell. */
-  commits?: number | 'git' | ((base: string) => number)
+  /** Commits the engine's base..HEAD probe sees after an implementer ran (default 1); 'git' runs the probes in a real shell, and a function may return a failed result for one read. */
+  commits?: number | 'git' | ((base: string) => number | CommandResult)
   /** Answers a command before the reviews do; undefined passes it on. */
   checks?: (command: string) => Review | undefined
   /** What the engine's `git status --porcelain` probe prints, or a failed read, in order (the last one repeats; default clean); 'git' with commits runs it in a real shell. */
@@ -161,7 +161,8 @@ export function fakeHost(opts: FakeOptions = {}) {
     if (STATUS_PROBE.test(command)) return asResult((statuses.length > 1 ? statuses.shift() : statuses[0]) ?? '')
     if (command.includes(HEAD_PROBE)) return { code: 0, output: `deadbee${impl + 1}\n` }
     const base = COMMITS_PROBE.exec(command)![1]!
-    return { code: 0, output: `${typeof c === 'function' ? c(base) : c}\n` }
+    const n = typeof c === 'function' ? c(base) : c
+    return typeof n === 'number' ? { code: 0, output: `${n}\n` } : n
   }
   const setUp = async (command: string, cwd: string, repo: string): Promise<CommandResult> => {
     const w = opts.worktree

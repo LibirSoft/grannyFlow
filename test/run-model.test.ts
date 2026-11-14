@@ -156,6 +156,16 @@ describe('the stage-grouped run tree', () => {
     expect(tree.running).toEqual([2])
   })
 
+  it('names a stage by the labels of its step agents when the run has no outline, and places their commit with it', () => {
+    n = 0
+    const step1 = agent(3, 'implement payments step 1/2', 'implementer', 'Implement', { cwd: undefined })
+    const commit1 = agent(40, 'commit payments step 1/2', 'implementer', 'Implement', { cwd: undefined })
+    const step2 = agent(60, 'implement payments step 2/2', 'implementer', 'Implement', { cwd: undefined })
+    const entries = [j(0, 'phase', { title: 'Implement' }), step1.entry, ended(30, step1), commit1.entry, ended(45, commit1), step2.entry, ended(90, step2)]
+    const tree = buildRunTree({ id: 'steps', status: 'running', startedAt: BASE }, entries, new Map(), NOW)
+    expect(tree.groups.map(g => [g.key, g.title, g.agents.map(a => a.action)])).toEqual([['stage:1', 'payments', ['implement step 1/2', 'commit', 'implement step 2/2']]])
+  })
+
   it('drops the reviewer from the action when the run has one reviewer, and leaves Worktree and commands out', () => {
     const { entries } = twoStages()
     const tree = buildRunTree(RUN, entries, new Map(), NOW, new Map(), outlineOf({ reviewers: ['a'] }))
@@ -396,6 +406,13 @@ describe('placeOf', () => {
     ['review core r1 codex', 'stage:1', 'review r1', 1],
     ['tidy things', undefined, undefined],
     ['implement nothing known', undefined, undefined],
+    ['implement core step 2/5', 'stage:1', 'implement step 2/5'],
+    ['implement core api step 1/2', 'stage:2', 'implement step 1/2'],
+    ['implement fix r2 bugs step 3/3', 'stage:3', 'implement step 3/3'],
+    ['commit core step 2/5', 'stage:1', 'commit'],
+    ['commit core api step 1/2', 'stage:2', 'commit'],
+    ['repair core step 2/5 #1', undefined, undefined],
+    ['implement core step x/2', undefined, undefined],
   ]
   for (const [label, group, action, reviewers] of cases) {
     it(`places "${label}"`, () => {

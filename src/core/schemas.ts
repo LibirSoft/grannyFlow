@@ -39,6 +39,18 @@ export const SCHEMAS: Record<ResultKind, JsonSchema> = {
             task: { type: 'string', description: 'exactly which work orders or sections of the plan this stage does' },
             repo: { type: 'string', description: 'absolute path of the repo this stage works in, when the run spans several repos; omit for the primary repo' },
             after: { type: 'array', items: { type: 'number' }, description: '1-based numbers of the earlier stages this stage builds on; [] when it can start right away (independent stages run in parallel)' },
+            steps: {
+              type: 'array',
+              description: 'the steps of this stage, in order, one per commit point; the planner is asked for them only when config stepAgents is on',
+              items: {
+                type: 'object',
+                properties: {
+                  name: { type: 'string', description: 'a short name for the step' },
+                  task: { type: 'string', description: 'which work orders, or the part of one, this step does; the files to read first and the files it changes' },
+                },
+                required: ['task'],
+              },
+            },
           },
           required: ['name', 'task'],
         },

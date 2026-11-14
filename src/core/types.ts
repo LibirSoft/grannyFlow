@@ -130,6 +130,7 @@ export interface StageSpec {
   repo?: string
   after?: number[]
   checks?: string[]
+  steps?: Array<{ name?: string; task: string }>
 }
 
 export interface Implementation {
@@ -172,12 +173,20 @@ export interface Recheck {
   note?: string
 }
 
+export interface StepResult {
+  name: string
+  implementation: Implementation
+  commit?: Implementation
+}
+
 export interface StageResult {
   stage: string
   repo?: string
   outcome: StageOutcome
   rounds: number
   implementation?: Implementation
+  /** One entry per step, in order, only when step agents built the stage (stepAgents on, two or more steps). */
+  steps?: StepResult[]
   residual: Finding[]
   unresolved: Finding[]
   history: RoundRecord[]

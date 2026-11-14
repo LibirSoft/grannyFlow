@@ -55,6 +55,7 @@ var DEFAULT_CONFIG = {
   checks: [],
   maxRepairs: 2,
   readOnlyAgent: false,
+  stepAgents: false,
   watch: "full"
 };
 var ROLES = ["granny", "helper", "planner", "implementer", "judge"];
@@ -309,6 +310,8 @@ function validate(c, effortLayer) {
     errors.push("aiAttribution must be a boolean");
   if (typeof c.readOnlyAgent !== "boolean")
     errors.push("readOnlyAgent must be a boolean");
+  if (typeof c.stepAgents !== "boolean")
+    errors.push("stepAgents must be a boolean");
   if (!WATCH_MODES.includes(c.watch))
     errors.push('watch must be "full", "panel" or "off"');
   if (!Array.isArray(c.rules) || !c.rules.every((r) => typeof r === "string"))
@@ -735,7 +738,7 @@ function reviewSavePrompt(repo, step, script) {
   return oneCommand(`shell command for the "${step}" step, which saves a reviewer's answer to its review file under the work dir (the one file this step writes),`, `Do not review the code yourself. Repo ${repo}.`, VERBATIM, script);
 }
 var WHOLE_BRANCH_NOTE = "This is the whole-branch review: each stage was already reviewed alone, so look across them - duplicated code or helpers several stages added, inconsistencies between stages (naming, contracts, config, docs, tests) - and especially at the merge commits and their conflict resolutions (`git log --merges`, `git show <merge>`): both sides' intent must survive.";
-var taskSection = (stage) => stage ? `Stage ${stage.number}/${stage.total} "${stage.name}" - its TASK:
+var taskSection = (stage, unit = "Stage") => stage ? `${unit} ${stage.number}/${stage.total} "${stage.name}" - its TASK:
 ${stage.task}
 ` : "";
 var reviewAsks = (stage, base) => [
@@ -1266,7 +1269,19 @@ var SCHEMAS = {
             name: { type: "string" },
             task: { type: "string", description: "exactly which work orders or sections of the plan this stage does" },
             repo: { type: "string", description: "absolute path of the repo this stage works in, when the run spans several repos; omit for the primary repo" },
-            after: { type: "array", items: { type: "number" }, description: "1-based numbers of the earlier stages this stage builds on; [] when it can start right away (independent stages run in parallel)" }
+            after: { type: "array", items: { type: "number" }, description: "1-based numbers of the earlier stages this stage builds on; [] when it can start right away (independent stages run in parallel)" },
+            steps: {
+              type: "array",
+              description: "the steps of this stage, in order, one per commit point; the planner is asked for them only when config stepAgents is on",
+              items: {
+                type: "object",
+                properties: {
+                  name: { type: "string", description: "a short name for the step" },
+                  task: { type: "string", description: "which work orders, or the part of one, this step does; the files to read first and the files it changes" }
+                },
+                required: ["task"]
+              }
+            }
           },
           required: ["name", "task"]
         }

@@ -55,6 +55,7 @@ var DEFAULT_CONFIG = {
   checks: [],
   maxRepairs: 2,
   readOnlyAgent: false,
+  stepAgents: false,
   watch: "full"
 };
 function planReviewWarning(maxRounds) {
@@ -301,6 +302,8 @@ function validate(c, effortLayer) {
     errors.push("aiAttribution must be a boolean");
   if (typeof c.readOnlyAgent !== "boolean")
     errors.push("readOnlyAgent must be a boolean");
+  if (typeof c.stepAgents !== "boolean")
+    errors.push("stepAgents must be a boolean");
   if (!WATCH_MODES.includes(c.watch))
     errors.push('watch must be "full", "panel" or "off"');
   if (!Array.isArray(c.rules) || !c.rules.every((r) => typeof r === "string"))
@@ -808,6 +811,7 @@ function readOnlyHeader(p, writes, extra = []) {
 var repoAsk = (p, repos) => (repos.length ? `
 The goal spans several repos: ${p.repo} (the primary) and ${repos.join(", ")}. Explore each one it touches. A stage works in exactly one repo: set its repo to that repo's absolute path (omit it for the primary). The same change in several repos gets one stage per repo.` : "") + `
 Independent stages run in parallel, each in its own git worktree. Set after on every stage: the 1-based numbers of the earlier stages it builds on, [] if it can start right away. Stages are independent when neither needs the other's code and they edit different files${repos.length ? " (the same change in several repos usually is)" : ""}; when in doubt, make the later one wait.`;
+var PLANNER_STEPS = `Each step of a stage is built by its own implementer agent, which has not seen the other steps' conversations and knows only the plan, the branch and its step's task. Split every stage into steps, one per logical commit point: a change that builds, passes the gates and is committed on its own, in the order they must land. A step's task names its work orders or the part of one, the files to read first, the files it changes and the acceptance criteria a test can check, and it never needs code a later step writes. A stage that is one commit gets one step.`;
 function draftPrompt(p, goal, plans, repos = []) {
   return `${readOnlyHeader(p, "the plan", [`The implementer's gates: ${gateList(p.config)}; all must pass before every commit.`])}
 
@@ -817,8 +821,9 @@ ${goal}
 
 First explore the code, configs, lockfiles, tests and docs the goal touches. Then write the plan to ${plans.join(", ")} (absolute paths; create missing directories). If a plan file already exists there, revise it toward the goal instead of starting over. Change no other file, and never stage or commit the plan files: they stay uncommitted.
 Write it for an implementer who has not seen this conversation: the goal and the current state of the code (with file paths); the approach and why, with the alternatives you rejected; work orders WP-01, WP-02, ..., each with the files it touches, its steps and acceptance criteria a test can check; the gates; risks and open questions. Name versions, APIs, flags and files as the repo has them, not from memory.
-Split the work orders into stages, one per stop-and-review point: one stage for a small plan; for a larger one, a checkpoint where later work builds on earlier foundations. Each stage's task names exactly which work orders it does.${repoAsk(p, repos)}
-Return files (the absolute paths you wrote), stages ([{ name, task, after${repos.length ? ", repo" : ""} }]), summary (a few lines for the user: the approach and the work orders) and questions (decisions only the user can make, each with the default the plan assumes; empty when none).`;
+Split the work orders into stages, one per stop-and-review point: one stage for a small plan; for a larger one, a checkpoint where later work builds on earlier foundations. Each stage's task names exactly which work orders it does.${repoAsk(p, repos)}${p.config.stepAgents ? `
+${PLANNER_STEPS}` : ""}
+Return files (the absolute paths you wrote), stages ([{ name, task, after${repos.length ? ", repo" : ""}${p.config.stepAgents ? ", steps" : ""} }]), summary (a few lines for the user: the approach and the work orders) and questions (decisions only the user can make, each with the default the plan assumes; empty when none).`;
 }
 var BUILD_METHOD = `How to build it:
 1. Work in few, large steps: every round trip costs. Read the task, the code you will change and the code that will meet yours without being changed (whatever reads the data you write, calls what you alter, logs it, or runs beside it) in one or two commands. Take the work orders or logical steps one at a time: write all the files and tests of one in one command, run the gates and commit it in the next, then start the following one - a stage with several of them is never one commit. Do not re-read what you already have, and do not run a gate twice on the same tree.
@@ -826,20 +831,53 @@ var BUILD_METHOD = `How to build it:
 3. Everything that can run twice, beside itself or beside a request (a job, a retry, a second process): act only on state read in the same transaction, decide what a crash between two steps leaves behind, and let one bad item fail alone.
 4. Every failure path: what is stored and what the caller is told must agree with what really happened.
 5. Where the task is silent, do what the nearest existing code does, and note the choice.`;
-function implementPrompt(p, stage, index, total, name, builds = index > 0) {
-  const pr = prBodyOf(p);
-  const earlier = builds ? `${p.others?.length ? "Earlier stages in this repo are done and reviewed" : "Earlier stages are done and reviewed"}: first read ${branchLog(p)}, the code and ${pr}.
-` : index === 0 ? "" : `This stage does not build on the other stages (they run in parallel, elsewhere or later): expect no commits from them on this branch.
+var stepName = (step, k) => step.name ?? `step ${k + 1}`;
+function earlierLine(p, index, builds, withSteps = false) {
+  if (builds)
+    return `${p.others?.length ? "Earlier stages in this repo are done and reviewed" : "Earlier stages are done and reviewed"}${withSteps ? ", and the earlier steps of this stage are committed by other agents" : ""}: first read ${branchLog(p)}, the code and ${prBodyOf(p)}.
 `;
+  return index === 0 ? "" : `This stage does not build on the other stages (they run in parallel, elsewhere or later): expect no commits from them on this branch.
+`;
+}
+function prBodyInstruction(p, unit) {
+  const whose = unit === "stage" ? "the stage's" : "this step's";
+  return `When ${whose} code is committed, bring ${prBodyOf(p)} up to date in one edit (git-excluded; create its directory if missing), with sections: Title, Summary, Changes (table), Test plan (real numbers), Revised in stage N, Review fixes, Untested. Return startSha = HEAD before your first change.`;
+}
+function implementPrompt(p, stage, index, total, name, builds = index > 0) {
+  const steps = stage.steps?.length ? `
+
+Its steps, in this order - commit each one before you start the next:
+${stage.steps.map((s, k) => `${k + 1}. ${stepName(s, k)}: ${s.task}`).join(`
+`)}` : "";
   return `${common(p)}
 
 You are the IMPLEMENTER. Stage ${index + 1}/${total}: "${name}".
-${earlier}Do ONLY this stage, then stop:
-${stage.task ?? ""}
+${earlierLine(p, index, builds)}Do ONLY this stage, then stop:
+${stage.task ?? ""}${steps}
 
 ${BUILD_METHOD}
 
-When the stage's code is committed, bring ${pr} up to date in one edit (git-excluded; create its directory if missing), with sections: Title, Summary, Changes (table), Test plan (real numbers), Revised in stage N, Review fixes, Untested. Return startSha = HEAD before your first change.`;
+${prBodyInstruction(p, "stage")}`;
+}
+function implementStepPrompt(p, stage, index, total, name, k, builds = index > 0) {
+  const steps = stage.steps ?? [];
+  const step = steps[k];
+  const pr = prBodyOf(p);
+  const earlierSteps = `The earlier steps of this stage are committed by other agents: first read ${branchLog(p)}, the code and ${pr}.
+`;
+  const earlier = builds ? earlierLine(p, index, true, k > 0) : `${earlierLine(p, index, false)}${k === 0 ? "" : earlierSteps}`;
+  const order = steps.map((s, j) => `${j + 1}. ${stepName(s, j)}${j === k ? " (yours)" : ""}`).join(", ");
+  return `${common(p)}
+
+You are the IMPLEMENTER. Stage ${index + 1}/${total}: "${name}", step ${k + 1} of ${steps.length}: "${stepName(step, k)}".
+${earlier}The steps of this stage are built by one agent each, in this order: ${order}.
+Do ONLY step ${k + 1}, then stop; the other steps are other agents' work:
+${step.task}
+If the branch log shows this step is already committed, change nothing and say so in deviations.
+
+${BUILD_METHOD}
+
+${prBodyInstruction(p, "step")}`;
 }
 function fixPrompt(p, name, round, accepted, overruled = []) {
   return `${common(p)}
@@ -913,18 +951,20 @@ ${list.join(`
 
 `)}`;
 }
-function commitPrompt(p, name, at, status, plans, stage) {
+function commitPrompt(p, name, at, status, plans, stage, step) {
+  const opening = step ? `You are the IMPLEMENTER, after step ${step.number}/${step.total} ("${step.name}") of stage "${name}". The working tree has uncommitted changes; granny checks and reviews only committed work.` : `You are the IMPLEMENTER, finishing stage "${name}" (${at}). The working tree has uncommitted changes; granny checks and reviews only committed work.`;
+  const commit = step ? "Commit this step's work with explicit paths, gates green. Build nothing of the later steps: other agents do them." : "Commit the stage's work with explicit paths, gates green.";
   return `${common(p)}
 
-You are the IMPLEMENTER, finishing stage "${name}" (${at}). The working tree has uncommitted changes; granny checks and reviews only committed work.
-${taskSection(stage)}\`git status --porcelain\` printed:
+${opening}
+${step ? taskSection(step, "Step") : taskSection(stage)}\`git status --porcelain\` printed:
 \`\`\`
 ${status.slice(-3000)}
 \`\`\`
-Read \`git diff\`, ${branchLog(p)} and the files above. Commit the stage's work with explicit paths, gates green. Delete only stray files you created that do not belong in the repo (scratch files, build output). Do not hide changes to get a clean tree: never \`git stash\`, \`git reset\`, \`git checkout -- <path>\` or \`git clean\`.${plans.length ? ` Leave the plan files ${plans.join(", ")} as they are and never stage or commit them (granny left them out of the status above).` : ""} When you are done, \`git status --porcelain\` prints nothing (${p.config.workDir}/ is git-excluded and does not count${plans.length ? ", nor do the plan files" : ""}); explain any change you cannot commit in deviations. Return startSha = HEAD before your first commit.`;
+Read \`git diff\`, ${branchLog(p)} and the files above. ${commit} Delete only stray files you created that do not belong in the repo (scratch files, build output). Do not hide changes to get a clean tree: never \`git stash\`, \`git reset\`, \`git checkout -- <path>\` or \`git clean\`.${plans.length ? ` Leave the plan files ${plans.join(", ")} as they are and never stage or commit them (granny left them out of the status above).` : ""} When you are done, \`git status --porcelain\` prints nothing (${p.config.workDir}/ is git-excluded and does not count${plans.length ? ", nor do the plan files" : ""}); explain any change you cannot commit in deviations. Return startSha = HEAD before your first commit.`;
 }
 var WHOLE_BRANCH_NOTE = "This is the whole-branch review: each stage was already reviewed alone, so look across them - duplicated code or helpers several stages added, inconsistencies between stages (naming, contracts, config, docs, tests) - and especially at the merge commits and their conflict resolutions (`git log --merges`, `git show <merge>`): both sides' intent must survive.";
-var taskSection = (stage) => stage ? `Stage ${stage.number}/${stage.total} "${stage.name}" - its TASK:
+var taskSection = (stage, unit = "Stage") => stage ? `${unit} ${stage.number}/${stage.total} "${stage.name}" - its TASK:
 ${stage.task}
 ` : "";
 var reviewAsks = (stage, base) => [
@@ -1417,7 +1457,19 @@ var SCHEMAS = {
             name: { type: "string" },
             task: { type: "string", description: "exactly which work orders or sections of the plan this stage does" },
             repo: { type: "string", description: "absolute path of the repo this stage works in, when the run spans several repos; omit for the primary repo" },
-            after: { type: "array", items: { type: "number" }, description: "1-based numbers of the earlier stages this stage builds on; [] when it can start right away (independent stages run in parallel)" }
+            after: { type: "array", items: { type: "number" }, description: "1-based numbers of the earlier stages this stage builds on; [] when it can start right away (independent stages run in parallel)" },
+            steps: {
+              type: "array",
+              description: "the steps of this stage, in order, one per commit point; the planner is asked for them only when config stepAgents is on",
+              items: {
+                type: "object",
+                properties: {
+                  name: { type: "string", description: "a short name for the step" },
+                  task: { type: "string", description: "which work orders, or the part of one, this step does; the files to read first and the files it changes" }
+                },
+                required: ["task"]
+              }
+            }
           },
           required: ["name", "task"]
         }
@@ -1732,8 +1784,65 @@ function stageErrors(stages, known) {
     if (s.checks !== undefined && !(Array.isArray(s.checks) && s.checks.every((c) => typeof c === "string" && c.trim()))) {
       errors.push(`stages[${i}].checks must be an array of check names`);
     }
+    if (s.steps !== undefined)
+      errors.push(...stepErrors(i, s));
   });
   return errors;
+}
+function stepErrors(i, s) {
+  const at = `stages[${i}].steps`;
+  if (!Array.isArray(s.steps) || !s.steps.length)
+    return [`${at} must be a non-empty array of { name?, task }`];
+  if (s.implement === false)
+    return [`${at} needs an implementing stage (implement is false)`];
+  return s.steps.flatMap((step, k) => {
+    const here = `${at}[${k}]`;
+    if (!step || typeof step !== "object")
+      return [`${here} must be an object { name?, task }`];
+    const problems = [];
+    if (step.name !== undefined && (typeof step.name !== "string" || !step.name.trim()))
+      problems.push(`${here}.name must be a non-empty string`);
+    if (typeof step.task !== "string" || !step.task.trim())
+      problems.push(`${here}.task is required`);
+    return problems;
+  });
+}
+function plannedSteps(list) {
+  if (!Array.isArray(list))
+    return;
+  const kept = list.flatMap((step) => {
+    if (!step || typeof step !== "object")
+      return [];
+    const { name, task } = step;
+    if (typeof task !== "string" || !task.trim())
+      return [];
+    return [typeof name === "string" && name.trim() ? { name, task } : { task }];
+  });
+  return kept.length ? kept : undefined;
+}
+function mergeSteps(ran) {
+  const first = ran[0].implementation;
+  const last = ran.at(-1).implementation;
+  const said = (text) => {
+    const parts = ran.flatMap((s, k) => {
+      const t = text(s.implementation);
+      return t ? [`step ${k + 1} (${s.name}): ${t}`] : [];
+    });
+    return parts.length ? parts.join(`
+`) : undefined;
+  };
+  const deviations = said((r) => saidSomething(r.deviations));
+  const declined = ran.flatMap((s, k) => (s.implementation.declined ?? []).map((d) => ({ id: d.id, reason: `step ${k + 1} (${s.name}): ${d.reason}` })));
+  return {
+    startSha: first.startSha,
+    headSha: last.headSha,
+    gatesGreen: last.gatesGreen,
+    gates: last.gates,
+    commits: ran.flatMap((s) => [...s.implementation.commits ?? [], ...s.commit?.commits ?? []]),
+    untested: said((r) => r.untested?.trim() || undefined) ?? "",
+    ...deviations ? { deviations } : {},
+    ...declined.length ? { declined } : {}
+  };
 }
 function stageCheckErrors(stages, checks) {
   const names = new Set(checks.map((c) => c.name));
@@ -2075,6 +2184,9 @@ async function runGranny(host, input) {
         out.repo = st.repo;
       if (Array.isArray(st.after))
         out.after = st.after;
+      const steps = config.stepAgents ? plannedSteps(st.steps) : undefined;
+      if (steps)
+        out.steps = steps;
       return out;
     });
     const draft = { files, stages, summary: String(r.summary ?? "") };
@@ -2148,7 +2260,7 @@ async function runGranny(host, input) {
     return { ...base, ...metric, passed: true };
   };
   const detail = (r) => r.note ?? `exit ${r.code}`;
-  const commitWork = async (lane, name, at, stage) => {
+  const commitWork = async (lane, name, at, stage, step) => {
     const dirty = await uncommitted(`status ${name} ${at}`, "Implement", lane.cwd);
     if (!Array.isArray(dirty))
       return { unread: dirty.unreadable };
@@ -2157,7 +2269,7 @@ async function runGranny(host, input) {
     host.log(`${name}: uncommitted changes after ${at} - asking the implementer to commit them: ${listed(dirty)}`);
     const label = `commit ${name} ${at}`;
     const impl = await implement(lane, label, commitPrompt(lane.p, name, at, dirty.join(`
-`), plansIn(lane.cwd), stage));
+`), plansIn(lane.cwd), stage, step));
     const left = await uncommitted(`status ${name} ${at} after commit`, "Implement", lane.cwd);
     return { impl, by: `the commit step (${label})`, ...!Array.isArray(left) ? { unread: left.unreadable } : left.length ? { left } : {} };
   };
@@ -2516,6 +2628,31 @@ the last repair's deviations: ${deviations}` : ""}`;
       ledger.set(i, []);
     return ledger.get(i);
   };
+  const stepAgentsOf = (st) => config.stepAgents && (st.steps?.length ?? 0) > 1;
+  const finalReviewCovers = (st) => config.finalReview && specs.filter((s) => repoOf(s) === repoOf(st)).length > 1;
+  const implementSteps = async (lane, st, i, name, task, notes, ran) => {
+    const steps = st.steps;
+    for (let k = 0;k < steps.length; k++) {
+      const at = `step ${k + 1}/${steps.length}`;
+      const impl = await implement(lane, `implement ${name} ${at}`, implementStepPrompt(lane.p, st, i, specs.length, name, k, buildsOnEarlier(i)));
+      const stepRun = { name: stepName(steps[k], k), implementation: impl };
+      ran.push(stepRun);
+      if (k === steps.length - 1)
+        break;
+      if (!impl.gatesGreen)
+        host.log(`${name}: ${at} ended with RED gates`);
+      const committed = await commitWork(lane, name, at, task, { number: k + 1, total: steps.length, name: stepRun.name, task: steps[k].task });
+      if (committed.impl)
+        stepRun.commit = committed.impl;
+      const { left, unread } = committed;
+      if (left || unread) {
+        const note = unread ? `working tree status unreadable after ${at} (${unread})` : `uncommitted changes after ${at}: ${listed(left)} - step ${k + 2}/${steps.length} started on them`;
+        host.log(`${name}: ${note}`);
+        notes.push(note);
+      }
+    }
+    return mergeSteps(ran);
+  };
   const runStage = async (lane, st, i, name, began) => {
     let impl;
     let base = lane.base;
@@ -2524,6 +2661,8 @@ the last repair's deviations: ${deviations}` : ""}`;
     const checks = checksOf(st);
     const runs = [];
     const ran = () => runs.length ? { checks: runs } : {};
+    const stepRuns = [];
+    const stepsOut = () => stepRuns.length ? { steps: stepRuns } : {};
     const notes = [];
     let committed = {};
     let gates;
@@ -2536,7 +2675,7 @@ the last repair's deviations: ${deviations}` : ""}`;
         base = start;
       else
         host.log(`${name}: could not read HEAD before the implementer ran - reviewing ${lane.base}...HEAD instead (exit ${head.code}): ${head.output.slice(-500)}`);
-      impl = await implement(lane, `implement ${name}`, implementPrompt(lane.p, st, i, specs.length, name, buildsOnEarlier(i)));
+      impl = stepAgentsOf(st) ? await implementSteps(lane, st, i, name, task, notes, stepRuns) : await implement(lane, `implement ${name}`, implementPrompt(lane.p, st, i, specs.length, name, buildsOnEarlier(i)));
       if (!impl.gatesGreen)
         host.log(`${name}: implementer ended with RED gates - review will see it`);
       if (start && impl.startSha !== start)
@@ -2555,26 +2694,31 @@ the last repair's deviations: ${deviations}` : ""}`;
         if (committed.impl)
           count = await commits(`commits ${name} after commit`);
       }
-      const resumed = count === 0 && fromStage > 1 && i === fromStage - 1;
-      if (resumed) {
-        count = await commits(`commits ${name} on resume`, lane.base);
-        if (count !== 0) {
-          host.log(`${name}: no new commit on resume - reviewing ${lane.base}...HEAD instead`);
+      const resumed = fromStage > 1 && i === fromStage - 1;
+      if (resumed && (count === 0 || stepAgentsOf(st) && !finalReviewCovers(st))) {
+        const onBranch = await commits(`commits ${name} on resume`, lane.base);
+        if (onBranch !== 0 && (onBranch === undefined || count === undefined || onBranch !== count)) {
+          const why = count === 0 ? "no new commit on resume" : onBranch === undefined ? "the commits below its HEAD could not be counted on this resume" : count === undefined ? "the commits since its start could not be counted on this resume" : "commits of an earlier run may sit below its HEAD";
+          host.log(`${name}: ${why} - reviewing ${lane.base}...HEAD instead`);
           base = lane.base;
         }
+        if (count === 0)
+          count = onBranch;
       }
       if (count === 0) {
         const { left, unread } = committed;
         const note = left ? `the implementer made no commit: the work it left is uncommitted (${listed(left)}), so there was nothing to review` : `the implementer made no commit: ${base}..HEAD is empty${resumed ? `, and so is ${lane.base}..HEAD on this resume` : ""}, so there was nothing to review${unread ? `; the working tree status could not be read (${unread}), so uncommitted work may be left` : ""}`;
         host.log(`${name}: no-changes - ${note}`);
-        return { stage: name, ...where, implementation: impl, outcome: "no-changes", rounds: 0, residual: [], unresolved: [], history: [], note };
+        return { stage: name, ...where, implementation: impl, outcome: "no-changes", rounds: 0, residual: [], unresolved: [], history: [], note: [note, ...notes].join(`
+`), ...stepsOut() };
       }
       const last = committed.impl ?? impl;
       gates = { green: last.gatesGreen, text: last.gates, by: committed.by ?? "the implementer" };
       if (checks.length) {
         const gate = await checkGate(lane, name, "implement", checks, runs, task, gates);
         if (!gate.passed)
-          return { stage: name, ...where, implementation: impl, outcome: "checks-failed", rounds: 0, residual: [], unresolved: [], history: [], note: gate.note, ...ran() };
+          return { stage: name, ...where, implementation: impl, outcome: "checks-failed", rounds: 0, residual: [], unresolved: [], history: [], note: [gate.note, ...notes].filter(Boolean).join(`
+`), ...ran(), ...stepsOut() };
       } else {
         if (!committed.impl) {
           committed = await commitWork(lane, name, "implement", task);
@@ -2603,7 +2747,7 @@ the last repair's deviations: ${deviations}` : ""}`;
     }
     const note = [loop.note, ...notes].filter(Boolean).join(`
 `);
-    return { stage: name, ...where, ...impl ? { implementation: impl } : {}, ...loop, ...note ? { note } : {}, ...ran() };
+    return { stage: name, ...where, ...impl ? { implementation: impl } : {}, ...loop, ...note ? { note } : {}, ...ran(), ...stepsOut() };
   };
   const mergeLane = async (state, lane, name) => {
     const main = state.lane;

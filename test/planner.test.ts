@@ -111,4 +111,34 @@ describe('a planning run', () => {
     const prompt = draftPrompt({ repo: '/r', branch: 'b', base: 'main', config: resolveConfig([]) }, 'G', ['/r/.granny/plans/b.md'])
     expect(prompt).toContain('Change no other file, and never stage or commit the plan files')
   })
+
+  it('asks the planner for steps only with stepAgents on', () => {
+    const off = draftPrompt({ repo: '/r', branch: 'b', base: 'main', config: resolveConfig([]) }, 'G', ['/r/.granny/plans/b.md'])
+    expect(off).toContain('stages ([{ name, task, after }])')
+    expect(off).not.toContain('Split every stage into steps')
+    const on = draftPrompt({ repo: '/r', branch: 'b', base: 'main', config: resolveConfig([{ stepAgents: true }]) }, 'G', ['/r/.granny/plans/b.md'])
+    expect(on).toContain('Split every stage into steps, one per logical commit point')
+    expect(on).toContain('A stage that is one commit gets one step.')
+    expect(on).toContain('stages ([{ name, task, after, steps }])')
+    const several = draftPrompt({ repo: '/r', branch: 'b', base: 'main', config: resolveConfig([{ stepAgents: true }]) }, 'G', ['/r/.granny/plans/b.md'], ['/other'])
+    expect(several).toContain('stages ([{ name, task, after, repo, steps }])')
+  })
+
+  it('keeps the steps the planner proposes only with stepAgents on, and a second run takes them as they are', async () => {
+    const proposal = {
+      files: ['/work/repo/.granny/plans/feat-x.md'],
+      stages: [{ name: 'core', task: 'WP-01', steps: [{ name: 'schema', task: 'WP-01a' }, { task: 'WP-01b' }, { name: 'empty', task: ' ' }] }],
+      summary: 's',
+    }
+    const on = await runGranny(fakeHost({ override: req => (req.kind === 'draft' ? proposal : undefined) }).host, goal({ config: { planReview: false, stepAgents: true } }))
+    expect(on.draft!.stages).toEqual([{ name: 'core', task: 'WP-01', steps: [{ name: 'schema', task: 'WP-01a' }, { task: 'WP-01b' }] }])
+
+    const f = fakeHost()
+    await runGranny(f.host, { repo: '/work/repo', branch: 'feat/x', plan: on.draft!.files, stages: on.draft!.stages, config: { planReview: false, stepAgents: true } })
+    expect(f.calls.filter(c => c.kind === 'implementation').map(c => c.label)).toEqual(['implement core step 1/2', 'implement core step 2/2'])
+
+    const off = await runGranny(fakeHost({ override: req => (req.kind === 'draft' ? proposal : undefined) }).host, goal({ config: { planReview: false } }))
+    expect(off.draft!.stages).toEqual([{ name: 'core', task: 'WP-01' }])
+    expect(off.draft!.stages[0]).not.toHaveProperty('steps')
+  })
 })

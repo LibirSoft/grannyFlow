@@ -191,6 +191,18 @@ describe('parallel stages', () => {
     expect(checkInput(input({ stages: [{ task: 'x' }, { task: 'y', after: [2] }] }))).toContain('stages[1].after must list 1-based numbers of earlier stages (1..1)')
     expect(checkInput(input({ stages: [{ task: 'x', after: [] }] }))).toEqual([])
   })
+
+  it('validates the steps of a stage', () => {
+    const errorsOf = (stage: object) => checkInput(input({ stages: [stage as any] }))
+    expect(errorsOf({ task: 'x', steps: [] })).toContain('stages[0].steps must be a non-empty array of { name?, task }')
+    expect(errorsOf({ task: 'x', steps: 'two' })).toContain('stages[0].steps must be a non-empty array of { name?, task }')
+    expect(errorsOf({ task: 'x', steps: [{ name: 'a' }] })).toContain('stages[0].steps[0].task is required')
+    expect(errorsOf({ task: 'x', steps: [{ task: ' ' }] })).toContain('stages[0].steps[0].task is required')
+    expect(errorsOf({ task: 'x', steps: [{ name: '', task: 'y' }] })).toContain('stages[0].steps[0].name must be a non-empty string')
+    expect(errorsOf({ task: 'x', steps: ['y'] })).toContain('stages[0].steps[0] must be an object { name?, task }')
+    expect(errorsOf({ implement: false, steps: [{ task: 'y' }] })).toContain('stages[0].steps needs an implementing stage (implement is false)')
+    expect(errorsOf({ task: 'x', steps: [{ name: 'schema', task: 'WP-01' }, { task: 'WP-02' }] })).toEqual([])
+  })
 })
 
 describe('parallel stages in a real git repo', () => {

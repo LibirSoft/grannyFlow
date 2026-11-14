@@ -168,6 +168,8 @@ The goal spans several repos: ${p.repo} (the primary) and ${repos.join(', ')}. E
   `
 Independent stages run in parallel, each in its own git worktree. Set after on every stage: the 1-based numbers of the earlier stages it builds on, [] if it can start right away. Stages are independent when neither needs the other's code and they edit different files${repos.length ? ' (the same change in several repos usually is)' : ''}; when in doubt, make the later one wait.`
 
+const PLANNER_STEPS = `Each step of a stage is built by its own implementer agent, which has not seen the other steps' conversations and knows only the plan, the branch and its step's task. Split every stage into steps, one per logical commit point: a change that builds, passes the gates and is committed on its own, in the order they must land. A step's task names its work orders or the part of one, the files to read first, the files it changes and the acceptance criteria a test can check, and it never needs code a later step writes. A stage that is one commit gets one step.`
+
 export function draftPrompt(p: PromptContext, goal: string, plans: string[], repos: string[] = []): string {
   return `${readOnlyHeader(p, 'the plan', [`The implementer's gates: ${gateList(p.config)}; all must pass before every commit.`])}
 
@@ -177,8 +179,8 @@ ${goal}
 
 First explore the code, configs, lockfiles, tests and docs the goal touches. Then write the plan to ${plans.join(', ')} (absolute paths; create missing directories). If a plan file already exists there, revise it toward the goal instead of starting over. Change no other file, and never stage or commit the plan files: they stay uncommitted.
 Write it for an implementer who has not seen this conversation: the goal and the current state of the code (with file paths); the approach and why, with the alternatives you rejected; work orders WP-01, WP-02, ..., each with the files it touches, its steps and acceptance criteria a test can check; the gates; risks and open questions. Name versions, APIs, flags and files as the repo has them, not from memory.
-Split the work orders into stages, one per stop-and-review point: one stage for a small plan; for a larger one, a checkpoint where later work builds on earlier foundations. Each stage's task names exactly which work orders it does.${repoAsk(p, repos)}
-Return files (the absolute paths you wrote), stages ([{ name, task, after${repos.length ? ', repo' : ''} }]), summary (a few lines for the user: the approach and the work orders) and questions (decisions only the user can make, each with the default the plan assumes; empty when none).`
+Split the work orders into stages, one per stop-and-review point: one stage for a small plan; for a larger one, a checkpoint where later work builds on earlier foundations. Each stage's task names exactly which work orders it does.${repoAsk(p, repos)}${p.config.stepAgents ? `\n${PLANNER_STEPS}` : ''}
+Return files (the absolute paths you wrote), stages ([{ name, task, after${repos.length ? ', repo' : ''}${p.config.stepAgents ? ', steps' : ''} }]), summary (a few lines for the user: the approach and the work orders) and questions (decisions only the user can make, each with the default the plan assumes; empty when none).`
 }
 
 /** How the implementer works: few round trips, and the three places where a first version usually goes wrong. */
@@ -189,22 +191,51 @@ const BUILD_METHOD = `How to build it:
 4. Every failure path: what is stored and what the caller is told must agree with what really happened.
 5. Where the task is silent, do what the nearest existing code does, and note the choice.`
 
+/** The name a step is shown by: its own, or `step <k>` (1-based) when it has none. */
+export const stepName = (step: { name?: string }, k: number): string => step.name ?? `step ${k + 1}`
+
+function earlierLine(p: PromptContext, index: number, builds: boolean, withSteps = false): string {
+  if (builds) return `${p.others?.length ? 'Earlier stages in this repo are done and reviewed' : 'Earlier stages are done and reviewed'}${withSteps ? ', and the earlier steps of this stage are committed by other agents' : ''}: first read ${branchLog(p)}, the code and ${prBodyOf(p)}.\n`
+  return index === 0 ? '' : 'This stage does not build on the other stages (they run in parallel, elsewhere or later): expect no commits from them on this branch.\n'
+}
+
+function prBodyInstruction(p: PromptContext, unit: 'stage' | 'step'): string {
+  const whose = unit === 'stage' ? "the stage's" : "this step's"
+  return `When ${whose} code is committed, bring ${prBodyOf(p)} up to date in one edit (git-excluded; create its directory if missing), with sections: Title, Summary, Changes (table), Test plan (real numbers), Revised in stage N, Review fixes, Untested. Return startSha = HEAD before your first change.`
+}
+
 export function implementPrompt(p: PromptContext, stage: StageSpec, index: number, total: number, name: string, builds = index > 0): string {
-  const pr = prBodyOf(p)
-  const earlier = builds
-    ? `${p.others?.length ? 'Earlier stages in this repo are done and reviewed' : 'Earlier stages are done and reviewed'}: first read ${branchLog(p)}, the code and ${pr}.\n`
-    : index === 0
-      ? ''
-      : 'This stage does not build on the other stages (they run in parallel, elsewhere or later): expect no commits from them on this branch.\n'
+  const steps = stage.steps?.length ? `\n\nIts steps, in this order - commit each one before you start the next:\n${stage.steps.map((s, k) => `${k + 1}. ${stepName(s, k)}: ${s.task}`).join('\n')}` : ''
   return `${common(p)}
 
 You are the IMPLEMENTER. Stage ${index + 1}/${total}: "${name}".
-${earlier}Do ONLY this stage, then stop:
-${stage.task ?? ''}
+${earlierLine(p, index, builds)}Do ONLY this stage, then stop:
+${stage.task ?? ''}${steps}
 
 ${BUILD_METHOD}
 
-When the stage's code is committed, bring ${pr} up to date in one edit (git-excluded; create its directory if missing), with sections: Title, Summary, Changes (table), Test plan (real numbers), Revised in stage N, Review fixes, Untested. Return startSha = HEAD before your first change.`
+${prBodyInstruction(p, 'stage')}`
+}
+
+/** One step of a stage with stepAgents on: its own agent, which sees the other steps by name only. `k` is the step's 0-based index. */
+export function implementStepPrompt(p: PromptContext, stage: StageSpec, index: number, total: number, name: string, k: number, builds = index > 0): string {
+  const steps = stage.steps ?? []
+  const step = steps[k]
+  const pr = prBodyOf(p)
+  const earlierSteps = `The earlier steps of this stage are committed by other agents: first read ${branchLog(p)}, the code and ${pr}.\n`
+  const earlier = builds ? earlierLine(p, index, true, k > 0) : `${earlierLine(p, index, false)}${k === 0 ? '' : earlierSteps}`
+  const order = steps.map((s, j) => `${j + 1}. ${stepName(s, j)}${j === k ? ' (yours)' : ''}`).join(', ')
+  return `${common(p)}
+
+You are the IMPLEMENTER. Stage ${index + 1}/${total}: "${name}", step ${k + 1} of ${steps.length}: "${stepName(step!, k)}".
+${earlier}The steps of this stage are built by one agent each, in this order: ${order}.
+Do ONLY step ${k + 1}, then stop; the other steps are other agents' work:
+${step!.task}
+If the branch log shows this step is already committed, change nothing and say so in deviations.
+
+${BUILD_METHOD}
+
+${prBodyInstruction(p, 'step')}`
 }
 
 export function fixPrompt(p: PromptContext, name: string, round: number, accepted: Finding[], overruled: Overruled[] = []): string {
@@ -352,15 +383,21 @@ FAILED CHECKS:
 ${list.join('\n\n')}`
 }
 
-export function commitPrompt(p: PromptContext, name: string, at: string, status: string, plans: string[], stage?: StageTask): string {
+export function commitPrompt(p: PromptContext, name: string, at: string, status: string, plans: string[], stage?: StageTask, step?: StageTask): string {
+  const opening = step
+    ? `You are the IMPLEMENTER, after step ${step.number}/${step.total} ("${step.name}") of stage "${name}". The working tree has uncommitted changes; granny checks and reviews only committed work.`
+    : `You are the IMPLEMENTER, finishing stage "${name}" (${at}). The working tree has uncommitted changes; granny checks and reviews only committed work.`
+  const commit = step
+    ? "Commit this step's work with explicit paths, gates green. Build nothing of the later steps: other agents do them."
+    : "Commit the stage's work with explicit paths, gates green."
   return `${common(p)}
 
-You are the IMPLEMENTER, finishing stage "${name}" (${at}). The working tree has uncommitted changes; granny checks and reviews only committed work.
-${taskSection(stage)}\`git status --porcelain\` printed:
+${opening}
+${step ? taskSection(step, 'Step') : taskSection(stage)}\`git status --porcelain\` printed:
 \`\`\`
 ${status.slice(-3000)}
 \`\`\`
-Read \`git diff\`, ${branchLog(p)} and the files above. Commit the stage's work with explicit paths, gates green. Delete only stray files you created that do not belong in the repo (scratch files, build output). Do not hide changes to get a clean tree: never \`git stash\`, \`git reset\`, \`git checkout -- <path>\` or \`git clean\`.${plans.length ? ` Leave the plan files ${plans.join(', ')} as they are and never stage or commit them (granny left them out of the status above).` : ''} When you are done, \`git status --porcelain\` prints nothing (${p.config.workDir}/ is git-excluded and does not count${plans.length ? ', nor do the plan files' : ''}); explain any change you cannot commit in deviations. Return startSha = HEAD before your first commit.`
+Read \`git diff\`, ${branchLog(p)} and the files above. ${commit} Delete only stray files you created that do not belong in the repo (scratch files, build output). Do not hide changes to get a clean tree: never \`git stash\`, \`git reset\`, \`git checkout -- <path>\` or \`git clean\`.${plans.length ? ` Leave the plan files ${plans.join(', ')} as they are and never stage or commit them (granny left them out of the status above).` : ''} When you are done, \`git status --porcelain\` prints nothing (${p.config.workDir}/ is git-excluded and does not count${plans.length ? ', nor do the plan files' : ''}); explain any change you cannot commit in deviations. Return startSha = HEAD before your first commit.`
 }
 
 export const WHOLE_BRANCH_NOTE =
@@ -373,8 +410,8 @@ export interface StageTask {
   task: string
 }
 
-const taskSection = (stage?: StageTask): string =>
-  stage ? `Stage ${stage.number}/${stage.total} "${stage.name}" - its TASK:\n${stage.task}\n` : ''
+const taskSection = (stage?: StageTask, unit = 'Stage'): string =>
+  stage ? `${unit} ${stage.number}/${stage.total} "${stage.name}" - its TASK:\n${stage.task}\n` : ''
 
 const reviewAsks = (stage: StageTask | undefined, base: string): string[] => [
   'Review it the way a careful senior engineer would, in this order. Take the time it needs: a problem missed here ships.',

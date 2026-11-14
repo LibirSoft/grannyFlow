@@ -58,6 +58,7 @@ export interface GrannyConfig {
   checks: CheckConfig[]
   maxRepairs: number
   readOnlyAgent: boolean
+  stepAgents: boolean
   watch: WatchMode
 }
 
@@ -92,6 +93,7 @@ export const DEFAULT_CONFIG: GrannyConfig = {
   checks: [],
   maxRepairs: 2,
   readOnlyAgent: false,
+  stepAgents: false,
   watch: 'full',
 }
 
@@ -325,6 +327,7 @@ function validate(c: GrannyConfig, effortLayer: Partial<Record<ConfigRole, strin
   if (!Number.isInteger(c.maxParallel) || c.maxParallel < 1) errors.push('maxParallel must be an integer >= 1')
   if (typeof c.aiAttribution !== 'boolean') errors.push('aiAttribution must be a boolean')
   if (typeof c.readOnlyAgent !== 'boolean') errors.push('readOnlyAgent must be a boolean')
+  if (typeof c.stepAgents !== 'boolean') errors.push('stepAgents must be a boolean')
   if (!WATCH_MODES.includes(c.watch)) errors.push('watch must be "full", "panel" or "off"')
   if (!Array.isArray(c.rules) || !c.rules.every(r => typeof r === 'string')) errors.push('rules must be an array of strings')
   if (!isRepairs(c.maxRepairs)) errors.push('maxRepairs must be an integer >= 0')

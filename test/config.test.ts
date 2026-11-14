@@ -254,6 +254,19 @@ describe('worktree', () => {
   }
 })
 
+describe('stepAgents', () => {
+  it('is off by default and takes a boolean from any layer', () => {
+    expect(DEFAULT_CONFIG.stepAgents).toBe(false)
+    expect(resolveConfig([]).stepAgents).toBe(false)
+    expect(resolveConfig([{ stepAgents: true }]).stepAgents).toBe(true)
+    expect(resolveConfig([{ stepAgents: true }, { stepAgents: false }]).stepAgents).toBe(false)
+  })
+
+  it('rejects a stepAgents that is not a boolean', () => {
+    expect(() => resolveConfig([{ stepAgents: 'yes' }])).toThrow('stepAgents must be a boolean')
+  })
+})
+
 describe('planReview', () => {
   it('is off by default and takes a boolean from any layer', () => {
     expect(DEFAULT_CONFIG.planReview).toBe(false)

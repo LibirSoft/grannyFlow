@@ -256,6 +256,17 @@ export function dropPlaceholders<T extends RunInput | JudgeInput>(input: T): T {
       if (!stage || typeof stage !== 'object') return stage
       const st: Record<string, unknown> = { ...stage }
       for (const key of ['name', 'task', 'repo']) if (st[key] === '') delete st[key]
+      if (Array.isArray(st.steps)) {
+        if (!st.steps.length) delete st.steps
+        else {
+          st.steps = st.steps.map(step => {
+            if (!step || typeof step !== 'object' || step.name !== '') return step
+            const kept = { ...step }
+            delete kept.name
+            return kept
+          })
+        }
+      }
       return st
     })
   }
@@ -310,6 +321,18 @@ export const RUN_INPUT_SCHEMA = {
             type: 'array',
             items: { type: 'number' },
             description: '1-based numbers of earlier stages this one waits for; [] starts it right away. Omitted: it waits for the previous stage in the same repo. Independent stages run in parallel (config parallel, on by default), a same-repo one in its own worktree that is merged back',
+          },
+          steps: {
+            type: 'array',
+            description: 'Optional, for an implementing stage: its commit points in order. A step is one change that builds, passes the gates and is committed on its own, with its own task. The stage task stays required and is still what the review checks. With config stepAgents on and two or more steps, each step is built by its own agent; otherwise one agent builds the stage and its prompt lists the steps',
+            items: {
+              type: 'object',
+              properties: {
+                name: { type: 'string', description: 'Optional label, used in the result and the notes; a step without one is "step <k>"' },
+                task: { type: 'string', description: 'The work of this step: its work orders or part of one, the files to read first, and the acceptance criteria a test can check' },
+              },
+              required: ['task'],
+            },
           },
         },
       },

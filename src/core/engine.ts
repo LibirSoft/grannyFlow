@@ -12,6 +12,7 @@ import {
   finalPrompt,
   fixPrompt,
   implementPrompt,
+  implementStepPrompt,
   judgePrompt,
   judgeRetryNote,
   judgeStepPrompt,
@@ -27,6 +28,7 @@ import {
   reviewStartPrompt,
   reviewStopPrompt,
   reviewWaitPrompt,
+  stepName,
   gitCommandPrompt,
   tagPrompt,
   timeoutProbePrompt,
@@ -73,6 +75,7 @@ import type {
   StageOutcome,
   StageResult,
   StageSpec,
+  StepResult,
   TrailReviewer,
   TrailRound,
   TrailSummary,
@@ -249,8 +252,58 @@ function stageErrors(stages: StageSpec[], known: Set<string>): string[] {
     if (s.checks !== undefined && !(Array.isArray(s.checks) && s.checks.every(c => typeof c === 'string' && c.trim()))) {
       errors.push(`stages[${i}].checks must be an array of check names`)
     }
+    if (s.steps !== undefined) errors.push(...stepErrors(i, s))
   })
   return errors
+}
+
+function stepErrors(i: number, s: StageSpec): string[] {
+  const at = `stages[${i}].steps`
+  if (!Array.isArray(s.steps) || !s.steps.length) return [`${at} must be a non-empty array of { name?, task }`]
+  if (s.implement === false) return [`${at} needs an implementing stage (implement is false)`]
+  return s.steps.flatMap((step, k) => {
+    const here = `${at}[${k}]`
+    if (!step || typeof step !== 'object') return [`${here} must be an object { name?, task }`]
+    const problems: string[] = []
+    if (step.name !== undefined && (typeof step.name !== 'string' || !step.name.trim())) problems.push(`${here}.name must be a non-empty string`)
+    if (typeof step.task !== 'string' || !step.task.trim()) problems.push(`${here}.task is required`)
+    return problems
+  })
+}
+
+function plannedSteps(list: unknown): Array<{ name?: string; task: string }> | undefined {
+  if (!Array.isArray(list)) return undefined
+  const kept = list.flatMap((step: unknown) => {
+    if (!step || typeof step !== 'object') return []
+    const { name, task } = step as { name?: unknown; task?: unknown }
+    if (typeof task !== 'string' || !task.trim()) return []
+    return [typeof name === 'string' && name.trim() ? { name, task } : { task }]
+  })
+  return kept.length ? kept : undefined
+}
+
+function mergeSteps(ran: StepResult[]): Implementation {
+  const first = ran[0]!.implementation
+  const last = ran.at(-1)!.implementation
+  const said = (text: (r: Implementation) => string | undefined): string | undefined => {
+    const parts = ran.flatMap((s, k) => {
+      const t = text(s.implementation)
+      return t ? [`step ${k + 1} (${s.name}): ${t}`] : []
+    })
+    return parts.length ? parts.join('\n') : undefined
+  }
+  const deviations = said(r => saidSomething(r.deviations))
+  const declined = ran.flatMap((s, k) => (s.implementation.declined ?? []).map(d => ({ id: d.id, reason: `step ${k + 1} (${s.name}): ${d.reason}` })))
+  return {
+    startSha: first.startSha,
+    headSha: last.headSha,
+    gatesGreen: last.gatesGreen,
+    gates: last.gates,
+    commits: ran.flatMap(s => [...(s.implementation.commits ?? []), ...(s.commit?.commits ?? [])]),
+    untested: said(r => r.untested?.trim() || undefined) ?? '',
+    ...(deviations ? { deviations } : {}),
+    ...(declined.length ? { declined } : {}),
+  }
 }
 
 export function stageCheckErrors(stages: StageSpec[] | undefined, checks: CheckConfig[]): string[] {
@@ -618,6 +671,8 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
       const out: StageSpec = { name: st.name, task: st.task }
       if (typeof st.repo === 'string' && st.repo && trimPath(st.repo) !== primary && trimPath(st.repo) !== trimPath(worktree)) out.repo = st.repo
       if (Array.isArray(st.after)) out.after = st.after
+      const steps = config.stepAgents ? plannedSteps(st.steps) : undefined
+      if (steps) out.steps = steps
       return out
     })
     const draft: PlanDraft = { files, stages, summary: String(r.summary ?? '') }
@@ -686,13 +741,13 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
 
   const detail = (r: CheckResult) => r.note ?? `exit ${r.code}`
 
-  const commitWork = async (lane: Lane, name: string, at: string, stage?: StageTask): Promise<Committed> => {
+  const commitWork = async (lane: Lane, name: string, at: string, stage?: StageTask, step?: StageTask): Promise<Committed> => {
     const dirty = await uncommitted(`status ${name} ${at}`, 'Implement', lane.cwd)
     if (!Array.isArray(dirty)) return { unread: dirty.unreadable }
     if (!dirty.length) return {}
     host.log(`${name}: uncommitted changes after ${at} - asking the implementer to commit them: ${listed(dirty)}`)
     const label = `commit ${name} ${at}`
-    const impl = await implement(lane, label, commitPrompt(lane.p, name, at, dirty.join('\n'), plansIn(lane.cwd), stage))
+    const impl = await implement(lane, label, commitPrompt(lane.p, name, at, dirty.join('\n'), plansIn(lane.cwd), stage, step))
     const left = await uncommitted(`status ${name} ${at} after commit`, 'Implement', lane.cwd)
     return { impl, by: `the commit step (${label})`, ...(!Array.isArray(left) ? { unread: left.unreadable } : left.length ? { left } : {}) }
   }
@@ -1065,6 +1120,32 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
     return ledger.get(i)!
   }
 
+  /** A stage is built in steps when stepAgents is on and it has two or more steps; one step is built as a stage without steps. */
+  const stepAgentsOf = (st: StageSpec): boolean => config.stepAgents && (st.steps?.length ?? 0) > 1
+  /** The final review of a repo reviews its whole branch: finalReview on and more than one stage in the repo. A lane merge can add one; that is left out here. */
+  const finalReviewCovers = (st: StageSpec): boolean => config.finalReview && specs.filter(s => repoOf(s) === repoOf(st)).length > 1
+
+  const implementSteps = async (lane: Lane, st: StageSpec, i: number, name: string, task: StageTask | undefined, notes: string[], ran: StepResult[]): Promise<Implementation> => {
+    const steps = st.steps!
+    for (let k = 0; k < steps.length; k++) {
+      const at = `step ${k + 1}/${steps.length}`
+      const impl = await implement(lane, `implement ${name} ${at}`, implementStepPrompt(lane.p, st, i, specs.length, name, k, buildsOnEarlier(i)))
+      const stepRun: StepResult = { name: stepName(steps[k], k), implementation: impl }
+      ran.push(stepRun)
+      if (k === steps.length - 1) break
+      if (!impl.gatesGreen) host.log(`${name}: ${at} ended with RED gates`)
+      const committed = await commitWork(lane, name, at, task, { number: k + 1, total: steps.length, name: stepRun.name, task: steps[k].task })
+      if (committed.impl) stepRun.commit = committed.impl
+      const { left, unread } = committed
+      if (left || unread) {
+        const note = unread ? `working tree status unreadable after ${at} (${unread})` : `uncommitted changes after ${at}: ${listed(left!)} - step ${k + 2}/${steps.length} started on them`
+        host.log(`${name}: ${note}`)
+        notes.push(note)
+      }
+    }
+    return mergeSteps(ran)
+  }
+
   const runStage = async (lane: Lane, st: StageSpec, i: number, name: string, began?: (start?: string) => void): Promise<StageResult> => {
     let impl: Implementation | undefined
     let base = lane.base
@@ -1073,6 +1154,8 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
     const checks = checksOf(st)
     const runs: CheckRun[] = []
     const ran = () => (runs.length ? { checks: runs } : {})
+    const stepRuns: StepResult[] = []
+    const stepsOut = () => (stepRuns.length ? { steps: stepRuns } : {})
     const notes: string[] = []
     let committed: Committed = {}
     let gates: Gates | undefined
@@ -1083,7 +1166,9 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
       began?.(start)
       if (start) base = start
       else host.log(`${name}: could not read HEAD before the implementer ran - reviewing ${lane.base}...HEAD instead (exit ${head.code}): ${head.output.slice(-500)}`)
-      impl = await implement(lane, `implement ${name}`, implementPrompt(lane.p, st, i, specs.length, name, buildsOnEarlier(i)))
+      impl = stepAgentsOf(st)
+        ? await implementSteps(lane, st, i, name, task, notes, stepRuns)
+        : await implement(lane, `implement ${name}`, implementPrompt(lane.p, st, i, specs.length, name, buildsOnEarlier(i)))
       if (!impl.gatesGreen) host.log(`${name}: implementer ended with RED gates - review will see it`)
       if (start && impl.startSha !== start) host.log(`${name}: the implementer reported startSha ${impl.startSha}, but HEAD was ${start} before it ran - reviewing ${start}...HEAD`)
       const commits = async (label: string, since = base) => {
@@ -1098,13 +1183,18 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
         committed = await commitWork(lane, name, 'implement', task)
         if (committed.impl) count = await commits(`commits ${name} after commit`)
       }
-      const resumed = count === 0 && fromStage > 1 && i === fromStage - 1
-      if (resumed) {
-        count = await commits(`commits ${name} on resume`, lane.base)
-        if (count !== 0) {
-          host.log(`${name}: no new commit on resume - reviewing ${lane.base}...HEAD instead`)
+      const resumed = fromStage > 1 && i === fromStage - 1
+      if (resumed && (count === 0 || (stepAgentsOf(st) && !finalReviewCovers(st)))) {
+        const onBranch = await commits(`commits ${name} on resume`, lane.base)
+        if (onBranch !== 0 && (onBranch === undefined || count === undefined || onBranch !== count)) {
+          const why = count === 0 ? 'no new commit on resume'
+            : onBranch === undefined ? 'the commits below its HEAD could not be counted on this resume'
+            : count === undefined ? 'the commits since its start could not be counted on this resume'
+            : 'commits of an earlier run may sit below its HEAD'
+          host.log(`${name}: ${why} - reviewing ${lane.base}...HEAD instead`)
           base = lane.base
         }
+        if (count === 0) count = onBranch
       }
       if (count === 0) {
         const { left, unread } = committed
@@ -1112,13 +1202,13 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
           ? `the implementer made no commit: the work it left is uncommitted (${listed(left)}), so there was nothing to review`
           : `the implementer made no commit: ${base}..HEAD is empty${resumed ? `, and so is ${lane.base}..HEAD on this resume` : ''}, so there was nothing to review${unread ? `; the working tree status could not be read (${unread}), so uncommitted work may be left` : ''}`
         host.log(`${name}: no-changes - ${note}`)
-        return { stage: name, ...where, implementation: impl, outcome: 'no-changes', rounds: 0, residual: [], unresolved: [], history: [], note }
+        return { stage: name, ...where, implementation: impl, outcome: 'no-changes', rounds: 0, residual: [], unresolved: [], history: [], note: [note, ...notes].join('\n'), ...stepsOut() }
       }
       const last = committed.impl ?? impl
       gates = { green: last.gatesGreen, text: last.gates, by: committed.by ?? 'the implementer' }
       if (checks.length) {
         const gate = await checkGate(lane, name, 'implement', checks, runs, task, gates)
-        if (!gate.passed) return { stage: name, ...where, implementation: impl, outcome: 'checks-failed', rounds: 0, residual: [], unresolved: [], history: [], note: gate.note, ...ran() }
+        if (!gate.passed) return { stage: name, ...where, implementation: impl, outcome: 'checks-failed', rounds: 0, residual: [], unresolved: [], history: [], note: [gate.note, ...notes].filter(Boolean).join('\n'), ...ran(), ...stepsOut() }
       } else {
         if (!committed.impl) {
           committed = await commitWork(lane, name, 'implement', task)
@@ -1153,7 +1243,7 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
       notes.push(warned)
     }
     const note = [loop.note, ...notes].filter(Boolean).join('\n')
-    return { stage: name, ...where, ...(impl ? { implementation: impl } : {}), ...loop, ...(note ? { note } : {}), ...ran() }
+    return { stage: name, ...where, ...(impl ? { implementation: impl } : {}), ...loop, ...(note ? { note } : {}), ...ran(), ...stepsOut() }
   }
 
   const mergeLane = async (state: RepoState, lane: Lane, name: string): Promise<string | undefined> => {

@@ -130,6 +130,12 @@ describe('runOutline', () => {
     expect(plan).toMatchObject({ kind: 'plan', planReview: true, finalReview: false, stages: [], reviewers: ['a', 'b'] })
   })
 
+  it('says how many steps a stage runs as step agents, and only with stepAgents on', () => {
+    const stages = [{ name: 'one', task: 't', steps: [{ task: 'a' }, { task: 'b' }, { task: 'c' }] }, { name: 'two', task: 't', steps: [{ task: 'a' }] }]
+    expect(run({ stages }, { stepAgents: true }).stages.map(s => s.steps)).toEqual([3, undefined])
+    expect(run({ stages }).stages.map(s => 'steps' in s)).toEqual([false, false])
+  })
+
   it('drops control characters from the names', () => {
     expect(run({ branch: 'feat/\x1b[1mx', stages: [{ name: 'o\rne', task: 't' }] }).stages[0]!.name).toBe('one')
   })
@@ -146,6 +152,13 @@ describe('readOutline', () => {
     const judge = judgeOutline('feat/x', resolveConfig([]))
     expect(judge.kind).toBe('judge')
     expect(readOutline(JSON.parse(JSON.stringify(judge)))).toEqual(judge)
+  })
+
+  it('reads back the step count of a stage, and drops one that is not a count', () => {
+    const counted = runOutline({ repo: '/r', branch: 'feat/x', stages: [{ name: 'one', task: 't', steps: [{ task: 'a' }, { task: 'b' }] }] }, resolveConfig([{ stepAgents: true }]))
+    expect(counted.stages[0]!.steps).toBe(2)
+    expect(readOutline(JSON.parse(JSON.stringify(counted)))).toEqual(counted)
+    expect(readOutline({ ...counted, stages: [{ ...counted.stages[0], steps: 'two' }] })?.stages[0]).not.toHaveProperty('steps')
   })
 
   it('rejects anything malformed', () => {

@@ -113,7 +113,7 @@ granny  feat/pause  ● running · 21m36s
 
 A row that has not started does not open. `run details` is the only place with the run's id, repo, branch, times, `result.json` path and result. With several runs the list of runs takes its place: Enter on another run shows it.
 
-**2. A stage**: its implementer and checks, then the review loop with its rounds, the ones still possible and the round cap.
+**2. A stage**: its implementer and checks, then the review loop with its rounds, the ones still possible and the round cap. With `stepAgents` on and a stage with two or more steps, its implementer is one agent per step, each labelled `implement <stage> step <k>/<n>` in the run's journal; the stage view lists it in the stage's group as `implement step <k>/<n>`, and a commit agent after a step as `commit` ([config.md](config.md#step-agents)).
 
 ```
 granny › 2 Client pause UI
