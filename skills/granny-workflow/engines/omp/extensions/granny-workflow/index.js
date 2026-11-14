@@ -2801,7 +2801,7 @@ the last repair's deviations: ${deviations}` : ""}`;
         break;
       if (!impl.gatesGreen)
         host.log(`${name}: ${at} ended with RED gates`);
-      const committed = await commitWork(lane, name, at, task, { number: k + 1, total: steps.length, name: stepName(steps[k], k), task: steps[k].task });
+      const committed = await commitWork(lane, name, at, task, { number: k + 1, total: steps.length, name: stepRun.name, task: steps[k].task });
       if (committed.impl)
         stepRun.commit = committed.impl;
       const { left, unread } = committed;
