@@ -51,6 +51,32 @@ describe('the step prompt', () => {
     expect(later).toContain('The earlier steps of this stage are committed by other agents')
   })
 
+  it('gives stage 1 no earlier-stages line: a step after the first gets the earlier steps alone, and step 1 gets no line', () => {
+    const first = implementStepPrompt(p, stage, 0, 2, 'core', 0)
+    expect(first).toContain('step 1 of 3: "schema".\nThe steps of this stage are built by one agent each')
+    const later = implementStepPrompt(p, stage, 0, 2, 'core', 2)
+    expect(later).toContain(
+      'step 3 of 3: "docs".\nThe earlier steps of this stage are committed by other agents: first read `git log --oneline main..HEAD`, the code and .granny/PR-BODY.md.\nThe steps of this stage',
+    )
+    expect(later).not.toContain('Earlier stages')
+    expect(later).not.toContain('does not build on the other stages')
+  })
+
+  it('gives a parallel lane step 1 the parallel-lane line and no earlier steps', () => {
+    const first = implementStepPrompt(p, stage, 1, 2, 'core', 0, false)
+    expect(first).toContain(
+      'This stage does not build on the other stages (they run in parallel, elsewhere or later): expect no commits from them on this branch.\nThe steps of this stage',
+    )
+    expect(first).not.toContain('The earlier steps of this stage')
+  })
+
+  it('names the earlier stages of this repo on the merged line when the run changes other repos too', () => {
+    const later = implementStepPrompt({ ...p, others: ['/work/other'] }, stage, 1, 2, 'core', 2, true)
+    expect(later).toContain(
+      'Earlier stages in this repo are done and reviewed, and the earlier steps of this stage are committed by other agents: first read `git log --oneline main..HEAD`, the code and .granny/PR-BODY.md.',
+    )
+  })
+
   it('writes the PR body when this step is committed', () => {
     expect(implementStepPrompt(p, stage, 0, 1, 'core', 2)).toContain("When this step's code is committed, bring .granny/PR-BODY.md up to date in one edit")
   })
@@ -104,4 +130,5 @@ describe('the prompt reference', () => {
     expect(rendered).toContain('## Implementer - commit after a step that is not the last of a stage with steps')
     expect(rendered).toContain('## Implementer - commit (`git status --porcelain` listed uncommitted changes before a check gate - label `commit <stage> <gate> #<n>`, a repair - or, with no checks or no commit at all, after the implementer')
   })
+
 })

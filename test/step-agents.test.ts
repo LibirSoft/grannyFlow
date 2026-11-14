@@ -224,4 +224,15 @@ describe('step agents', () => {
     expect(prompt(2)).toContain('Earlier stages are done and reviewed, and the earlier steps of this stage are committed by other agents: first read `git log --oneline main..HEAD`')
     expect(prompt(3)).toContain('Earlier stages are done and reviewed, and the earlier steps of this stage are committed by other agents')
   })
+
+  it('gives the step agents of stage 1 no earlier-stages line, and the earlier steps from step 2 on', async () => {
+    const f = fakeHost()
+    await runGranny(f.host, run([{ name: 'core', task: 'WP-01', steps }], on))
+    const prompt = (k: number) => f.calls.find(c => c.label === `implement core step ${k}/3`)!.prompt
+    expect(prompt(1)).not.toContain('Earlier stages')
+    expect(prompt(1)).not.toContain('The earlier steps of this stage')
+    expect(prompt(2)).not.toContain('Earlier stages')
+    expect(prompt(2)).toContain('The earlier steps of this stage are committed by other agents: first read `git log --oneline main..HEAD`')
+    expect(prompt(3)).toContain('The earlier steps of this stage are committed by other agents: first read `git log --oneline main..HEAD`')
+  })
 })
