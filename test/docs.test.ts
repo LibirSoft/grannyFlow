@@ -543,10 +543,17 @@ describe('skill docs', () => {
     expect(read('SKILL.md')).toContain(phrase)
   })
 
-  it('has the prompt reference say every step gets the earlier-stages line, and a step after the first also the earlier-steps line', () => {
+  it('has the prompt reference say what step 1 leaves out, and which entry stage 1 and a parallel lane use', () => {
     const heading = read('references/prompts.md').split('\n').find(l => l.startsWith('## Implementer - a step of a stage with steps'))!
-    expect(heading).toContain('every step gets the earlier-stages line of the stage, a step after the first also the line on the earlier steps')
+    expect(heading).toContain(`step 1 of such a stage leaves out ', and the earlier steps of this stage are committed by other agents' from the line after "You are the IMPLEMENTER"`)
+    expect(heading).toContain('stage 1 and a parallel lane have their own entries below')
     expect(heading).not.toContain('the first step gets')
+  })
+
+  it('has the Cursor step loop name the step entry of stage 1 and of a parallel lane', () => {
+    const cursor = read('references/cursor.md')
+    expect(cursor).toContain('"Implementer - a step of stage 1 with steps" prompt')
+    expect(cursor).toContain('"Implementer - a step of a parallel lane with steps" prompt')
   })
 
   it('names the commit agent of a step in the result, in the step section of config.md', () => {

@@ -142,8 +142,16 @@ export function renderPrompts(): string {
     ['Implementer - stage', implementPrompt(p, { task: '<stage task>' }, 1, 2, '<stage name>')],
     ['Implementer - stage with steps, with stepAgents off or one step (the stage task, then its steps as one numbered list)', implementPrompt(p, stepped, 1, 2, '<stage name>')],
     [
-      'Implementer - a step of a stage with steps, with stepAgents on and two or more steps (label `implement <stage> step <k>/<n>`; every step gets the earlier-stages line of the stage, a step after the first also the line on the earlier steps; this entry is step 2)',
+      "Implementer - a step of a stage with steps, with stepAgents on and two or more steps (label `implement <stage> step <k>/<n>`; this entry is step 2 of a stage that builds on an earlier stage of its repo: step 1 of such a stage leaves out ', and the earlier steps of this stage are committed by other agents' from the line after \"You are the IMPLEMENTER\"; stage 1 and a parallel lane have their own entries below)",
       implementStepPrompt(p, stepped, 1, 2, '<stage name>', 1),
+    ],
+    [
+      'Implementer - a step of stage 1 with steps, with stepAgents on and two or more steps (label `implement <stage> step <k>/<n>`; this entry is step 2 of stage 1: step 1 of stage 1 has no line after "You are the IMPLEMENTER")',
+      implementStepPrompt(p, stepped, 0, 2, '<stage name>', 1, false),
+    ],
+    [
+      'Implementer - a step of a parallel lane with steps, with stepAgents on and two or more steps (label `implement <stage> step <k>/<n>`; a parallel lane is a stage that builds on no earlier stage of its repo; this entry is step 2 of one: step 1 of a parallel lane leaves out the line that begins "The earlier steps")',
+      implementStepPrompt(p, stepped, 1, 2, '<stage name>', 1, false),
     ],
     ['Implementer - fix', fixPrompt(p, '<stage name>', 1, []).replace(/\[\]$/, '<accepted findings as JSON>')],
     [

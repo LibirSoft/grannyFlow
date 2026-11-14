@@ -131,4 +131,17 @@ describe('the prompt reference', () => {
     expect(rendered).toContain('## Implementer - commit (`git status --porcelain` listed uncommitted changes before a check gate - label `commit <stage> <gate> #<n>`, a repair - or, with no checks or no commit at all, after the implementer')
   })
 
+  it('gives stage 1 and a parallel lane their own step entries, each with the first line its stage sends', () => {
+    const sections = renderPrompts().split('\n## ')
+    const stage1 = sections.find(s => s.startsWith('Implementer - a step of stage 1 with steps, '))
+    expect(stage1).toBeDefined()
+    expect(stage1).toContain('Stage 1/2: "<stage name>", step 2 of 2: "<next step name>".\nThe earlier steps of this stage are committed by other agents: first read ')
+    expect(stage1).not.toContain('Earlier stages')
+    const lane = sections.find(s => s.startsWith('Implementer - a step of a parallel lane with steps, '))
+    expect(lane).toBeDefined()
+    expect(lane).toContain(
+      'Stage 2/2: "<stage name>", step 2 of 2: "<next step name>".\nThis stage does not build on the other stages (they run in parallel, elsewhere or later): expect no commits from them on this branch.\nThe earlier steps of this stage are committed by other agents: first read ',
+    )
+    expect(lane).not.toContain('Earlier stages')
+  })
 })
