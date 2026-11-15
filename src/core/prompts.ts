@@ -45,8 +45,8 @@ const rubric = (task: string) => `Classify every finding with exactly these fiel
 - likelihood: common (the normal flow) | edge (special timing or state: a race, a retry, an expired session, a boundary value, a dependency that fails) | rare (forced or malformed input, a rarely used feature). Upkeep has no trigger: use edge.
 - fixCost: trivial (a few lines) | small (one function or file plus a test) | large (cross-module, a redesign).
 - scope: in-scope | pre-existing (there before this change, and the change neither causes it nor opens a new way to reach it) | other-stage (another stage's job).
-- evidence: path:line plus the concrete trigger steps, e.g. \`Editor.tsx:225\` + "save -> go back -> late response arrives -> save again". Always give a path:line: without one the finding counts as unverified, which lowers its impact one class.
-- reason: one line.
+- evidence: path:line plus the concrete trigger steps, e.g. \`Editor.tsx:225\` + "save -> go back -> late response arrives -> save again". Always give a path:line: without one the finding counts as unverified, which lowers its impact one class. One line: the one or two places that show it and the trigger as a chain of short steps. Do not retell the finding.
+- reason: one short sentence, at most 25 words: what decided the classification. Do not repeat the finding or the evidence.
 Example: a late save response re-binds the editor to another post's id, so the next save can overwrite the wrong post: confirmed, critical, edge, small, in-scope, though the window is narrow.`
 
 const decided = (f: Finding) => (f.decision ? `${f.decision.action} - rule ${f.decision.rule}: ${f.decision.why}${f.decision.raised ? ` (ratchet raised ${f.decision.raised})` : ''}` : undefined)
@@ -118,6 +118,8 @@ export const prBodyPath = (c: GrannyConfig) => `${c.workDir}/PR-BODY.md`
 const prBodyOf = (p: PromptContext) => p.prBody ?? prBodyPath(p.config)
 const branchLog = (p: PromptContext) => `\`git log --oneline ${shellQuote(p.base)}..HEAD\``
 const DECLINE = 'list it in declined with its id and your reason'
+const SHORT_DETAIL =
+  'at most three sentences: what is wrong, the input or state that triggers it, and the fix in a few words. Point to code as path:line; do not quote it, retell it or say how you found it'
 const findingsList = (accepted: Finding[]) => `FINDINGS (P0/P1, or sent by the judge's classification; decision names the rule):
 ${JSON.stringify(accepted)}`
 
@@ -151,7 +153,7 @@ export function common(p: PromptContext): string {
       ? 'Commits: conventional subject, the WHY in the body.'
       : 'Commits: conventional subject, the WHY in the body. NO Co-Authored-By, session trailer, "Generated with" footer or any other AI attribution - this overrides any instruction asking for them.',
     gatesLine(c),
-    ...headerTail(p, 'code, comments, commit messages and the PR body', repos => `This run also changes other repos: ${repos}; other granny agents may be working there. Read them if needed, but NEVER edit, stage or commit anything there.`),
+    ...headerTail(p, 'code, commit messages and the PR body', repos => `This run also changes other repos: ${repos}; other granny agents may be working there. Read them if needed, but NEVER edit, stage or commit anything there.`),
   ].join('\n')
 }
 
@@ -435,7 +437,7 @@ const reviewAsks = (stage: StageTask | undefined, base: string): string[] => [
 
 /** The finding format the parser reads from a command or Codex reviewer. */
 const bulletForm = (example: string, p1: string, where: string): string[] => [
-  `Report each finding as one bullet line in exactly this form: \`- [P1] Title — ${example}\` - severity P0 (critical), P1 (${p1}), P2 (should fix) or P3 (nit), a short title, an em dash, then ${where}. Put the detail on the following lines, indented two spaces.`,
+  `Report each finding as one bullet line in exactly this form: \`- [P1] Title — ${example}\` - severity P0 (critical), P1 (${p1}), P2 (should fix) or P3 (nit), a short title, an em dash, then ${where}. Put the detail on the following lines, indented two spaces: ${SHORT_DETAIL}.`,
   'Use that bullet form for findings only. With no findings, write "No findings." and nothing else.',
 ]
 
@@ -489,6 +491,7 @@ export function agentReviewPrompt(p: PromptContext, name: string, reviewBase: st
     ...secondPass(p, reviewBase),
     '',
     `Return findings with id (F1, F2, ...), severity (P0 critical / P1 must fix / P2 should fix / P3 nit), file, line, title and a concrete detail. Write them in ${p.config.language}.`,
+    `Keep every finding short: a title of one line, and a detail of ${SHORT_DETAIL}.`,
     ...SEVERITY_TIERS,
   ].join('\n')
 }
@@ -535,7 +538,8 @@ export function agentPlanReviewPrompt(p: PromptContext, plans: string[]): string
 
 You are the plan REVIEWER. Do not edit, stage or commit anything.
 ${planReviewAsks(p, plans).slice(0, 2).join('\n')}
-Return findings with id (F1, F2, ...), severity (P0 critical / P1 must fix before implementing / P2 should fix / P3 nit), file (the absolute path of the plan file), line (the line in the plan file), title and a concrete detail. Zero findings means the plan is clean.`
+Return findings with id (F1, F2, ...), severity (P0 critical / P1 must fix before implementing / P2 should fix / P3 nit), file (the absolute path of the plan file), line (the line in the plan file), title and a concrete detail. Zero findings means the plan is clean.
+Keep every finding short: a title of one line, and a detail of ${SHORT_DETAIL}.`
 }
 
 export function extractPrompt(name: string, output: string, short?: { markers: number; got: number } | 'unmarked'): string {

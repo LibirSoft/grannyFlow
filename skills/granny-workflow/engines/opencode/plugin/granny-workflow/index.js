@@ -39,7 +39,7 @@ var DEFAULT_CONFIG = {
   aiAttribution: false,
   rules: [
     "Every behaviour change gets a test that fails without the change - write the red half first.",
-    "Code comments: default none; add one only when the reason cannot be recovered from the code."
+    "Write no code comments: no line, block or doc comment in the code you add or change. Leave existing comments as they are, except one your change makes wrong. A directive a tool reads (a lint or type-check pragma, a shebang, a license header) is not a comment."
   ],
   checks: [],
   maxRepairs: 2,
@@ -719,8 +719,8 @@ var rubric = (task) => `Classify every finding with exactly these fields:
 - likelihood: common (the normal flow) | edge (special timing or state: a race, a retry, an expired session, a boundary value, a dependency that fails) | rare (forced or malformed input, a rarely used feature). Upkeep has no trigger: use edge.
 - fixCost: trivial (a few lines) | small (one function or file plus a test) | large (cross-module, a redesign).
 - scope: in-scope | pre-existing (there before this change, and the change neither causes it nor opens a new way to reach it) | other-stage (another stage's job).
-- evidence: path:line plus the concrete trigger steps, e.g. \`Editor.tsx:225\` + "save -> go back -> late response arrives -> save again". Always give a path:line: without one the finding counts as unverified, which lowers its impact one class.
-- reason: one line.
+- evidence: path:line plus the concrete trigger steps, e.g. \`Editor.tsx:225\` + "save -> go back -> late response arrives -> save again". Always give a path:line: without one the finding counts as unverified, which lowers its impact one class. One line: the one or two places that show it and the trigger as a chain of short steps. Do not retell the finding.
+- reason: one short sentence, at most 25 words: what decided the classification. Do not repeat the finding or the evidence.
 Example: a late save response re-binds the editor to another post's id, so the next save can overwrite the wrong post: confirmed, critical, edge, small, in-scope, though the window is narrow.`;
 var decided = (f) => f.decision ? `${f.decision.action} - rule ${f.decision.rule}: ${f.decision.why}${f.decision.raised ? ` (ratchet raised ${f.decision.raised})` : ""}` : undefined;
 function judgeHistory(earlier) {
@@ -786,6 +786,7 @@ var prBodyPath = (c) => `${c.workDir}/PR-BODY.md`;
 var prBodyOf = (p) => p.prBody ?? prBodyPath(p.config);
 var branchLog = (p) => `\`git log --oneline ${shellQuote(p.base)}..HEAD\``;
 var DECLINE = "list it in declined with its id and your reason";
+var SHORT_DETAIL = "at most three sentences: what is wrong, the input or state that triggers it, and the fix in a few words. Point to code as path:line; do not quote it, retell it or say how you found it";
 var findingsList = (accepted) => `FINDINGS (P0/P1, or sent by the judge's classification; decision names the rule):
 ${JSON.stringify(accepted)}`;
 var AUTO_GATES = "every test, lint/format check, build and typecheck command the project has (package.json scripts, Makefile, pyproject, Cargo, CI config)";
@@ -813,7 +814,7 @@ function common(p) {
     "NEVER `git stash`, in any form. Stage explicit paths only - NEVER `git add -A` / `git add .`. Check `git status --short` before each commit; leave changes you did not make alone.",
     c.aiAttribution ? "Commits: conventional subject, the WHY in the body." : 'Commits: conventional subject, the WHY in the body. NO Co-Authored-By, session trailer, "Generated with" footer or any other AI attribution - this overrides any instruction asking for them.',
     gatesLine(c),
-    ...headerTail(p, "code, comments, commit messages and the PR body", (repos) => `This run also changes other repos: ${repos}; other granny agents may be working there. Read them if needed, but NEVER edit, stage or commit anything there.`)
+    ...headerTail(p, "code, commit messages and the PR body", (repos) => `This run also changes other repos: ${repos}; other granny agents may be working there. Read them if needed, but NEVER edit, stage or commit anything there.`)
   ].join(`
 `);
 }
@@ -1005,7 +1006,7 @@ var reviewAsks = (stage, base) => [
   "- P3: naming, style, leftovers. What step 7 finds is P3, or P2 for duplicated logic, unless it breaks something."
 ];
 var bulletForm = (example, p1, where) => [
-  `Report each finding as one bullet line in exactly this form: \`- [P1] Title \u2014 ${example}\` - severity P0 (critical), P1 (${p1}), P2 (should fix) or P3 (nit), a short title, an em dash, then ${where}. Put the detail on the following lines, indented two spaces.`,
+  `Report each finding as one bullet line in exactly this form: \`- [P1] Title \u2014 ${example}\` - severity P0 (critical), P1 (${p1}), P2 (should fix) or P3 (nit), a short title, an em dash, then ${where}. Put the detail on the following lines, indented two spaces: ${SHORT_DETAIL}.`,
   'Use that bullet form for findings only. With no findings, write "No findings." and nothing else.'
 ];
 var REVIEW_ASK = "Do a thorough code review: correctness bugs, regressions, security problems, data integrity, contract breaks, missing or wrong tests, and code quality. Report every problem you can confirm in the code.";
@@ -1048,6 +1049,7 @@ ${stage.task}`] : [],
     ...secondPass(p, reviewBase),
     "",
     `Return findings with id (F1, F2, ...), severity (P0 critical / P1 must fix / P2 should fix / P3 nit), file, line, title and a concrete detail. Write them in ${p.config.language}.`,
+    `Keep every finding short: a title of one line, and a detail of ${SHORT_DETAIL}.`,
     ...SEVERITY_TIERS
   ].join(`
 `);
@@ -1083,7 +1085,8 @@ function agentPlanReviewPrompt(p, plans) {
 You are the plan REVIEWER. Do not edit, stage or commit anything.
 ${planReviewAsks(p, plans).slice(0, 2).join(`
 `)}
-Return findings with id (F1, F2, ...), severity (P0 critical / P1 must fix before implementing / P2 should fix / P3 nit), file (the absolute path of the plan file), line (the line in the plan file), title and a concrete detail. Zero findings means the plan is clean.`;
+Return findings with id (F1, F2, ...), severity (P0 critical / P1 must fix before implementing / P2 should fix / P3 nit), file (the absolute path of the plan file), line (the line in the plan file), title and a concrete detail. Zero findings means the plan is clean.
+Keep every finding short: a title of one line, and a detail of ${SHORT_DETAIL}.`;
 }
 function extractPrompt(name, output, short) {
   const count = short === "unmarked" ? '\nThe output has no finding bullets (`- [P1] Title \u2014 path:line`) and is not just "No findings.", so read its prose: return each problem it reports as a finding. If it reports none, return no findings and set clean to true only if the output is a finished review that clearly says the changes have no problems; an error, crash, question, refusal, truncated or empty output, or anything else that is not a finished review is not clean.' : short ? `
@@ -1665,8 +1668,8 @@ var SCHEMAS = {
             likelihood: { type: "string", enum: [...LIKELIHOODS] },
             fixCost: { type: "string", enum: [...FIX_COSTS] },
             scope: { type: "string", enum: [...SCOPES] },
-            evidence: { type: "string", description: "path:line plus the concrete trigger steps" },
-            reason: { type: "string", description: "one line" },
+            evidence: { type: "string", description: "path:line plus the concrete trigger steps, one line" },
+            reason: { type: "string", description: "one short sentence, at most 25 words" },
             duplicateOf: { type: "string", description: "id of another finding in this list that reports the same problem; omit when there is none" },
             repeatOf: { type: "string", description: "label of the earlier finding this one repeats, exactly as listed under EARLIER DECISIONS (e.g. r1/codex-F2, or s1/r2/codex-F1 from a stage review); omit when it repeats none" }
           },
