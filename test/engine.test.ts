@@ -638,14 +638,18 @@ describe('runGranny', () => {
       expect(prompts.draft).not.toContain('rules above are for the implementer')
       for (const prompt of Object.values(prompts)) expect(prompt).not.toContain('commit messages and the PR body')
       expect(prompts.review).toContain('concrete detail. Write them in Turkish.')
+      for (const prompt of [prompts.review, prompts.planReview]) expect(prompt).toContain('Keep every finding short: a title of one line, and a detail of at most three sentences: what is wrong, the input or state that triggers it, and the fix in a few words. Point to code as path:line; do not quote it, retell it or say how you found it.')
       expect(prompts.planReview).toContain('Write your findings in Turkish.')
       expect(prompts.draft).toContain('Write the plan in Turkish.')
     })
 
     it('keeps every write rule for the implementer and the fixer', () => {
       for (const prompt of [implementPrompt(p, { task: 'WP-01' }, 0, 1, 'core'), fixPrompt(p, 'core', 1, [])]) {
-        for (const line of [...SHARED, ...WRITE_RULES, 'Write code, comments, commit messages and the PR body in Turkish.', 'Gates (all must pass before every commit; report exact numbers): `make test`.']) expect(prompt).toContain(line)
+        for (const line of [...SHARED, ...WRITE_RULES, 'Write code, commit messages and the PR body in Turkish.', 'Gates (all must pass before every commit; report exact numbers): `make test`.']) expect(prompt).toContain(line)
       }
+      const byDefault = implementPrompt({ ...p, config: resolveConfig([]) }, { task: 'WP-01' }, 0, 1, 'core')
+      expect(byDefault).toContain('Write no code comments: no line, block or doc comment in the code you add or change. Leave existing comments as they are, except one your change makes wrong.')
+      expect(byDefault).not.toContain('Code comments: default none')
     })
 
     it('gives the implementer a build method between the task and the PR body, and not the fixer', () => {
@@ -1260,6 +1264,7 @@ describe('several reviewers', () => {
     expect(prompt).toContain('6. The tests. For each new test ask whether it could fail if the code were wrong')
     expect(prompt).toContain('7. Small things last')
     expect(prompt).toContain('Do not report what you could not confirm.')
+    expect(prompt).toContain('Put the detail on the following lines, indented two spaces: at most three sentences: what is wrong, the input or state that triggers it, and the fix in a few words. Point to code as path:line; do not quote it, retell it or say how you found it.')
     expect(prompt).toContain('Severity is what happens when the problem triggers; how rarely it triggers does not lower it.')
     for (const tier of ['- P0: data loss or corruption', '- P1: something that worked before breaks', '- P2: wrong behaviour with an easy workaround', '- P3: naming, style, leftovers.']) expect(prompt).toContain(tier)
     expect(prompt).not.toContain('Check the diff against the TASK')
@@ -1281,6 +1286,7 @@ describe('several reviewers', () => {
       '- tests that could not fail if the code were wrong, and promised behaviour that no test covers;',
       "- the project's rules, as the author of the change was given them:\n  Use tabs.\n  No default exports.",
       'Return findings with id (F1, F2, ...), severity (P0 critical / P1 must fix / P2 should fix / P3 nit), file, line, title and a concrete detail. Write them in English.',
+      'Keep every finding short: a title of one line, and a detail of at most three sentences: what is wrong, the input or state that triggers it, and the fix in a few words. Point to code as path:line; do not quote it, retell it or say how you found it.',
       'Severity is what happens when the problem triggers; how rarely it triggers does not lower it.',
       '- P0: data loss or corruption',
       '- P3: naming, style, leftovers.',
@@ -2253,6 +2259,11 @@ describe('the judge rubric', () => {
     expect(judge.prompt).toContain("a required part of the stage's TASK is missing.")
     expect(judge.prompt).toContain('Upkeep has no trigger: use edge.')
     expect(judge.prompt).toContain('evidence: path:line plus the concrete trigger steps')
+    expect(judge.prompt).toContain('One line: the one or two places that show it and the trigger as a chain of short steps. Do not retell the finding.')
+    expect(judge.prompt).toContain('- reason: one short sentence, at most 25 words: what decided the classification. Do not repeat the finding or the evidence.')
+    expect(judge.schema.properties.perFinding).toMatchObject({
+      items: { properties: { evidence: { description: 'path:line plus the concrete trigger steps, one line' }, reason: { description: 'one short sentence, at most 25 words' } } },
+    })
     expect(judge.schema.properties.perFinding).toMatchObject({
       items: { required: ['id', 'verdict', 'impact', 'likelihood', 'fixCost', 'scope', 'evidence', 'reason'] },
     })

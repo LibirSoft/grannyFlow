@@ -58,7 +58,7 @@ var DEFAULT_CONFIG = {
   aiAttribution: false,
   rules: [
     "Every behaviour change gets a test that fails without the change - write the red half first.",
-    "Code comments: default none; add one only when the reason cannot be recovered from the code."
+    "Write no code comments: no line, block or doc comment in the code you add or change. Leave existing comments as they are, except one your change makes wrong. A directive a tool reads (a lint or type-check pragma, a shebang, a license header) is not a comment."
   ],
   checks: [],
   maxRepairs: 2,

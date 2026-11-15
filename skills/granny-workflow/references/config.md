@@ -35,12 +35,12 @@ Layers, later wins:
 | `workDir` | `".granny"` | repo-relative, git-excluded: PR body, review outputs, run journals |
 | `worktree` | `true` | work in the branch's own git worktree: reuse the one that has the branch checked out, or create one - see [Worktree](#worktree). `false`: work in `repo`, on the branch checked out there |
 | `worktreeDir` | `<parent of repo>/<repo name>-worktrees` | where new worktrees go: an absolute path, or a path relative to the repo's parent directory (`~` is not expanded). A worktree is `<worktreeDir>/<branch-slug>` |
-| `language` | `"English"` | language of code, comments, commits and the PR body; the planner writes the plan and the `agent` reviewers their findings in it |
+| `language` | `"English"` | language of code, commits and the PR body; the planner writes the plan and the `agent` reviewers their findings in it |
 | `aiAttribution` | `false` | `false` forbids Co-Authored-By / "Generated with" lines and the final check greps for them |
 | `readOnlyAgent` | `false` | Claude Code only: `true` runs `agent` reviewers, the judge and the extraction agent as the `granny-readonly` agent type (Read, Grep, Glob and Bash; no Edit or Write) with a PreToolUse hook that lets their Bash run only read-only git and shell commands - see [Read-only roles](#read-only-roles). Install the agent and the hook first; without the agent the run stops at the first reviewer with `agent type 'granny-readonly' not found`. opencode enforces read-only with permissions and ignores it |
 | `stepAgents` | `false` | `true`: a stage with two or more steps (its `steps` in the run's `stages`) is built by one implementer agent per step, one after the other on the same branch. Each step but the last is committed before the next one starts: the engine asks for the commit when work is left, and work it cannot commit is noted on the stage. A planner in a run with `goal` proposes the steps. `false`, or a stage with fewer than two steps: one implementer builds the whole stage, and its prompt lists its steps in order. Reviews, the judge and the checks stay per stage either way - see [Step agents](#step-agents) |
 | `watch` | `"full"` | omp and opencode: how much of a running run you can watch - `"full"` everything: on omp the live panel, an event log per role and the run navigator, on opencode the sidebar section, the prompt-footer chip, toasts and the `/granny` navigator; `"panel"` the omp panel, or the opencode sidebar section and chip, only; `"off"` none of them. The run itself is the same in every mode - see [Watching a run](#watching-a-run). Claude Code accepts it and ignores it |
-| `rules` | red-green tests; code comments default none | extra house rules appended to every agent prompt that carries the run's header (the implementer's, the planner's and an `agent` reviewer's); `[]` removes them |
+| `rules` | red-green tests; no code comments | extra house rules appended to every agent prompt that carries the run's header (the implementer's, the planner's and an `agent` reviewer's); `[]` removes them |
 | `$schema` | | accepted and ignored, so an editor can point a config file at a JSON schema of your own; granny ships none |
 
 There is no `roles.reviewer`: a config that has one is rejected with the migration - move its keys into `"reviewers": [{ "name": "codex", ...the same keys }]`, and a custom `command` into an entry with `"engine": "command"`.
@@ -715,6 +715,6 @@ Claude Code (`/workflows`) has its own view of a run; it accepts the key and ign
   "worktreeDir": "/work/worktrees",
   "language": "English",
   "aiAttribution": false,
-  "rules": ["Code comments: default none."]
+  "rules": ["No code comments."]
 }
 ```

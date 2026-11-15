@@ -23,7 +23,7 @@ Prefix EVERY shell command with `cd '<repo>' &&`.
 The implementer's gates: every test, lint/format check, build and typecheck command the project has (package.json scripts, Makefile, pyproject, Cargo, CI config); all must pass before every commit.
 Write the plan in English.
 Every behaviour change gets a test that fails without the change - write the red half first.
-Code comments: default none; add one only when the reason cannot be recovered from the code.
+Write no code comments: no line, block or doc comment in the code you add or change. Leave existing comments as they are, except one your change makes wrong. A directive a tool reads (a lint or type-check pragma, a shebang, a license header) is not a comment.
 
 CONTEXT - read it before anything else and obey it:
 <context: work-order files and override notes>
@@ -47,7 +47,7 @@ Prefix EVERY shell command with `cd '<repo>' &&`.
 The implementer's gates: every test, lint/format check, build and typecheck command the project has (package.json scripts, Makefile, pyproject, Cargo, CI config); all must pass before every commit.
 Write the plan in English.
 Every behaviour change gets a test that fails without the change - write the red half first.
-Code comments: default none; add one only when the reason cannot be recovered from the code.
+Write no code comments: no line, block or doc comment in the code you add or change. Leave existing comments as they are, except one your change makes wrong. A directive a tool reads (a lint or type-check pragma, a shebang, a license header) is not a comment.
 
 CONTEXT - read it before anything else and obey it:
 <context: work-order files and override notes>
@@ -71,7 +71,7 @@ Working repo: <repo>, branch `<branch>` (verify with `git branch --show-current`
 Prefix EVERY shell command with `cd '<repo>' &&`.
 Write your findings in English.
 Every behaviour change gets a test that fails without the change - write the red half first.
-Code comments: default none; add one only when the reason cannot be recovered from the code.
+Write no code comments: no line, block or doc comment in the code you add or change. Leave existing comments as they are, except one your change makes wrong. A directive a tool reads (a lint or type-check pragma, a shebang, a license header) is not a comment.
 
 CONTEXT - read it before anything else and obey it:
 Plan files - read them first: <plan files>
@@ -81,12 +81,13 @@ You are the plan REVIEWER. Do not edit, stage or commit anything.
 Review the plan in <plan files> - a plan, not code changes - against the actual repo at <repo> (branch `<branch>`): open the code, configs, lockfiles and docs it names before reporting anything.
 Find wrong assumptions about the code or its dependencies, missing steps, risky ordering, acceptance criteria that cannot be tested, and version drift (versions, APIs, flags or files the plan names that differ from what the repo or its dependencies have).
 Return findings with id (F1, F2, ...), severity (P0 critical / P1 must fix before implementing / P2 should fix / P3 nit), file (the absolute path of the plan file), line (the line in the plan file), title and a concrete detail. Zero findings means the plan is clean.
+Keep every finding short: a title of one line, and a detail of at most three sentences: what is wrong, the input or state that triggers it, and the fix in a few words. Point to code as path:line; do not quote it, retell it or say how you found it.
 ```
 
 ## Plan reviewer - codex exec, the Codex plugin task, the {prompt} of a command engine and the opencode engine
 
 ```text
-You are a plan REVIEWER. Do not edit, stage or commit anything. Review the plan in <plan files> - a plan, not code changes - against the actual repo at <repo> (branch `<branch>`): open the code, configs, lockfiles and docs it names before reporting anything. Design context, read it first: Plan files - read them first: <plan files> <context: work-order files and override notes> Find wrong assumptions about the code or its dependencies, missing steps, risky ordering, acceptance criteria that cannot be tested, and version drift (versions, APIs, flags or files the plan names that differ from what the repo or its dependencies have). Report each finding as one bullet line in exactly this form: `- [P1] Title — /abs/path/of/plan.md:12` - severity P0 (critical), P1 (must fix before implementing), P2 (should fix) or P3 (nit), a short title, an em dash, then the absolute path of the plan file and the line in it the finding is about. Put the detail on the following lines, indented two spaces. Use that bullet form for findings only. With no findings, write "No findings." and nothing else.
+You are a plan REVIEWER. Do not edit, stage or commit anything. Review the plan in <plan files> - a plan, not code changes - against the actual repo at <repo> (branch `<branch>`): open the code, configs, lockfiles and docs it names before reporting anything. Design context, read it first: Plan files - read them first: <plan files> <context: work-order files and override notes> Find wrong assumptions about the code or its dependencies, missing steps, risky ordering, acceptance criteria that cannot be tested, and version drift (versions, APIs, flags or files the plan names that differ from what the repo or its dependencies have). Report each finding as one bullet line in exactly this form: `- [P1] Title — /abs/path/of/plan.md:12` - severity P0 (critical), P1 (must fix before implementing), P2 (should fix) or P3 (nit), a short title, an em dash, then the absolute path of the plan file and the line in it the finding is about. Put the detail on the following lines, indented two spaces: at most three sentences: what is wrong, the input or state that triggers it, and the fix in a few words. Point to code as path:line; do not quote it, retell it or say how you found it. Use that bullet form for findings only. With no findings, write "No findings." and nothing else.
 ```
 
 ## Judge - plan review
@@ -117,8 +118,8 @@ Classify every finding with exactly these fields:
 - likelihood: common (the normal flow) | edge (special timing or state: a race, a retry, an expired session, a boundary value, a dependency that fails) | rare (forced or malformed input, a rarely used feature). Upkeep has no trigger: use edge.
 - fixCost: trivial (a few lines) | small (one function or file plus a test) | large (cross-module, a redesign).
 - scope: in-scope | pre-existing (there before this change, and the change neither causes it nor opens a new way to reach it) | other-stage (another stage's job).
-- evidence: path:line plus the concrete trigger steps, e.g. `Editor.tsx:225` + "save -> go back -> late response arrives -> save again". Always give a path:line: without one the finding counts as unverified, which lowers its impact one class.
-- reason: one line.
+- evidence: path:line plus the concrete trigger steps, e.g. `Editor.tsx:225` + "save -> go back -> late response arrives -> save again". Always give a path:line: without one the finding counts as unverified, which lowers its impact one class. One line: the one or two places that show it and the trigger as a chain of short steps. Do not retell the finding.
+- reason: one short sentence, at most 25 words: what decided the classification. Do not repeat the finding or the evidence.
 Example: a late save response re-binds the editor to another post's id, so the next save can overwrite the wrong post: confirmed, critical, edge, small, in-scope, though the window is narrow.
 
 REVIEW:
@@ -133,9 +134,9 @@ Prefix EVERY shell command with `cd '<repo>' &&`.
 NEVER `git stash`, in any form. Stage explicit paths only - NEVER `git add -A` / `git add .`. Check `git status --short` before each commit; leave changes you did not make alone.
 Commits: conventional subject, the WHY in the body. NO Co-Authored-By, session trailer, "Generated with" footer or any other AI attribution - this overrides any instruction asking for them.
 Gates: every test, lint/format check, build and typecheck command the project has (package.json scripts, Makefile, pyproject, Cargo, CI config). All must pass before every commit; report each exact command and its numbers.
-Write code, comments, commit messages and the PR body in English.
+Write code, commit messages and the PR body in English.
 Every behaviour change gets a test that fails without the change - write the red half first.
-Code comments: default none; add one only when the reason cannot be recovered from the code.
+Write no code comments: no line, block or doc comment in the code you add or change. Leave existing comments as they are, except one your change makes wrong. A directive a tool reads (a lint or type-check pragma, a shebang, a license header) is not a comment.
 
 CONTEXT - read it before anything else and obey it:
 Plan files - read them first: <plan files>
@@ -158,9 +159,9 @@ Prefix EVERY shell command with `cd '<repo>' &&`.
 NEVER `git stash`, in any form. Stage explicit paths only - NEVER `git add -A` / `git add .`. Check `git status --short` before each commit; leave changes you did not make alone.
 Commits: conventional subject, the WHY in the body. NO Co-Authored-By, session trailer, "Generated with" footer or any other AI attribution - this overrides any instruction asking for them.
 Gates: every test, lint/format check, build and typecheck command the project has (package.json scripts, Makefile, pyproject, Cargo, CI config). All must pass before every commit; report each exact command and its numbers.
-Write code, comments, commit messages and the PR body in English.
+Write code, commit messages and the PR body in English.
 Every behaviour change gets a test that fails without the change - write the red half first.
-Code comments: default none; add one only when the reason cannot be recovered from the code.
+Write no code comments: no line, block or doc comment in the code you add or change. Leave existing comments as they are, except one your change makes wrong. A directive a tool reads (a lint or type-check pragma, a shebang, a license header) is not a comment.
 
 CONTEXT - read it before anything else and obey it:
 Plan files - read them first: <plan files>
@@ -189,9 +190,9 @@ Prefix EVERY shell command with `cd '<repo>' &&`.
 NEVER `git stash`, in any form. Stage explicit paths only - NEVER `git add -A` / `git add .`. Check `git status --short` before each commit; leave changes you did not make alone.
 Commits: conventional subject, the WHY in the body. NO Co-Authored-By, session trailer, "Generated with" footer or any other AI attribution - this overrides any instruction asking for them.
 Gates: every test, lint/format check, build and typecheck command the project has (package.json scripts, Makefile, pyproject, Cargo, CI config). All must pass before every commit; report each exact command and its numbers.
-Write code, comments, commit messages and the PR body in English.
+Write code, commit messages and the PR body in English.
 Every behaviour change gets a test that fails without the change - write the red half first.
-Code comments: default none; add one only when the reason cannot be recovered from the code.
+Write no code comments: no line, block or doc comment in the code you add or change. Leave existing comments as they are, except one your change makes wrong. A directive a tool reads (a lint or type-check pragma, a shebang, a license header) is not a comment.
 
 CONTEXT - read it before anything else and obey it:
 Plan files - read them first: <plan files>
@@ -224,9 +225,9 @@ Prefix EVERY shell command with `cd '<repo>' &&`.
 NEVER `git stash`, in any form. Stage explicit paths only - NEVER `git add -A` / `git add .`. Check `git status --short` before each commit; leave changes you did not make alone.
 Commits: conventional subject, the WHY in the body. NO Co-Authored-By, session trailer, "Generated with" footer or any other AI attribution - this overrides any instruction asking for them.
 Gates: every test, lint/format check, build and typecheck command the project has (package.json scripts, Makefile, pyproject, Cargo, CI config). All must pass before every commit; report each exact command and its numbers.
-Write code, comments, commit messages and the PR body in English.
+Write code, commit messages and the PR body in English.
 Every behaviour change gets a test that fails without the change - write the red half first.
-Code comments: default none; add one only when the reason cannot be recovered from the code.
+Write no code comments: no line, block or doc comment in the code you add or change. Leave existing comments as they are, except one your change makes wrong. A directive a tool reads (a lint or type-check pragma, a shebang, a license header) is not a comment.
 
 CONTEXT - read it before anything else and obey it:
 Plan files - read them first: <plan files>
@@ -257,9 +258,9 @@ Prefix EVERY shell command with `cd '<repo>' &&`.
 NEVER `git stash`, in any form. Stage explicit paths only - NEVER `git add -A` / `git add .`. Check `git status --short` before each commit; leave changes you did not make alone.
 Commits: conventional subject, the WHY in the body. NO Co-Authored-By, session trailer, "Generated with" footer or any other AI attribution - this overrides any instruction asking for them.
 Gates: every test, lint/format check, build and typecheck command the project has (package.json scripts, Makefile, pyproject, Cargo, CI config). All must pass before every commit; report each exact command and its numbers.
-Write code, comments, commit messages and the PR body in English.
+Write code, commit messages and the PR body in English.
 Every behaviour change gets a test that fails without the change - write the red half first.
-Code comments: default none; add one only when the reason cannot be recovered from the code.
+Write no code comments: no line, block or doc comment in the code you add or change. Leave existing comments as they are, except one your change makes wrong. A directive a tool reads (a lint or type-check pragma, a shebang, a license header) is not a comment.
 
 CONTEXT - read it before anything else and obey it:
 Plan files - read them first: <plan files>
@@ -290,9 +291,9 @@ Prefix EVERY shell command with `cd '<repo>' &&`.
 NEVER `git stash`, in any form. Stage explicit paths only - NEVER `git add -A` / `git add .`. Check `git status --short` before each commit; leave changes you did not make alone.
 Commits: conventional subject, the WHY in the body. NO Co-Authored-By, session trailer, "Generated with" footer or any other AI attribution - this overrides any instruction asking for them.
 Gates: every test, lint/format check, build and typecheck command the project has (package.json scripts, Makefile, pyproject, Cargo, CI config). All must pass before every commit; report each exact command and its numbers.
-Write code, comments, commit messages and the PR body in English.
+Write code, commit messages and the PR body in English.
 Every behaviour change gets a test that fails without the change - write the red half first.
-Code comments: default none; add one only when the reason cannot be recovered from the code.
+Write no code comments: no line, block or doc comment in the code you add or change. Leave existing comments as they are, except one your change makes wrong. A directive a tool reads (a lint or type-check pragma, a shebang, a license header) is not a comment.
 
 CONTEXT - read it before anything else and obey it:
 Plan files - read them first: <plan files>
@@ -324,9 +325,9 @@ Prefix EVERY shell command with `cd '<repo>' &&`.
 NEVER `git stash`, in any form. Stage explicit paths only - NEVER `git add -A` / `git add .`. Check `git status --short` before each commit; leave changes you did not make alone.
 Commits: conventional subject, the WHY in the body. NO Co-Authored-By, session trailer, "Generated with" footer or any other AI attribution - this overrides any instruction asking for them.
 Gates: every test, lint/format check, build and typecheck command the project has (package.json scripts, Makefile, pyproject, Cargo, CI config). All must pass before every commit; report each exact command and its numbers.
-Write code, comments, commit messages and the PR body in English.
+Write code, commit messages and the PR body in English.
 Every behaviour change gets a test that fails without the change - write the red half first.
-Code comments: default none; add one only when the reason cannot be recovered from the code.
+Write no code comments: no line, block or doc comment in the code you add or change. Leave existing comments as they are, except one your change makes wrong. A directive a tool reads (a lint or type-check pragma, a shebang, a license header) is not a comment.
 
 CONTEXT - read it before anything else and obey it:
 Plan files - read them first: <plan files>
@@ -347,9 +348,9 @@ Prefix EVERY shell command with `cd '<repo>' &&`.
 NEVER `git stash`, in any form. Stage explicit paths only - NEVER `git add -A` / `git add .`. Check `git status --short` before each commit; leave changes you did not make alone.
 Commits: conventional subject, the WHY in the body. NO Co-Authored-By, session trailer, "Generated with" footer or any other AI attribution - this overrides any instruction asking for them.
 Gates: every test, lint/format check, build and typecheck command the project has (package.json scripts, Makefile, pyproject, Cargo, CI config). All must pass before every commit; report each exact command and its numbers.
-Write code, comments, commit messages and the PR body in English.
+Write code, commit messages and the PR body in English.
 Every behaviour change gets a test that fails without the change - write the red half first.
-Code comments: default none; add one only when the reason cannot be recovered from the code.
+Write no code comments: no line, block or doc comment in the code you add or change. Leave existing comments as they are, except one your change makes wrong. A directive a tool reads (a lint or type-check pragma, a shebang, a license header) is not a comment.
 
 CONTEXT - read it before anything else and obey it:
 Plan files - read them first: <plan files>
@@ -387,9 +388,9 @@ Prefix EVERY shell command with `cd '<repo>' &&`.
 NEVER `git stash`, in any form. Stage explicit paths only - NEVER `git add -A` / `git add .`. Check `git status --short` before each commit; leave changes you did not make alone.
 Commits: conventional subject, the WHY in the body. NO Co-Authored-By, session trailer, "Generated with" footer or any other AI attribution - this overrides any instruction asking for them.
 Gates: every test, lint/format check, build and typecheck command the project has (package.json scripts, Makefile, pyproject, Cargo, CI config). All must pass before every commit; report each exact command and its numbers.
-Write code, comments, commit messages and the PR body in English.
+Write code, commit messages and the PR body in English.
 Every behaviour change gets a test that fails without the change - write the red half first.
-Code comments: default none; add one only when the reason cannot be recovered from the code.
+Write no code comments: no line, block or doc comment in the code you add or change. Leave existing comments as they are, except one your change makes wrong. A directive a tool reads (a lint or type-check pragma, a shebang, a license header) is not a comment.
 
 CONTEXT - read it before anything else and obey it:
 Plan files - read them first: <plan files>
@@ -419,9 +420,9 @@ Prefix EVERY shell command with `cd '<repo>' &&`.
 NEVER `git stash`, in any form. Stage explicit paths only - NEVER `git add -A` / `git add .`. Check `git status --short` before each commit; leave changes you did not make alone.
 Commits: conventional subject, the WHY in the body. NO Co-Authored-By, session trailer, "Generated with" footer or any other AI attribution - this overrides any instruction asking for them.
 Gates: every test, lint/format check, build and typecheck command the project has (package.json scripts, Makefile, pyproject, Cargo, CI config). All must pass before every commit; report each exact command and its numbers.
-Write code, comments, commit messages and the PR body in English.
+Write code, commit messages and the PR body in English.
 Every behaviour change gets a test that fails without the change - write the red half first.
-Code comments: default none; add one only when the reason cannot be recovered from the code.
+Write no code comments: no line, block or doc comment in the code you add or change. Leave existing comments as they are, except one your change makes wrong. A directive a tool reads (a lint or type-check pragma, a shebang, a license header) is not a comment.
 
 CONTEXT - read it before anything else and obey it:
 Plan files - read them first: <plan files>
@@ -446,9 +447,9 @@ Prefix EVERY shell command with `cd '<repo>' &&`.
 NEVER `git stash`, in any form. Stage explicit paths only - NEVER `git add -A` / `git add .`. Check `git status --short` before each commit; leave changes you did not make alone.
 Commits: conventional subject, the WHY in the body. NO Co-Authored-By, session trailer, "Generated with" footer or any other AI attribution - this overrides any instruction asking for them.
 Gates: every test, lint/format check, build and typecheck command the project has (package.json scripts, Makefile, pyproject, Cargo, CI config). All must pass before every commit; report each exact command and its numbers.
-Write code, comments, commit messages and the PR body in English.
+Write code, commit messages and the PR body in English.
 Every behaviour change gets a test that fails without the change - write the red half first.
-Code comments: default none; add one only when the reason cannot be recovered from the code.
+Write no code comments: no line, block or doc comment in the code you add or change. Leave existing comments as they are, except one your change makes wrong. A directive a tool reads (a lint or type-check pragma, a shebang, a license header) is not a comment.
 
 CONTEXT - read it before anything else and obey it:
 Plan files - read them first: <plan files>
@@ -473,9 +474,9 @@ Prefix EVERY shell command with `cd '<repo>' &&`.
 NEVER `git stash`, in any form. Stage explicit paths only - NEVER `git add -A` / `git add .`. Check `git status --short` before each commit; leave changes you did not make alone.
 Commits: conventional subject, the WHY in the body. NO Co-Authored-By, session trailer, "Generated with" footer or any other AI attribution - this overrides any instruction asking for them.
 Gates: every test, lint/format check, build and typecheck command the project has (package.json scripts, Makefile, pyproject, Cargo, CI config). All must pass before every commit; report each exact command and its numbers.
-Write code, comments, commit messages and the PR body in English.
+Write code, commit messages and the PR body in English.
 Every behaviour change gets a test that fails without the change - write the red half first.
-Code comments: default none; add one only when the reason cannot be recovered from the code.
+Write no code comments: no line, block or doc comment in the code you add or change. Leave existing comments as they are, except one your change makes wrong. A directive a tool reads (a lint or type-check pragma, a shebang, a license header) is not a comment.
 
 CONTEXT - read it before anything else and obey it:
 Plan files - read them first: <plan files>
@@ -509,9 +510,10 @@ When you have your list, you are not done: a first pass finds about half of what
 - tests that could not fail if the code were wrong, and promised behaviour that no test covers;
 - the project's rules, as the author of the change was given them:
   Every behaviour change gets a test that fails without the change - write the red half first.
-  Code comments: default none; add one only when the reason cannot be recovered from the code.
+  Write no code comments: no line, block or doc comment in the code you add or change. Leave existing comments as they are, except one your change makes wrong. A directive a tool reads (a lint or type-check pragma, a shebang, a license header) is not a comment.
 
 Return findings with id (F1, F2, ...), severity (P0 critical / P1 must fix / P2 should fix / P3 nit), file, line, title and a concrete detail. Write them in English.
+Keep every finding short: a title of one line, and a detail of at most three sentences: what is wrong, the input or state that triggers it, and the fix in a few words. Point to code as path:line; do not quote it, retell it or say how you found it.
 Severity is what happens when the problem triggers; how rarely it triggers does not lower it.
 - P0: data loss or corruption, money or records written wrong, a security or authorization bypass, a leaked secret.
 - P1: something that worked before breaks, a crash, a broken contract, a required part of the change that is missing or does not work.
@@ -585,13 +587,13 @@ Return ran: true only if it exited 0; exitCode: its exit code; output: everythin
 ## Reviewer - command and opencode engines, the text {prompt} is filled with
 
 ```text
-You are a code REVIEWER. Do not edit, stage or commit anything. Repo <repo>, branch `<branch>`. Review the changes of stage "<stage name>": `cd '<repo>' && git diff '<stage start sha>'...HEAD` plus `git log --oneline '<stage start sha>'..HEAD`. Design context, read it first: Plan files - read them first: <plan files> <context: work-order files and override notes> Stage 2/2 "<stage name>" - its TASK: <stage task> Review it the way a careful senior engineer would, in this order. Take the time it needs: a problem missed here ships. 1. What the change promises. Read the commit messages and every doc, comment and test name the change adds or edits. List for yourself each behaviour, rule, limit, number and worked example they state. 2. Promise against code. For each item on that list, find the code that is meant to do it and follow it to the end. Where the docs give a number or an example, compute what the code actually returns for it. A promise the code does not keep is a finding; so is one it keeps only on the path the tests take. Check the diff against the TASK in the same way: a missing part of the task is a finding, and so is a change outside it (scope creep, unrelated edits); work the task leaves to other stages is not a finding. 3. Every changed file, top to bottom. For each new or changed function ask what happens with: a missing or unknown id, a null, an empty or huge value, a boundary value, a value in another unit or scale, text with separators, quotes or line breaks, the same call or the same message arriving twice, calls arriving out of order, a failure halfway through, the end of a month or a day. Check who is allowed to call it, and whether that check is made on the right party and the right record. 4. Code that was moved or rewritten. When a commit moves code or says it changes no behaviour, compare the old version (`git show <stage start sha>:<path>`) with the new one line by line. A check, a branch or a default that did not come along is a finding. 5. Beyond the diff. For everything the change renames, removes or gives a new meaning (a function, a type, a column, a route, a config key, a stored value), search the repo for what still uses it. Read the untouched code the new code calls or relies on, and the untouched code that reads what the new code writes: does it still hold when the new code feeds it new values? A problem the change causes in a file it does not touch is a finding: cite that file and line. 6. The tests. For each new test ask whether it could fail if the code were wrong: an expectation computed with the same formula as the code, an assertion on a side effect instead of the result, only the happy path. Name the promised behaviours that no test would catch breaking. 7. Small things last: a name that breaks the convention of its file or schema, leftovers (debug output, TODOs, commented-out code), a constant that is defined and not used, duplication, needless abstraction, a deviation from the design the plan or context lays out. Before you report a finding, open the code and confirm it; when it is cheap, run it (an existing test, or a one-line command that writes no file) instead of reasoning about it. Before you say something is missing - a test, a check, a doc line - search for it. Do not report what you could not confirm. Give each problem its own finding: do not fold two into one, and do not report one twice. Severity is what happens when the problem triggers; how rarely it triggers does not lower it. - P0: data loss or corruption, money or records written wrong, a security or authorization bypass, a leaked secret. A check that guards money, access or data and no longer runs is a bypass, also when it went missing in a refactor. - P1: something that worked before breaks, a crash, a broken contract, a required part of the change that is missing or does not work. - P2: wrong behaviour with an easy workaround, a wrong or missing error, a missing test for changed behaviour, duplicated logic. - P3: naming, style, leftovers. What step 7 finds is P3, or P2 for duplicated logic, unless it breaks something. Report each finding as one bullet line in exactly this form: `- [P1] Title — path/to/file.ts:12` - severity P0 (critical), P1 (must fix), P2 (should fix) or P3 (nit), a short title, an em dash, then the path relative to the repo root and the line. Put the detail on the following lines, indented two spaces. Use that bullet form for findings only. With no findings, write "No findings." and nothing else.
+You are a code REVIEWER. Do not edit, stage or commit anything. Repo <repo>, branch `<branch>`. Review the changes of stage "<stage name>": `cd '<repo>' && git diff '<stage start sha>'...HEAD` plus `git log --oneline '<stage start sha>'..HEAD`. Design context, read it first: Plan files - read them first: <plan files> <context: work-order files and override notes> Stage 2/2 "<stage name>" - its TASK: <stage task> Review it the way a careful senior engineer would, in this order. Take the time it needs: a problem missed here ships. 1. What the change promises. Read the commit messages and every doc, comment and test name the change adds or edits. List for yourself each behaviour, rule, limit, number and worked example they state. 2. Promise against code. For each item on that list, find the code that is meant to do it and follow it to the end. Where the docs give a number or an example, compute what the code actually returns for it. A promise the code does not keep is a finding; so is one it keeps only on the path the tests take. Check the diff against the TASK in the same way: a missing part of the task is a finding, and so is a change outside it (scope creep, unrelated edits); work the task leaves to other stages is not a finding. 3. Every changed file, top to bottom. For each new or changed function ask what happens with: a missing or unknown id, a null, an empty or huge value, a boundary value, a value in another unit or scale, text with separators, quotes or line breaks, the same call or the same message arriving twice, calls arriving out of order, a failure halfway through, the end of a month or a day. Check who is allowed to call it, and whether that check is made on the right party and the right record. 4. Code that was moved or rewritten. When a commit moves code or says it changes no behaviour, compare the old version (`git show <stage start sha>:<path>`) with the new one line by line. A check, a branch or a default that did not come along is a finding. 5. Beyond the diff. For everything the change renames, removes or gives a new meaning (a function, a type, a column, a route, a config key, a stored value), search the repo for what still uses it. Read the untouched code the new code calls or relies on, and the untouched code that reads what the new code writes: does it still hold when the new code feeds it new values? A problem the change causes in a file it does not touch is a finding: cite that file and line. 6. The tests. For each new test ask whether it could fail if the code were wrong: an expectation computed with the same formula as the code, an assertion on a side effect instead of the result, only the happy path. Name the promised behaviours that no test would catch breaking. 7. Small things last: a name that breaks the convention of its file or schema, leftovers (debug output, TODOs, commented-out code), a constant that is defined and not used, duplication, needless abstraction, a deviation from the design the plan or context lays out. Before you report a finding, open the code and confirm it; when it is cheap, run it (an existing test, or a one-line command that writes no file) instead of reasoning about it. Before you say something is missing - a test, a check, a doc line - search for it. Do not report what you could not confirm. Give each problem its own finding: do not fold two into one, and do not report one twice. Severity is what happens when the problem triggers; how rarely it triggers does not lower it. - P0: data loss or corruption, money or records written wrong, a security or authorization bypass, a leaked secret. A check that guards money, access or data and no longer runs is a bypass, also when it went missing in a refactor. - P1: something that worked before breaks, a crash, a broken contract, a required part of the change that is missing or does not work. - P2: wrong behaviour with an easy workaround, a wrong or missing error, a missing test for changed behaviour, duplicated logic. - P3: naming, style, leftovers. What step 7 finds is P3, or P2 for duplicated logic, unless it breaks something. Report each finding as one bullet line in exactly this form: `- [P1] Title — path/to/file.ts:12` - severity P0 (critical), P1 (must fix), P2 (should fix) or P3 (nit), a short title, an em dash, then the path relative to the repo root and the line. Put the detail on the following lines, indented two spaces: at most three sentences: what is wrong, the input or state that triggers it, and the fix in a few words. Point to code as path:line; do not quote it, retell it or say how you found it. Use that bullet form for findings only. With no findings, write "No findings." and nothing else.
 ```
 
 ## Reviewer - command and opencode engines, the opencode engine's message to `opencode run` (the same text, its git commands run from the worktree without `cd` or quotes, which the reviewer's bash rules refuse)
 
 ```text
-You are a code REVIEWER. Do not edit, stage or commit anything. Repo <repo>, branch `<branch>`. Review the changes of stage "<stage name>", from the worktree you run in: `git diff <stage start sha>...HEAD` plus `git log --oneline <stage start sha>..HEAD`. Design context, read it first: Plan files - read them first: <plan files> <context: work-order files and override notes> Stage 2/2 "<stage name>" - its TASK: <stage task> Review it the way a careful senior engineer would, in this order. Take the time it needs: a problem missed here ships. 1. What the change promises. Read the commit messages and every doc, comment and test name the change adds or edits. List for yourself each behaviour, rule, limit, number and worked example they state. 2. Promise against code. For each item on that list, find the code that is meant to do it and follow it to the end. Where the docs give a number or an example, compute what the code actually returns for it. A promise the code does not keep is a finding; so is one it keeps only on the path the tests take. Check the diff against the TASK in the same way: a missing part of the task is a finding, and so is a change outside it (scope creep, unrelated edits); work the task leaves to other stages is not a finding. 3. Every changed file, top to bottom. For each new or changed function ask what happens with: a missing or unknown id, a null, an empty or huge value, a boundary value, a value in another unit or scale, text with separators, quotes or line breaks, the same call or the same message arriving twice, calls arriving out of order, a failure halfway through, the end of a month or a day. Check who is allowed to call it, and whether that check is made on the right party and the right record. 4. Code that was moved or rewritten. When a commit moves code or says it changes no behaviour, compare the old version (`git show <stage start sha>:<path>`) with the new one line by line. A check, a branch or a default that did not come along is a finding. 5. Beyond the diff. For everything the change renames, removes or gives a new meaning (a function, a type, a column, a route, a config key, a stored value), search the repo for what still uses it. Read the untouched code the new code calls or relies on, and the untouched code that reads what the new code writes: does it still hold when the new code feeds it new values? A problem the change causes in a file it does not touch is a finding: cite that file and line. 6. The tests. For each new test ask whether it could fail if the code were wrong: an expectation computed with the same formula as the code, an assertion on a side effect instead of the result, only the happy path. Name the promised behaviours that no test would catch breaking. 7. Small things last: a name that breaks the convention of its file or schema, leftovers (debug output, TODOs, commented-out code), a constant that is defined and not used, duplication, needless abstraction, a deviation from the design the plan or context lays out. Before you report a finding, open the code and confirm it; when it is cheap, run it (an existing test, or a one-line command that writes no file) instead of reasoning about it. Before you say something is missing - a test, a check, a doc line - search for it. Do not report what you could not confirm. Give each problem its own finding: do not fold two into one, and do not report one twice. Severity is what happens when the problem triggers; how rarely it triggers does not lower it. - P0: data loss or corruption, money or records written wrong, a security or authorization bypass, a leaked secret. A check that guards money, access or data and no longer runs is a bypass, also when it went missing in a refactor. - P1: something that worked before breaks, a crash, a broken contract, a required part of the change that is missing or does not work. - P2: wrong behaviour with an easy workaround, a wrong or missing error, a missing test for changed behaviour, duplicated logic. - P3: naming, style, leftovers. What step 7 finds is P3, or P2 for duplicated logic, unless it breaks something. Report each finding as one bullet line in exactly this form: `- [P1] Title — path/to/file.ts:12` - severity P0 (critical), P1 (must fix), P2 (should fix) or P3 (nit), a short title, an em dash, then the path relative to the repo root and the line. Put the detail on the following lines, indented two spaces. Use that bullet form for findings only. With no findings, write "No findings." and nothing else.
+You are a code REVIEWER. Do not edit, stage or commit anything. Repo <repo>, branch `<branch>`. Review the changes of stage "<stage name>", from the worktree you run in: `git diff <stage start sha>...HEAD` plus `git log --oneline <stage start sha>..HEAD`. Design context, read it first: Plan files - read them first: <plan files> <context: work-order files and override notes> Stage 2/2 "<stage name>" - its TASK: <stage task> Review it the way a careful senior engineer would, in this order. Take the time it needs: a problem missed here ships. 1. What the change promises. Read the commit messages and every doc, comment and test name the change adds or edits. List for yourself each behaviour, rule, limit, number and worked example they state. 2. Promise against code. For each item on that list, find the code that is meant to do it and follow it to the end. Where the docs give a number or an example, compute what the code actually returns for it. A promise the code does not keep is a finding; so is one it keeps only on the path the tests take. Check the diff against the TASK in the same way: a missing part of the task is a finding, and so is a change outside it (scope creep, unrelated edits); work the task leaves to other stages is not a finding. 3. Every changed file, top to bottom. For each new or changed function ask what happens with: a missing or unknown id, a null, an empty or huge value, a boundary value, a value in another unit or scale, text with separators, quotes or line breaks, the same call or the same message arriving twice, calls arriving out of order, a failure halfway through, the end of a month or a day. Check who is allowed to call it, and whether that check is made on the right party and the right record. 4. Code that was moved or rewritten. When a commit moves code or says it changes no behaviour, compare the old version (`git show <stage start sha>:<path>`) with the new one line by line. A check, a branch or a default that did not come along is a finding. 5. Beyond the diff. For everything the change renames, removes or gives a new meaning (a function, a type, a column, a route, a config key, a stored value), search the repo for what still uses it. Read the untouched code the new code calls or relies on, and the untouched code that reads what the new code writes: does it still hold when the new code feeds it new values? A problem the change causes in a file it does not touch is a finding: cite that file and line. 6. The tests. For each new test ask whether it could fail if the code were wrong: an expectation computed with the same formula as the code, an assertion on a side effect instead of the result, only the happy path. Name the promised behaviours that no test would catch breaking. 7. Small things last: a name that breaks the convention of its file or schema, leftovers (debug output, TODOs, commented-out code), a constant that is defined and not used, duplication, needless abstraction, a deviation from the design the plan or context lays out. Before you report a finding, open the code and confirm it; when it is cheap, run it (an existing test, or a one-line command that writes no file) instead of reasoning about it. Before you say something is missing - a test, a check, a doc line - search for it. Do not report what you could not confirm. Give each problem its own finding: do not fold two into one, and do not report one twice. Severity is what happens when the problem triggers; how rarely it triggers does not lower it. - P0: data loss or corruption, money or records written wrong, a security or authorization bypass, a leaked secret. A check that guards money, access or data and no longer runs is a bypass, also when it went missing in a refactor. - P1: something that worked before breaks, a crash, a broken contract, a required part of the change that is missing or does not work. - P2: wrong behaviour with an easy workaround, a wrong or missing error, a missing test for changed behaviour, duplicated logic. - P3: naming, style, leftovers. What step 7 finds is P3, or P2 for duplicated logic, unless it breaks something. Report each finding as one bullet line in exactly this form: `- [P1] Title — path/to/file.ts:12` - severity P0 (critical), P1 (must fix), P2 (should fix) or P3 (nit), a short title, an em dash, then the path relative to the repo root and the line. Put the detail on the following lines, indented two spaces: at most three sentences: what is wrong, the input or state that triggers it, and the fix in a few words. Point to code as path:line; do not quote it, retell it or say how you found it. Use that bullet form for findings only. With no findings, write "No findings." and nothing else.
 ```
 
 ## Judge
@@ -624,8 +626,8 @@ Classify every finding with exactly these fields:
 - likelihood: common (the normal flow) | edge (special timing or state: a race, a retry, an expired session, a boundary value, a dependency that fails) | rare (forced or malformed input, a rarely used feature). Upkeep has no trigger: use edge.
 - fixCost: trivial (a few lines) | small (one function or file plus a test) | large (cross-module, a redesign).
 - scope: in-scope | pre-existing (there before this change, and the change neither causes it nor opens a new way to reach it) | other-stage (another stage's job).
-- evidence: path:line plus the concrete trigger steps, e.g. `Editor.tsx:225` + "save -> go back -> late response arrives -> save again". Always give a path:line: without one the finding counts as unverified, which lowers its impact one class.
-- reason: one line.
+- evidence: path:line plus the concrete trigger steps, e.g. `Editor.tsx:225` + "save -> go back -> late response arrives -> save again". Always give a path:line: without one the finding counts as unverified, which lowers its impact one class. One line: the one or two places that show it and the trigger as a chain of short steps. Do not retell the finding.
+- reason: one short sentence, at most 25 words: what decided the classification. Do not repeat the finding or the evidence.
 Example: a late save response re-binds the editor to another post's id, so the next save can overwrite the wrong post: confirmed, critical, edge, small, in-scope, though the window is narrow.
 
 REVIEW:
@@ -662,8 +664,8 @@ Classify every finding with exactly these fields:
 - likelihood: common (the normal flow) | edge (special timing or state: a race, a retry, an expired session, a boundary value, a dependency that fails) | rare (forced or malformed input, a rarely used feature). Upkeep has no trigger: use edge.
 - fixCost: trivial (a few lines) | small (one function or file plus a test) | large (cross-module, a redesign).
 - scope: in-scope | pre-existing (there before this change, and the change neither causes it nor opens a new way to reach it) | other-stage (another stage's job).
-- evidence: path:line plus the concrete trigger steps, e.g. `Editor.tsx:225` + "save -> go back -> late response arrives -> save again". Always give a path:line: without one the finding counts as unverified, which lowers its impact one class.
-- reason: one line.
+- evidence: path:line plus the concrete trigger steps, e.g. `Editor.tsx:225` + "save -> go back -> late response arrives -> save again". Always give a path:line: without one the finding counts as unverified, which lowers its impact one class. One line: the one or two places that show it and the trigger as a chain of short steps. Do not retell the finding.
+- reason: one short sentence, at most 25 words: what decided the classification. Do not repeat the finding or the evidence.
 Example: a late save response re-binds the editor to another post's id, so the next save can overwrite the wrong post: confirmed, critical, edge, small, in-scope, though the window is narrow.
 
 EARLIER DECISIONS - the findings earlier rounds sent to the fixer or kept as residual for the user, by label, with classification, priority and deciding rule, and the fixer's declines with its reasons:
@@ -722,8 +724,8 @@ Classify every finding with exactly these fields:
 - likelihood: common (the normal flow) | edge (special timing or state: a race, a retry, an expired session, a boundary value, a dependency that fails) | rare (forced or malformed input, a rarely used feature). Upkeep has no trigger: use edge.
 - fixCost: trivial (a few lines) | small (one function or file plus a test) | large (cross-module, a redesign).
 - scope: in-scope | pre-existing (there before this change, and the change neither causes it nor opens a new way to reach it) | other-stage (another stage's job).
-- evidence: path:line plus the concrete trigger steps, e.g. `Editor.tsx:225` + "save -> go back -> late response arrives -> save again". Always give a path:line: without one the finding counts as unverified, which lowers its impact one class.
-- reason: one line.
+- evidence: path:line plus the concrete trigger steps, e.g. `Editor.tsx:225` + "save -> go back -> late response arrives -> save again". Always give a path:line: without one the finding counts as unverified, which lowers its impact one class. One line: the one or two places that show it and the trigger as a chain of short steps. Do not retell the finding.
+- reason: one short sentence, at most 25 words: what decided the classification. Do not repeat the finding or the evidence.
 Example: a late save response re-binds the editor to another post's id, so the next save can overwrite the wrong post: confirmed, critical, edge, small, in-scope, though the window is narrow.
 
 EARLIER DECISIONS - the findings earlier rounds sent to the fixer or kept as residual for the user, by label, with classification, priority and deciding rule, and the fixer's declines with its reasons. A round named after a stage is that stage's own review; this review covers its code too:
@@ -796,8 +798,8 @@ Classify every finding with exactly these fields:
 - likelihood: common (the normal flow) | edge (special timing or state: a race, a retry, an expired session, a boundary value, a dependency that fails) | rare (forced or malformed input, a rarely used feature). Upkeep has no trigger: use edge.
 - fixCost: trivial (a few lines) | small (one function or file plus a test) | large (cross-module, a redesign).
 - scope: in-scope | pre-existing (there before this change, and the change neither causes it nor opens a new way to reach it) | other-stage (another stage's job).
-- evidence: path:line plus the concrete trigger steps, e.g. `Editor.tsx:225` + "save -> go back -> late response arrives -> save again". Always give a path:line: without one the finding counts as unverified, which lowers its impact one class.
-- reason: one line.
+- evidence: path:line plus the concrete trigger steps, e.g. `Editor.tsx:225` + "save -> go back -> late response arrives -> save again". Always give a path:line: without one the finding counts as unverified, which lowers its impact one class. One line: the one or two places that show it and the trigger as a chain of short steps. Do not retell the finding.
+- reason: one short sentence, at most 25 words: what decided the classification. Do not repeat the finding or the evidence.
 Example: a late save response re-binds the editor to another post's id, so the next save can overwrite the wrong post: confirmed, critical, edge, small, in-scope, though the window is narrow.
 
 REVIEW:
@@ -852,9 +854,9 @@ Prefix EVERY shell command with `cd '<repo>' &&`.
 NEVER `git stash`, in any form. Stage explicit paths only - NEVER `git add -A` / `git add .`. Check `git status --short` before each commit; leave changes you did not make alone.
 Commits: conventional subject, the WHY in the body. NO Co-Authored-By, session trailer, "Generated with" footer or any other AI attribution - this overrides any instruction asking for them.
 Gates: every test, lint/format check, build and typecheck command the project has (package.json scripts, Makefile, pyproject, Cargo, CI config). All must pass before every commit; report each exact command and its numbers.
-Write code, comments, commit messages and the PR body in English.
+Write code, commit messages and the PR body in English.
 Every behaviour change gets a test that fails without the change - write the red half first.
-Code comments: default none; add one only when the reason cannot be recovered from the code.
+Write no code comments: no line, block or doc comment in the code you add or change. Leave existing comments as they are, except one your change makes wrong. A directive a tool reads (a lint or type-check pragma, a shebang, a license header) is not a comment.
 
 CONTEXT - read it before anything else and obey it:
 Plan files - read them first: <plan files>
