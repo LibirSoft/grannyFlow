@@ -585,6 +585,15 @@ describe('skill docs', () => {
     expect(read('engines/opencode/agents/granny.md')).toContain('granny tag')
   })
 
+  it('reads the user config at the path granny tag writes on Claude Code and Cursor, and applies tags and rideAlong on Cursor', () => {
+    const path = '`$GRANNY_CONFIG` when it is set, else `$XDG_CONFIG_HOME/granny/config.json`, else `~/.config/granny/config.json`'
+    for (const file of ['references/tags.md', 'references/claude-code.md', 'references/cursor.md']) {
+      expect({ file, has: read(file).includes(path) }).toEqual({ file, has: true })
+    }
+    const cursorConfig = read('references/cursor.md').split('\n').find(line => line.startsWith('Config: '))!
+    for (const key of ['`rideAlong`', '`tags`']) expect({ key, has: cursorConfig.includes(key) }).toEqual({ key, has: true })
+  })
+
   it('sends granny tag to the tags reference, not to the run launch in the opencode agent', () => {
     const agent = read('engines/opencode/agents/granny.md')
     expect(agent).toContain('references/tags.md')
