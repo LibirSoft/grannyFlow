@@ -8,8 +8,12 @@ function targetOf(path: string): string {
   try {
     return realpathSync(path)
   } catch {
-    const entry = lstatSync(path, { throwIfNoEntry: false })
-    return entry?.isSymbolicLink() ? resolve(realpathSync(dirname(path)), readlinkSync(path)) : path
+    let target = path
+    for (let hops = 0; lstatSync(target, { throwIfNoEntry: false })?.isSymbolicLink(); hops++) {
+      if (hops === 40) throw new Error('too many symbolic links')
+      target = resolve(realpathSync(dirname(target)), readlinkSync(target))
+    }
+    return target
   }
 }
 
@@ -19,6 +23,10 @@ const io: TagsIo = {
   write(path, text) {
     const target = targetOf(path)
     mkdirSync(dirname(target), { recursive: true })
+    if (existsSync(target) && statSync(target).nlink > 1) {
+      writeFileSync(target, text)
+      return
+    }
     const temp = `${target}.${process.pid}.tmp`
     try {
       writeFileSync(temp, text)
