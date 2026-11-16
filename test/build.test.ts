@@ -1,6 +1,6 @@
 import { describe, expect, it, mock } from 'bun:test'
 import { spawnSync } from 'node:child_process'
-import { chmodSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { builtinModules } from 'node:module'
 import { join } from 'node:path'
@@ -309,6 +309,25 @@ describe('tags.mjs', () => {
       const r = spawnSync('node', [script, 'add', 'typo', '--fix', '--description', 'x'], { cwd: dir, encoding: 'utf8', env: { ...process.env, GRANNY_CONFIG: file } })
       expect(r.status).toBe(0)
       expect(statSync(file).mode & 0o777).toBe(0o620)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('writes the repo file of the git checkout it runs in, and of the one --repo names', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'granny-tags-'))
+    try {
+      const repo = join(dir, 'repo')
+      mkdirSync(repo)
+      expect(spawnSync('git', ['init', '-q'], { cwd: repo }).status).toBe(0)
+      const env = { ...process.env, GRANNY_CONFIG: join(dir, 'user.json') }
+      const file = join(realpathSync(repo), 'granny.config.json')
+      const inside = spawnSync('node', [script, 'add', 'typo', '--fix', '--description', 'x', '--project'], { cwd: repo, encoding: 'utf8', env })
+      expect({ code: inside.status, stdout: inside.stdout, stderr: inside.stderr }).toEqual({ code: 0, stdout: `added tag typo (fix) to ${file}\n`, stderr: '' })
+      const outside = spawnSync('node', [script, 'add', 'naming', '--points', '20', '--description', 'n', '--project', '--repo', repo], { cwd: dir, encoding: 'utf8', env })
+      expect({ code: outside.status, stdout: outside.stdout, stderr: outside.stderr }).toEqual({ code: 0, stdout: `added tag naming (+20) to ${file}\n`, stderr: '' })
+      expect(JSON.parse(readFileSync(file, 'utf8'))).toEqual({ tags: { typo: { description: 'x', fix: true }, naming: { description: 'n', points: 20 } } })
+      expect(existsSync(join(dir, 'user.json'))).toBe(false)
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }
