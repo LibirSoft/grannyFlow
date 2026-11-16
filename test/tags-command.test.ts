@@ -44,7 +44,7 @@ describe('granny tag', () => {
   })
 
   it('keeps the other keys and their order, and puts a new tag last', () => {
-    const before = { threshold: 80, reviewers: [{ name: 'codex', engine: 'codex' }], tags: { typo: TYPO } }
+    const before = { tags: { typo: TYPO }, threshold: 80, reviewers: [{ name: 'codex', engine: 'codex' }] }
     const r = run(['add', 'naming', '--points', '20', '--description', 'x'], { [USER]: json(before) })
     expect(r.code).toBe(0)
     expect(r.store.get(USER)).toBe(json({ ...before, tags: { typo: TYPO, naming: { description: 'x', points: 20 } } }))
@@ -159,12 +159,12 @@ describe('granny tag', () => {
   })
 
   it('removes a tag, keeps the other keys, and removes the tags key with the last tag', () => {
-    const files = { [USER]: json({ threshold: 80, tags: { typo: TYPO, naming: { description: 'b', points: 20 } } }) }
+    const files = { [USER]: json({ tags: { typo: TYPO, naming: { description: 'b', points: 20 } }, threshold: 80 }) }
     const r = run(['remove', 'typo'], files)
     expect(r.code).toBe(0)
     expect(r.out).toEqual([`removed tag typo from ${USER}`])
-    expect(r.store.get(USER)).toBe(json({ threshold: 80, tags: { naming: { description: 'b', points: 20 } } }))
-    const last = run(['remove', 'naming'], { [USER]: json({ threshold: 80, tags: { naming: { description: 'b', points: 20 } } }) })
+    expect(r.store.get(USER)).toBe(json({ tags: { naming: { description: 'b', points: 20 } }, threshold: 80 }))
+    const last = run(['remove', 'naming'], { [USER]: json({ tags: { naming: { description: 'b', points: 20 } }, threshold: 80 }) })
     expect(last.store.get(USER)).toBe(json({ threshold: 80 }))
   })
 
