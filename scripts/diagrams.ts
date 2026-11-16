@@ -98,12 +98,12 @@ function canvas(theme: Theme, width: number, height: number, title: string) {
 }
 
 function loop(theme: Theme): string {
-  const c = canvas(theme, 1000, 790, 'granny-workflow: an optional plan review, then implement, checks, review, judge and fix for every stage, then whole-branch checks and review')
+  const c = canvas(theme, 1000, 812, 'granny-workflow: a plan of your own or from the planner, an optional plan review, then implement, checks, review, judge and fix for every stage, then whole-branch checks and review, and a review trail for the PR')
 
-  c.text(24, 34, 'OPTIONAL · "planReview": true · BEFORE STAGE 1', { size: 11.5, weight: 700, fill: c.p.muted, spacing: 1.2 })
-  c.box(24, 52, 150, 70, 'neutral', 'Plan files', ['your plan'])
-  c.path('M174,87 L222,87', 'neutral')
-  c.box(224, 52, 230, 70, 'purple', 'Plan review', ['reviewers check it', 'against the real repo'], { dashed: true })
+  c.text(244, 34, 'OPTIONAL · "planReview": true · BEFORE STAGE 1', { size: 11.5, weight: 700, fill: c.p.muted, spacing: 1.2 })
+  c.box(24, 52, 180, 70, 'neutral', 'Plan', ['yours, or the planner’s', 'once you approve it'])
+  c.path('M204,87 L242,87', 'neutral')
+  c.box(244, 52, 210, 70, 'purple', 'Plan review', ['reviewers check it', 'against the real repo'], { dashed: true })
   c.path('M454,74 L540,74', 'purple')
   c.label(497, 66, 'findings', 'purple')
   c.box(542, 52, 230, 70, 'blue', 'Implementer fixes plan', ['in place, never committed'])
@@ -113,10 +113,10 @@ function loop(theme: Theme): string {
   c.label(801, 79, 'cap', 'red')
   c.box(832, 52, 144, 70, 'red', 'Stop', ['nothing is built'])
 
-  c.path('M339,122 L339,152 L135,152 L135,226', 'green')
-  c.label(345, 145, 'clean, residual-only, or plan review off', 'green', 'start')
+  c.path('M349,122 L349,152 L135,152 L135,226', 'green')
+  c.label(355, 145, 'clean, residual-only, or plan review off', 'green', 'start')
 
-  c.frame(12, 186, 976, 404, 'FOR EACH STAGE · IN THE BRANCH’S OWN GIT WORKTREE')
+  c.frame(12, 186, 976, 404, 'FOR EACH STAGE · INDEPENDENT STAGES RUN IN PARALLEL · IN THE BRANCH’S OWN GIT WORKTREE')
 
   c.box(40, 228, 190, 82, 'blue', 'Implementer', ['builds the stage', 'and commits'])
   c.path('M230,269 L278,269', 'blue')
@@ -124,17 +124,17 @@ function loop(theme: Theme): string {
   c.box(40, 346, 190, 104, 'amber', 'Checks', ['optional · "checks"', 'granny runs them itself', 'red → repair · maxRepairs', 'still red → checks-failed'], { dashed: true })
   c.path('M230,398 L278,398', 'amber')
 
-  c.box(280, 222, 230, 238, 'purple', '', [])
+  c.box(280, 222, 230, 248, 'purple', '', [])
   c.text(395, 248, 'Reviewers', { size: 15, weight: 600, anchor: 'middle' })
   c.text(395, 266, 'all in parallel', { size: 12.5, fill: c.p.muted, anchor: 'middle' })
-  const chips = ['host model (default)', 'Codex CLI / plugin', 'any CLI  {prompt}']
+  const chips = ['host model (default)', 'Codex CLI / plugin', 'any opencode model', 'any CLI  {prompt}']
   chips.forEach((chip, i) => {
-    const y = 282 + i * 44
-    c.box(298, y, 194, 34, 'neutral', '', [])
-    c.text(395, y + 22, chip, { size: 13, anchor: 'middle', mono: i === 2 })
+    const y = 280 + i * 38
+    c.box(298, y, 194, 30, 'neutral', '', [])
+    c.text(395, y + 20, chip, { size: 13, anchor: 'middle', mono: i === 3 })
   })
-  c.text(395, 434, 'one that fails twice →', { size: 11.5, fill: c.p.muted, anchor: 'middle' })
-  c.text(395, 449, 'stage review-failed', { size: 11.5, fill: c.p.muted, anchor: 'middle' })
+  c.text(395, 444, 'one that fails twice →', { size: 11.5, fill: c.p.muted, anchor: 'middle' })
+  c.text(395, 459, 'stage review-failed', { size: 11.5, fill: c.p.muted, anchor: 'middle' })
 
   c.path('M510,250 L630,250', 'green')
   c.label(570, 242, 'no findings', 'green')
@@ -150,7 +150,8 @@ function loop(theme: Theme): string {
   c.path('M510,412 L560,412 L560,530 L26,530 L26,290 L38,290', 'red')
   c.label(566, 430, 'P0 / P1: skip the judge', 'red', 'start')
   c.path('M722,380 L722,530 L560,530', 'amber', { head: false })
-  c.label(730, 410, 'critical · major · > 70', 'amber', 'start')
+  c.label(730, 410, 'critical · major · priority > 70', 'amber', 'start')
+  c.label(730, 428, '+ near misses (≥ 55) ride along', 'amber', 'start')
   c.text(300, 555, 'implementer fixes them → checks again → every reviewer reviews again · cap: maxRounds', { size: 12.5, fill: c.p.muted, anchor: 'middle' })
 
   c.path('M185,590 L185,632', 'neutral')
@@ -161,7 +162,8 @@ function loop(theme: Theme): string {
   c.path('M650,674 L678,674', 'green')
   c.box(680, 634, 296, 80, 'green', 'PR-ready branch', ['nothing is pushed:', 'you review and decide'])
 
-  c.text(500, 760, 'The loop is code, not a prompt: thresholds, caps and stop conditions hold on every run.', { size: 12.5, fill: c.p.muted, anchor: 'middle' })
+  c.text(500, 752, 'Every round is recorded as a review trail. Once you open the PR, a script posts it as line comments.', { size: 12.5, fill: c.p.muted, anchor: 'middle' })
+  c.text(500, 782, 'The loop is code, not a prompt: thresholds, caps and stop conditions hold on every run.', { size: 12.5, fill: c.p.muted, anchor: 'middle' })
   return c.done()
 }
 

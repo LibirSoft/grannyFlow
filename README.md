@@ -1,153 +1,102 @@
 # granny-workflow
 
-Granny takes a plan and turns it into a PR-ready branch. An **implementer** agent builds the plan stage by stage, **reviewers** check every stage, a **judge** decides which findings are worth fixing, and the loop repeats until the review is clean. Nothing is pushed: you get a branch, a PR body and a short report, and you decide what happens next.
+Granny turns a plan into a PR-ready branch. An **implementer** agent builds the plan stage by stage, **reviewers** check every stage, and a **judge** decides which findings are worth fixing. The loop repeats until the review is clean.
 
-It works on Claude Code, opencode and omp (oh-my-pi), where the loop runs as code (the round cap and thresholds hold on every run), and on Cursor, where the agent follows the same steps by hand.
+Nothing is pushed. You get a branch, a PR body and a short report, and you decide what happens next.
+
+It runs on Claude Code, opencode and omp (oh-my-pi), where the loop is code, so the round cap and the thresholds hold on every run. On Cursor the agent follows the same steps by hand.
 
 ## Install
 
-1. Add the skill:
+```sh
+npx skills add LibirSoft/grannyFlow
+```
 
-   ```sh
-   npx skills add LibirSoft/grannyFlow
-   ```
+Claude Code needs nothing more. The other hosts need one more step, where `<skill-dir>` is the directory the skill landed in (for example `~/.claude/skills/granny-workflow`):
 
-2. Finish the install for your host (`<skill-dir>` is where the skill landed, e.g. `~/.claude/skills/granny-workflow`):
+```sh
+# opencode: install the plugin, then restart
+cp -r <skill-dir>/engines/opencode/plugin/granny-workflow ~/.config/opencode/plugins/
+opencode service restart
 
-   - **Claude Code** - nothing else to do.
-   - **opencode** - install the plugin globally and restart:
+# omp: install the extension, then quit omp and start it again
+cp -r <skill-dir>/engines/omp/extensions/granny-workflow ~/.omp/agent/extensions/
 
-     ```sh
-     cp -r <skill-dir>/engines/opencode/plugin/granny-workflow ~/.config/opencode/plugins/
-     opencode service restart
-     ```
+# Cursor: copy the subagents, then set `model:` in each file
+cp <skill-dir>/engines/cursor/agents/*.md ~/.cursor/agents/
+```
 
-   - **omp** - install the extension globally, then quit omp and start it again. omp must find the skill in `~/.omp/agent/skills/` or `~/.agents/skills/`; link it there if it landed elsewhere:
-
-     ```sh
-     cp -r <skill-dir>/engines/omp/extensions/granny-workflow ~/.omp/agent/extensions/
-     ```
-
-   - **Cursor** - copy the subagents and set `model:` in each:
-
-     ```sh
-     cp <skill-dir>/engines/cursor/agents/*.md ~/.cursor/agents/
-     ```
-
-3. Optional: Codex as a second reviewer. Install the [Codex CLI](https://github.com/openai/codex) and run `codex login`. On Claude Code, OpenAI's [Codex plugin](https://github.com/openai/codex-plugin-cc) is used instead when it is installed. omp runs no Codex reviewer: use an `agent` reviewer on one of omp's `openai-codex/...` models.
-
-   Optional: any model [opencode](https://opencode.ai) reaches (Kimi, GLM, ...) as a reviewer, on every host. Install opencode, log in to the provider, and add a reviewer with `"engine": "opencode"` and a model from `opencode models`; opencode's permission rules keep it to reading and read-only git, as far as their patterns reach - see [opencode reviewers](skills/granny-workflow/references/config.md#opencode-reviewers).
-
-4. In your project, ask your agent:
-
-   > granny setup
+omp must find the skill in `~/.omp/agent/skills/` or `~/.agents/skills/`. Link it there if it landed somewhere else.
 
 ## Setup
 
-`granny setup` (or `granny init`) asks five questions and writes `granny.config.json` in your repo (or `~/.config/granny/config.json` for every project). It does not start a run.
+In your project, ask your agent:
 
-1. **Review strictness** - how many findings go back to the implementer. P0/P1 findings and critical or major issues are always fixed; the preset decides the rest:
+> granny setup
 
-   | preset | threshold | fixes more or fewer findings |
-   |---|---|---|
-   | strict | 55 | more: moderate issues on the common path even when the fix is large, and cheap fixes on edge paths |
-   | normal | 70 | the default |
-   | relaxed | 85 | fewer: a moderate issue only when it is on the common path and trivial to fix |
+It asks five questions and writes `granny.config.json` in your repo, or `~/.config/granny/config.json` for every project. It does not start a run. The questions are: how strict the review is, who reviews, which checks to run, which model each role uses, and where to save.
 
-2. **Reviewers** - the host model, the host model and Codex, or Codex only; with opencode installed, the host model and an opencode model.
-3. **Checks** - the project's test, typecheck, lint or build commands that granny runs itself before every review. A red check goes back to the implementer.
-4. **Models** - keep the defaults, or pick a model for each role in turn: who writes the code (implementer), who reviews, who judges the findings, who plans, and granny's own final check. Claude Code also asks about the helper that runs plain commands; opencode and omp have none, granny runs those commands itself.
-5. **Where to save** - this project or every project.
+Strictness sets how many findings go back to the implementer. P0/P1 findings and critical or major issues are always fixed. The preset decides the rest:
+
+| preset | threshold | |
+|---|---|---|
+| strict | 55 | fixes more findings |
+| normal | 70 | the default |
+| relaxed | 85 | fixes fewer findings |
 
 ## Use
 
-Hand granny a plan:
+With a plan:
 
 > implement plans/auth/plan.md with granny - stage 1: WP-01..03, stage 2: WP-04..06
 
-No plan yet? Let granny plan it first:
+Without a plan, granny plans first:
 
 > plan OAuth login with granny on feat/oauth
 
-A planner writes the plan to `.granny/plans/feat-oauth.md` and proposes the stages, then the run stops. Approve it (or edit it) and granny builds it in a second run.
+A planner writes the plan to `.granny/plans/feat-oauth.md` and proposes the stages, then the run stops. Approve the plan or edit it, and a second run builds it.
 
-When a run ends you get the worktree path, and per stage: commits, review rounds, the outcome, and the findings left for you to decide. The PR body is at `.granny/PR-BODY.md` in the worktree. Review and push from there.
+When a run ends you get the worktree path and, for each stage, the commits, the review rounds, the outcome and the findings left for you to decide. The PR body is at `.granny/PR-BODY.md` in the worktree. Review and push from there.
 
-## Review only: `granny judge`
+### Post the review to the PR
 
-Want granny only for a review? In your project, ask your agent:
-
-> granny judge
-
-If the agents are not configured yet, granny asks who reviews and who tags, and writes the config. Then one agent reviews the checkout's `<base>...HEAD`, a second agent tags what it found, and the review goes to `.granny/reviews/<date>-<branch>.md`. You get the path and the counts, and you can read the file later. Nothing is fixed or committed, and no branch or worktree is created; uncommitted files are not reviewed, and the report lists them.
-
-```markdown
-# Granny judge - feat/login
-
-- Reviewed: `main...HEAD` at 1a2b3c4d, 3 commit(s), in /work/app
-- When: 20261106-101010
-- Reviewers: reviewer (agent, openai-codex/gpt-6.1-sol) · Judge: anthropic/claude-haiku-5-5
-- Totals: P0 1, P1 0, P2 1, P3 0, dismissed 0
-
-## P0
-
-### Session cookie is not marked secure
-
-`src/auth.ts:12` · `confirmed` `critical` `common` `small` `in-scope` · priority 95 · `reviewer: P1` · from `reviewer-F1`
-
-The detail, the evidence and the judge's reason follow here.
-
-## P1
-
-None.
-```
-
-The heading is the tagging agent's call: `critical` goes under P0, `major` under P1, `moderate` under P2 and `minor` under P3; what it refutes goes under `Dismissed by the judge`, with its reason. A finding it placed below the reviewer's severity is tagged `demoted`. Details: [references/judge.md](skills/granny-workflow/references/judge.md).
-
-## The review trail on the PR
-
-Every review round is recorded as it ends: the findings, the judge's tags and what became of each one, with the commit ids. Granny never pushes or opens the PR, so once you have opened it, ask your agent to post the trail, or run it yourself in the worktree:
+Every review round is recorded: the findings, the judge's verdict on each one and what became of it. After you open the PR, ask your agent to post the record, or run this in the worktree:
 
 ```sh
 node <skill-dir>/scripts/pr-comments.mjs
 ```
 
-Each round becomes one review on the PR, in order. A finding sits on its line, and lines a later fix changed show as *Outdated*:
+Each round becomes one review on the PR, and a finding sits on its line. It works for a GitHub PR and a GitLab MR. For any other platform, `--out <file>` writes the rounds as JSON. Details: [review trail](skills/granny-workflow/references/config.md#review-trail).
 
-```markdown
-**granny · Stage 1 (engine) · round 1 · `codex-F2`** (reviewer `codex`, P2)
-**Retry loop never gives up**
+## Review only: `granny judge`
 
-`fetchAll` retries on every error, including 404.
+To review a branch without changing it, ask your agent:
 
----
-**Judge:** `confirmed` `major` `common` `trivial` `in-scope` · priority 82 · rule 6 → fix: impact major is in alwaysFix (major/common/trivial -> 82)
-**Evidence:** src/fetch.ts:41 - a 404 loops forever
-**What happened:** fixed in fix r1: a1b2c3d..d4e5f6a (2 commits)
-```
+> granny judge
 
-A script posts it, not an agent, and a rerun posts only what is missing. It posts to a GitHub PR or a GitLab MR, whichever your remote is on; for any other platform, `--out <file>` writes the rounds as JSON for another client to post. Details: [references/config.md](skills/granny-workflow/references/config.md#review-trail).
+One agent reviews the checkout's `<base>...HEAD` and a second agent rates each finding. The report goes to `.granny/reviews/<date>-<branch>.md`. Nothing is fixed or committed, and uncommitted files are not reviewed. If no reviewer or judge model is set yet, granny asks first.
+
+The report groups the findings by that rating: `critical` under P0, `major` under P1, `moderate` under P2 and `minor` under P3. What the second agent refutes goes under `Dismissed by the judge`, with its reason. Details: [judge.md](skills/granny-workflow/references/judge.md).
 
 ## How it works
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/loop-dark.svg">
-  <img src="docs/images/loop-light.svg" alt="The granny loop: an optional plan review, then for each stage the implementer builds, optional checks run, reviewers review in parallel, P0/P1 go straight back, the judge classifies the rest, and a final check ends with a PR-ready branch that is not pushed">
+  <img src="docs/images/loop-light.svg" alt="The granny loop: a plan of your own or from the planner, an optional plan review, then for each stage the implementer builds, optional checks run, reviewers review in parallel, P0/P1 go straight back, the judge classifies the rest, and a final review and a final check end with a PR-ready branch that is not pushed">
 </picture>
 
 - **Worktree** - the run works in the branch's own git worktree, next to your repo. Your main checkout is not touched.
-- **Implementer** - builds one stage, commits, and later fixes the findings sent back to it. With `stepAgents` on, a stage with steps is built one agent per step; each step but the last is committed before the next starts ([Step agents](skills/granny-workflow/references/config.md#step-agents)).
-- **Checks** (optional) - commands granny runs itself; a red one goes back to the implementer before any review.
+- **Implementer** - builds one stage, commits it, and later fixes the findings sent back to it.
+- **Checks** (optional) - your test, typecheck or lint commands. Granny runs them itself, and a red one goes back to the implementer before any review.
 - **Reviewers** - all of them review every stage at the same time.
-- **Judge** - P0/P1 findings skip it and go straight back. For the rest it rates impact, likelihood and fix cost; code turns that into a priority. Critical and major issues are always fixed, the others when their priority is above the threshold; the ones just under it go along when the round has a fix anyway. What is not fixed is listed for you, with the reason.
+- **Judge** - P0/P1 findings skip it and go straight back. It rates the rest by impact, likelihood and fix cost, and code turns the rating into a priority. Critical and major issues are always fixed, the others when their priority is above the threshold. What is not fixed is listed for you, with the reason.
 - **Final review** - after the last stage, the whole branch is reviewed once more for problems between stages.
-- **Parallel stages** - stages that do not depend on each other, also in other repos, run at the same time.
 
-The full rules: [the decision table](skills/granny-workflow/references/config.md#the-decision-table).
+Stages that do not depend on each other run at the same time, also in other repos. The full rules: [the decision table](skills/granny-workflow/references/config.md#the-decision-table).
 
 ## Configure
 
-`granny setup` covers the common choices. To edit by hand: settings are read from `~/.config/granny/config.json`, then `<repo>/granny.config.json`, then the run's own overrides - later wins.
+`granny setup` covers the common choices. To edit by hand: settings are read from `~/.config/granny/config.json`, then `<repo>/granny.config.json`, then the run's own overrides. Later wins.
 
 ```json
 {
@@ -164,21 +113,28 @@ The full rules: [the decision table](skills/granny-workflow/references/config.md
 }
 ```
 
-| key | default | |
+| key | default | what it does |
 |---|---|---|
 | `threshold` | `70` | findings with a priority above it are fixed |
 | `alwaysFix` | `["critical", "major"]` | impact classes that are always fixed |
-| `rideAlong` | `55` | findings at or above it go along with a round that already has a fix |
+| `rideAlong` | `55` | findings at or above it are fixed too, when the round already has a fix |
 | `maxRounds` | `4` | review rounds per stage |
-| `reviewers` | the host model | any mix of host models, Codex, opencode models and other CLIs |
+| `reviewers` | the host model | who reviews, in any mix (see below) |
 | `checks` | none | commands granny runs before every review |
-| `planReview` | `false` | review the plan itself before building it - many more tokens and a much longer run; only when asked |
+| `planReview` | `false` | review the plan before building it; uses many more tokens |
 | `finalReview` | `true` | review the whole branch after the last stage |
 | `parallel` | `true` | run independent stages at the same time |
-| `stepAgents` | `false` | a stage with two or more steps is built one agent per step, each step committed before the next; off: one agent builds the stage. See [Step agents](skills/granny-workflow/references/config.md#step-agents) |
-| `roles.<role>.model` | the session model; on Claude Code the judge and helper use Haiku | model per role: `implementer`, `planner`, `judge`, `granny`, `helper` |
+| `stepAgents` | `false` | build a stage with one agent per step: [step agents](skills/granny-workflow/references/config.md#step-agents) |
+| `roles.<role>.model` | the session model | model per role: `implementer`, `planner`, `judge`, `granny`, `helper` |
 
-Every key, reviewer engines and examples: [config.md](skills/granny-workflow/references/config.md).
+A reviewer is one of these:
+
+- `agent` - a model of your host. This is the default.
+- `auto` - Codex. Install the [Codex CLI](https://github.com/openai/codex) and run `codex login`. Not on omp.
+- `opencode` - any model [opencode](https://opencode.ai) reaches, such as Kimi or GLM, on every host: [opencode reviewers](skills/granny-workflow/references/config.md#opencode-reviewers).
+- `command` - any other CLI.
+
+Every key and more examples: [config.md](skills/granny-workflow/references/config.md).
 
 ## Hosts
 
@@ -189,7 +145,7 @@ Every key, reviewer engines and examples: [config.md](skills/granny-workflow/ref
 | omp | an extension in your omp session; every role is its own `omp` process with its own model |
 | Cursor | the agent follows the steps by hand with four subagents - not deterministic |
 
-On Claude Code, plain commands (git, checks) run through a small Haiku helper agent, because Workflow scripts have no shell ([claude-code#98566](https://github.com/anthropics/claude-code/issues/98566)).
+On Claude Code a small Haiku helper agent runs the plain commands (git, checks), because Workflow scripts have no shell ([claude-code#98566](https://github.com/anthropics/claude-code/issues/98566)). The judge uses Haiku there too, unless you set its model.
 
 To resume a stopped run: on Claude Code relaunch it with `resumeFromRunId`; on opencode and omp relaunch it with `fromStage` set to the first unfinished stage.
 
@@ -201,7 +157,7 @@ bun run build   # regenerates the engines, scripts/pr-comments.mjs and reference
 bun run check   # typecheck + tests
 ```
 
-`src/core` holds the loop, shared by every engine; `src/adapters` connects it to each host; `src/pr` is the trail poster. The generated engine files are committed so the skill installs without a build step.
+`src/core` holds the loop, shared by every engine. `src/adapters` connects it to each host, and `src/pr` posts the review trail. The generated engine files are committed, so the skill installs without a build step.
 
 ## License
 
