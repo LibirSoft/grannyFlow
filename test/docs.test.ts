@@ -572,6 +572,19 @@ describe('skill docs', () => {
     expect(read('references/config.md')).toContain("that agent's `commit`")
   })
 
+  it('documents config tags in the config reference, SKILL.md, tags.md, the Cursor protocol and the README', () => {
+    const command = 'node <skill-dir>/scripts/tags.mjs add <name> --description <text> (--points <1-100> | --fix) [--project] [--replace] [--repo <dir>]'
+    const config = read('references/config.md')
+    expect(read('SKILL.md')).toContain('granny tag')
+    expect(read('SKILL.md')).toContain('(references/tags.md')
+    expect(read('references/tags.md')).toContain(command)
+    expect(config).toContain(command)
+    for (const text of ['## Tags', 'tag <name> is marked fix', 'a tag starts a fix round by itself']) expect({ text, has: config.includes(text) }).toEqual({ text, has: true })
+    expect(read('references/cursor.md')).toContain('"Judge - with config tags" prompt')
+    expect(readRoot('README.md')).toContain('scripts/tags.mjs')
+    expect(read('engines/opencode/agents/granny.md')).toContain('granny tag')
+  })
+
   it('points every repo reference at LibirSoft/grannyFlow', () => {
     expect(readRoot('README.md')).toContain('npx skills add LibirSoft/grannyFlow')
     const docs: Record<string, string> = {

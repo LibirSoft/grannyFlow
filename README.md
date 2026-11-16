@@ -139,7 +139,7 @@ A script posts it, not an agent, and a rerun posts only what is missing. It post
 - **Implementer** - builds one stage, commits, and later fixes the findings sent back to it. With `stepAgents` on, a stage with steps is built one agent per step; each step but the last is committed before the next starts ([Step agents](skills/granny-workflow/references/config.md#step-agents)).
 - **Checks** (optional) - commands granny runs itself; a red one goes back to the implementer before any review.
 - **Reviewers** - all of them review every stage at the same time.
-- **Judge** - P0/P1 findings skip it and go straight back. For the rest it rates impact, likelihood and fix cost; code turns that into a priority. Critical and major issues are always fixed, the others when their priority is above the threshold; the ones just under it go along when the round has a fix anyway. What is not fixed is listed for you, with the reason.
+- **Judge** - P0/P1 findings skip it and go straight back. For the rest it rates impact, likelihood and fix cost; code turns that into a priority. Critical and major issues are always fixed, the others when their priority is above the threshold; the ones just under it go along when the round has a fix anyway. What is not fixed is listed for you, with the reason. A kind of small finding you name as a config tag (`granny tag`) gets points on its priority, or is fixed outright: [config tags](skills/granny-workflow/references/config.md#tags).
 - **Final review** - after the last stage, the whole branch is reviewed once more for problems between stages.
 - **Parallel stages** - stages that do not depend on each other, also in other repos, run at the same time.
 
@@ -177,6 +177,23 @@ The full rules: [the decision table](skills/granny-workflow/references/config.md
 | `parallel` | `true` | run independent stages at the same time |
 | `stepAgents` | `false` | a stage with two or more steps is built one agent per step, each step committed before the next; off: one agent builds the stage. See [Step agents](skills/granny-workflow/references/config.md#step-agents) |
 | `roles.<role>.model` | the session model; on Claude Code the judge and helper use Haiku | model per role: `implementer`, `planner`, `judge`, `granny`, `helper` |
+
+Config tags name a kind of small finding that is always fixed, or that gets points on its priority. Say `granny tag` to your agent, or run the script from the skill directory:
+
+```sh
+node <skill-dir>/scripts/tags.mjs add typo --fix --description "a misspelled word in a comment, a string or a doc"
+```
+
+The same two tags, written in the config file:
+
+```json
+{
+  "tags": {
+    "typo": { "description": "a misspelled word in a comment, a string or a doc", "fix": true },
+    "naming": { "description": "a name that says something other than what the code does", "points": 20 }
+  }
+}
+```
 
 Every key, reviewer engines and examples: [config.md](skills/granny-workflow/references/config.md).
 

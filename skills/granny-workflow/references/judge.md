@@ -2,7 +2,7 @@
 
 When the user says `granny judge`, or wants granny only to review, follow this instead of the normal run. One agent reviews the branch, a second agent tags what it found, and the result is a markdown file the user can read later. It works on every host.
 
-It never implements, fixes, commits, pushes, or creates a branch or worktree. There is one review round and no loop, so it costs one review and one tagging, no fix rounds. `threshold`, `alwaysFix`, `maxRounds`, `checks` and the implementer play no part.
+It never implements, fixes, commits, pushes, or creates a branch or worktree. There is one review round and no loop, so it costs one review and one tagging, no fix rounds. `threshold`, `alwaysFix`, `maxRounds`, `checks`, `tags` and the implementer play no part.
 
 Talk to the user in their language. Ask with your host's question tool when you have one; otherwise ask in one numbered message and wait for the answer.
 
