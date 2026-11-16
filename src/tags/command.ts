@@ -1,4 +1,4 @@
-import { tagErrors } from '../core/config'
+import { isTagPoints, mergeTags, tagErrors } from '../core/config'
 
 type Obj = Record<string, unknown>
 type Verb = 'add' | 'remove' | 'list'
@@ -44,7 +44,6 @@ const SWITCHES: Record<Verb, string[]> = { add: ['--fix', '--project', '--replac
 const VALUED: Record<Verb, string[]> = { add: ['--description', '--points', '--repo'], remove: ['--repo'], list: ['--repo'] }
 
 const isObject = (v: unknown): v is Obj => typeof v === 'object' && v !== null && !Array.isArray(v)
-const isPoints = (v: unknown): v is number => Number.isInteger(v) && (v as number) >= 1 && (v as number) <= 100
 const hasOwn = (o: Obj, key: string) => Object.prototype.hasOwnProperty.call(o, key)
 const reason = (e: unknown) => (e instanceof Error ? e.message : String(e))
 const serialize = (object: Obj) => `${JSON.stringify(object, null, 2)}\n`
@@ -60,7 +59,7 @@ function effectOf(tag: unknown): string {
   if (tag === null) return 'off'
   if (!isObject(tag)) return 'invalid'
   if (tag.fix === true && tag.points === undefined) return 'fix'
-  if (tag.fix === undefined && isPoints(tag.points)) return `+${tag.points}`
+  if (tag.fix === undefined && isTagPoints(tag.points)) return `+${tag.points}`
   return 'invalid'
 }
 
@@ -130,15 +129,7 @@ function readStore(io: TagsIo, top: string | undefined): Store | string {
 }
 
 function merged(...layers: Array<Obj | undefined>): Obj {
-  const tags = new Map<string, unknown>()
-  for (const layer of layers) {
-    if (layer === undefined) continue
-    for (const [name, value] of Object.entries(layer)) {
-      if (value === null) tags.delete(name)
-      else tags.set(name, value)
-    }
-  }
-  return Object.fromEntries(tags)
+  return layers.reduce<Obj>((tags, layer) => (layer === undefined ? tags : mergeTags(tags, layer)), {})
 }
 
 const checkAfter = (store: Store, project: boolean, tags: Obj) => {

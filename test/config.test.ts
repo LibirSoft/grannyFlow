@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test'
-import { DEFAULT_CONFIG, resolveConfig, resolveEffort, resolveModel } from '../src/core/config'
+import { DEFAULT_CONFIG, isTagPoints, mergeTags, resolveConfig, resolveEffort, resolveModel } from '../src/core/config'
 import type { HostName } from '../src/core/types'
 import { cliCommand } from '../src/core/reviewer'
 
@@ -528,5 +528,19 @@ describe('tags', () => {
   ]
   it.each(rejected)('rejects %s with its message', (_label, tags, message) => {
     expect(() => resolveConfig([{ tags }])).toThrow(message)
+  })
+
+  it('merges one layer of tags into another by name: null drops a tag, undefined keeps it, and a new name goes last', () => {
+    expect(mergeTags({ typo, naming }, { naming: { description: 'd', fix: true }, style: { description: 's', points: 10 } })).toEqual({
+      typo,
+      naming: { description: 'd', fix: true },
+      style: { description: 's', points: 10 },
+    })
+    expect(Object.keys(mergeTags({ typo, naming }, { typo: { description: 'd', points: 5 } }))).toEqual(['typo', 'naming'])
+    expect(mergeTags({ typo, naming }, { typo: null, style: undefined })).toEqual({ naming })
+  })
+
+  it('checks points with one rule for the config and the tag command: an integer from 1 to 100', () => {
+    expect([0, 1, 100, 101, 1.5, Number.NaN, '20', null].map(value => isTagPoints(value))).toEqual([false, true, true, false, false, false, false, false])
   })
 })

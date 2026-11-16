@@ -122,16 +122,8 @@ function resolveConfig(layers, host) {
     if (layer.tags !== undefined) {
       if (!isObject(layer.tags))
         errors.push(`${where}: tags must be an object keyed by tag name`);
-      else {
-        for (const [name, value] of Object.entries(layer.tags)) {
-          if (value === undefined)
-            continue;
-          if (value === null)
-            delete config.tags[name];
-          else
-            config.tags = { ...config.tags, [name]: value };
-        }
-      }
+      else
+        config.tags = mergeTags(config.tags, layer.tags);
     }
     for (const [key, value] of Object.entries(layer)) {
       if (key === "roles" || key === "tags" || key === "$schema" || value === undefined || !TOP_KEYS.has(key))
@@ -392,6 +384,19 @@ function metricErrors(at, m) {
 }
 var TAG_KEYS = new Set(["description", "points", "fix"]);
 var TAG_LIMIT = 20;
+function mergeTags(base, layer) {
+  const tags = new Map(Object.entries(base));
+  for (const [name, value] of Object.entries(layer)) {
+    if (value === null)
+      tags.delete(name);
+    else if (value !== undefined)
+      tags.set(name, value);
+  }
+  return Object.fromEntries(tags);
+}
+function isTagPoints(value) {
+  return Number.isInteger(value) && value >= 1 && value <= 100;
+}
 function tagErrors(tags) {
   if (!isObject(tags))
     return ["tags must be an object keyed by tag name"];
@@ -418,7 +423,7 @@ function tagErrors(tags) {
     if (points !== undefined && fix !== undefined) {
       errors.push(fix === true ? `${at} has points and fix - keep one of them` : `${at}.fix must be true - leave it out for a tag with points`);
     } else if (points !== undefined) {
-      if (!Number.isInteger(points) || points < 1 || points > 100)
+      if (!isTagPoints(points))
         errors.push(`${at}.points must be an integer between 1 and 100`);
     } else if (fix !== true)
       errors.push(`${at} needs points (1-100) or fix: true`);

@@ -175,13 +175,7 @@ export function resolveConfig(layers: unknown[], host?: HostName): GrannyConfig 
     }
     if (layer.tags !== undefined) {
       if (!isObject(layer.tags)) errors.push(`${where}: tags must be an object keyed by tag name`)
-      else {
-        for (const [name, value] of Object.entries(layer.tags)) {
-          if (value === undefined) continue
-          if (value === null) delete config.tags[name]
-          else config.tags = { ...config.tags, [name]: value }
-        }
-      }
+      else config.tags = mergeTags(config.tags, layer.tags)
     }
     for (const [key, value] of Object.entries(layer)) {
       if (key === 'roles' || key === 'tags' || key === '$schema' || value === undefined || !TOP_KEYS.has(key)) continue
@@ -404,6 +398,19 @@ function metricErrors(at: string, m: unknown): string[] {
 const TAG_KEYS = new Set(['description', 'points', 'fix'])
 const TAG_LIMIT = 20
 
+export function mergeTags<T>(base: Record<string, T>, layer: Record<string, T | null | undefined>): Record<string, T> {
+  const tags = new Map<string, T>(Object.entries(base))
+  for (const [name, value] of Object.entries(layer)) {
+    if (value === null) tags.delete(name)
+    else if (value !== undefined) tags.set(name, value)
+  }
+  return Object.fromEntries(tags)
+}
+
+export function isTagPoints(value: unknown): value is number {
+  return Number.isInteger(value) && (value as number) >= 1 && (value as number) <= 100
+}
+
 export function tagErrors(tags: unknown): string[] {
   if (!isObject(tags)) return ['tags must be an object keyed by tag name']
   const names = Object.keys(tags)
@@ -427,7 +434,7 @@ export function tagErrors(tags: unknown): string[] {
     if (points !== undefined && fix !== undefined) {
       errors.push(fix === true ? `${at} has points and fix - keep one of them` : `${at}.fix must be true - leave it out for a tag with points`)
     } else if (points !== undefined) {
-      if (!Number.isInteger(points) || points < 1 || points > 100) errors.push(`${at}.points must be an integer between 1 and 100`)
+      if (!isTagPoints(points)) errors.push(`${at}.points must be an integer between 1 and 100`)
     } else if (fix !== true) errors.push(`${at} needs points (1-100) or fix: true`)
   }
   return errors

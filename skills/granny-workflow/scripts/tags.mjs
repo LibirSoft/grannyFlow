@@ -59,6 +59,19 @@ var NAME = /^[a-z0-9-]+$/;
 var isObject = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
 var TAG_KEYS = new Set(["description", "points", "fix"]);
 var TAG_LIMIT = 20;
+function mergeTags(base, layer) {
+  const tags = new Map(Object.entries(base));
+  for (const [name, value] of Object.entries(layer)) {
+    if (value === null)
+      tags.delete(name);
+    else if (value !== undefined)
+      tags.set(name, value);
+  }
+  return Object.fromEntries(tags);
+}
+function isTagPoints(value) {
+  return Number.isInteger(value) && value >= 1 && value <= 100;
+}
 function tagErrors(tags) {
   if (!isObject(tags))
     return ["tags must be an object keyed by tag name"];
@@ -85,7 +98,7 @@ function tagErrors(tags) {
     if (points !== undefined && fix !== undefined) {
       errors.push(fix === true ? `${at} has points and fix - keep one of them` : `${at}.fix must be true - leave it out for a tag with points`);
     } else if (points !== undefined) {
-      if (!Number.isInteger(points) || points < 1 || points > 100)
+      if (!isTagPoints(points))
         errors.push(`${at}.points must be an integer between 1 and 100`);
     } else if (fix !== true)
       errors.push(`${at} needs points (1-100) or fix: true`);
@@ -104,7 +117,6 @@ var NO_CHECKOUT = "--project needs a git checkout: run it in the repo or pass --
 var SWITCHES = { add: ["--fix", "--project", "--replace"], remove: ["--project"], list: [] };
 var VALUED = { add: ["--description", "--points", "--repo"], remove: ["--repo"], list: ["--repo"] };
 var isObject2 = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
-var isPoints = (v) => Number.isInteger(v) && v >= 1 && v <= 100;
 var hasOwn = (o, key) => Object.prototype.hasOwnProperty.call(o, key);
 var reason = (e) => e instanceof Error ? e.message : String(e);
 var serialize = (object) => `${JSON.stringify(object, null, 2)}
@@ -123,7 +135,7 @@ function effectOf(tag) {
     return "invalid";
   if (tag.fix === true && tag.points === undefined)
     return "fix";
-  if (tag.fix === undefined && isPoints(tag.points))
+  if (tag.fix === undefined && isTagPoints(tag.points))
     return `+${tag.points}`;
   return "invalid";
 }
@@ -199,18 +211,7 @@ function readStore(io, top) {
   return typeof project === "string" ? project : { user, project };
 }
 function merged(...layers) {
-  const tags = new Map;
-  for (const layer of layers) {
-    if (layer === undefined)
-      continue;
-    for (const [name, value] of Object.entries(layer)) {
-      if (value === null)
-        tags.delete(name);
-      else
-        tags.set(name, value);
-    }
-  }
-  return Object.fromEntries(tags);
+  return layers.reduce((tags, layer) => layer === undefined ? tags : mergeTags(tags, layer), {});
 }
 var checkAfter = (store, project, tags) => {
   const own = tagErrors(merged(tags));
