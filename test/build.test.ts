@@ -1,6 +1,6 @@
 import { describe, expect, it, mock } from 'bun:test'
 import { spawnSync } from 'node:child_process'
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { builtinModules } from 'node:module'
 import { join } from 'node:path'
@@ -275,6 +275,54 @@ describe('tags.mjs', () => {
       const r = spawnSync('node', [script, 'add', 'typo', '--fix', '--description', 'x'], { cwd: dir, encoding: 'utf8', env })
       expect({ code: r.status, stdout: r.stdout, stderr: r.stderr }).toEqual({ code: 0, stdout: `added tag typo (fix) to ${file}\n`, stderr: '' })
       expect(readFileSync(file, 'utf8')).toBe('{\n  "tags": {\n    "typo": {\n      "description": "x",\n      "fix": true\n    }\n  }\n}\n')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('writes a symlinked config through its link, so the link stays and the target keeps its mode', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'granny-tags-'))
+    try {
+      const target = join(dir, 'dotfiles', 'granny.json')
+      const link = join(dir, 'config', 'granny.json')
+      mkdirSync(join(dir, 'dotfiles'))
+      mkdirSync(join(dir, 'config'))
+      writeFileSync(target, '{ "threshold": 80 }\n')
+      chmodSync(target, 0o600)
+      symlinkSync(target, link)
+      const r = spawnSync('node', [script, 'add', 'typo', '--fix', '--description', 'x'], { cwd: dir, encoding: 'utf8', env: { ...process.env, GRANNY_CONFIG: link } })
+      expect({ code: r.status, stderr: r.stderr }).toEqual({ code: 0, stderr: '' })
+      expect(lstatSync(link).isSymbolicLink()).toBe(true)
+      expect(JSON.parse(readFileSync(target, 'utf8'))).toEqual({ threshold: 80, tags: { typo: { description: 'x', fix: true } } })
+      expect(statSync(target).mode & 0o777).toBe(0o600)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('keeps the mode of a config file it rewrites', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'granny-tags-'))
+    try {
+      const file = join(dir, 'config.json')
+      writeFileSync(file, '{ "threshold": 80 }\n')
+      chmodSync(file, 0o620)
+      const r = spawnSync('node', [script, 'add', 'typo', '--fix', '--description', 'x'], { cwd: dir, encoding: 'utf8', env: { ...process.env, GRANNY_CONFIG: file } })
+      expect(r.status).toBe(0)
+      expect(statSync(file).mode & 0o777).toBe(0o620)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('creates the file a dangling symlink names, relative to the link, and keeps the link', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'granny-tags-'))
+    try {
+      const link = join(dir, 'config.json')
+      symlinkSync('dotfiles/granny.json', link)
+      const r = spawnSync('node', [script, 'add', 'typo', '--fix', '--description', 'x'], { cwd: dir, encoding: 'utf8', env: { ...process.env, GRANNY_CONFIG: link } })
+      expect({ code: r.status, stderr: r.stderr }).toEqual({ code: 0, stderr: '' })
+      expect(lstatSync(link).isSymbolicLink()).toBe(true)
+      expect(JSON.parse(readFileSync(join(dir, 'dotfiles', 'granny.json'), 'utf8'))).toEqual({ tags: { typo: { description: 'x', fix: true } } })
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }
