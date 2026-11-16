@@ -111,6 +111,7 @@ export interface Finding {
   scope?: Scope
   evidence?: string
   priority?: number
+  tag?: string
   reason?: string
   decision?: Decision
   duplicates?: string[]

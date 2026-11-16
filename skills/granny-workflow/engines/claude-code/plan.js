@@ -545,7 +545,7 @@ function reviewFailure(text) {
   return FAILED_RENDER.exec(text)?.[0];
 }
 var isBlocker = (f) => /^\s*(p0|p1|critical|high)\b/i.test(String(f.severity ?? ""));
-var JUDGED = ["verdict", "impact", "likelihood", "fixCost", "scope", "evidence", "priority", "reason", "decision"];
+var JUDGED = ["verdict", "impact", "likelihood", "fixCost", "scope", "evidence", "priority", "tag", "reason", "decision"];
 var fixes = (f) => f.decision?.action !== "residual";
 var rank = (f) => f.priority ?? -1;
 function mergeDuplicates(findings, duplicateOf) {
@@ -654,6 +654,12 @@ function ratchet(fields, label, earlier) {
   }
   return raised.length ? `repeat of ${label}: ${raised.join(", ")}` : undefined;
 }
+function namedTag(entry) {
+  if (typeof entry?.tag !== "string")
+    return;
+  const name = entry.tag.trim().toLowerCase();
+  return name === "" || name === "none" ? undefined : name;
+}
 function decide(f, entry, policy, repeatsDeclined = () => false, earlierOf = () => {
   return;
 }) {
@@ -680,7 +686,6 @@ function decide(f, entry, policy, repeatsDeclined = () => false, earlierOf = () 
   if (c.kind === "none")
     return done(2, "fix", c.why);
   const { verdict, impact, likelihood, fixCost, scope } = c.fields;
-  const p = out.priority;
   const classes = `${impact}/${likelihood}/${fixCost}`;
   if (verdict === "refuted")
     return done(3, "residual", "refuted");
@@ -690,11 +695,23 @@ function decide(f, entry, policy, repeatsDeclined = () => false, earlierOf = () 
     const attention = impact === "critical" || impact === "major";
     return done(5, "residual", attention ? `pre-existing - ATTENTION: impact ${impact}` : "pre-existing", attention);
   }
+  const name = namedTag(entry);
+  const tagged = name !== undefined && policy.tags !== undefined && Object.prototype.hasOwnProperty.call(policy.tags, name) && verdict === "confirmed" && impact !== "none" && !repeatsDeclined(out) ? name : undefined;
+  const tag = tagged === undefined ? undefined : policy.tags[tagged];
+  const base = out.priority;
+  if (tagged !== undefined)
+    out.tag = tagged;
+  if (tag?.points !== undefined)
+    out.priority = Math.min(100, base + tag.points);
+  const p = out.priority;
+  const sum = tag?.points === undefined ? undefined : `${classes} -> ${base} + ${tag.points} (tag ${tagged}) = ${p}`;
   if (policy.alwaysFix.includes(impact))
-    return done(6, "fix", `impact ${impact} is in alwaysFix (${classes} -> ${p})${c.note}`);
+    return done(6, "fix", `impact ${impact} is in alwaysFix (${sum ?? `${classes} -> ${p}`})${c.note}`);
   if (p > policy.threshold)
-    return done(7, "fix", `priority ${p} > threshold ${policy.threshold} (${classes})${c.note}`);
-  return done(8, "residual", `under the bar: ${classes} -> ${p}${c.note}`);
+    return done(7, "fix", `priority ${p} > threshold ${policy.threshold} (${sum ?? classes})${c.note}`);
+  if (tag?.fix)
+    return done(10, "fix", `tag ${tagged} is marked fix (${classes} -> ${p})`);
+  return done(8, "residual", `under the bar: ${sum ?? `${classes} -> ${p}`}${c.note}`);
 }
 function rideAlong(findings, policy, except = () => false) {
   const bar = policy.rideAlong;
@@ -703,7 +720,7 @@ function rideAlong(findings, policy, except = () => false) {
   return findings.map((f) => {
     if (f.decision?.rule !== 8 || f.priority === undefined || f.priority < bar || except(f))
       return f;
-    const why = `rides along with this round's fixes: priority ${f.priority} >= rideAlong ${bar} (${f.impact}/${f.likelihood}/${f.fixCost})`;
+    const why = `rides along with this round's fixes: priority ${f.priority} >= rideAlong ${bar} (${f.impact}/${f.likelihood}/${f.fixCost}${f.tag === undefined ? "" : `, tag ${f.tag}`})`;
     return { ...f, decision: { ...f.decision, rule: 9, action: "fix", why } };
   });
 }
