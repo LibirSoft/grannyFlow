@@ -36,6 +36,7 @@ var DEFAULT_CONFIG = {
   threshold: 70,
   alwaysFix: ["critical", "major"],
   rideAlong: 55,
+  tags: {},
   maxRounds: 4,
   base: "main",
   gates: "auto",
@@ -124,8 +125,22 @@ function resolveConfig(layers, host) {
         }
       }
     }
+    if (layer.tags !== undefined) {
+      if (!isObject(layer.tags))
+        errors.push(`${where}: tags must be an object keyed by tag name`);
+      else {
+        for (const [name, value] of Object.entries(layer.tags)) {
+          if (value === undefined)
+            continue;
+          if (value === null)
+            delete config.tags[name];
+          else
+            config.tags = { ...config.tags, [name]: value };
+        }
+      }
+    }
     for (const [key, value] of Object.entries(layer)) {
-      if (key === "roles" || key === "$schema" || value === undefined || !TOP_KEYS.has(key))
+      if (key === "roles" || key === "tags" || key === "$schema" || value === undefined || !TOP_KEYS.has(key))
         continue;
       config[key] = value;
       if (key === "reviewers")
@@ -319,6 +334,7 @@ function validate(c, effortLayer) {
   if (!isRepairs(c.maxRepairs))
     errors.push("maxRepairs must be an integer >= 0");
   errors.push(...checkErrors(c.checks));
+  errors.push(...tagErrors(c.tags));
   for (const role of ROLES) {
     errors.push(...modelErrors(`roles.${role}.model`, c.roles[role].model), ...effortErrors(`roles.${role}.effort`, c.roles[role].effort, effortLayer[role]));
   }
@@ -378,6 +394,41 @@ function metricErrors(at, m) {
     errors.push(`${at} needs min, max or both`);
   else if (isNumber(m.min) && isNumber(m.max) && m.min > m.max)
     errors.push(`${at}.min must not be above max`);
+  return errors;
+}
+var TAG_KEYS = new Set(["description", "points", "fix"]);
+var TAG_LIMIT = 20;
+function tagErrors(tags) {
+  if (!isObject(tags))
+    return ["tags must be an object keyed by tag name"];
+  const names = Object.keys(tags);
+  const errors = names.length > TAG_LIMIT ? [`tags: at most ${TAG_LIMIT} tags (got ${names.length})`] : [];
+  for (const name of names) {
+    if (!NAME.test(name) || name.length > 32 || name === "none") {
+      errors.push(`tags.${name}: a tag name is 1 to 32 characters of a-z, 0-9 and -, and not "none"`);
+      continue;
+    }
+    const at = `tags.${name}`;
+    const value = tags[name];
+    if (!isObject(value)) {
+      errors.push(`${at} must be an object: { description, points } or { description, fix: true }`);
+      continue;
+    }
+    for (const key of Object.keys(value))
+      if (!TAG_KEYS.has(key))
+        errors.push(`unknown key "${at}.${key}"`);
+    const { description, points, fix } = value;
+    if (typeof description !== "string" || !description.trim() || description.length > 200 || /[\r\n]|\p{Zl}|\p{Zp}/u.test(description)) {
+      errors.push(`${at}.description must be a non-empty string of at most 200 characters on one line`);
+    }
+    if (points !== undefined && fix !== undefined) {
+      errors.push(fix === true ? `${at} has points and fix - keep one of them` : `${at}.fix must be true - leave it out for a tag with points`);
+    } else if (points !== undefined) {
+      if (!Number.isInteger(points) || points < 1 || points > 100)
+        errors.push(`${at}.points must be an integer between 1 and 100`);
+    } else if (fix !== true)
+      errors.push(`${at} needs points (1-100) or fix: true`);
+  }
   return errors;
 }
 function resolveModel(spec, host) {
