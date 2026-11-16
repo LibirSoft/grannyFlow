@@ -585,6 +585,18 @@ describe('skill docs', () => {
     expect(read('engines/opencode/agents/granny.md')).toContain('granny tag')
   })
 
+  it('sends granny tag to the tags reference, not to the run launch in the opencode agent', () => {
+    const agent = read('engines/opencode/agents/granny.md')
+    expect(agent).toContain('references/tags.md')
+    expect(agent.split('. ').find(sentence => sentence.includes('launch `granny_run`'))).not.toContain('granny tag')
+  })
+
+  it('tells the user that --project writes the worktree\'s file, and that a run reads the main checkout\'s', () => {
+    const project = read('references/tags.md').split('\n').find(line => line.startsWith('- With `--project`'))
+    expect(project).toContain('main checkout')
+    expect(project).toContain('worktree')
+  })
+
   it('points every repo reference at LibirSoft/grannyFlow', () => {
     expect(readRoot('README.md')).toContain('npx skills add LibirSoft/grannyFlow')
     const docs: Record<string, string> = {

@@ -15,7 +15,7 @@ node <skill-dir>/scripts/tags.mjs list [--repo <dir>]
 ```
 
 - Without `--project` the tag goes to the user config: `$GRANNY_CONFIG` when it is set, else `$XDG_CONFIG_HOME/granny/config.json`, else `~/.config/granny/config.json`. It holds in every project.
-- With `--project` the tag goes to `granny.config.json` at the top of the git checkout the command runs in, or of the one `--repo <dir>` names. Outside a git checkout the command fails with `--project needs a git checkout: run it in the repo or pass --repo <dir>`. The command does not commit the file: tell the user that it is theirs to commit, and that only a committed file reaches the team.
+- With `--project` the tag goes to `granny.config.json` at the top of the git checkout the command runs in, or of the one `--repo <dir>` names. Run it in the main checkout, or pass `--repo` with that checkout's path. A run reads the main checkout's `granny.config.json`, so inside a granny worktree the command writes the worktree's own file, and runs ignore the tag until that file reaches the main checkout. Outside a git checkout the command fails with `--project needs a git checkout: run it in the repo or pass --repo <dir>`. The command does not commit the file: tell the user that it is theirs to commit, and that only a committed file reaches the team.
 - `add` refuses a name the file already has, and `--replace` changes it. The description is what the judge reads, so give one concrete line.
 - `remove` says which file holds the tag when the file asked about does not.
 - `list` shows the tags of both files merged: the name, the effect (`fix`, `+<points>`, or `off` when a project `null` turns a user tag off), the file it comes from and the description.
