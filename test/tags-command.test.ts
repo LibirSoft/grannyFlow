@@ -164,6 +164,29 @@ describe('granny tag', () => {
     expect(r.store.size).toBe(1)
   })
 
+  it('removes a tag from the repo file with --project, and says which file holds a user tag it was not asked to take', () => {
+    const files = { [USER]: json({ tags: { typo: TYPO } }), [PROJECT]: json({ threshold: 70, tags: { naming: { description: 'n', points: 5 } } }) }
+    const removed = run(['remove', 'naming', '--project'], files)
+    expect(removed.code).toBe(0)
+    expect(removed.out).toEqual([`removed tag naming from ${PROJECT}`])
+    expect(removed.store.get(PROJECT)).toBe(json({ threshold: 70 }))
+    expect(removed.store.get(USER)).toBe(files[USER])
+    const reverse = run(['remove', 'typo', '--project'], { [USER]: json({ tags: { typo: TYPO } }) })
+    expect(reverse.code).toBe(1)
+    expect(reverse.out).toEqual([`tag typo is not in ${PROJECT} - it is in ${USER}`])
+    expect(reverse.store.size).toBe(1)
+  })
+
+  it('lists the tags of the repo that --repo names, not those of the current directory', () => {
+    const r = run(['list', '--repo', '/other'], {
+      [USER]: json({ tags: { typo: TYPO } }),
+      [PROJECT]: json({ tags: { style: { description: 'here', points: 9 } } }),
+      '/other/granny.config.json': json({ tags: { naming: { description: 'there', points: 10 } } }),
+    })
+    expect(r.code).toBe(0)
+    expect(r.out).toEqual(['typo  fix  user  a misspelled word', 'naming  +10  project  there', `user: ${USER}`, 'project: /other/granny.config.json'])
+  })
+
   it('lists the tags of both files, marking a project tag and a project null that turns a user tag off', () => {
     const r = run(['list'], {
       [USER]: json({ tags: { typo: TYPO, naming: { description: 'a name', points: 20 } } }),
