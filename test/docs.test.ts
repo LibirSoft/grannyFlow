@@ -620,6 +620,11 @@ describe('skill docs', () => {
     expect(layer).toContain('on Claude Code, opencode, omp and Cursor')
   })
 
+  it('gives the Cursor final-review judge the TAGS block, as the stage judge gets it', () => {
+    const judge = read('references/cursor.md').split('\n').find(line => line.startsWith('4. **Judge**'))!
+    expect(judge).toContain('("Judge - final review", with `tags` in the config, with the same TAGS block after its rubric)')
+  })
+
   it('points every repo reference at LibirSoft/grannyFlow', () => {
     expect(readRoot('README.md')).toContain('npx skills add LibirSoft/grannyFlow')
     const docs: Record<string, string> = {
