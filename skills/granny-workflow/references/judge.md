@@ -25,7 +25,7 @@ With nothing missing, go to step 4. Otherwise ask only about what is missing:
 
 1. **Who reviews** - the reviewers, as [setup.md](setup.md#2-ask) question 2, then the model of each `agent` reviewer, and of each `opencode` reviewer from `opencode models`.
 2. **Who tags** - the `judge` model. On Claude Code offer it too, with `haiku` marked as the default.
-3. **Where to save** - this project (`<repo>/granny.config.json`) or every project (`~/.config/granny/config.json`).
+3. **Where to save** - this project (`<repo>/granny.config.json`) or every project (the user config: `$GRANNY_CONFIG` when it is set, else `$XDG_CONFIG_HOME/granny/config.json`, else `~/.config/granny/config.json`).
 
 Tell the user that a reviewer on another model than the tagger is a real second opinion, and that this costs one review and one tagging, no fix rounds. A parent never answers these for the user: do not pick a model because it looks suitable, and do not pass the models in the run's `config`. On omp and opencode the tool reads only the config files for this and refuses otherwise, naming what is missing.
 

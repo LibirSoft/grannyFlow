@@ -44,7 +44,7 @@ It works on Claude Code, opencode and omp (oh-my-pi), where the loop runs as cod
 
 ## Setup
 
-`granny setup` (or `granny init`) asks five questions and writes `granny.config.json` in your repo (or `~/.config/granny/config.json` for every project). It does not start a run.
+`granny setup` (or `granny init`) asks five questions and writes `granny.config.json` in your repo (or, for every project, the user config: `$GRANNY_CONFIG` when it is set, else `$XDG_CONFIG_HOME/granny/config.json`, else `~/.config/granny/config.json`). It does not start a run.
 
 1. **Review strictness** - how many findings go back to the implementer. P0/P1 findings and critical or major issues are always fixed; the preset decides the rest:
 
@@ -147,7 +147,7 @@ The full rules: [the decision table](skills/granny-workflow/references/config.md
 
 ## Configure
 
-`granny setup` covers the common choices. To edit by hand: settings are read from `~/.config/granny/config.json`, then `<repo>/granny.config.json`, then the run's own overrides - later wins.
+`granny setup` covers the common choices. To edit by hand: settings are read from the user config (`$GRANNY_CONFIG` when it is set, else `$XDG_CONFIG_HOME/granny/config.json`, else `~/.config/granny/config.json`), then `<repo>/granny.config.json`, then the run's own overrides - later wins.
 
 ```json
 {

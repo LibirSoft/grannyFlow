@@ -594,6 +594,19 @@ describe('skill docs', () => {
     for (const key of ['`rideAlong`', '`tags`']) expect({ key, has: cursorConfig.includes(key) }).toEqual({ key, has: true })
   })
 
+  it('gives setup, judge, SKILL.md, the README and the opencode and omp references the same user config path rule', () => {
+    const path = '`$GRANNY_CONFIG` when it is set, else `$XDG_CONFIG_HOME/granny/config.json`, else `~/.config/granny/config.json`'
+    const docs: Record<string, string> = {
+      'references/setup.md': read('references/setup.md'),
+      'references/judge.md': read('references/judge.md'),
+      'SKILL.md': read('SKILL.md'),
+      'README.md': readRoot('README.md'),
+      'references/opencode.md': read('references/opencode.md'),
+      'references/omp.md': read('references/omp.md'),
+    }
+    for (const [file, text] of Object.entries(docs)) expect({ file, has: text.includes(path) }).toEqual({ file, has: true })
+  })
+
   it('sends granny tag to the tags reference, not to the run launch in the opencode agent', () => {
     const agent = read('engines/opencode/agents/granny.md')
     expect(agent).toContain('references/tags.md')

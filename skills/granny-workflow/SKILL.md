@@ -100,7 +100,7 @@ When the user wants something built but there is no plan (or they ask granny to 
 
 ## 2. Config
 
-Three layers, later wins: `~/.config/granny/config.json` (user), `<repo>/granny.config.json` (project, committable), the run's `config` argument. Roles merge key by key, `tags` by name; arrays, `reviewers` included, replace. `model` and `effort` are each one string for every host or an object keyed by host, and a higher layer's value replaces the lower one whole. Unknown keys are rejected, so typos fail loudly; a leftover `roles.reviewer` fails with the move to `reviewers`. Full reference: [references/config.md](references/config.md). Granny turns `stepAgents` on only when the user's config has it or the user asks for step agents; it never sets it in the run's `config` on its own.
+Three layers, later wins: the user config (`$GRANNY_CONFIG` when it is set, else `$XDG_CONFIG_HOME/granny/config.json`, else `~/.config/granny/config.json`), `<repo>/granny.config.json` (project, committable), the run's `config` argument. Roles merge key by key, `tags` by name; arrays, `reviewers` included, replace. `model` and `effort` are each one string for every host or an object keyed by host, and a higher layer's value replaces the lower one whole. Unknown keys are rejected, so typos fail loudly; a leftover `roles.reviewer` fails with the move to `reviewers`. Full reference: [references/config.md](references/config.md). Granny turns `stepAgents` on only when the user's config has it or the user asks for step agents; it never sets it in the run's `config` on its own.
 
 ```json
 {
