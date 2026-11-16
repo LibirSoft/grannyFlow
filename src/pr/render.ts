@@ -58,7 +58,7 @@ function fitted(text: string, marker: string): string {
 
 function judgeLine(f: TrailFinding): string {
   const tags =
-    f.impact === undefined ? code('not judged') : [[f.verdict, f.impact, f.likelihood, f.fixCost, f.scope].filter(Boolean).map(t => code(String(t))).join(' '), `priority ${f.priority ?? '?'}`].join(' · ')
+    f.impact === undefined ? code('not judged') : [[f.verdict, f.impact, f.likelihood, f.fixCost, f.scope].filter(Boolean).map(t => code(String(t))).join(' '), `priority ${f.priority ?? '?'}`, ...(typeof f.tag === 'string' ? [`tag ${code(f.tag)}`] : [])].join(' · ')
   const d = f.decision
   const rule = d ? ` · rule ${d.rule} → ${d.action}: ${agentLine(d.why)}${d.raised ? ` (ratchet raised ${agentLine(d.raised)})` : ''}` : ''
   return `**Judge:** ${tags}${rule}`

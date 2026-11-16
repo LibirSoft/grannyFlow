@@ -32,6 +32,7 @@ export function trailProblem(value: unknown): string | undefined {
     if (!optional(f.line, isCount)) return `${at}.line is not a positive integer`
     for (const [key, known] of Object.entries(TAGS)) if (!optional(f[key], v => known.includes(v as string))) return `${at}.${key} ${JSON.stringify(f[key])} is unknown`
     if (!optional(f.priority, v => typeof v === 'number' && Number.isFinite(v))) return `${at}.priority is not a number`
+    if (!optional(f.tag, isString)) return `${at}.tag is not a string`
     if (!optional(f.reviewer, isString)) return `${at}.reviewer is not a string`
     if (!optional(f.route, v => ROUTES.includes(v as string))) return `${at}.route is not sent or residual`
     if (!optional(f.decision, d => isObject(d) && Number.isInteger(d.rule) && isString(d.action) && isString(d.why))) return `${at}.decision is malformed`

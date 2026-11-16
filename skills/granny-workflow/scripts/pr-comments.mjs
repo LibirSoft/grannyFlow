@@ -608,7 +608,7 @@ ${CUT}
 ${marker}`;
 }
 function judgeLine(f) {
-  const tags = f.impact === undefined ? code("not judged") : [[f.verdict, f.impact, f.likelihood, f.fixCost, f.scope].filter(Boolean).map((t) => code(String(t))).join(" "), `priority ${f.priority ?? "?"}`].join(" · ");
+  const tags = f.impact === undefined ? code("not judged") : [[f.verdict, f.impact, f.likelihood, f.fixCost, f.scope].filter(Boolean).map((t) => code(String(t))).join(" "), `priority ${f.priority ?? "?"}`, ...typeof f.tag === "string" ? [`tag ${code(f.tag)}`] : []].join(" · ");
   const d = f.decision;
   const rule = d ? ` · rule ${d.rule} → ${d.action}: ${agentLine(d.why)}${d.raised ? ` (ratchet raised ${agentLine(d.raised)})` : ""}` : "";
   return `**Judge:** ${tags}${rule}`;
@@ -1153,6 +1153,8 @@ function trailProblem(value) {
         return `${at}.${key} ${JSON.stringify(f[key])} is unknown`;
     if (!optional(f.priority, (v) => typeof v === "number" && Number.isFinite(v)))
       return `${at}.priority is not a number`;
+    if (!optional(f.tag, isString))
+      return `${at}.tag is not a string`;
     if (!optional(f.reviewer, isString))
       return `${at}.reviewer is not a string`;
     if (!optional(f.route, (v) => ROUTES.includes(v)))

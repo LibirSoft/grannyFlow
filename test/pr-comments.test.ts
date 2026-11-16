@@ -414,6 +414,26 @@ describe('trail records', () => {
   })
 })
 
+describe('config tags in the trail and the PR comment', () => {
+  const judge = { verdict: 'confirmed', impact: 'minor', likelihood: 'edge', fixCost: 'trivial', scope: 'in-scope', priority: 40 } as const
+
+  it('reads a tag that is not a string as a problem of its record, and a string tag as none', () => {
+    expect(trailProblem({ ...round(), findings: [{ ...finding('codex-F1'), tag: 7 }] })).toBe('findings[0].tag is not a string')
+    expect(trailProblem({ ...round(), findings: [finding('codex-F1', { tag: 'typo' })] })).toBeUndefined()
+  })
+
+  it('shows the tag on the judge line after the priority, and renders a finding without one as before', () => {
+    const tagged = finding('codex-F1', { ...judge, tag: 'typo', decision: { rule: 10, action: 'fix', why: 'tag typo is marked fix (minor/edge/trivial -> 40)' } })
+    const plain = finding('codex-F2', { ...judge, decision: { rule: 8, action: 'residual', why: 'under the bar: minor/edge/trivial -> 40' } })
+    expect(findingComment(tagged, round({ findings: [tagged] }), [round({ findings: [tagged] })])).toContain(
+      '**Judge:** `confirmed` `minor` `edge` `trivial` `in-scope` · priority 40 · tag `typo` · rule 10 → fix: tag typo is marked fix (minor/edge/trivial -> 40)\n',
+    )
+    expect(findingComment(plain, round({ findings: [plain] }), [round({ findings: [plain] })])).toContain(
+      '**Judge:** `confirmed` `minor` `edge` `trivial` `in-scope` · priority 40 · rule 8 → residual: under the bar: minor/edge/trivial -> 40\n',
+    )
+  })
+})
+
 describe('rendering', () => {
   it('cuts a comment that is too long without naming a platform, splitting a surrogate pair or leaving a fence open', () => {
     const fenced = finding('codex-F1', { detail: `\`\`\`ts\n${'x'.repeat(MAX_BODY)}\n\`\`\`` })

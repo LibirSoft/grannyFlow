@@ -85,6 +85,12 @@ describe('trailRound', () => {
     expect(record.outcome).toBe('round-cap')
   })
 
+  it('keeps the tag of a finding that has one, and adds none to a finding that has not', () => {
+    const record = trailRound({ ...base, findings: [judged('codex-F1', { tag: 'typo' }), judged('codex-F2')] })
+    expect(record.findings[0]).toMatchObject({ id: 'codex-F1', tag: 'typo' })
+    expect(record.findings[1]).not.toHaveProperty('tag')
+  })
+
   it('serializes to indented JSON that ends in a newline', () => {
     const record = trailRound({ ...base, findings: [], outcome: 'clean' })
     const text = trailText(record)

@@ -17,6 +17,7 @@ const FINDING_KEYS = [
   'scope',
   'evidence',
   'priority',
+  'tag',
   'reason',
   'decision',
   'duplicates',
