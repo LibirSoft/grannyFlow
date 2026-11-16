@@ -614,6 +614,12 @@ describe('skill docs', () => {
     expect(readRoot('README.md')).toContain('run the script yourself from your repo')
   })
 
+  it('names every host that reads $GRANNY_CONFIG in the layer list of the config reference', () => {
+    const layer = read('references/config.md').split('\n').find(line => line.startsWith('2. `~/.config/granny/config.json`'))!
+    expect(layer).not.toContain('opencode and omp also honour')
+    expect(layer).toContain('on Claude Code, opencode, omp and Cursor')
+  })
+
   it('points every repo reference at LibirSoft/grannyFlow', () => {
     expect(readRoot('README.md')).toContain('npx skills add LibirSoft/grannyFlow')
     const docs: Record<string, string> = {

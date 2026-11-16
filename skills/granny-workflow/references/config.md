@@ -3,7 +3,7 @@
 Layers, later wins:
 
 1. built-in defaults (below)
-2. `~/.config/granny/config.json` - user (`$XDG_CONFIG_HOME/granny/config.json`; opencode and omp also honour `$GRANNY_CONFIG`)
+2. `~/.config/granny/config.json` - user (`$XDG_CONFIG_HOME/granny/config.json`; on Claude Code, opencode, omp and Cursor `$GRANNY_CONFIG` names the file instead when it is set)
 3. `<repo>/granny.config.json` - project, safe to commit
 4. the run's `config` argument
 
