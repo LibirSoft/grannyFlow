@@ -791,6 +791,16 @@ var rubric = (task) => `Classify every finding with exactly these fields:
 - reason: one short sentence, at most 25 words: what decided the classification. Do not repeat the finding or the evidence.
 Example: a late save response re-binds the editor to another post's id, so the next save can overwrite the wrong post: confirmed, critical, edge, small, in-scope, though the window is narrow.`;
 var decided = (f) => f.decision ? `${f.decision.action} - rule ${f.decision.rule}: ${f.decision.why}${f.decision.raised ? ` (ratchet raised ${f.decision.raised})` : ""}` : undefined;
+function tagsSection(tags) {
+  const names = Object.entries(tags ?? {});
+  if (!names.length)
+    return "";
+  return `
+TAGS - names the user gave to kinds of findings. Classify every finding first, exactly as above: a tag never changes a class. Then, when a finding is of one of these kinds, set its tag to that name; when several fit, the first one listed; when none fits, leave tag out. Use only these names:
+${names.map(([name, tag]) => `- ${name}: ${tag.description}`).join(`
+`)}
+`;
+}
 function judgeHistory(earlier) {
   if (!earlier.length)
     return "";
@@ -808,6 +818,7 @@ function judgeHistory(earlier) {
     fixCost: f.fixCost,
     scope: f.scope,
     priority: f.priority,
+    tag: f.tag,
     evidence: f.evidence
   })));
   const rounds = earlier.map((e) => {
@@ -1175,7 +1186,7 @@ ${note ? note + `
 ${judgeRouting(findings)}
 For each finding, open the cited code and check that it is real and correctly described.${stage ? " Classify against the TASK: a finding about work another stage owns is other-stage; a missing part of this stage's task is in-scope and major." : ""} ${JUDGE_DUPES}
 ${rubric(stage ? "the stage's TASK" : "what the change set out to do")}
-${judgeHistory(earlier)}
+${tagsSection(p.config.tags)}${judgeHistory(earlier)}
 REVIEW:
 ${JSON.stringify(findings)}`;
 }
@@ -1738,6 +1749,7 @@ var SCHEMAS = {
             scope: { type: "string", enum: [...SCOPES] },
             evidence: { type: "string", description: "path:line plus the concrete trigger steps, one line" },
             reason: { type: "string", description: "one short sentence, at most 25 words" },
+            tag: { type: "string", description: "only when the prompt has a TAGS list: the name of the tag that fits this finding, exactly as listed; omit when none fits" },
             duplicateOf: { type: "string", description: "id of another finding in this list that reports the same problem; omit when there is none" },
             repeatOf: { type: "string", description: "label of the earlier finding this one repeats, exactly as listed under EARLIER DECISIONS (e.g. r1/codex-F2, or s1/r2/codex-F1 from a stage review); omit when it repeats none" }
           },

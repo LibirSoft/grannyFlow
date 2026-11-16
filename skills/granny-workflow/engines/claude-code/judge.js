@@ -1421,6 +1421,7 @@ var SCHEMAS = {
             scope: { type: "string", enum: [...SCOPES] },
             evidence: { type: "string", description: "path:line plus the concrete trigger steps, one line" },
             reason: { type: "string", description: "one short sentence, at most 25 words" },
+            tag: { type: "string", description: "only when the prompt has a TAGS list: the name of the tag that fits this finding, exactly as listed; omit when none fits" },
             duplicateOf: { type: "string", description: "id of another finding in this list that reports the same problem; omit when there is none" },
             repeatOf: { type: "string", description: "label of the earlier finding this one repeats, exactly as listed under EARLIER DECISIONS (e.g. r1/codex-F2, or s1/r2/codex-F1 from a stage review); omit when it repeats none" }
           },

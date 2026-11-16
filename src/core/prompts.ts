@@ -51,6 +51,15 @@ Example: a late save response re-binds the editor to another post's id, so the n
 
 const decided = (f: Finding) => (f.decision ? `${f.decision.action} - rule ${f.decision.rule}: ${f.decision.why}${f.decision.raised ? ` (ratchet raised ${f.decision.raised})` : ''}` : undefined)
 
+function tagsSection(tags: GrannyConfig['tags'] | undefined): string {
+  const names = Object.entries(tags ?? {})
+  if (!names.length) return ''
+  return `
+TAGS - names the user gave to kinds of findings. Classify every finding first, exactly as above: a tag never changes a class. Then, when a finding is of one of these kinds, set its tag to that name; when several fit, the first one listed; when none fits, leave tag out. Use only these names:
+${names.map(([name, tag]) => `- ${name}: ${tag.description}`).join('\n')}
+`
+}
+
 function judgeHistory(earlier: EarlierRound[]): string {
   if (!earlier.length) return ''
   const labelled = (e: EarlierRound, findings: Finding[]) =>
@@ -69,6 +78,7 @@ function judgeHistory(earlier: EarlierRound[]): string {
         fixCost: f.fixCost,
         scope: f.scope,
         priority: f.priority,
+        tag: f.tag,
         evidence: f.evidence,
       })),
     )
@@ -565,7 +575,7 @@ ${note ? note + '\n' : ''}${p.context ? 'Design context:\n' + p.context + '\n' :
 ${judgeRouting(findings)}
 For each finding, open the cited code and check that it is real and correctly described.${stage ? " Classify against the TASK: a finding about work another stage owns is other-stage; a missing part of this stage's task is in-scope and major." : ''} ${JUDGE_DUPES}
 ${rubric(stage ? "the stage's TASK" : 'what the change set out to do')}
-${judgeHistory(earlier)}
+${tagsSection(p.config.tags)}${judgeHistory(earlier)}
 REVIEW:
 ${JSON.stringify(findings)}`
 }
