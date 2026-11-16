@@ -147,6 +147,17 @@ describe('granny tag', () => {
     expect(r.store.has(USER)).toBe(false)
   })
 
+  it('checks a new user tag by itself, so a repo file that hides its name with a null or an override cannot let it through', () => {
+    const cases: Array<[string, unknown]> = [
+      ['a null', null],
+      ['an override', { description: 'repo typo', fix: true }],
+    ]
+    for (const [label, value] of cases) {
+      const r = run(['add', 'typo', '--points', '500', '--description', 'x'], { [PROJECT]: json({ tags: { typo: value } }) })
+      expect({ label, code: r.code, out: r.out, user: r.store.has(USER) }).toEqual({ label, code: 1, out: ['tags.typo.points must be an integer between 1 and 100'], user: false })
+    }
+  })
+
   it('removes a tag, keeps the other keys, and removes the tags key with the last tag', () => {
     const files = { [USER]: json({ threshold: 80, tags: { typo: TYPO, naming: { description: 'b', points: 20 } } }) }
     const r = run(['remove', 'typo'], files)

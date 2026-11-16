@@ -141,8 +141,11 @@ function merged(...layers: Array<Obj | undefined>): Obj {
   return Object.fromEntries(tags)
 }
 
-const checkAfter = (store: Store, project: boolean, tags: Obj) =>
-  tagErrors(project ? merged(store.user.tags, tags) : merged(tags, store.project?.tags))
+const checkAfter = (store: Store, project: boolean, tags: Obj) => {
+  const own = tagErrors(merged(tags))
+  const layered = tagErrors(project ? merged(store.user.tags, tags) : merged(tags, store.project?.tags))
+  return [...new Set([...own, ...layered])]
+}
 
 function save(io: TagsIo, path: string, object: Obj): string | undefined {
   try {

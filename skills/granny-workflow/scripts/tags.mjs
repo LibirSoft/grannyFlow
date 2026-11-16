@@ -212,7 +212,11 @@ function merged(...layers) {
   }
   return Object.fromEntries(tags);
 }
-var checkAfter = (store, project, tags) => tagErrors(project ? merged(store.user.tags, tags) : merged(tags, store.project?.tags));
+var checkAfter = (store, project, tags) => {
+  const own = tagErrors(merged(tags));
+  const layered = tagErrors(project ? merged(store.user.tags, tags) : merged(tags, store.project?.tags));
+  return [...new Set([...own, ...layered])];
+};
 function save(io, path, object) {
   try {
     io.write(path, serialize(object));
