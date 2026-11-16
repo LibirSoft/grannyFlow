@@ -488,6 +488,7 @@ describe('tags', () => {
   it('takes the far ends of the limits: 20 tags, a 200-character description, points 1 and 100', () => {
     const twenty = Object.fromEntries(Array.from({ length: 20 }, (_, i) => [`t${i}`, { description: 'x'.repeat(200), points: 1 }]))
     expect(Object.keys(resolveConfig([{ tags: twenty }]).tags)).toHaveLength(20)
+    expect(resolveConfig([{ tags: { ['a'.repeat(32)]: { description: 'd', points: 1 } } }]).tags).toHaveProperty(['a'.repeat(32)])
     expect(resolveConfig([{ tags: { a: { description: 'd', points: 100 }, b: { description: 'd', points: 1 } } }]).tags.a).toEqual({ description: 'd', points: 100 })
   })
 
@@ -512,6 +513,9 @@ describe('tags', () => {
     ['a value that is not an object', { t: 'typo' }, SHAPE],
     ['a description of 201 characters', { t: { ...typo, description: 'x'.repeat(201) } }, 'tags.t.description must be a non-empty string of at most 200 characters on one line'],
     ['a description with a line break', { t: { ...typo, description: 'a\nb' } }, 'tags.t.description must be a non-empty string of at most 200 characters on one line'],
+    ['a description with a carriage return', { t: { ...typo, description: 'a\rb' } }, 'tags.t.description must be a non-empty string of at most 200 characters on one line'],
+    ['a description with a line separator', { t: { ...typo, description: `a${String.fromCharCode(0x2028)}b` } }, 'tags.t.description must be a non-empty string of at most 200 characters on one line'],
+    ['a description with a paragraph separator', { t: { ...typo, description: `a${String.fromCharCode(0x2029)}b` } }, 'tags.t.description must be a non-empty string of at most 200 characters on one line'],
     ['a blank description', { t: { ...typo, description: '  ' } }, 'tags.t.description must be a non-empty string of at most 200 characters on one line'],
     ['points 0', { t: { description: 'd', points: 0 } }, 'tags.t.points must be an integer between 1 and 100'],
     ['points 1.5', { t: { description: 'd', points: 1.5 } }, 'tags.t.points must be an integer between 1 and 100'],
