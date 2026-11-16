@@ -4,7 +4,7 @@ import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync 
 import { tmpdir } from 'node:os'
 import { builtinModules } from 'node:module'
 import { join } from 'node:path'
-import { buildClaudeCode, buildOmp, CLAUDE_CODE_SCRIPTS, buildOpencode, buildOpencodeTui, buildPrComments, buildReadOnlyGuard } from '../scripts/build'
+import { buildClaudeCode, buildOmp, CLAUDE_CODE_SCRIPTS, buildOpencode, buildOpencodeTui, buildPrComments, buildReadOnlyGuard, buildTags } from '../scripts/build'
 import { CODEX_REVIEWER, finding, review } from './fake-host'
 
 const root = join(import.meta.dir, '..')
@@ -250,6 +250,34 @@ describe('omp extension bundle', () => {
     }
     expect(tools).toEqual(['granny_submit_findings'])
     expect(events).toEqual(['tool_call', 'session_start'])
+  })
+})
+
+describe('tags.mjs', () => {
+  const script = join(root, 'skills/granny-workflow/scripts/tags.mjs')
+
+  it('is committed in sync with src/', async () => {
+    expect(readFileSync(script, 'utf8')).toBe(await buildTags())
+  })
+
+  it('imports only node built-ins', () => {
+    const text = readFileSync(script, 'utf8')
+    const specifiers = [...text.matchAll(/^\s*import\s+(?:[^'"]*?\sfrom\s+)?["']([^"']+)["']/gm)].map(m => m[1]!)
+    expect(specifiers.length).toBeGreaterThan(0)
+    expect(specifiers.filter(s => !s.startsWith('node:'))).toEqual([])
+  })
+
+  it('adds the tag to the file GRANNY_CONFIG names when node runs it outside a checkout', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'granny-tags-'))
+    try {
+      const file = join(dir, 'nested', 'config.json')
+      const env = { ...process.env, GRANNY_CONFIG: file }
+      const r = spawnSync('node', [script, 'add', 'typo', '--fix', '--description', 'x'], { cwd: dir, encoding: 'utf8', env })
+      expect({ code: r.status, stdout: r.stdout, stderr: r.stderr }).toEqual({ code: 0, stdout: `added tag typo (fix) to ${file}\n`, stderr: '' })
+      expect(readFileSync(file, 'utf8')).toBe('{\n  "tags": {\n    "typo": {\n      "description": "x",\n      "fix": true\n    }\n  }\n}\n')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 })
 
