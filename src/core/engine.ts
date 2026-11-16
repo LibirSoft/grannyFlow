@@ -45,7 +45,7 @@ import {
 } from './prompts'
 import { opencodeAnswer, readGrant } from './opencode'
 import { bucketOf, countsOf, isDemoted, isJudged, renderReport, severityOf, utf8Length, type ReportMeta } from './report'
-import { decide, declinedOf, isBlocker, mergeDuplicates, parseCodexReview, reviewFailure, rideAlong, saysNoFindings, triage, type Policy } from './review'
+import { decide, declinedOf, isBlocker, mergeDuplicates, namedTag, parseCodexReview, reviewFailure, rideAlong, saysNoFindings, triage, type Policy } from './review'
 import { detachedReview, MAX_WAITS, planReviewScript, reportedBackend, reviewerModel, reviewPlan, reviewStem, WAIT_SECONDS } from './reviewer'
 import { SCHEMAS } from './schemas'
 import { heredocWriteScript, shellQuote } from './shell'
@@ -945,7 +945,7 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
         host.log(`${name} r${round}: ${blockers.length} P0/P1 finding(s) go to the implementer without the judge: ${blockers.map(f => f.id).join(', ')}`)
       }
       const declinedBefore = (f: Finding) => f.repeatOf !== undefined && declined.has(f.repeatOf)
-      const policy = { threshold: config.threshold, alwaysFix: config.alwaysFix, rideAlong: config.rideAlong }
+      const policy = { threshold: config.threshold, alwaysFix: config.alwaysFix, rideAlong: config.rideAlong, ...(subject.kind === 'diff' && Object.keys(config.tags).length ? { tags: config.tags } : {}) }
       let findings = found.map(f => decide(f, undefined, policy, declinedBefore))
       unmerged = findings
       if (judged.length) {
@@ -968,6 +968,13 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
           apply: decideAll,
           leftTo: 'to the implementer unjudged (rule 2)',
         })
+        const unknownTags = Object.keys(config.tags).length
+          ? per.flatMap(x => {
+              const tagName = namedTag(x)
+              return judgedIds.has(x.id) && tagName !== undefined && !Object.prototype.hasOwnProperty.call(config.tags, tagName) ? [`${x.id} "${tagName}"`] : []
+            })
+          : []
+        if (unknownTags.length) host.log(`${name} r${round}: the judge named tag(s) the config does not have - ignored: ${unknownTags.join(', ')}`)
         const duplicateOf = new Map(
           per
             .filter(x => judgedIds.has(x.id) && typeof x.duplicateOf === 'string' && judgedIds.has(x.duplicateOf))
