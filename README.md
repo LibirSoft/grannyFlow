@@ -178,7 +178,7 @@ The full rules: [the decision table](skills/granny-workflow/references/config.md
 | `stepAgents` | `false` | a stage with two or more steps is built one agent per step, each step committed before the next; off: one agent builds the stage. See [Step agents](skills/granny-workflow/references/config.md#step-agents) |
 | `roles.<role>.model` | the session model; on Claude Code the judge and helper use Haiku | model per role: `implementer`, `planner`, `judge`, `granny`, `helper` |
 
-Config tags name a kind of small finding that is always fixed, or that gets points on its priority. Say `granny tag` to your agent, or run the script from the skill directory:
+Config tags name a kind of small finding that is always fixed, or that gets points on its priority. Say `granny tag` to your agent, or run the script yourself from your repo (with `--repo <dir>` from anywhere else):
 
 ```sh
 node <skill-dir>/scripts/tags.mjs add typo --fix --description "a misspelled word in a comment, a string or a doc"

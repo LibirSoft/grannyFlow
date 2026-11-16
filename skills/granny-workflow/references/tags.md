@@ -6,7 +6,7 @@ A config tag names a kind of finding. The judge names the tag that fits a findin
 
 ## The commands
 
-Run the script from the skill directory with `node`. On success it prints its result and exits 0. On a refusal it prints the reason, exits 1 and writes nothing.
+Run the script with `node` from the user's repo, or pass `--repo <dir>` with the repo's path. Without `--repo`, do not run it in the skill directory: when that directory is inside another git checkout, `--project` would write that checkout's `granny.config.json`. On success it prints its result and exits 0. On a refusal it prints the reason, exits 1 and writes nothing.
 
 ```sh
 node <skill-dir>/scripts/tags.mjs add <name> --description <text> (--points <1-100> | --fix) [--project] [--replace] [--repo <dir>]
@@ -36,7 +36,7 @@ A tag that starts a fix round starts it the same way any finding does: one fix a
 ## The steps
 
 1. Take the name, the description and the effect from the user. If the user gives no description, write one concrete line and show it before the command runs.
-2. Run the `add`, `remove` or `list` command from the skill directory, with the `--project` and `--repo` the user asked for.
+2. Run the `add`, `remove` or `list` command from the user's repo (not in the skill directory), with the `--project` and `--repo` the user asked for.
 3. Relay the result line to the user, with the file it names. On a refusal, relay the reason; the file is unchanged.
 
 The tags apply to the next run. A run that has started keeps the tags it read when it started.

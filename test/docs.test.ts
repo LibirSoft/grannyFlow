@@ -606,6 +606,14 @@ describe('skill docs', () => {
     expect(project).toContain('worktree')
   })
 
+  it('runs granny tag from the user repo or with --repo, not from the skill directory, in tags.md and the README', () => {
+    const tags = read('references/tags.md')
+    expect(tags).not.toContain('from the skill directory')
+    expect(tags).toContain("from the user's repo")
+    expect(readRoot('README.md')).not.toContain('from the skill directory')
+    expect(readRoot('README.md')).toContain('run the script yourself from your repo')
+  })
+
   it('points every repo reference at LibirSoft/grannyFlow', () => {
     expect(readRoot('README.md')).toContain('npx skills add LibirSoft/grannyFlow')
     const docs: Record<string, string> = {
