@@ -211,13 +211,25 @@ describe('granny tag', () => {
     expect(run(['list'], {}, null).out).toEqual(['no tags', `user: ${USER}`, 'project: none (not in a git checkout)'])
   })
 
-  it('refuses a tag that would make the tags of both files more than 20, and writes nothing', () => {
-    const tags = Object.fromEntries(Array.from({ length: 20 }, (_, i) => [`t${String(i + 1).padStart(2, '0')}`, TYPO]))
-    const files = { [USER]: json({ tags }) }
-    const r = run(['add', 'extra', '--fix', '--description', 'x'], files)
+  it('refuses a tag that would make the tags of both files more than 20, from either file, and writes nothing', () => {
+    const named = (from: number, count: number) => Object.fromEntries(Array.from({ length: count }, (_, i) => [`t${String(from + i).padStart(2, '0')}`, TYPO]))
+    const files = { [USER]: json({ tags: named(1, 12) }), [PROJECT]: json({ tags: named(13, 8) }) }
+    const fromUser = run(['add', 'extra', '--fix', '--description', 'x'], files)
+    expect(fromUser.code).toBe(1)
+    expect(fromUser.out).toEqual(['tags: at most 20 tags (got 21)'])
+    expect(fromUser.store.get(USER)).toBe(files[USER])
+    const fromRepo = run(['add', 'extra', '--fix', '--description', 'x', '--project'], files)
+    expect(fromRepo.code).toBe(1)
+    expect(fromRepo.out).toEqual(['tags: at most 20 tags (got 21)'])
+    expect(fromRepo.store.get(PROJECT)).toBe(files[PROJECT])
+  })
+
+  it('refuses a new user tag that a repo tag of the same name overrides with an invalid value, and writes nothing', () => {
+    const files = { [PROJECT]: json({ tags: { naming: { description: 'repo naming', points: 500 } } }) }
+    const r = run(['add', 'naming', '--points', '20', '--description', 'a name'], files)
     expect(r.code).toBe(1)
-    expect(r.out).toEqual(['tags: at most 20 tags (got 21)'])
-    expect(r.store.get(USER)).toBe(files[USER])
+    expect(r.out).toEqual(['tags.naming.points must be an integer between 1 and 100'])
+    expect(r.store.has(USER)).toBe(false)
   })
 
   it('keeps a name such as constructor an ordinary tag name, not a property of the object', () => {
