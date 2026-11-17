@@ -160,6 +160,9 @@ function fake(opts: {
   home?: string
   tmp?: string[]
   commonDir?: string
+  at?: string
+  also?: string[]
+  worktrees?: string[]
 }): Fake {
   const out: string[] = []
   const calls: Fake['calls'] = []
@@ -200,8 +203,9 @@ function fake(opts: {
       }
       throw new Error(`unexpected ${cmd} ${line}`)
     },
-    list: dir => (dir === DIR && records ? Object.keys(records) : undefined),
-    read: path => records![path.slice(DIR.length + 1)]!,
+    list: dir => (dir === (opts.at ?? DIR) && records ? Object.keys(records) : opts.also?.includes(dir) ? [] : undefined),
+    read: path => records![path.slice((opts.at ?? DIR).length + 1)]!,
+    ...(opts.worktrees === undefined ? {} : { worktrees: () => opts.worktrees! }),
     workDir: opts.workDir ?? (() => '.granny'),
     ...(opts.home === undefined ? {} : { home: () => opts.home! }),
     ...(opts.tmp === undefined ? {} : { tmp: () => opts.tmp! }),
@@ -1288,6 +1292,50 @@ describe('local paths', () => {
     expect(postTrail(['--out', 'trail.json'], f.io)).toBe(0)
     expect(f.written['trail.json']!.includes(TOP)).toBe(false)
     expect(f.written['trail.json']!).toContain('reads /home/u/.config/granny/config.json')
+  })
+})
+
+describe('the trail of a removed worktree', () => {
+  const SAVED = `${TOP}/.granny/branches/feat%2Fx/trail`
+  const one = { 's1-r1.json': round({ findings: [finding('codex-F1')] }) }
+
+  it('reads the saved trail of the checked-out branch before the checkout\'s own', () => {
+    const f = fake({ records: one, at: SAVED, diffs: { [SHA1]: A_DIFF } })
+    expect(postTrail([], f.io)).toBe(0)
+    expect(f.posted).toHaveLength(1)
+    expect(f.out[0]).toBe('s1 r1: posted 1 line comment, 0 in body')
+  })
+
+  it('says which trail it reads when the checkout has one of its own too', () => {
+    const f = fake({ records: one, at: SAVED, also: [DIR], diffs: { [SHA1]: A_DIFF } })
+    expect(postTrail([], f.io)).toBe(0)
+    expect(f.out[0]).toBe(`note: reading the trail in ${SAVED}; another one is in ${DIR} - pass --trail <dir> to post that one`)
+    expect(f.posted).toHaveLength(1)
+  })
+
+  it('finds the saved trail in the main checkout from a linked worktree', () => {
+    const f = fake({ records: one, at: '/w/main/.granny/branches/feat%2Fx/trail', commonDir: '/w/main/.git', diffs: { [SHA1]: A_DIFF } })
+    expect(postTrail([], f.io)).toBe(0)
+    expect(f.posted).toHaveLength(1)
+  })
+
+  it('looks only in the checkout\'s own work dir on a detached HEAD, and names it when there is no trail', () => {
+    const f = fake({ records: one, at: SAVED, branch: '' })
+    expect(postTrail([], f.io)).toBe(1)
+    expect(f.out).toEqual([`no trail at ${DIR} - a granny run writes it there (config trail: true)`])
+  })
+
+  it('reads a path under the removed worktree from the repo root', () => {
+    const wt = '/w/repo-worktrees/feat-x'
+    const f = fake({
+      records: { 's1-r1.json': round({ findings: [finding('codex-F1', { file: `${wt}/src/a.ts`, evidence: `${wt}/src/a.ts:12 - x is null` })] }) },
+      at: SAVED,
+      worktrees: [wt, 'not absolute'],
+      diffs: { [SHA1]: A_DIFF },
+    })
+    expect(postTrail([], f.io)).toBe(0)
+    expect(f.posted[0]!.comments.map(c => c.path)).toEqual(['src/a.ts'])
+    expect(JSON.stringify(f.posted).includes('repo-worktrees')).toBe(false)
   })
 })
 

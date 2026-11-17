@@ -1,8 +1,9 @@
 import { trimSlashes } from '../core/paths'
 import type { TrailRound } from '../core/types'
+import { savedKey } from '../core/worktree'
 import { postGithub, prOf, prTarget } from './github'
 import { mrOf, mrTarget, postGitlab } from './gitlab'
-import { failure, plural, type PosterIo } from './io'
+import { currentBranch, failure, plural, type PosterIo } from './io'
 import { type PlannedReview, planRound, type Target } from './plan'
 import { detectPlatform, type Platform, PLATFORMS } from './platform'
 import { byTrailOrder, type LocalRoot, trailProblem, withoutLocalPaths } from './records'
@@ -65,13 +66,26 @@ function readRecords(io: PosterIo, dir: string): TrailRound[] | undefined {
   return records.sort(byTrailOrder)
 }
 
-/** The checkout, the main checkout it is a worktree of, the home directory and the temporary directories: what a record's text may name of this machine. */
-function localRoots(io: PosterIo, toplevel: string): LocalRoot[] {
+function mainCheckout(io: PosterIo): string | undefined {
   const common = io.exec('git', ['rev-parse', '--path-format=absolute', '--git-common-dir'])
-  const main = common.code === 0 && /\/\.git\/?$/.test(common.stdout.trim()) ? common.stdout.trim().replace(/\/\.git\/?$/, '') : undefined
+  return common.code === 0 && /\/\.git\/?$/.test(common.stdout.trim()) ? common.stdout.trim().replace(/\/\.git\/?$/, '') : undefined
+}
+
+function localRoots(io: PosterIo, toplevel: string, main: string | undefined, dir: string): LocalRoot[] {
   const home = io.home?.()
-  const tmp = (io.tmp?.() ?? []).map((dir): LocalRoot => [dir, '$TMPDIR', true])
-  return [[toplevel, ''], ...(main ? [[main, ''] as LocalRoot] : []), ...(home ? [[home, '~'] as LocalRoot] : []), ...tmp]
+  const tmp = (io.tmp?.() ?? []).map((d): LocalRoot => [d, '$TMPDIR', true])
+  const written = (io.worktrees?.(dir) ?? []).filter(path => path.startsWith('/')).map((path): LocalRoot => [path, ''])
+  return [[toplevel, ''], ...(main ? [[main, ''] as LocalRoot] : []), ...written, ...(home ? [[home, '~'] as LocalRoot] : []), ...tmp]
+}
+
+function findTrail(io: PosterIo, toplevel: string, main: string | undefined, work: string): string {
+  const branch = currentBranch(io)
+  const saved = (root: string) => `${root}/${work}/branches/${savedKey(branch)}/trail`
+  const own = `${toplevel}/${work}/trail`
+  const candidates = [...(branch ? [saved(toplevel)] : []), own, ...(branch && main && main !== toplevel ? [saved(main)] : [])]
+  const found = candidates.filter(dir => io.list(dir) !== undefined)
+  if (found.length > 1) io.print(`note: reading the trail in ${found[0]}; another one is in ${found.slice(1).join(' and in ')} - pass --trail <dir> to post that one`)
+  return found[0] ?? own
 }
 
 const commitOf = (io: PosterIo, ref: string) => {
@@ -137,17 +151,18 @@ export function postTrail(argv: string[], io: PosterIo): number {
     return 1
   }
   const toplevel = top.stdout.trim()
+  const main = mainCheckout(io)
   let dir = options.trail
   if (dir === undefined) {
     try {
-      dir = `${toplevel}/${trimSlashes(io.workDir(toplevel))}/trail`
+      dir = findTrail(io, toplevel, main, trimSlashes(io.workDir(toplevel)))
     } catch (e) {
       io.print(`${(e as Error).message}\npass the trail directory with --trail <dir>`)
       return 1
     }
   }
   const read = readRecords(io, dir)
-  const records = read && withoutLocalPaths(read, localRoots(io, toplevel))
+  const records = read && withoutLocalPaths(read, localRoots(io, toplevel, main, dir))
   if (records === undefined) {
     io.print(`no trail at ${dir} - a granny run writes it there (config trail: true)`)
     return 1

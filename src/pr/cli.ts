@@ -17,6 +17,7 @@ const io: PosterIo = {
   workDir: toplevel => resolveConfig([readJson(globalConfigPath()), readJson(join(toplevel, 'granny.config.json'))]).workDir,
   home: homedir,
   tmp: () => [...new Set([tmpdir(), '/tmp'])],
+  worktrees: dir => (existsSync(join(dir, 'worktree-paths')) ? readFileSync(join(dir, 'worktree-paths'), 'utf8').split('\n').filter(Boolean) : []),
   write: (path, text) => writeFileSync(path, text),
   print: line => console.log(line),
 }
