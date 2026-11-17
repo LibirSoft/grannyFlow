@@ -71,6 +71,18 @@ describe('granny tag', () => {
     expect(r.store.get('/other/granny.config.json')).toBe(json({ tags: { typo: { description: 'x', fix: true } } }))
   })
 
+  it('refuses a --repo that is not in a git checkout, for every command, and writes nothing', () => {
+    const cases: Array<[string[], string]> = [
+      [['add', 'typo', '--fix', '--description', 'x', '--repo', '/nowhere'], '--repo /nowhere is not in a git checkout - nothing written'],
+      [['remove', 'typo', '--repo', '/nowhere'], '--repo /nowhere is not in a git checkout - nothing written'],
+      [['list', '--repo', '/nowhere'], '--repo /nowhere is not in a git checkout'],
+    ]
+    for (const [argv, message] of cases) {
+      const r = run(argv, { [USER]: json({ tags: { typo: TYPO } }) })
+      expect({ argv, code: r.code, out: r.out, user: r.store.get(USER) }).toEqual({ argv, code: 1, out: [message], user: json({ tags: { typo: TYPO } }) })
+    }
+  })
+
   it('refuses --project outside a git checkout and writes nothing', () => {
     const r = run(['add', 'typo', '--fix', '--description', 'x', '--project'], {}, null)
     expect(r.code).toBe(1)

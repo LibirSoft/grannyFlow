@@ -6,7 +6,7 @@ A config tag names a kind of finding. The judge names the tag that fits a findin
 
 ## The commands
 
-Run the script with `node` from the user's repo, or pass `--repo <dir>` with the repo's path. Without `--repo`, do not run it in the skill directory: when that directory is inside another git checkout, `--project` would write that checkout's `granny.config.json`. On success it prints its result and exits 0. On a refusal it prints the reason, exits 1 and writes nothing.
+Run the script with `node` from the user's repo, or pass `--repo <dir>` with the repo's path; a `--repo` that is not in a git checkout is refused. Without `--repo`, do not run it in the skill directory: when that directory is inside another git checkout, `--project` would write that checkout's `granny.config.json`. On success it prints its result and exits 0. On a refusal it prints the reason, exits 1 and writes nothing.
 
 ```sh
 node <skill-dir>/scripts/tags.mjs add <name> --description <text> (--points <1-100> | --fix) [--project] [--replace] [--repo <dir>]

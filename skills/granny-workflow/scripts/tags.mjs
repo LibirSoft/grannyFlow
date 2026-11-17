@@ -334,7 +334,11 @@ function runTags(argv, io) {
   const options = parse(argv);
   if (options === undefined)
     return fail(io, ...USAGE);
-  const store = readStore(io, io.toplevel(options.repo), options.verb === "list" ? "" : " - nothing written");
+  const tail = options.verb === "list" ? "" : " - nothing written";
+  const top = io.toplevel(options.repo);
+  if (options.repo !== undefined && top === undefined)
+    return fail(io, `--repo ${options.repo} is not in a git checkout${tail}`);
+  const store = readStore(io, top, tail);
   if (typeof store === "string")
     return fail(io, store);
   if (options.verb === "list")
