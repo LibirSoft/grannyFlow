@@ -1736,7 +1736,7 @@ var OWNER_FILE = "granny-worktree";
 var RESTORED = "[granny] work dir restored";
 var NOT_RESTORED = "[granny] work dir not restored";
 var ASIDE = "[granny] earlier work dir files moved aside: ";
-var NOT_ASIDE = "[granny] earlier work dir files not moved aside";
+var NOT_ASIDE = "[granny] earlier work dir files not moved aside: ";
 var GIT_DIR = 'gd=$(git -C "$wt" rev-parse --absolute-git-dir)';
 var ownerFile = `"$gd"/${OWNER_FILE}`;
 function normalize2(path) {
@@ -1786,9 +1786,9 @@ function worktreeScript(c, branch, base, path, saved) {
   const s = saved === undefined ? undefined : shellQuote(saved);
   const work = shellQuote(workOf(c));
   const restore = s ? `; if [ -d ${s} ]; then if mkdir -p "$wt"/${work} && cp -R ${s}/. "$wt"/${work}/; then echo ${shellQuote(RESTORED)}; else echo ${shellQuote(NOT_RESTORED)}; fi; fi` : "";
-  const aside = s ? `; if [ -d ${s} ]; then base=${s}.before-$(date +%Y%m%d-%H%M%S); old=$base; n=2; while [ -e "$old" ]; do old=$base-$n; n=$((n+1)); done; if mv ${s} "$old"; then printf '%s%s\\n' ${shellQuote(ASIDE)} "$old"; else echo ${shellQuote(NOT_ASIDE)}; fi; fi` : "";
+  const aside = s ? `if [ -d ${s} ]; then base=${s}.before-$(date +%Y%m%d-%H%M%S); old=$base; n=2; while [ -e "$old" ]; do old=$base-$n; n=$((n+1)); done; if mv ${s} "$old"; then printf '%s%s\\n' ${shellQuote(ASIDE)} "$old"; else printf '%s%s - move or delete them, then run again\\n' ${shellQuote(NOT_ASIDE)} ${s}; exit 1; fi; fi; ` : "";
   const add = `wt=${shellQuote(path)}; git worktree add "$wt" ${b} || exit 1; ${own}${restore}`;
-  const create = `wt=${shellQuote(path)}; git worktree add -b ${b} "$wt" ${shellQuote(base)} || exit 1; ${own}${aside}`;
+  const create = `${aside}wt=${shellQuote(path)}; git worktree add -b ${b} "$wt" ${shellQuote(base)} || exit 1; ${own}`;
   const owned = `${GIT_DIR} && if [ -f ${ownerFile} ]; then echo ${shellQuote(OWNED)}; fi`;
   return `${excludeScript(c)} && ${find} && if [ -n "$wt" ]; then ${reuse}; elif git show-ref --verify --quiet ${shellQuote(`refs/heads/${branch}`)}; then ${add}; else ${create}; fi && ${owned} && printf '%s%s\\n' ${shellQuote(SAID2)} "$wt"`;
 }
@@ -1801,8 +1801,7 @@ function savedNotes(output, saved) {
   return [
     ...lines.includes(RESTORED) ? [`work dir files of an earlier run restored from ${saved}`] : [],
     ...lines.includes(NOT_RESTORED) ? [`the work dir files of an earlier run could not be restored from ${saved} - they stay there`] : [],
-    ...aside ? [`${saved} held the files of an earlier branch of this name - moved to ${aside.slice(ASIDE.length)}`] : [],
-    ...lines.includes(NOT_ASIDE) ? [`${saved} holds the files of an earlier branch of this name, which could not be moved aside - the files of this run are merged into them`] : []
+    ...aside ? [`${saved} held the files of an earlier branch of this name - moved to ${aside.slice(ASIDE.length)}`] : []
   ];
 }
 var MARK = (m) => `echo ${shellQuote(`[granny] ${m}`)}`;

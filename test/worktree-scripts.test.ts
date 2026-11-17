@@ -246,7 +246,7 @@ describe('the worktree scripts in a real git repo', () => {
     expect(readFileSync(join(repo, '.granny/branches', aside[0]!, 'PR-BODY.md'), 'utf8')).toBe('# one\n')
   })
 
-  it('says so when the saved files of an earlier branch cannot be moved aside, and leaves them where they are', () => {
+  it('stops the setup, and creates nothing, when the saved files of an earlier branch cannot be moved aside', () => {
     setup()
     workDir({ 'PR-BODY.md': '# one\n' })
     remove()
@@ -259,12 +259,19 @@ describe('the worktree scripts in a real git repo', () => {
     process.env.PATH = `${bin}:${path}`
     try {
       const fresh = setup()
-      expect(madeByGranny(fresh.output)).toBe(true)
-      expect(savedNotes(fresh.output, saved)).toEqual([`${saved} holds the files of an earlier branch of this name, which could not be moved aside - the files of this run are merged into them`])
+      expect(fresh.code).not.toBe(0)
+      expect(fresh.output).toContain(`[granny] earlier work dir files not moved aside: ${saved} - move or delete them, then run again`)
+      expect(existsSync(wt)).toBe(false)
+      expect(sh('git branch --list feat/x').output).toBe('')
+      expect(sh('git worktree list').output.trim().split('\n')).toHaveLength(1)
       expect(readFileSync(join(saved, 'PR-BODY.md'), 'utf8')).toBe('# one\n')
     } finally {
       process.env.PATH = path
     }
+    const retry = setup()
+    expect(retry.code).toBe(0)
+    expect(savedNotes(retry.output, saved)[0]).toContain(`${saved} held the files of an earlier branch of this name - moved to ${saved}.before-`)
+    expect(existsSync(saved)).toBe(false)
   })
 
   it('keeps the saved files of a branch apart from a branch whose name differs only in a slash', () => {
