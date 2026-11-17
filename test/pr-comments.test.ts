@@ -1320,7 +1320,7 @@ describe('the trail of a removed worktree', () => {
   })
 
   it('looks only in the checkout\'s own work dir on a detached HEAD, and names it when there is no trail', () => {
-    const f = fake({ records: one, at: SAVED, branch: '' })
+    const f = fake({ records: one, at: `${TOP}/.granny/branches//trail`, branch: '' })
     expect(postTrail([], f.io)).toBe(1)
     expect(f.out).toEqual([`no trail at ${DIR} - a granny run writes it there (config trail: true)`])
   })
