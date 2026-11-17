@@ -308,6 +308,24 @@ describe('the worktree scripts in a real git repo', () => {
     expect(sh('git worktree list').output.trim().split('\n')).toHaveLength(2)
   })
 
+  it('keeps a worktree that git still lists after its folder was deleted by hand, whichever path the run names it by', () => {
+    mkdirSync(join(root, 'my repo-worktrees'))
+    const linked = join(root, 'linked-worktrees')
+    symlinkSync(join(root, 'my repo-worktrees'), linked)
+    wt = join(linked, 'feat-x')
+    setup()
+    const listed = reportedWorktree(setup().output)!
+    expect(listed).toBe(join(root, 'my repo-worktrees', 'feat-x'))
+    rmSync(listed, { recursive: true, force: true })
+    for (const path of [join(linked, 'feat-x'), listed]) {
+      wt = path
+      const r = remove()
+      expect(r.code).not.toBe(0)
+      expect(r.end).toEqual({ removed: false, kept: 'the worktree folder is gone, but git still lists it - git worktree prune removes the entry' })
+    }
+    expect(sh('git worktree list').output.trim().split('\n')).toHaveLength(2)
+  })
+
   it('reports a worktree that git already removed as removed', () => {
     setup()
     sh(`git worktree remove ${quoted(wt)}`)
