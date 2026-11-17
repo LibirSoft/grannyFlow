@@ -1590,7 +1590,7 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
     if (config.keepWorktree) return keep('keepWorktree is on')
     if (!made.has(repo)) return keep('granny did not create it')
     if (blocked) return keep(blocked)
-    if (s.left.length) return keep(`a lane worktree was left in place (${s.left.join(', ')})`)
+    if (s.left.length) return keep(`a lane worktree was left in place (${s.left.join(', ')}), and the removal could not be confirmed`)
     if (trimPath(cwd) === repo) return keep('the run was started in this worktree')
     const saved = savedDir(config, repo, input.branch)
     try {

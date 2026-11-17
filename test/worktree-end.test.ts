@@ -99,7 +99,7 @@ describe('the end of a run', () => {
       override: async req => (req.label === 'implement one' ? new Promise(r => setTimeout(() => r(undefined), 15)) : undefined),
     })
     const r = await runGranny(f.host, { repo: A, branch: 'feat/x', stages: [{ name: 'one', task: 'a' }, { name: 'two', task: 'b', after: [] }] })
-    expect(r.worktreeEnd).toEqual({ removed: false, kept: 'a lane worktree was left in place (/work/a-worktrees/feat-x--s2-two)' })
+    expect(r.worktreeEnd).toEqual({ removed: false, kept: 'a lane worktree was left in place (/work/a-worktrees/feat-x--s2-two), and the removal could not be confirmed' })
     expect(f.commands.some(isRemoval)).toBe(false)
   })
 
@@ -111,7 +111,7 @@ describe('the end of a run', () => {
       override: async req => (req.label === 'implement one' ? new Promise(r => setTimeout(() => r(undefined), 15)) : undefined),
     })
     const r = await runGranny(f.host, { repo: A, branch: 'feat/x', stages: [{ name: 'one', task: 'a' }, { name: 'two', task: 'b', after: [] }] })
-    expect(r.worktreeEnd).toEqual({ removed: false, kept: 'a lane worktree was left in place (/work/a-worktrees/feat-x--s2-two)' })
+    expect(r.worktreeEnd).toEqual({ removed: false, kept: 'a lane worktree was left in place (/work/a-worktrees/feat-x--s2-two), and the removal could not be confirmed' })
     expect(f.commands.some(isRemoval)).toBe(false)
   })
 
@@ -124,7 +124,7 @@ describe('the end of a run', () => {
     })
     const r = await runGranny(f.host, { repo: A, branch: 'feat/x', stages: [{ name: 'one', task: 'a' }, { name: 'two', task: 'b', after: [] }] })
     expect(f.logs).toContainEqual(expect.stringContaining('merge two: left feat/x--s2-two in place'))
-    expect(r.worktreeEnd).toEqual({ removed: false, kept: 'a lane worktree was left in place (/work/a-worktrees/feat-x--s2-two)' })
+    expect(r.worktreeEnd).toEqual({ removed: false, kept: 'a lane worktree was left in place (/work/a-worktrees/feat-x--s2-two), and the removal could not be confirmed' })
     expect(f.commands.some(isRemoval)).toBe(false)
   })
 
