@@ -144,6 +144,21 @@ describe('granny tag', () => {
     }
   })
 
+  it('ends no list error with nothing written, since list writes nothing', () => {
+    const cases: Array<[string, string]> = [
+      ['{ not json', `${USER}: invalid JSON (`],
+      ['[]', `${USER}: not a JSON object`],
+      ['{"tags": []}', `${USER}: tags must be an object keyed by tag name`],
+    ]
+    for (const [text, start] of cases) {
+      const r = run(['list'], { [USER]: text })
+      expect(r.code).toBe(1)
+      expect(r.out).toHaveLength(1)
+      expect(r.out[0]).toStartWith(start)
+      expect(r.out[0]).not.toContain('nothing written')
+    }
+  })
+
   it('refuses to write the user file while the repo file is not valid JSON, since the two are merged', () => {
     const r = run(['add', 'typo', '--fix', '--description', 'x'], { [PROJECT]: '{ bad' })
     expect(r.code).toBe(1)

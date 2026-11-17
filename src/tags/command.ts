@@ -102,7 +102,7 @@ function parse(argv: string[]): Options | undefined {
   }
 }
 
-function readFile(io: TagsIo, path: string): File | string {
+function readFile(io: TagsIo, path: string, tail: string): File | string {
   let text: string | undefined
   try {
     text = io.read(path)
@@ -114,19 +114,19 @@ function readFile(io: TagsIo, path: string): File | string {
   try {
     object = JSON.parse(text)
   } catch (e) {
-    return `${path}: invalid JSON (${reason(e)}) - nothing written`
+    return `${path}: invalid JSON (${reason(e)})${tail}`
   }
-  if (!isObject(object)) return `${path}: not a JSON object - nothing written`
+  if (!isObject(object)) return `${path}: not a JSON object${tail}`
   const tags = object.tags === undefined ? {} : object.tags
-  if (!isObject(tags)) return `${path}: tags must be an object keyed by tag name - nothing written`
+  if (!isObject(tags)) return `${path}: tags must be an object keyed by tag name${tail}`
   return { path, object, tags }
 }
 
-function readStore(io: TagsIo, top: string | undefined): Store | string {
-  const user = readFile(io, io.userPath)
+function readStore(io: TagsIo, top: string | undefined, tail: string): Store | string {
+  const user = readFile(io, io.userPath, tail)
   if (typeof user === 'string') return user
   if (top === undefined) return { user }
-  const project = readFile(io, `${top}/granny.config.json`)
+  const project = readFile(io, `${top}/granny.config.json`, tail)
   return typeof project === 'string' ? project : { user, project }
 }
 
@@ -245,7 +245,7 @@ function list(io: TagsIo, store: Store): number {
 export function runTags(argv: string[], io: TagsIo): number {
   const options = parse(argv)
   if (options === undefined) return fail(io, ...USAGE)
-  const store = readStore(io, io.toplevel(options.repo))
+  const store = readStore(io, io.toplevel(options.repo), options.verb === 'list' ? '' : ' - nothing written')
   if (typeof store === 'string') return fail(io, store)
   if (options.verb === 'list') return list(io, store)
   const target = options.project ? store.project : store.user

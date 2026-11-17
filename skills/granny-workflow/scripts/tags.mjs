@@ -181,7 +181,7 @@ function parse(argv) {
     ...repo === undefined ? {} : { repo }
   };
 }
-function readFile(io, path) {
+function readFile(io, path, tail) {
   let text;
   try {
     text = io.read(path);
@@ -194,22 +194,22 @@ function readFile(io, path) {
   try {
     object = JSON.parse(text);
   } catch (e) {
-    return `${path}: invalid JSON (${reason(e)}) - nothing written`;
+    return `${path}: invalid JSON (${reason(e)})${tail}`;
   }
   if (!isObject2(object))
-    return `${path}: not a JSON object - nothing written`;
+    return `${path}: not a JSON object${tail}`;
   const tags = object.tags === undefined ? {} : object.tags;
   if (!isObject2(tags))
-    return `${path}: tags must be an object keyed by tag name - nothing written`;
+    return `${path}: tags must be an object keyed by tag name${tail}`;
   return { path, object, tags };
 }
-function readStore(io, top) {
-  const user = readFile(io, io.userPath);
+function readStore(io, top, tail) {
+  const user = readFile(io, io.userPath, tail);
   if (typeof user === "string")
     return user;
   if (top === undefined)
     return { user };
-  const project = readFile(io, `${top}/granny.config.json`);
+  const project = readFile(io, `${top}/granny.config.json`, tail);
   return typeof project === "string" ? project : { user, project };
 }
 function merged(...layers) {
@@ -334,7 +334,7 @@ function runTags(argv, io) {
   const options = parse(argv);
   if (options === undefined)
     return fail(io, ...USAGE);
-  const store = readStore(io, io.toplevel(options.repo));
+  const store = readStore(io, io.toplevel(options.repo), options.verb === "list" ? "" : " - nothing written");
   if (typeof store === "string")
     return fail(io, store);
   if (options.verb === "list")
