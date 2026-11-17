@@ -206,6 +206,11 @@ function add(io: TagsIo, o: Options, store: Store, target: File): number {
   const error = save(io, target.path, { ...target.object, tags: next })
   if (error !== undefined) return fail(io, error)
   io.print(existed ? `replaced tag ${o.name} (${effectOf(tag)}) in ${target.path}` : `added tag ${o.name} (${effectOf(tag)}) to ${target.path}`)
+  const project = o.project ? undefined : store.project
+  if (project !== undefined && hasOwn(project.tags, o.name)) {
+    const theirs = project.tags[o.name]
+    io.print(theirs === null ? `note: ${project.path} turns tag ${o.name} off in this repo` : `note: ${project.path} has its own tag ${o.name} (${effectOf(theirs)}), and this repo uses that one`)
+  }
   return 0
 }
 

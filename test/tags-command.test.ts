@@ -189,6 +189,13 @@ describe('granny tag', () => {
     }
   })
 
+  it('adds a user tag that the repo file turns off or overrides, and says so', () => {
+    const off = run(['add', 'typo', '--fix', '--description', 'x'], { [PROJECT]: json({ tags: { typo: null } }) })
+    expect({ code: off.code, out: off.out }).toEqual({ code: 0, out: [`added tag typo (fix) to ${USER}`, `note: ${PROJECT} turns tag typo off in this repo`] })
+    const over = run(['add', 'typo', '--fix', '--description', 'x'], { [PROJECT]: json({ tags: { typo: { description: 'repo typo', points: 30 } } }) })
+    expect({ code: over.code, out: over.out }).toEqual({ code: 0, out: [`added tag typo (fix) to ${USER}`, `note: ${PROJECT} has its own tag typo (+30), and this repo uses that one`] })
+  })
+
   it('removes a tag, keeps the other keys, and removes the tags key with the last tag', () => {
     const files = { [USER]: json({ tags: { typo: TYPO, naming: { description: 'b', points: 20 } }, threshold: 80 }) }
     const r = run(['remove', 'typo'], files)
