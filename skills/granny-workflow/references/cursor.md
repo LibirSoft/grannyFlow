@@ -44,7 +44,7 @@ The plan review is optional and off by default; enable it with `"planReview": tr
   - engine `agent`: `granny-reviewer` with the "Plan reviewer - agent engine" prompt.
   - engine `opencode`: not supported on Cursor - skip it and say so in the journal.
   - engine `command`: only a template with `{prompt}`, filled with the same one-line prompt; a reviewer without `{prompt}` sits the plan review out - say so in the journal. No reviewer left → the plan review fails.
-- Judge: `granny-judge` with the "Judge - plan review" prompt.
+- Judge: `granny-judge` with the "Judge - plan review" prompt, which has no TAGS block. Config tags do not apply here: in step 5 add no points and skip rule 10, also when the judge names a tag.
 - Fix: `granny-implementer` with the "Implementer - plan fix" prompt. It edits the plan files in place at their absolute paths, adds (round 1) or extends (later rounds) a `## rN deltas (<date>)` section at the top with the date from `date +%F`, and never stages or commits them. Check with `git status --short` that it committed nothing.
 - `clean` or `residual-only` → go on to stage 1. `round-cap` or `review-failed` → stop: implement nothing, report the plan findings left unresolved, and wait.
 
