@@ -115,6 +115,19 @@ describe('the end of a run', () => {
     expect(f.commands.some(isRemoval)).toBe(false)
   })
 
+  it('keeps the lane wording of a cleanup whose marker shares its line with other text, and keeps the run worktree', async () => {
+    const f = fakeHost({
+      worktree: lanePath,
+      made: true,
+      reviews: (command: string) => (command.includes('--force') ? { code: 1, output: 'Helper: [granny] lane worktree removed\n' } : 'No findings.'),
+      override: async req => (req.label === 'implement one' ? new Promise(r => setTimeout(() => r(undefined), 15)) : undefined),
+    })
+    const r = await runGranny(f.host, { repo: A, branch: 'feat/x', stages: [{ name: 'one', task: 'a' }, { name: 'two', task: 'b', after: [] }] })
+    expect(f.logs).toContainEqual(expect.stringContaining('merge two: left feat/x--s2-two in place'))
+    expect(r.worktreeEnd).toEqual({ removed: false, kept: 'a lane worktree was left in place (/work/a-worktrees/feat-x--s2-two)' })
+    expect(f.commands.some(isRemoval)).toBe(false)
+  })
+
   it('runs the removal through a helper agent on Claude Code', async () => {
     const f = fakeHost({ name: 'claude-code', direct: false, worktree: lanePath, made: true, checks: c => (isRemoval(c) ? DONE : undefined) })
     const r = await runGranny(f.host, input)

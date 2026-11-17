@@ -2979,8 +2979,8 @@ the last repair's deviations: ${deviations}` : ""}`;
     const cleaned = await shell(`cleanup ${name}`, "Implement", cleanup, main.cwd);
     if (cleaned.ran)
       return done;
-    const reached = (marker) => printed(cleaned.output, marker);
-    if (!reached("lane worktree removed"))
+    const reached = (marker) => cleaned.output.includes(`[granny] ${marker}`);
+    if (!printed(cleaned.output, "lane worktree removed"))
       state.left.push(lane.cwd);
     const left = reached("lane worktree removed") ? `its worktree ${lane.cwd} was removed, but its branch ${lane.branch} was left in place` : `its worktree ${lane.cwd} and branch ${lane.branch} were left in place (${reached("lane worktree clean") ? "git worktree remove failed" : reached("lane merged") ? "uncommitted changes in the worktree" : "the cleanup could not confirm the merge"})`;
     host.log(`${label}: left ${reached("lane worktree removed") ? lane.branch : `${lane.cwd} (${lane.branch})`} in place - remove it yourself once you have checked it: ${cleaned.output.slice(-500)}`);
