@@ -1822,7 +1822,7 @@ function removeWorktreeScript(c, branch, path, saved) {
   ].join("; ");
   const steps = [
     `wt=${shellQuote(path)}; src="$wt"/${shellQuote(workOf(c))}`,
-    `if [ ! -e "$wt" ]; then common=$(git rev-parse --git-common-dir) || exit 1; if [ -n "$(find "$common/worktrees" -mindepth 2 -maxdepth 2 -name ${OWNER_FILE} -type f -exec grep -lxF -e "$wt" {} + 2>/dev/null)" ]; then ${MARK("run worktree listed")}; exit 1; fi;${MARK("run worktree gone")}; if [ -d ${dst} ]; then ${MARK("work dir saved")}; fi; exit 0; fi`,
+    `if [ ! -e "$wt" ]; then common=$(git rev-parse --git-common-dir) || exit 1; if [ -n "$(find "$common/worktrees" -mindepth 2 -maxdepth 2 -name ${OWNER_FILE} -type f -exec grep -lxF -e "$wt" {} + 2>/dev/null)" ]; then ${MARK("run worktree listed")}; exit 1; fi; ${MARK("run worktree gone")}; if [ -d ${dst} ]; then ${MARK("work dir saved")}; fi; exit 0; fi`,
     `${GIT_DIR} || exit 1; [ -f ${ownerFile} ] || exit 1; ${MARK("run worktree owned")}`,
     `top=$(git rev-parse --show-toplevel) && wtop=$(git -C "$wt" rev-parse --show-toplevel) || exit 1; if [ "$top" = "$wtop" ]; then ${MARK("run worktree is where the run starts")}; exit 1; fi`,
     `[ "$(git -C "$wt" symbolic-ref -q HEAD)" = ${shellQuote(`refs/heads/${branch}`)} ] || exit 1; ${MARK("run worktree on branch")}`,
