@@ -676,6 +676,7 @@ function namedTag(entry) {
   const name = entry.tag.trim().toLowerCase();
   return name === "" || name === "none" ? undefined : name;
 }
+var knownTag = (tags, name) => tags !== undefined && Object.prototype.hasOwnProperty.call(tags, name);
 function decide(f, entry, policy, repeatsDeclined = () => false, earlierOf = () => {
   return;
 }) {
@@ -712,7 +713,7 @@ function decide(f, entry, policy, repeatsDeclined = () => false, earlierOf = () 
     return done(5, "residual", attention ? `pre-existing - ATTENTION: impact ${impact}` : "pre-existing", attention);
   }
   const name = namedTag(entry);
-  const tagged = name !== undefined && policy.tags !== undefined && Object.prototype.hasOwnProperty.call(policy.tags, name) && verdict === "confirmed" && impact !== "none" && !repeatsDeclined(out) ? name : undefined;
+  const tagged = name !== undefined && knownTag(policy.tags, name) && verdict === "confirmed" && impact !== "none" && !repeatsDeclined(out) ? name : undefined;
   const tag = tagged === undefined ? undefined : policy.tags[tagged];
   const base = out.priority;
   if (tagged !== undefined)

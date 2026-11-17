@@ -121,6 +121,13 @@ describe('config tags in a run', () => {
     expect(r.stages[0]!.residual[0]!.decision).toMatchObject({ rule: 8 })
   })
 
+  it('logs an unknown tag on one line, cut to 40 characters', async () => {
+    const odd = `odd\nname ${'x'.repeat(100)}`
+    const f = fakeHost({ reviews: [review(reviewLine('P2', 'Odd word')), 'No findings.'], scores: [{ 'codex-F1': { score: 40, tag: odd } }] })
+    await runGranny(f.host, run({ config: { tags: TYPO } }))
+    expect(f.logs).toContain(`core r1: the judge named tag(s) the config does not have - ignored: codex-F1 "odd\\nname ${'x'.repeat(31)}..."`)
+  })
+
   it('logs nothing for a tag of none', async () => {
     const f = fakeHost({ reviews: [review(reviewLine('P2', 'Odd word')), 'No findings.'], scores: [{ 'codex-F1': { score: 40, tag: 'none' } }] })
     await runGranny(f.host, run({ config: { tags: TYPO } }))
@@ -187,6 +194,14 @@ describe('config tags in a run', () => {
     expect(r.plan).toMatchObject({ outcome: 'residual-only', rounds: 1 })
     expect(r.plan!.residual[0]).toMatchObject({ decision: { rule: 8 } })
     expect(r.plan!.residual[0]).not.toHaveProperty('tag')
+  })
+
+  it('logs no unknown tag in the plan review, where no tag applies', async () => {
+    const PLAN = '/plans/v1.md'
+    const f = fakeHost({ reviews: [review(reviewLine('P2', 'Odd plan word', PLAN))], scores: [{ 'codex-F1': { score: 40, tag: 'nit' } }] })
+    const r = await runGranny(f.host, run({ plan: PLAN, config: { tags: TYPO, planReview: true, maxRounds: 1 } }))
+    expect(r.plan).toMatchObject({ outcome: 'residual-only', rounds: 1 })
+    expect(f.logs.filter(l => l.includes('named tag'))).toEqual([])
   })
 
   it('gives the final review judge the TAGS block too', async () => {

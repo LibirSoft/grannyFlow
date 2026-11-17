@@ -239,6 +239,8 @@ export function namedTag(entry: Record<string, unknown> | undefined): string | u
   return name === '' || name === 'none' ? undefined : name
 }
 
+export const knownTag = (tags: Record<string, TagConfig> | undefined, name: string) => tags !== undefined && Object.prototype.hasOwnProperty.call(tags, name)
+
 /**
  * Applies the judge's entry for a finding (undefined when the judge did not judge it) and the decision table: the first
  * matching rule wins.
@@ -277,7 +279,7 @@ export function decide(
     return done(5, 'residual', attention ? `pre-existing - ATTENTION: impact ${impact}` : 'pre-existing', attention)
   }
   const name = namedTag(entry)
-  const tagged = name !== undefined && policy.tags !== undefined && Object.prototype.hasOwnProperty.call(policy.tags, name) && verdict === 'confirmed' && impact !== 'none' && !repeatsDeclined(out) ? name : undefined
+  const tagged = name !== undefined && knownTag(policy.tags, name) && verdict === 'confirmed' && impact !== 'none' && !repeatsDeclined(out) ? name : undefined
   const tag = tagged === undefined ? undefined : policy.tags![tagged]
   const base = out.priority!
   if (tagged !== undefined) out.tag = tagged

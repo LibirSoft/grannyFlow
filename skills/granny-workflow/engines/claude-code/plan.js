@@ -668,6 +668,7 @@ function namedTag(entry) {
   const name = entry.tag.trim().toLowerCase();
   return name === "" || name === "none" ? undefined : name;
 }
+var knownTag = (tags, name) => tags !== undefined && Object.prototype.hasOwnProperty.call(tags, name);
 function decide(f, entry, policy, repeatsDeclined = () => false, earlierOf = () => {
   return;
 }) {
@@ -704,7 +705,7 @@ function decide(f, entry, policy, repeatsDeclined = () => false, earlierOf = () 
     return done(5, "residual", attention ? `pre-existing - ATTENTION: impact ${impact}` : "pre-existing", attention);
   }
   const name = namedTag(entry);
-  const tagged = name !== undefined && policy.tags !== undefined && Object.prototype.hasOwnProperty.call(policy.tags, name) && verdict === "confirmed" && impact !== "none" && !repeatsDeclined(out) ? name : undefined;
+  const tagged = name !== undefined && knownTag(policy.tags, name) && verdict === "confirmed" && impact !== "none" && !repeatsDeclined(out) ? name : undefined;
   const tag = tagged === undefined ? undefined : policy.tags[tagged];
   const base = out.priority;
   if (tagged !== undefined)
@@ -2567,9 +2568,9 @@ the last repair's deviations: ${deviations}` : ""}`;
           apply: decideAll,
           leftTo: "to the implementer unjudged (rule 2)"
         });
-        const unknownTags = Object.keys(config.tags).length ? per.flatMap((x) => {
+        const unknownTags = policy.tags ? per.flatMap((x) => {
           const tagName = namedTag(x);
-          return judgedIds.has(x.id) && tagName !== undefined && !Object.prototype.hasOwnProperty.call(config.tags, tagName) ? [`${x.id} "${tagName}"`] : [];
+          return judgedIds.has(x.id) && tagName !== undefined && !knownTag(policy.tags, tagName) ? [`${x.id} ${JSON.stringify(tagName.length > 40 ? `${tagName.slice(0, 40)}...` : tagName)}`] : [];
         }) : [];
         if (unknownTags.length)
           host.log(`${name} r${round}: the judge named tag(s) the config does not have - ignored: ${unknownTags.join(", ")}`);

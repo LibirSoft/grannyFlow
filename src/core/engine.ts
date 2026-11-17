@@ -45,7 +45,7 @@ import {
 } from './prompts'
 import { opencodeAnswer, readGrant } from './opencode'
 import { bucketOf, countsOf, isDemoted, isJudged, renderReport, severityOf, utf8Length, type ReportMeta } from './report'
-import { decide, declinedOf, isBlocker, keeperOf, mergeDuplicates, namedTag, parseCodexReview, reviewFailure, rideAlong, saysNoFindings, triage, type Policy } from './review'
+import { decide, declinedOf, isBlocker, keeperOf, knownTag, mergeDuplicates, namedTag, parseCodexReview, reviewFailure, rideAlong, saysNoFindings, triage, type Policy } from './review'
 import { detachedReview, MAX_WAITS, planReviewScript, reportedBackend, reviewerModel, reviewPlan, reviewStem, WAIT_SECONDS } from './reviewer'
 import { SCHEMAS } from './schemas'
 import { heredocWriteScript, shellQuote } from './shell'
@@ -980,10 +980,10 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
           apply: decideAll,
           leftTo: 'to the implementer unjudged (rule 2)',
         })
-        const unknownTags = Object.keys(config.tags).length
+        const unknownTags = policy.tags
           ? per.flatMap(x => {
               const tagName = namedTag(x)
-              return judgedIds.has(x.id) && tagName !== undefined && !Object.prototype.hasOwnProperty.call(config.tags, tagName) ? [`${x.id} "${tagName}"`] : []
+              return judgedIds.has(x.id) && tagName !== undefined && !knownTag(policy.tags, tagName) ? [`${x.id} ${JSON.stringify(tagName.length > 40 ? `${tagName.slice(0, 40)}...` : tagName)}`] : []
             })
           : []
         if (unknownTags.length) host.log(`${name} r${round}: the judge named tag(s) the config does not have - ignored: ${unknownTags.join(', ')}`)
