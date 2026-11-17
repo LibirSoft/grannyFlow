@@ -1591,6 +1591,7 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
     if (!made.has(repo)) return keep('granny did not create it')
     if (blocked) return keep(blocked)
     if (s.left.length) return keep(`a lane worktree was left in place (${s.left.join(', ')})`)
+    if (trimPath(cwd) === repo) return keep('the run was started in this worktree')
     const saved = savedDir(config, repo, input.branch)
     try {
       const r = await shell(repo === primary ? 'remove worktree' : `remove worktree ${baseName(repo)}`, 'PR ready', removeWorktreeScript(config, input.branch, cwd, saved), repo, worktreeRemovalPrompt)

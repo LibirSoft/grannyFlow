@@ -64,6 +64,13 @@ describe('the end of a run', () => {
     expect((await runGranny(thrown.host, input)).worktreeEnd).toEqual({ removed: false, kept: 'the removal step failed: boom' })
   })
 
+  it('keeps a worktree the run was started in, and starts no removal in it', async () => {
+    const f = host({ worktree: A })
+    const r = await runGranny(f.host, input)
+    expect(r.worktreeEnd).toEqual({ removed: false, kept: 'the run was started in this worktree' })
+    expect(f.commands.some(isRemoval)).toBe(false)
+  })
+
   it('rewrites a prBodyPath under the removed worktree to the saved copy, and leaves any other form as the agent gave it', async () => {
     for (const [prBodyPath, moved] of [[`${WT}/.granny/PR-BODY.md`, `${SAVED}/PR-BODY.md`], ['docs/PR.md', 'docs/PR.md']] as const) {
       const f = host({ override: req => (req.kind === 'final' ? { gatesGreen: true, gates: 'all green', commits: [], prBodyPath, issues: '' } : undefined) })
