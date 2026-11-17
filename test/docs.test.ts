@@ -114,13 +114,22 @@ describe('skill docs', () => {
     const entry = unreleased.split('\n').find(l => l.includes('`"engine": "opencode"`'))!
     expect(entry).not.toContain('one string for every host')
     expect(entry).toContain('an object keyed by host')
-    expect(entry).toContain("of the absolute file paths named in `context` or in the stage's `task` - each whole directory")
+    expect(entry).toContain('only the plan files and what the absolute paths in `context` name - a file alone')
+    expect(entry).not.toContain("or in the stage's `task`")
+    expect(entry).toContain("opencode cannot read <path> - name it in the run's context")
+    expect(entry).toContain('`grep` and `glob` still reach the file\'s directory')
     expect(entry).toContain('the other repos\' worktrees')
     expect(entry).toContain('opencode cannot read <path> - move it under a project directory')
     expect(config).toContain('opencode cannot read <path>, ... - move it under a project directory')
+    expect(config).toContain("opencode cannot read <path>, ... - name it in the run's context")
+    for (const topic of ["A stage's `task` is not a source", 'takes directories, not files', 'opens the named file and no other file of that directory', 'opencode checks `grep` and `glob` against the directory rule only']) {
+      expect({ topic, has: section.includes(topic) }).toEqual({ topic, has: true })
+    }
+    expect(section).not.toContain('each whole directory')
+    expect(read('SKILL.md').split('\n').find(l => l.startsWith('| `context` |'))).toContain("only when `plan` or `context` names it, not when only a stage's `task` does")
     expect(config).not.toContain('only the paths named in `context`')
     const judgeRuns = config.split('## Judge runs')[1]!.split('\n## ')[0]!
-    expect(judgeRuns).toContain('only the directories of the absolute file paths named in `context` - each whole directory')
+    expect(judgeRuns).toContain('only what the absolute paths in `context` name: a file alone, or a directory when the path ends in `/`')
     const setup = read('references/setup.md').split('2. **Reviewers**')[1]!.split('\n3. ')[0]!
     expect(setup).not.toContain('offer only the host model')
     expect(setup).not.toContain('offer the host model only')
