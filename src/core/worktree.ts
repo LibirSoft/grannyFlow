@@ -72,7 +72,9 @@ export function worktreeScript(c: GrannyConfig, branch: string, base: string, pa
   return `${excludeScript(c)} && ${find} && if [ -n "$wt" ]; then ${reuse}; elif git show-ref --verify --quiet ${shellQuote(`refs/heads/${branch}`)}; then ${add}; else ${create}; fi && ${owned} && printf '%s%s\\n' ${shellQuote(SAID)} "$wt"`
 }
 
-export const madeByGranny = (output: string) => output.split('\n').some(l => l.trim() === OWNED)
+export const printed = (output: string, marker: string) => output.split('\n').some(l => l.trim() === `[granny] ${marker}`)
+
+export const madeByGranny = (output: string) => printed(output, 'worktree made by granny')
 
 export function savedNotes(output: string, saved: string): string[] {
   const lines = output.split('\n').map(l => l.trim())
@@ -109,8 +111,6 @@ export function removeWorktreeScript(c: Pick<GrannyConfig, 'workDir'>, branch: s
   ]
   return `{ ${steps.join('; ')}; }`
 }
-
-export const printed = (output: string, marker: string) => output.split('\n').some(l => l.trim() === `[granny] ${marker}`)
 
 export type Removal = { removed: true; saved?: string } | { removed: false; kept: string }
 

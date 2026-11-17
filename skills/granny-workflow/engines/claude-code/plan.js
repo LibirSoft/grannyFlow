@@ -1792,8 +1792,9 @@ function worktreeScript(c, branch, base, path, saved) {
   const owned = `${GIT_DIR} && if [ -f ${ownerFile} ]; then echo ${shellQuote(OWNED)}; fi`;
   return `${excludeScript(c)} && ${find} && if [ -n "$wt" ]; then ${reuse}; elif git show-ref --verify --quiet ${shellQuote(`refs/heads/${branch}`)}; then ${add}; else ${create}; fi && ${owned} && printf '%s%s\\n' ${shellQuote(SAID2)} "$wt"`;
 }
-var madeByGranny = (output) => output.split(`
-`).some((l) => l.trim() === OWNED);
+var printed = (output, marker) => output.split(`
+`).some((l) => l.trim() === `[granny] ${marker}`);
+var madeByGranny = (output) => printed(output, "worktree made by granny");
 function savedNotes(output, saved) {
   const lines = output.split(`
 `).map((l) => l.trim());
@@ -1828,8 +1829,6 @@ function removeWorktreeScript(c, branch, path, saved) {
   ];
   return `{ ${steps.join("; ")}; }`;
 }
-var printed = (output, marker) => output.split(`
-`).some((l) => l.trim() === `[granny] ${marker}`);
 function removalOf(output, branch, saved, code) {
   if (code !== undefined && typeof code !== "number" && !output.split(`
 `).some((l) => l.trim().startsWith("[granny] ")))
