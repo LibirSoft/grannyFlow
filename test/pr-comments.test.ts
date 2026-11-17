@@ -205,7 +205,7 @@ function fake(opts: {
     },
     list: dir => (dir === (opts.at ?? DIR) && records ? Object.keys(records) : opts.also?.includes(dir) ? [] : undefined),
     read: path => records![path.slice((opts.at ?? DIR).length + 1)]!,
-    ...(opts.worktrees === undefined ? {} : { worktrees: () => opts.worktrees! }),
+    ...(opts.worktrees === undefined ? {} : { worktrees: dir => (dir === (opts.at ?? DIR) ? opts.worktrees! : []) }),
     workDir: opts.workDir ?? (() => '.granny'),
     ...(opts.home === undefined ? {} : { home: () => opts.home! }),
     ...(opts.tmp === undefined ? {} : { tmp: () => opts.tmp! }),
