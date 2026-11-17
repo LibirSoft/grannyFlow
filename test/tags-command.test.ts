@@ -252,11 +252,11 @@ describe('granny tag', () => {
     const files = { [USER]: json({ tags: named(1, 12) }), [PROJECT]: json({ tags: named(13, 8) }) }
     const fromUser = run(['add', 'extra', '--fix', '--description', 'x'], files)
     expect(fromUser.code).toBe(1)
-    expect(fromUser.out).toEqual(['tags: at most 20 tags (got 21)'])
+    expect(fromUser.out).toEqual([`tags: at most 20 tags (got 21) in ${USER} and ${PROJECT} together`])
     expect(fromUser.store.get(USER)).toBe(files[USER])
     const fromRepo = run(['add', 'extra', '--fix', '--description', 'x', '--project'], files)
     expect(fromRepo.code).toBe(1)
-    expect(fromRepo.out).toEqual(['tags: at most 20 tags (got 21)'])
+    expect(fromRepo.out).toEqual([`tags: at most 20 tags (got 21) in ${USER} and ${PROJECT} together`])
     expect(fromRepo.store.get(PROJECT)).toBe(files[PROJECT])
   })
 
@@ -264,8 +264,14 @@ describe('granny tag', () => {
     const files = { [PROJECT]: json({ tags: { naming: { description: 'repo naming', points: 500 } } }) }
     const r = run(['add', 'naming', '--points', '20', '--description', 'a name'], files)
     expect(r.code).toBe(1)
-    expect(r.out).toEqual(['tags.naming.points must be an integer between 1 and 100'])
+    expect(r.out).toEqual([`${PROJECT}: tags.naming.points must be an integer between 1 and 100`])
     expect(r.store.has(USER)).toBe(false)
+  })
+
+  it('names the user file in an error that comes from it, when the repo file is written', () => {
+    const files = { [USER]: json({ tags: { naming: { description: 'user naming', points: 500 } } }) }
+    const r = run(['add', 'typo', '--fix', '--description', 'x', '--project'], files)
+    expect({ code: r.code, out: r.out, project: r.store.has(PROJECT) }).toEqual({ code: 1, out: [`${USER}: tags.naming.points must be an integer between 1 and 100`], project: false })
   })
 
   it('keeps a name such as constructor an ordinary tag name, not a property of the object', () => {

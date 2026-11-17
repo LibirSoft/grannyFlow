@@ -136,8 +136,11 @@ function merged(...layers: Array<Obj | undefined>): Obj {
 
 const checkAfter = (store: Store, project: boolean, tags: Obj) => {
   const own = tagErrors(merged(tags))
-  const layered = tagErrors(project ? merged(store.user.tags, tags) : merged(tags, store.project?.tags))
-  return [...new Set([...own, ...layered])]
+  const other = project ? store.user : store.project
+  if (other === undefined) return own
+  const layered = tagErrors(project ? merged(other.tags, tags) : merged(tags, other.tags))
+  const fromOther = layered.filter(m => !own.includes(m))
+  return [...own, ...fromOther.map(m => (m.startsWith('tags: ') ? `${m} in ${store.user.path} and ${store.project!.path} together` : `${other.path}: ${m}`))]
 }
 
 function save(io: TagsIo, path: string, object: Obj): string | undefined {
