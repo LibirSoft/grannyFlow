@@ -23,6 +23,14 @@ describe('the worktree scripts as text', () => {
     expect(savedDir(c, '/work/a', 'feat%2Fx')).not.toBe(savedDir(c, '/work/a', 'feat/x'))
   })
 
+  it('caps the saved dir name at 200 bytes, and keeps long branch names apart', () => {
+    const long = `feat/${'a'.repeat(250)}`
+    expect(savedKey(long).length).toBeLessThanOrEqual(200)
+    expect(savedKey(long)).not.toBe(savedKey(`feat/${'a'.repeat(249)}b`))
+    expect(savedKey(`feat/${'é'.repeat(120)}`).length).toBeLessThanOrEqual(200)
+    expect(savedKey('feat/x')).toBe('feat%2Fx')
+  })
+
   it('leaves the saved dir out of a setup script that is given none, and marks the worktree either way', () => {
     const lane = worktreeScript(c, 'feat/x--s2-two', 'main', '/work/a-worktrees/feat-x--s2-two')
     expect(lane).not.toContain('branches')
@@ -131,6 +139,20 @@ describe('the worktree scripts in a real git repo', () => {
     expect(readFileSync(join(saved, "review it's.md"), 'utf8')).toBe('r\n')
     expect(readFileSync(join(saved, 'trail/worktree-paths'), 'utf8')).toBe(`${wt}\n`)
     expect(remove().end).toEqual({ removed: true, saved })
+  })
+
+  it('saves the work dir files of a branch name too long for one file name, and removes the worktree', () => {
+    for (const [i, branch] of [`feat/${'a'.repeat(250)}`, `feat/${'é'.repeat(120)}`].entries()) {
+      const path = join(root, 'my repo-worktrees', `long-${i}`)
+      const dir = savedDir(c, repo, branch)
+      expect(sh(worktreeScript(c, branch, 'main', path, dir)).code).toBe(0)
+      mkdirSync(join(path, '.granny'), { recursive: true })
+      writeFileSync(join(path, '.granny/PR-BODY.md'), `# ${i}\n`)
+      const r = sh(removeWorktreeScript(c, branch, path, dir))
+      expect(removalOf(r.output, branch, dir)).toEqual({ removed: true, saved: dir })
+      expect(readFileSync(join(dir, 'PR-BODY.md'), 'utf8')).toBe(`# ${i}\n`)
+      expect(existsSync(path)).toBe(false)
+    }
   })
 
   it('removes a worktree with no work dir, and says nothing was saved', () => {

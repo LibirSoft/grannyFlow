@@ -40,7 +40,20 @@ export function excludeScript(c: GrannyConfig): string {
   return `ex="$(git rev-parse --git-common-dir)/info/exclude" && mkdir -p "\${ex%/*}" && { grep -qxF -e ${entry} "$ex" 2>/dev/null || { if [ -s "$ex" ] && [ -n "$(tail -c 1 "$ex")" ]; then echo >> "$ex"; fi; printf '%s\\n' ${entry} >> "$ex"; }; }`
 }
 
-export const savedKey = (branch: string) => encodeURIComponent(branch).replace(/[!'()*~]/g, ch => `%${ch.charCodeAt(0).toString(16).toUpperCase()}`)
+const KEY_MAX = 200
+
+const hashOf = (text: string) => {
+  let h = 0x811c9dc5
+  for (let i = 0; i < text.length; i++) {
+    h = Math.imul(h ^ text.charCodeAt(i), 0x01000193)
+  }
+  return (h >>> 0).toString(16).padStart(8, '0')
+}
+
+export const savedKey = (branch: string) => {
+  const key = encodeURIComponent(branch).replace(/[!'()*~]/g, ch => `%${ch.charCodeAt(0).toString(16).toUpperCase()}`)
+  return key.length <= KEY_MAX ? key : `${key.slice(0, KEY_MAX - 9)}-${hashOf(key)}`
+}
 
 export const savedDir = (c: Pick<GrannyConfig, 'workDir'>, repo: string, branch: string) => `${trimPath(repo)}/${workOf(c)}/branches/${savedKey(branch)}`
 

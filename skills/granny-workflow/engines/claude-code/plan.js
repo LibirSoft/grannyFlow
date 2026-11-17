@@ -1765,7 +1765,18 @@ function excludeScript(c) {
   const entry = shellQuote(`/${c.workDir}/`);
   return `ex="$(git rev-parse --git-common-dir)/info/exclude" && mkdir -p "\${ex%/*}" && { grep -qxF -e ${entry} "$ex" 2>/dev/null || { if [ -s "$ex" ] && [ -n "$(tail -c 1 "$ex")" ]; then echo >> "$ex"; fi; printf '%s\\n' ${entry} >> "$ex"; }; }`;
 }
-var savedKey = (branch) => encodeURIComponent(branch).replace(/[!'()*~]/g, (ch) => `%${ch.charCodeAt(0).toString(16).toUpperCase()}`);
+var KEY_MAX = 200;
+var hashOf = (text) => {
+  let h = 2166136261;
+  for (let i = 0;i < text.length; i++) {
+    h = Math.imul(h ^ text.charCodeAt(i), 16777619);
+  }
+  return (h >>> 0).toString(16).padStart(8, "0");
+};
+var savedKey = (branch) => {
+  const key = encodeURIComponent(branch).replace(/[!'()*~]/g, (ch) => `%${ch.charCodeAt(0).toString(16).toUpperCase()}`);
+  return key.length <= KEY_MAX ? key : `${key.slice(0, KEY_MAX - 9)}-${hashOf(key)}`;
+};
 var savedDir = (c, repo, branch) => `${trimPath(repo)}/${workOf(c)}/branches/${savedKey(branch)}`;
 function worktreeScript(c, branch, base, path, saved) {
   const b = shellQuote(branch);
