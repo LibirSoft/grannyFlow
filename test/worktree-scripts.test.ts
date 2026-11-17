@@ -207,6 +207,27 @@ describe('the worktree scripts in a real git repo', () => {
     expect(readFileSync(join(repo, '.granny/branches', aside[0]!, 'PR-BODY.md'), 'utf8')).toBe('# one\n')
   })
 
+  it('says so when the saved files of an earlier branch cannot be moved aside, and leaves them where they are', () => {
+    setup()
+    workDir({ 'PR-BODY.md': '# one\n' })
+    remove()
+    sh('git branch -D feat/x')
+    const bin = join(root, 'failing-bin')
+    mkdirSync(bin)
+    writeFileSync(join(bin, 'mv'), '#!/bin/sh\nexit 1\n')
+    chmodSync(join(bin, 'mv'), 0o755)
+    const path = process.env.PATH ?? ''
+    process.env.PATH = `${bin}:${path}`
+    try {
+      const fresh = setup()
+      expect(madeByGranny(fresh.output)).toBe(true)
+      expect(savedNotes(fresh.output, saved)).toEqual([`${saved} holds the files of an earlier branch of this name, which could not be moved aside - the files of this run are merged into them`])
+      expect(readFileSync(join(saved, 'PR-BODY.md'), 'utf8')).toBe('# one\n')
+    } finally {
+      process.env.PATH = path
+    }
+  })
+
   it('keeps the saved files of a branch apart from a branch whose name differs only in a slash', () => {
     setup()
     workDir({ 'PR-BODY.md': '# feat/x\n' })
