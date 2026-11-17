@@ -9,7 +9,7 @@ import { madeByGranny, removalOf, removeWorktreeScript, reportedWorktree, savedD
 const c = resolveConfig([])
 const WT = '/work/a-worktrees/feat-x'
 const SAVED = '/work/a/.granny/branches/feat%2Fx'
-const REACHED = ['run worktree owned', 'run worktree on branch', 'run worktree clean', 'work dir saved', 'run worktree removed'].map(m => `[granny] ${m}\n`)
+const REACHED = ['run worktree owned', 'run worktree is not where the run starts', 'run worktree on branch', 'run worktree clean', 'work dir saved', 'run worktree removed'].map(m => `[granny] ${m}\n`)
 
 describe('the worktree scripts as text', () => {
   it('names the saved dir per repo and branch', () => {
@@ -66,15 +66,16 @@ describe('the worktree scripts as text', () => {
 
   it('reads how far the removal got', () => {
     const upTo = (n: number, more = '') => REACHED.slice(0, n).join('') + more
-    expect(removalOf(upTo(5), 'feat/x', SAVED)).toEqual({ removed: true, saved: SAVED })
+    expect(removalOf(upTo(6), 'feat/x', SAVED)).toEqual({ removed: true, saved: SAVED })
     expect(removalOf('[granny] run worktree owned\n[granny] run worktree on branch\n[granny] run worktree clean\n[granny] no work dir files\n[granny] run worktree removed\n', 'feat/x', SAVED)).toEqual({ removed: true })
     expect(removalOf('[granny] run worktree gone\n[granny] work dir saved\n', 'feat/x', SAVED)).toEqual({ removed: true, saved: SAVED })
     expect(removalOf('[granny] run worktree gone\n', 'feat/x', SAVED)).toEqual({ removed: true })
     expect(removalOf('No findings.', 'feat/x', SAVED)).toEqual({ removed: false, kept: 'the removal could not confirm that granny created it' })
-    expect(removalOf(upTo(1), 'feat/x', SAVED)).toEqual({ removed: false, kept: 'it is not on feat/x' })
-    expect(removalOf(upTo(2, '?? left.txt\n'), 'feat/x', SAVED)).toEqual({ removed: false, kept: 'uncommitted changes in the worktree' })
-    expect(removalOf(upTo(3), 'feat/x', SAVED)).toEqual({ removed: false, kept: `its work dir files could not be saved to ${SAVED}` })
-    expect(removalOf(upTo(4, 'fatal: locked\n'), 'feat/x', SAVED)).toEqual({ removed: false, kept: 'git worktree remove failed' })
+    expect(removalOf(upTo(1), 'feat/x', SAVED)).toEqual({ removed: false, kept: 'git could not compare the worktree with the checkout the run starts in' })
+    expect(removalOf(upTo(2), 'feat/x', SAVED)).toEqual({ removed: false, kept: 'it is not on feat/x' })
+    expect(removalOf(upTo(3, '?? left.txt\n'), 'feat/x', SAVED)).toEqual({ removed: false, kept: 'uncommitted changes in the worktree' })
+    expect(removalOf(upTo(4), 'feat/x', SAVED)).toEqual({ removed: false, kept: `its work dir files could not be saved to ${SAVED}` })
+    expect(removalOf(upTo(5, 'fatal: locked\n'), 'feat/x', SAVED)).toEqual({ removed: false, kept: 'git worktree remove failed' })
     expect(removalOf(`{ wt=x; echo '[granny] run worktree removed'; }\n`, 'feat/x', SAVED)).toEqual({ removed: false, kept: 'the removal could not confirm that granny created it' })
     expect(removalOf('[granny] run worktree listed\n', 'feat/x', SAVED)).toEqual({ removed: false, kept: 'the worktree folder is gone, but git still lists it - git worktree prune removes the entry' })
     expect(removalOf('[granny] run worktree owned\n[granny] run worktree is where the run starts\n', 'feat/x', SAVED)).toEqual({ removed: false, kept: 'the run was started in this worktree' })
@@ -296,6 +297,14 @@ describe('the worktree scripts in a real git repo', () => {
     workDir({ 'PR-BODY.md': '# one\n' })
     expect(remove().end).toEqual({ removed: true, saved })
     expect(sh('git branch --list feat/x').output).toContain('feat/x')
+  })
+
+  it('reads the checkout the run starts in before it reads the branch', () => {
+    setup()
+    sh('git checkout -q --detach', wt)
+    const r = remove()
+    expect(r.output).toContain('[granny] run worktree is not where the run starts')
+    expect(r.end).toEqual({ removed: false, kept: 'it is not on feat/x' })
   })
 
   it('does not report a worktree removed while git still lists it after its folder was deleted by hand', () => {

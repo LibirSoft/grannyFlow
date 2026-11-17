@@ -55,7 +55,7 @@ describe('the end of a run', () => {
   })
 
   it('says why a removal stopped, and never fails the run over it', async () => {
-    const f = host({}, { code: 1, output: '[granny] run worktree owned\n[granny] run worktree on branch\n?? left.txt\n' })
+    const f = host({}, { code: 1, output: '[granny] run worktree owned\n[granny] run worktree is not where the run starts\n[granny] run worktree on branch\n?? left.txt\n' })
     const r = await runGranny(f.host, input)
     expect(r.worktreeEnd).toEqual({ removed: false, kept: 'uncommitted changes in the worktree' })
     expect(r.final!.prBodyPath).toBe('.granny/PR-BODY.md')
@@ -81,7 +81,7 @@ describe('the end of a run', () => {
   })
 
   it('treats each repo on its own', async () => {
-    const f = fakeHost({ worktree: lanePath, made: true, checks: c => (isRemoval(c) ? (c.includes('/work/b-') ? { code: 1, output: '[granny] run worktree owned\n' } : DONE) : undefined) })
+    const f = fakeHost({ worktree: lanePath, made: true, checks: c => (isRemoval(c) ? (c.includes('/work/b-') ? { code: 1, output: '[granny] run worktree owned\n[granny] run worktree is not where the run starts\n' } : DONE) : undefined) })
     const r = await runGranny(f.host, { repo: A, repos: [B], branch: 'feat/x', stages: [{ name: 'one', task: 'a' }, { name: 'two', task: 'b', repo: B }] })
     expect(r.repos!.map(x => x.worktreeEnd)).toEqual([{ removed: true, saved: SAVED }, { removed: false, kept: 'it is not on feat/x' }])
     expect(r.worktreeEnd).toEqual({ removed: true, saved: SAVED })

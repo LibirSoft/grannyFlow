@@ -1977,7 +1977,7 @@ function removeWorktreeScript(c, branch, path, saved) {
     `wt=${shellQuote(path)}; src="$wt"/${shellQuote(workOf(c))}`,
     `if [ ! -e "$wt" ]; then common=$(git rev-parse --git-common-dir) || exit 1; phys=$(cd "$(dirname "$wt")" 2>/dev/null && pwd -P) && phys="$phys/$(basename "$wt")" || phys="$wt"; if [ -n "$(find "$common/worktrees" -mindepth 2 -maxdepth 2 -name ${OWNER_FILE} -type f -exec grep -lxF -e "$wt" -e "$phys" {} + 2>/dev/null)" ]; then ${MARK("run worktree listed")}; exit 1; fi; ${MARK("run worktree gone")}; if [ -d ${dst} ]; then ${MARK("work dir saved")}; fi; exit 0; fi`,
     `${GIT_DIR} || exit 1; [ -f ${ownerFile} ] || exit 1; ${MARK("run worktree owned")}`,
-    `top=$(git rev-parse --show-toplevel) && wtop=$(git -C "$wt" rev-parse --show-toplevel) || exit 1; if [ "$top" = "$wtop" ]; then ${MARK("run worktree is where the run starts")}; exit 1; fi`,
+    `top=$(git rev-parse --show-toplevel) && wtop=$(git -C "$wt" rev-parse --show-toplevel) || exit 1; if [ "$top" = "$wtop" ]; then ${MARK("run worktree is where the run starts")}; exit 1; fi; ${MARK("run worktree is not where the run starts")}`,
     `[ "$(git -C "$wt" symbolic-ref -q HEAD)" = ${shellQuote(`refs/heads/${branch}`)} ] || exit 1; ${MARK("run worktree on branch")}`,
     `changes=$(git -C "$wt" status --porcelain) || exit 1; if [ -n "$changes" ]; then git -C "$wt" status --short; exit 1; fi; ${MARK("run worktree clean")}`,
     `if [ -d "$src" ]; then ( ${save} ) || exit 1; ${MARK("work dir saved")}; else ${MARK("no work dir files")}; fi`,
@@ -2000,6 +2000,8 @@ function removalOf(output, branch, saved, code) {
     return { removed: false, kept: "the removal could not confirm that granny created it" };
   if (reached("run worktree is where the run starts"))
     return { removed: false, kept: "the run was started in this worktree" };
+  if (!reached("run worktree is not where the run starts"))
+    return { removed: false, kept: "git could not compare the worktree with the checkout the run starts in" };
   if (!reached("run worktree on branch"))
     return { removed: false, kept: `it is not on ${branch}` };
   if (!reached("run worktree clean"))
