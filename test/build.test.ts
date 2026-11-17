@@ -596,4 +596,48 @@ esac
       rmSync(dir, { recursive: true, force: true })
     }
   })
+
+  it('reads a removed worktree\'s paths from the trail\'s worktree-paths file, and writes none of them', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'granny-pr-wt-'))
+    try {
+      const repo = join(dir, 'repo')
+      const worktree = join(dir, 'repo-worktrees', 'feat-x')
+      const git = (...args: string[]) => {
+        const r = spawnSync('git', ['-C', repo, '-c', 'commit.gpgsign=false', ...args], { encoding: 'utf8', env: { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' } })
+        expect(r.status).toBe(0)
+        return r.stdout.trim()
+      }
+      mkdirSync(repo)
+      git('init', '-q', '-b', 'main')
+      writeFileSync(join(repo, 'a.ts'), 'one\n')
+      git('add', 'a.ts')
+      git('commit', '-q', '-m', 'base')
+      git('checkout', '-q', '-b', 'feat')
+      writeFileSync(join(repo, 'a.ts'), 'one\ntwo\n')
+      git('commit', '-q', '-am', 'two')
+      const head = git('rev-parse', 'HEAD')
+      const record = {
+        version: 1,
+        loop: 's1',
+        name: 'one',
+        round: 1,
+        base: 'main',
+        reviewedSha: head,
+        reviewers: [{ name: 'codex', engine: 'auto' }],
+        findings: [{ id: 'codex-F1', reviewer: 'codex', severity: 'P2', file: join(worktree, 'a.ts'), line: 2, title: 'Two', detail: `d in ${worktree}/a.ts`, route: 'residual', decision: { rule: 8, action: 'residual', why: 'low' } }],
+        outcome: 'residual-only',
+      }
+      mkdirSync(join(repo, '.granny/trail'), { recursive: true })
+      writeFileSync(join(repo, '.granny/trail/s1-r1.json'), JSON.stringify(record))
+      writeFileSync(join(repo, '.granny/trail/worktree-paths'), `${worktree}\n`)
+      const env = { ...process.env, GRANNY_CONFIG: join(dir, 'none.json') }
+      const r = spawnSync('node', [script, '--out', 'plan.json', '--base', 'main'], { cwd: repo, encoding: 'utf8', env })
+      expect({ code: r.status, stdout: r.stdout, stderr: r.stderr }).toEqual({ code: 0, stdout: 'wrote 1 review to plan.json\n', stderr: '' })
+      const text = readFileSync(join(repo, 'plan.json'), 'utf8')
+      expect(text).not.toContain('repo-worktrees')
+      expect(JSON.parse(text)).toMatchObject({ reviews: [{ loop: 's1', round: 1, commit: head, comments: [{ path: 'a.ts', oldPath: 'a.ts', line: 2, kind: 'added' }] }] })
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
 })
