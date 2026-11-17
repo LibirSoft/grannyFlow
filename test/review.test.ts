@@ -637,6 +637,23 @@ describe('config tags', () => {
     expect(judged('x', { tag: 'style' })).toMatchObject({ priority: 60, tag: 'style', decision: { rule: 8, action: 'residual', why: 'under the bar: minor/edge/trivial -> 40 + 20 (tag style) = 60' } })
   })
 
+  it('adds a points tag to the priority of the classes the ratchet raised', () => {
+    const earlier: Finding = { ...f('codex-F1'), verdict: 'confirmed', impact: 'moderate', likelihood: 'edge', fixCost: 'small', scope: 'in-scope', evidence: 'src/a.ts:3 - x', priority: 55 }
+    const d = decide(
+      { ...f('codex-F2'), repeatOf: 'r1/codex-F1' },
+      { verdict: 'confirmed', impact: 'moderate', likelihood: 'rare', fixCost: 'small', scope: 'in-scope', evidence: 'src/a.ts:3 - x', tag: 'style' },
+      tagged,
+      () => false,
+      x => (x.repeatOf === 'r1/codex-F1' ? earlier : undefined),
+    )
+    expect(d).toMatchObject({
+      likelihood: 'edge',
+      priority: 75,
+      tag: 'style',
+      decision: { rule: 7, why: 'priority 75 > threshold 70 (moderate/edge/small -> 55 + 20 (tag style) = 75)', raised: 'repeat of r1/codex-F1: likelihood rare -> edge' },
+    })
+  })
+
   it('clamps a points tag to 100 and sums it in the why of rules 6 and 7, and a fix tag keeps the plain why of rule 6', () => {
     expect(judged('x', { impact: 'moderate', likelihood: 'common', fixCost: 'small', tag: 'naming' })).toMatchObject({
       priority: 100,
