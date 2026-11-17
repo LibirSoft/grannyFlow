@@ -140,6 +140,44 @@ describe('config tags in a run', () => {
     expect(r.stages[0]!.residual[0]).not.toHaveProperty('tag')
   })
 
+  it('does not send a repeat of a declined finding to the fixer through a tagged duplicate of it', async () => {
+    const f = fakeHost({
+      reviews: [review(reviewLine('P2', 'Misspelt word')), review(reviewLine('P2', 'Misspelt word again'), reviewLine('P3', 'Misspelt word', 'src/c.ts', 5)), 'No findings.'],
+      scores: [
+        { 'codex-F1': { verdict: 'confirmed', impact: 'moderate', likelihood: 'common', fixCost: 'small', scope: 'in-scope', evidence: 'src/a.ts:3 - misspelt word' } },
+        {
+          'codex-F1': { verdict: 'confirmed', impact: 'moderate', likelihood: 'edge', fixCost: 'large', scope: 'in-scope', evidence: 'src/a.ts:3 - misspelt word', repeatOf: 'r1/codex-F1' },
+          'codex-F2': { score: 40, tag: 'typo', duplicateOf: 'codex-F1' },
+        },
+      ],
+      override: declineIn('fix core r1'),
+    })
+    const r = await runGranny(f.host, run({ config: { tags: TYPO, maxRounds: 3 } }))
+    expect(f.calls.some(c => c.label === 'fix core r2')).toBe(false)
+    expect(r.stages[0]).toMatchObject({ outcome: 'residual-only', rounds: 2 })
+    expect(r.stages[0]!.residual).toEqual([expect.objectContaining({ repeatOf: 'r1/codex-F1', decision: expect.objectContaining({ rule: 8 }) })])
+    expect(r.stages[0]!.residual[0]).not.toHaveProperty('tag')
+  })
+
+  it('does not send a declined repeat to the fixer through a tagged finding it is merged into', async () => {
+    const f = fakeHost({
+      reviews: [review(reviewLine('P2', 'Misspelt word')), review(reviewLine('P2', 'Misspelt word again'), reviewLine('P3', 'Misspelt word', 'src/c.ts', 5)), 'No findings.'],
+      scores: [
+        { 'codex-F1': { verdict: 'confirmed', impact: 'moderate', likelihood: 'common', fixCost: 'small', scope: 'in-scope', evidence: 'src/a.ts:3 - misspelt word' } },
+        {
+          'codex-F1': { verdict: 'confirmed', impact: 'moderate', likelihood: 'edge', fixCost: 'large', scope: 'in-scope', evidence: 'src/a.ts:3 - misspelt word', repeatOf: 'r1/codex-F1', duplicateOf: 'codex-F2' },
+          'codex-F2': { score: 40, tag: 'typo' },
+        },
+      ],
+      override: declineIn('fix core r1'),
+    })
+    const r = await runGranny(f.host, run({ config: { tags: TYPO, maxRounds: 3 } }))
+    expect(f.calls.some(c => c.label === 'fix core r2')).toBe(false)
+    expect(r.stages[0]).toMatchObject({ outcome: 'residual-only', rounds: 2 })
+    expect(r.stages[0]!.residual).toEqual([expect.objectContaining({ id: 'codex-F2', duplicates: ['codex-F1'], decision: expect.objectContaining({ rule: 8 }) })])
+    expect(r.stages[0]!.residual[0]).not.toHaveProperty('tag')
+  })
+
   it('keeps tags out of the plan review judge, and a plan finding it tags stays residual', async () => {
     const PLAN = '/plans/v1.md'
     const f = fakeHost({ reviews: [review(reviewLine('P2', 'Misspelt plan word', PLAN))], scores: [{ 'codex-F1': { score: 40, tag: 'typo' } }] })

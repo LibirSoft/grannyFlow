@@ -561,9 +561,8 @@ var isBlocker = (f) => /^\s*(p0|p1|critical|high)\b/i.test(String(f.severity ?? 
 var JUDGED = ["verdict", "impact", "likelihood", "fixCost", "scope", "evidence", "priority", "tag", "reason", "decision"];
 var fixes = (f) => f.decision?.action !== "residual";
 var rank = (f) => f.priority ?? -1;
-function mergeDuplicates(findings, duplicateOf) {
-  const ids = new Set(findings.map((f) => f.id));
-  const keeper = (id) => {
+function keeperOf(duplicateOf, ids) {
+  return (id) => {
     const seen = new Set([id]);
     for (let current = id;; ) {
       const next = duplicateOf.get(current);
@@ -575,6 +574,10 @@ function mergeDuplicates(findings, duplicateOf) {
       current = next;
     }
   };
+}
+function mergeDuplicates(findings, duplicateOf) {
+  const ids = new Set(findings.map((f) => f.id));
+  const keeper = keeperOf(duplicateOf, ids);
   const into = new Map;
   for (const f of findings) {
     const k = keeper(f.id);

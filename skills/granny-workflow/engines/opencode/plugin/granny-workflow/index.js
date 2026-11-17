@@ -564,9 +564,8 @@ var isBlocker = (f) => /^\s*(p0|p1|critical|high)\b/i.test(String(f.severity ?? 
 var JUDGED = ["verdict", "impact", "likelihood", "fixCost", "scope", "evidence", "priority", "tag", "reason", "decision"];
 var fixes = (f) => f.decision?.action !== "residual";
 var rank = (f) => f.priority ?? -1;
-function mergeDuplicates(findings, duplicateOf) {
-  const ids = new Set(findings.map((f) => f.id));
-  const keeper = (id) => {
+function keeperOf(duplicateOf, ids) {
+  return (id) => {
     const seen = new Set([id]);
     for (let current = id;; ) {
       const next = duplicateOf.get(current);
@@ -578,6 +577,10 @@ function mergeDuplicates(findings, duplicateOf) {
       current = next;
     }
   };
+}
+function mergeDuplicates(findings, duplicateOf) {
+  const ids = new Set(findings.map((f) => f.id));
+  const keeper = keeperOf(duplicateOf, ids);
   const into = new Map;
   for (const f of findings) {
     const k = keeper(f.id);
@@ -2693,7 +2696,8 @@ the last repair's deviations: ${deviations}` : ""}`;
         host.log(`${name} r${round}: ${blockers.length} P0/P1 finding(s) go to the implementer without the judge: ${blockers.map((f) => f.id).join(", ")}`);
       }
       const declinedBefore = (f) => f.repeatOf !== undefined && declined.has(f.repeatOf);
-      const policy = { threshold: config.threshold, alwaysFix: config.alwaysFix, rideAlong: config.rideAlong, ...subject.kind === "diff" && Object.keys(config.tags).length ? { tags: config.tags } : {} };
+      const untagged = { threshold: config.threshold, alwaysFix: config.alwaysFix, rideAlong: config.rideAlong };
+      const policy = subject.kind === "diff" && Object.keys(config.tags).length ? { ...untagged, tags: config.tags } : untagged;
       let findings = found.map((f) => decide(f, undefined, policy, declinedBefore));
       unmerged = findings;
       if (judged.length) {
@@ -2701,11 +2705,17 @@ the last repair's deviations: ${deviations}` : ""}`;
         const label = `judge ${name} r${round}`;
         const judgedIds = new Set(judged.map((f) => f.id));
         const blockerIds = new Set(blockers.map((f) => f.id));
-        const decideAll = (per) => found.map((f) => {
-          const s = judgedIds.has(f.id) ? per.find((x) => x.id === f.id) : undefined;
-          const repeat = typeof s?.repeatOf === "string" && ledger.has(s.repeatOf) ? { repeatOf: s.repeatOf } : {};
-          return decide({ ...f, ...repeat }, s, policy, declinedBefore, earlierOf);
-        });
+        const duplicatesOf = (per) => new Map(per.filter((x) => judgedIds.has(x.id) && typeof x.duplicateOf === "string" && judgedIds.has(x.duplicateOf)).filter((x) => !blockerIds.has(x.id) || blockerIds.has(x.duplicateOf)).map((x) => [x.id, x.duplicateOf]));
+        const decideAll = (per) => {
+          const entries = found.map((f) => {
+            const s = judgedIds.has(f.id) ? per.find((x) => x.id === f.id) : undefined;
+            const repeat = typeof s?.repeatOf === "string" && ledger.has(s.repeatOf) ? { repeatOf: s.repeatOf } : {};
+            return { f: { ...f, ...repeat }, s };
+          });
+          const keeper = keeperOf(duplicatesOf(per), new Set(found.map((f) => f.id)));
+          const declinedGroups = new Set(entries.filter((e) => declinedBefore(e.f)).map((e) => keeper(e.f.id)));
+          return entries.map(({ f, s }) => decide(f, s, declinedGroups.has(keeper(f.id)) ? untagged : policy, declinedBefore, earlierOf));
+        };
         const { per, decided: withScores } = await judgeAnswers({
           at: `${name} r${round}`,
           label,
@@ -2721,8 +2731,7 @@ the last repair's deviations: ${deviations}` : ""}`;
         }) : [];
         if (unknownTags.length)
           host.log(`${name} r${round}: the judge named tag(s) the config does not have - ignored: ${unknownTags.join(", ")}`);
-        const duplicateOf = new Map(per.filter((x) => judgedIds.has(x.id) && typeof x.duplicateOf === "string" && judgedIds.has(x.duplicateOf)).filter((x) => !blockerIds.has(x.id) || blockerIds.has(x.duplicateOf)).map((x) => [x.id, x.duplicateOf]));
-        const merge = mergeDuplicates(withScores, duplicateOf);
+        const merge = mergeDuplicates(withScores, duplicatesOf(per));
         for (const m of merge.merged)
           host.log(`${name} r${round}: judge merged ${m.id} into ${m.into} (duplicate)`);
         unmerged = withScores;

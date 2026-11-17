@@ -112,10 +112,8 @@ const JUDGED = ['verdict', 'impact', 'likelihood', 'fixCost', 'scope', 'evidence
 const fixes = (f: Finding) => f.decision?.action !== 'residual'
 const rank = (f: Finding) => f.priority ?? -1
 
-/** Of merged copies the strongest one's judgement wins: a fix one first, then the higher priority. */
-export function mergeDuplicates(findings: Finding[], duplicateOf: Map<string, string>): { findings: Finding[]; merged: Array<{ id: string; into: string }> } {
-  const ids = new Set(findings.map(f => f.id))
-  const keeper = (id: string): string => {
+export function keeperOf(duplicateOf: Map<string, string>, ids: Set<string>): (id: string) => string {
+  return (id: string): string => {
     const seen = new Set([id])
     for (let current = id; ; ) {
       const next = duplicateOf.get(current)
@@ -125,6 +123,12 @@ export function mergeDuplicates(findings: Finding[], duplicateOf: Map<string, st
       current = next
     }
   }
+}
+
+/** Of merged copies the strongest one's judgement wins: a fix one first, then the higher priority. */
+export function mergeDuplicates(findings: Finding[], duplicateOf: Map<string, string>): { findings: Finding[]; merged: Array<{ id: string; into: string }> } {
+  const ids = new Set(findings.map(f => f.id))
+  const keeper = keeperOf(duplicateOf, ids)
   const into = new Map<string, string>()
   for (const f of findings) {
     const k = keeper(f.id)
