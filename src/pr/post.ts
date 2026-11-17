@@ -78,14 +78,23 @@ function localRoots(io: PosterIo, toplevel: string, main: string | undefined, di
   return [[toplevel, ''], ...(main ? [[main, ''] as LocalRoot] : []), ...written, ...(home ? [[home, '~'] as LocalRoot] : []), ...tmp]
 }
 
+function holdsEvery(io: PosterIo, holder: string, part: string): boolean {
+  const held = io.list(holder) ?? []
+  return (io.list(part) ?? []).every(name => held.includes(name) && io.read(`${holder}/${name}`) === io.read(`${part}/${name}`))
+}
+
 function findTrail(io: PosterIo, toplevel: string, main: string | undefined, work: string): string {
   const branch = currentBranch(io)
   const saved = (root: string) => `${root}/${work}/branches/${savedKey(branch)}/trail`
   const own = `${toplevel}/${work}/trail`
   const candidates = [...(branch ? [saved(toplevel)] : []), own, ...(branch && main && main !== toplevel ? [saved(main)] : [])]
   const found = candidates.filter(dir => io.list(dir) !== undefined)
-  if (found.length > 1) throw new Error(`more than one trail exists: ${found.join(' and ')}`)
-  return found[0] ?? own
+  if (found.length <= 1) return found[0] ?? own
+  const holding = found.filter(dir => found.every(other => holdsEvery(io, dir, other)))
+  if (!holding.length) throw new Error(`more than one trail exists, and none holds every record of the others: ${found.join(' and ')}`)
+  const chosen = holding.includes(own) ? own : holding[0]!
+  io.print(`note: reading the trail in ${chosen}; it holds every record of ${found.filter(dir => dir !== chosen).join(' and ')}`)
+  return chosen
 }
 
 const commitOf = (io: PosterIo, ref: string) => {

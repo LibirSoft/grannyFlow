@@ -1292,15 +1292,24 @@ function localRoots(io, toplevel, main, dir) {
   const written = (io.worktrees?.(dir) ?? []).filter((path) => path.startsWith("/")).map((path) => [path, ""]);
   return [[toplevel, ""], ...main ? [[main, ""]] : [], ...written, ...home ? [[home, "~"]] : [], ...tmp];
 }
+function holdsEvery(io, holder, part) {
+  const held = io.list(holder) ?? [];
+  return (io.list(part) ?? []).every((name) => held.includes(name) && io.read(`${holder}/${name}`) === io.read(`${part}/${name}`));
+}
 function findTrail(io, toplevel, main, work) {
   const branch = currentBranch(io);
   const saved = (root) => `${root}/${work}/branches/${savedKey(branch)}/trail`;
   const own = `${toplevel}/${work}/trail`;
   const candidates = [...branch ? [saved(toplevel)] : [], own, ...branch && main && main !== toplevel ? [saved(main)] : []];
   const found = candidates.filter((dir) => io.list(dir) !== undefined);
-  if (found.length > 1)
-    throw new Error(`more than one trail exists: ${found.join(" and ")}`);
-  return found[0] ?? own;
+  if (found.length <= 1)
+    return found[0] ?? own;
+  const holding = found.filter((dir) => found.every((other) => holdsEvery(io, dir, other)));
+  if (!holding.length)
+    throw new Error(`more than one trail exists, and none holds every record of the others: ${found.join(" and ")}`);
+  const chosen = holding.includes(own) ? own : holding[0];
+  io.print(`note: reading the trail in ${chosen}; it holds every record of ${found.filter((dir) => dir !== chosen).join(" and ")}`);
+  return chosen;
 }
 var commitOf = (io, ref) => {
   const r = io.exec("git", ["rev-parse", "--verify", "--quiet", `${ref}^{commit}`]);

@@ -228,6 +228,9 @@ describe('skill docs', () => {
     expect(md).toContain('Never write, edit or post review comments yourself. Only the script posts them.')
     expect(md).toContain('No push, no `git remote add`, no PR, no tag - the user decides.')
     expect(md).toContain('`trail.failed`')
+    expect(md).toContain('If it stops with `more than one trail exists`, it has posted nothing: run it again with `--trail` set to the checkout\'s own `<workDir>/trail`')
+    expect(config).toContain('none holds every record of the others')
+    expect(readRoot('CHANGELOG.md')).toContain('and stops, naming them, when none holds every record of the others')
     for (const host of ['claude-code', 'opencode', 'omp', 'cursor']) {
       const ref = read(`references/${host}.md`)
       expect({ host, has: ref.includes('## When the PR is opened') && ref.includes('<skill-dir>/scripts/pr-comments.mjs') }).toEqual({ host, has: true })
