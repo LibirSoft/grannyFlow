@@ -29,13 +29,14 @@ import {
   reviewWaitPrompt,
   tagPrompt,
   worktreeCommandPrompt,
+  worktreeRemovalPrompt,
   type EarlierRound,
   ONE_SHOT_NOTE,
   WHOLE_BRANCH_NOTE,
 } from '../src/core/prompts'
 import { detachedReview, MAX_WAITS, WAIT_SECONDS } from '../src/core/reviewer'
 import { heredocWriteScript } from '../src/core/shell'
-import { excludeScript, worktreeScript } from '../src/core/worktree'
+import { excludeScript, removeWorktreeScript, worktreeScript } from '../src/core/worktree'
 import { readOnlyPrefix } from '../src/adapters/claude-code/readonly'
 
 const root = join(import.meta.dir, '..')
@@ -130,7 +131,8 @@ export function renderPrompts(): string {
   ]
   const stageLedger: EarlierRound[] = [{ ...earlier[0]!, loop: { id: 's<k>', name: 'Stage <k> (<stage name>)' } }]
   const overruled = [{ id: '<id>', repeatOf: 'r1/<reviewer>-F<n>', reason: "<the judge's reason>", said: "<the fixer's reason>" }]
-  const setup = `cd '<repo>' && ${worktreeScript(p.config, '<branch>', '<base>', '<worktreeDir>/<branch-slug>')}`
+  const saved = '<repo>/.granny/branches/<branch-slug>'
+  const setup = `cd '<repo>' && ${worktreeScript(p.config, '<branch>', '<base>', '<worktreeDir>/<branch-slug>', saved)}`
   const job = detachedReview({ script: '', body: '<review script>' }, p.config, '.granny/review-<stage>-r<n>-<name>', '<repo>')
   const sections: Array<[string, string]> = [
     ['Granny - worktree setup, the helper agent on Claude Code (on Cursor, run the command yourself)', worktreeCommandPrompt('<repo>', '<branch>', setup)],
@@ -240,6 +242,10 @@ export function renderPrompts(): string {
         finalReview: { outcome: 'clean', rounds: 1, residual: [], unresolved: [], history: [] },
         reviewOnly: true,
       }),
+    ],
+    [
+      'Granny - worktree removal, the last step of a run with `keepWorktree` off, for a worktree granny created (label `remove worktree`, or `remove worktree <repo name>` for another repo): the helper agent on Claude Code (on opencode and omp granny runs the command itself; on Cursor nothing is removed)',
+      worktreeRemovalPrompt('<repo>', 'remove worktree', `cd '<repo>' && ${removeWorktreeScript(p.config, '<branch>', '<worktreeDir>/<branch-slug>', saved)}`),
     ],
   ]
   return [

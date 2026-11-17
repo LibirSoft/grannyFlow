@@ -1,0 +1,201 @@
+import { afterEach, beforeEach, describe, expect, it } from 'bun:test'
+import { spawnSync } from 'node:child_process'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { resolveConfig } from '../src/core/config'
+import { madeByGranny, removalOf, removeWorktreeScript, reportedWorktree, savedDir, savedNotes, worktreeScript } from '../src/core/worktree'
+
+const c = resolveConfig([])
+const WT = '/work/a-worktrees/feat-x'
+const SAVED = '/work/a/.granny/branches/feat-x'
+const REACHED = ['run worktree owned', 'run worktree on branch', 'run worktree clean', 'work dir saved', 'run worktree removed'].map(m => `[granny] ${m}\n`)
+
+describe('the worktree scripts as text', () => {
+  it('names the saved dir per repo and branch', () => {
+    expect(savedDir(c, '/work/a/', 'feat/x')).toBe(SAVED)
+    expect(savedDir({ workDir: 'tmp/g/' }, '/work/a', 'fix/a b')).toBe('/work/a/tmp/g/branches/fix-a-b')
+  })
+
+  it('leaves the saved dir out of a setup script that is given none, and marks the worktree either way', () => {
+    const lane = worktreeScript(c, 'feat/x--s2-two', 'main', '/work/a-worktrees/feat-x--s2-two')
+    expect(lane).not.toContain('branches')
+    expect(lane).toContain('granny-worktree')
+    const run = worktreeScript(c, 'feat/x', 'main', WT, SAVED)
+    expect(run).toContain(`cp -R ${SAVED}/. "$wt"/.granny/`)
+    expect(run).toContain(`mv ${SAVED} "$old"`)
+    expect(run).not.toContain('\n')
+  })
+
+  it('writes a removal script that is one braced line, never forces, checks before it copies and copies before it removes', () => {
+    const script = removeWorktreeScript(c, 'feat/x', WT, SAVED)
+    expect(script).not.toContain('\n')
+    expect(script).not.toContain('--force')
+    expect(script).not.toContain('git worktree list')
+    expect(script.startsWith('{ wt=')).toBe(true)
+    expect(script.endsWith(`git worktree remove "$wt" || exit 1; echo '[granny] run worktree removed'; }`)).toBe(true)
+    const order = ['granny-worktree', 'symbolic-ref', 'status --porcelain', 'cp -R', 'cmp -s', 'git worktree remove'].map(part => script.indexOf(part))
+    expect(order.every(at => at >= 0)).toBe(true)
+    expect([...order].sort((a, b) => a - b)).toEqual(order)
+  })
+
+  it('reads the mark and the notes of the setup output', () => {
+    expect(madeByGranny('Preparing worktree\n[granny] worktree made by granny\n[granny] worktree: /a/b\n')).toBe(true)
+    expect(madeByGranny('[granny] worktree: /a/b\n')).toBe(false)
+    expect(madeByGranny("echo '[granny] worktree made by granny'\n")).toBe(false)
+    expect(reportedWorktree('[granny] worktree made by granny\n[granny] worktree: /a/b\n')).toBe('/a/b')
+    expect(savedNotes('[granny] work dir restored\n', SAVED)).toEqual([`work dir files of an earlier run restored from ${SAVED}`])
+    expect(savedNotes('[granny] work dir not restored\n', SAVED)).toEqual([`the work dir files of an earlier run could not be restored from ${SAVED} - they stay there`])
+    expect(savedNotes(`[granny] earlier work dir files moved aside: ${SAVED}.before-20261117-120000\n`, SAVED)).toEqual([`${SAVED} held the files of an earlier branch of this name - moved to ${SAVED}.before-20261117-120000`])
+    expect(savedNotes('[granny] worktree: /a/b\n', SAVED)).toEqual([])
+  })
+
+  it('reads how far the removal got', () => {
+    const upTo = (n: number, more = '') => REACHED.slice(0, n).join('') + more
+    expect(removalOf(upTo(5), 'feat/x', SAVED)).toEqual({ removed: true, saved: SAVED })
+    expect(removalOf('[granny] run worktree owned\n[granny] run worktree on branch\n[granny] run worktree clean\n[granny] no work dir files\n[granny] run worktree removed\n', 'feat/x', SAVED)).toEqual({ removed: true })
+    expect(removalOf('[granny] run worktree gone\n[granny] work dir saved\n', 'feat/x', SAVED)).toEqual({ removed: true, saved: SAVED })
+    expect(removalOf('[granny] run worktree gone\n', 'feat/x', SAVED)).toEqual({ removed: true })
+    expect(removalOf('No findings.', 'feat/x', SAVED)).toEqual({ removed: false, kept: 'the removal could not confirm that granny created it' })
+    expect(removalOf(upTo(1), 'feat/x', SAVED)).toEqual({ removed: false, kept: 'it is not on feat/x' })
+    expect(removalOf(upTo(2, '?? left.txt\n'), 'feat/x', SAVED)).toEqual({ removed: false, kept: 'uncommitted changes in the worktree' })
+    expect(removalOf(upTo(3), 'feat/x', SAVED)).toEqual({ removed: false, kept: `its work dir files could not be saved to ${SAVED}` })
+    expect(removalOf(upTo(4, 'fatal: locked\n'), 'feat/x', SAVED)).toEqual({ removed: false, kept: 'git worktree remove failed' })
+    expect(removalOf(`{ wt=x; echo '[granny] run worktree removed'; }\n`, 'feat/x', SAVED)).toEqual({ removed: false, kept: 'the removal could not confirm that granny created it' })
+  })
+})
+
+describe('the worktree scripts in a real git repo', () => {
+  let root: string
+  let repo: string
+  let wt: string
+  let saved: string
+  const sh = (command: string, cwd = repo) => {
+    const r = spawnSync('bash', ['-c', command], { cwd, encoding: 'utf8' })
+    return { code: r.status, output: r.stdout + r.stderr }
+  }
+  const quoted = (path: string) => `'${path.replaceAll("'", `'\\''`)}'`
+  const setup = () => sh(worktreeScript(c, 'feat/x', 'main', wt, saved))
+  const remove = () => {
+    const r = sh(removeWorktreeScript(c, 'feat/x', wt, saved))
+    return { ...r, end: removalOf(r.output, 'feat/x', saved) }
+  }
+  const workDir = (files: Record<string, string>) => {
+    for (const [name, text] of Object.entries(files)) {
+      mkdirSync(join(wt, '.granny', name, '..'), { recursive: true })
+      writeFileSync(join(wt, '.granny', name), text)
+    }
+  }
+  beforeEach(() => {
+    root = realpathSync(mkdtempSync(join(tmpdir(), "granny sc's ")))
+    repo = join(root, 'my repo')
+    wt = join(root, 'my repo-worktrees', 'feat-x')
+    saved = savedDir(c, repo, 'feat/x')
+    mkdirSync(repo)
+    sh('git init -q -b main && git config user.email t@t && git config user.name t && echo a > a.txt && git add a.txt && git commit -qm init')
+  })
+  afterEach(() => rmSync(root, { recursive: true, force: true }))
+
+  it('marks a worktree it creates, for a new branch and for an existing one, and no worktree it reuses', () => {
+    expect(madeByGranny(setup().output)).toBe(true)
+    expect(madeByGranny(setup().output)).toBe(true)
+    sh(`git worktree remove ${quoted(wt)}`)
+    expect(madeByGranny(setup().output)).toBe(true)
+    sh(`git worktree remove ${quoted(wt)} && git worktree add -q ${quoted(wt)} feat/x`)
+    const reused = setup()
+    expect(reportedWorktree(reused.output)).toBe(wt)
+    expect(madeByGranny(reused.output)).toBe(false)
+    sh(`git worktree remove ${quoted(wt)} && git checkout -q feat/x`)
+    expect(madeByGranny(setup().output)).toBe(false)
+  })
+
+  it('saves the work dir files, removes the worktree and leaves the branch', () => {
+    setup()
+    workDir({ 'PR-BODY.md': '# one\n', 'trail/s1-r1.json': '{}\n', "review it's.md": 'r\n' })
+    const r = remove()
+    expect(r.code).toBe(0)
+    expect(r.end).toEqual({ removed: true, saved })
+    expect(existsSync(wt)).toBe(false)
+    expect(sh('git branch --list feat/x').output).toContain('feat/x')
+    expect(sh('git worktree list').output.trim().split('\n')).toHaveLength(1)
+    expect(readFileSync(join(saved, 'PR-BODY.md'), 'utf8')).toBe('# one\n')
+    expect(readFileSync(join(saved, "review it's.md"), 'utf8')).toBe('r\n')
+    expect(readFileSync(join(saved, 'trail/worktree-paths'), 'utf8')).toBe(`${wt}\n`)
+    expect(remove().end).toEqual({ removed: true, saved })
+  })
+
+  it('removes a worktree with no work dir, and says nothing was saved', () => {
+    setup()
+    expect(remove().end).toEqual({ removed: true })
+    expect(existsSync(saved)).toBe(false)
+  })
+
+  for (const [label, spoil, kept] of [
+    ['an untracked file', () => writeFileSync(join(wt, 'left.txt'), 'x'), 'uncommitted changes in the worktree'],
+    ['a changed tracked file', () => writeFileSync(join(wt, 'a.txt'), 'changed\n'), 'uncommitted changes in the worktree'],
+    ['a staged file', () => sh('echo s > s.txt && git add s.txt', wt), 'uncommitted changes in the worktree'],
+    ['another branch checked out', () => sh('git checkout -q -b other', wt), 'it is not on feat/x'],
+    ['a detached HEAD', () => sh('git checkout -q --detach', wt), 'it is not on feat/x'],
+    ['no mark', () => sh('rm "$(git rev-parse --absolute-git-dir)/granny-worktree"', wt), 'the removal could not confirm that granny created it'],
+    ['a lock', () => sh(`git worktree lock ${quoted(wt)}`), 'git worktree remove failed'],
+  ] as const) {
+    it(`leaves a worktree with ${label}, and every file in it`, () => {
+      setup()
+      workDir({ 'PR-BODY.md': '# one\n' })
+      spoil()
+      const r = remove()
+      expect(r.code).not.toBe(0)
+      expect(r.end).toEqual({ removed: false, kept })
+      expect(readFileSync(join(wt, '.granny/PR-BODY.md'), 'utf8')).toBe('# one\n')
+      expect(sh('git worktree list').output.trim().split('\n')).toHaveLength(2)
+    })
+  }
+
+  it('does not remove when a saved copy differs from its file', () => {
+    setup()
+    workDir({ 'PR-BODY.md': '# one\n' })
+    mkdirSync(join(saved, 'PR-BODY.md'), { recursive: true })
+    const r = remove()
+    expect(r.end).toEqual({ removed: false, kept: `its work dir files could not be saved to ${saved}` })
+    expect(existsSync(wt)).toBe(true)
+  })
+
+  it('never removes the main checkout or a worktree the user added, and does nothing from a directory that is not there', () => {
+    const main = sh(removeWorktreeScript(c, 'main', repo, savedDir(c, repo, 'main')))
+    expect(removalOf(main.output, 'main', 'x')).toEqual({ removed: false, kept: 'the removal could not confirm that granny created it' })
+    sh(`git worktree add -q -b feat/x ${quoted(wt)} main`)
+    expect(remove().end).toEqual({ removed: false, kept: 'the removal could not confirm that granny created it' })
+    expect(existsSync(wt)).toBe(true)
+    const nowhere = sh(`cd /nonexistent-granny-dir && ${removeWorktreeScript(c, 'feat/x', wt, saved)}`)
+    expect(nowhere.code).not.toBe(0)
+    expect(nowhere.output).not.toContain('[granny]')
+  })
+
+  it('copies the saved files back into the worktree it adds for the branch, and keeps the files of both runs', () => {
+    setup()
+    workDir({ 'PR-BODY.md': '# one\n', 'review-a-r1-x.md': 'old\n' })
+    remove()
+    const again = setup()
+    expect(savedNotes(again.output, saved)).toEqual([`work dir files of an earlier run restored from ${saved}`])
+    expect(readFileSync(join(wt, '.granny/PR-BODY.md'), 'utf8')).toBe('# one\n')
+    expect(sh('git status --porcelain', wt).output).toBe('')
+    workDir({ 'PR-BODY.md': '# two\n', 'review-b-r1-x.md': 'new\n' })
+    expect(remove().end).toEqual({ removed: true, saved })
+    expect(readdirSync(saved).sort()).toEqual(['PR-BODY.md', 'review-a-r1-x.md', 'review-b-r1-x.md'])
+    expect(readFileSync(join(saved, 'PR-BODY.md'), 'utf8')).toBe('# two\n')
+  })
+
+  it('moves the saved files aside when it creates the branch anew', () => {
+    setup()
+    workDir({ 'PR-BODY.md': '# one\n' })
+    remove()
+    sh('git branch -D feat/x')
+    const fresh = setup()
+    expect(savedNotes(fresh.output, saved)[0]).toContain(`${saved} held the files of an earlier branch of this name - moved to ${saved}.before-`)
+    expect(existsSync(saved)).toBe(false)
+    expect(existsSync(join(wt, '.granny'))).toBe(false)
+    const aside = readdirSync(join(repo, '.granny/branches'))
+    expect(aside).toHaveLength(1)
+    expect(readFileSync(join(repo, '.granny/branches', aside[0]!, 'PR-BODY.md'), 'utf8')).toBe('# one\n')
+  })
+})

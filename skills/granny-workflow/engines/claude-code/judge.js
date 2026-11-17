@@ -1459,6 +1459,8 @@ var SCHEMAS = {
   }
 };
 
+var OWNER_FILE = "granny-worktree";
+var ownerFile = `"$gd"/${OWNER_FILE}`;
 var branchSlug = (branch) => branch.replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") || "branch";
 function excludeScript(c) {
   const entry = shellQuote(`/${c.workDir}/`);

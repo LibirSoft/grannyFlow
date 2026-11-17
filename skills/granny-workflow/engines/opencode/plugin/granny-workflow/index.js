@@ -1883,6 +1883,13 @@ var trailText = (record) => `${JSON.stringify(record, null, 2)}
 // src/core/worktree.ts
 var SAID2 = "[granny] worktree: ";
 var REPORTED = /^\[granny\] worktree: (\/.*?)\r?$/m;
+var OWNED = "[granny] worktree made by granny";
+var OWNER_FILE = "granny-worktree";
+var RESTORED = "[granny] work dir restored";
+var NOT_RESTORED = "[granny] work dir not restored";
+var ASIDE = "[granny] earlier work dir files moved aside: ";
+var GIT_DIR = 'gd=$(git -C "$wt" rev-parse --absolute-git-dir)';
+var ownerFile = `"$gd"/${OWNER_FILE}`;
 function normalize2(path) {
   const parts = [];
   for (const part of path.split("/")) {
@@ -1909,13 +1916,19 @@ function excludeScript(c) {
   const entry = shellQuote(`/${c.workDir}/`);
   return `ex="$(git rev-parse --git-common-dir)/info/exclude" && mkdir -p "\${ex%/*}" && { grep -qxF -e ${entry} "$ex" 2>/dev/null || { if [ -s "$ex" ] && [ -n "$(tail -c 1 "$ex")" ]; then echo >> "$ex"; fi; printf '%s\\n' ${entry} >> "$ex"; }; }`;
 }
-function worktreeScript(c, branch, base, path) {
+function worktreeScript(c, branch, base, path, saved) {
   const b = shellQuote(branch);
   const find = `wt=$(git worktree list --porcelain | while IFS= read -r l; do case "$l" in "worktree "*) p=\${l#worktree };; "branch refs/heads/"*) if [ "\${l#branch refs/heads/}" = ${b} ]; then printf '%s\\n' "$p"; break; fi;; esac; done)`;
   const reuse = `changes=$(git -C "$wt" status --porcelain) || exit 1; if [ -n "$changes" ]; then printf '[granny] worktree failed: %s has %s checked out with uncommitted changes - commit or discard them, then run again:\\n' "$wt" ${b}; git -C "$wt" status --short; exit 1; fi`;
-  const add = `wt=${shellQuote(path)}; git worktree add "$wt" ${b} || exit 1`;
-  const create = `wt=${shellQuote(path)}; git worktree add -b ${b} "$wt" ${shellQuote(base)} || exit 1`;
-  return `${excludeScript(c)} && ${find} && if [ -n "$wt" ]; then ${reuse}; elif git show-ref --verify --quiet ${shellQuote(`refs/heads/${branch}`)}; then ${add}; else ${create}; fi && printf '%s%s\\n' ${shellQuote(SAID2)} "$wt"`;
+  const own = `${GIT_DIR} && touch ${ownerFile} || :`;
+  const s = saved === undefined ? undefined : shellQuote(saved);
+  const work = shellQuote(workOf(c));
+  const restore = s ? `; if [ -d ${s} ]; then if mkdir -p "$wt"/${work} && cp -R ${s}/. "$wt"/${work}/; then echo ${shellQuote(RESTORED)}; else echo ${shellQuote(NOT_RESTORED)}; fi; fi` : "";
+  const aside = s ? `; if [ -d ${s} ]; then old=${s}.before-$(date +%Y%m%d-%H%M%S); if mv ${s} "$old"; then printf '%s%s\\n' ${shellQuote(ASIDE)} "$old"; fi; fi` : "";
+  const add = `wt=${shellQuote(path)}; git worktree add "$wt" ${b} || exit 1; ${own}${restore}`;
+  const create = `wt=${shellQuote(path)}; git worktree add -b ${b} "$wt" ${shellQuote(base)} || exit 1; ${own}${aside}`;
+  const owned = `${GIT_DIR} && if [ -f ${ownerFile} ]; then echo ${shellQuote(OWNED)}; fi`;
+  return `${excludeScript(c)} && ${find} && if [ -n "$wt" ]; then ${reuse}; elif git show-ref --verify --quiet ${shellQuote(`refs/heads/${branch}`)}; then ${add}; else ${create}; fi && ${owned} && printf '%s%s\\n' ${shellQuote(SAID2)} "$wt"`;
 }
 function reportedWorktree(output) {
   return REPORTED.exec(output)?.[1];
