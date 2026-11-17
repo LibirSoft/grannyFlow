@@ -1594,7 +1594,7 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
     const saved = savedDir(config, repo, input.branch)
     try {
       const r = await shell(repo === primary ? 'remove worktree' : `remove worktree ${baseName(repo)}`, 'PR ready', removeWorktreeScript(config, input.branch, cwd, saved), repo, worktreeRemovalPrompt)
-      const end = removalOf(r.output, input.branch, saved)
+      const end = removalOf(r.output, input.branch, saved, r.code)
       if (!end.removed) return keep(end.kept, `: ${r.output.trim().slice(-500)}`)
       host.log(`${named} removed: ${cwd} - the branch ${input.branch} is left${end.saved ? `, and its work dir files are in ${end.saved}` : ''}`)
       return end

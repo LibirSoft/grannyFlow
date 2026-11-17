@@ -95,4 +95,12 @@ describe('the end of a run', () => {
     expect(call.prompt).toContain(`\n( cd ${A} && { wt=${WT}; `)
     expect(call.prompt).toContain("copies the run's work dir files into the repo and then removes the worktree granny created for the run")
   })
+
+  it('reports a removal whose helper returned nothing as a runner failure, not as a failed ownership check', async () => {
+    const f = fakeHost({ name: 'claude-code', direct: false, worktree: lanePath, made: true, override: req => (req.label === 'remove worktree' ? null : undefined) })
+    const r = await runGranny(f.host, input)
+    expect(r.worktreeEnd).toEqual({ removed: false, kept: 'the removal did not run: its runner returned no exit code' })
+    expect(f.logs.some(l => l.includes('the removal did not run') && l.includes('the remove worktree runner returned nothing'))).toBe(true)
+    expect(f.commands.some(isRemoval)).toBe(false)
+  })
 })

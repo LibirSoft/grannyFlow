@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test'
 import { spawnSync } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { resolveConfig } from '../src/core/config'
@@ -67,6 +67,9 @@ describe('the worktree scripts as text', () => {
     expect(removalOf(upTo(3), 'feat/x', SAVED)).toEqual({ removed: false, kept: `its work dir files could not be saved to ${SAVED}` })
     expect(removalOf(upTo(4, 'fatal: locked\n'), 'feat/x', SAVED)).toEqual({ removed: false, kept: 'git worktree remove failed' })
     expect(removalOf(`{ wt=x; echo '[granny] run worktree removed'; }\n`, 'feat/x', SAVED)).toEqual({ removed: false, kept: 'the removal could not confirm that granny created it' })
+    expect(removalOf('[granny] run worktree listed\n', 'feat/x', SAVED)).toEqual({ removed: false, kept: 'the worktree folder is gone, but git still lists it - git worktree prune removes the entry' })
+    expect(removalOf('the remove worktree runner returned nothing', 'feat/x', SAVED, '?')).toEqual({ removed: false, kept: 'the removal did not run: its runner returned no exit code' })
+    expect(removalOf('No findings.', 'feat/x', SAVED, 1)).toEqual({ removed: false, kept: 'the removal could not confirm that granny created it' })
   })
 })
 
@@ -226,5 +229,47 @@ describe('the worktree scripts in a real git repo', () => {
     workDir({ 'PR-BODY.md': '# one\n' })
     expect(remove().end).toEqual({ removed: true, saved })
     expect(sh('git branch --list feat/x').output).toContain('feat/x')
+  })
+
+  it('does not report a worktree removed while git still lists it after its folder was deleted by hand', () => {
+    setup()
+    workDir({ 'PR-BODY.md': '# one\n' })
+    rmSync(wt, { recursive: true, force: true })
+    const r = remove()
+    expect(r.code).not.toBe(0)
+    expect(r.end).toEqual({ removed: false, kept: 'the worktree folder is gone, but git still lists it - git worktree prune removes the entry' })
+    expect(sh('git worktree list').output.trim().split('\n')).toHaveLength(2)
+  })
+
+  it('reports a worktree that git already removed as removed', () => {
+    setup()
+    sh(`git worktree remove ${quoted(wt)}`)
+    expect(remove().end).toEqual({ removed: true })
+  })
+
+  it('gives a second move aside within the same second a name of its own', () => {
+    const bin = join(root, 'fake-bin')
+    mkdirSync(bin)
+    writeFileSync(join(bin, 'date'), '#!/bin/sh\necho 20261117-120000\n')
+    chmodSync(join(bin, 'date'), 0o755)
+    const path = process.env.PATH ?? ''
+    process.env.PATH = `${bin}:${path}`
+    try {
+      setup()
+      workDir({ 'PR-BODY.md': '# one\n' })
+      remove()
+      sh('git branch -D feat/x')
+      const first = /moved aside: (.+)/.exec(setup().output)![1]!.trim()
+      workDir({ 'PR-BODY.md': '# two\n' })
+      expect(remove().end).toEqual({ removed: true, saved })
+      sh('git branch -D feat/x')
+      const second = /moved aside: (.+)/.exec(setup().output)![1]!.trim()
+      expect(second).not.toBe(first)
+      expect(readFileSync(join(first, 'PR-BODY.md'), 'utf8')).toBe('# one\n')
+      expect(readFileSync(join(second, 'PR-BODY.md'), 'utf8')).toBe('# two\n')
+      expect(existsSync(saved)).toBe(false)
+    } finally {
+      process.env.PATH = path
+    }
   })
 })

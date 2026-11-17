@@ -1925,11 +1925,11 @@ function worktreeScript(c, branch, base, path, saved) {
   const b = shellQuote(branch);
   const find = `wt=$(git worktree list --porcelain | while IFS= read -r l; do case "$l" in "worktree "*) p=\${l#worktree };; "branch refs/heads/"*) if [ "\${l#branch refs/heads/}" = ${b} ]; then printf '%s\\n' "$p"; break; fi;; esac; done)`;
   const reuse = `changes=$(git -C "$wt" status --porcelain) || exit 1; if [ -n "$changes" ]; then printf '[granny] worktree failed: %s has %s checked out with uncommitted changes - commit or discard them, then run again:\\n' "$wt" ${b}; git -C "$wt" status --short; exit 1; fi`;
-  const own = `${GIT_DIR} && touch ${ownerFile} || :`;
+  const own = `${GIT_DIR} && printf '%s\\n' "$wt" > ${ownerFile} || :`;
   const s = saved === undefined ? undefined : shellQuote(saved);
   const work = shellQuote(workOf(c));
   const restore = s ? `; if [ -d ${s} ]; then if mkdir -p "$wt"/${work} && cp -R ${s}/. "$wt"/${work}/; then echo ${shellQuote(RESTORED)}; else echo ${shellQuote(NOT_RESTORED)}; fi; fi` : "";
-  const aside = s ? `; if [ -d ${s} ]; then old=${s}.before-$(date +%Y%m%d-%H%M%S); if mv ${s} "$old"; then printf '%s%s\\n' ${shellQuote(ASIDE)} "$old"; fi; fi` : "";
+  const aside = s ? `; if [ -d ${s} ]; then base=${s}.before-$(date +%Y%m%d-%H%M%S); old=$base; n=2; while [ -e "$old" ]; do old=$base-$n; n=$((n+1)); done; if mv ${s} "$old"; then printf '%s%s\\n' ${shellQuote(ASIDE)} "$old"; fi; fi` : "";
   const add = `wt=${shellQuote(path)}; git worktree add "$wt" ${b} || exit 1; ${own}${restore}`;
   const create = `wt=${shellQuote(path)}; git worktree add -b ${b} "$wt" ${shellQuote(base)} || exit 1; ${own}${aside}`;
   const owned = `${GIT_DIR} && if [ -f ${ownerFile} ]; then echo ${shellQuote(OWNED)}; fi`;
@@ -1961,7 +1961,7 @@ function removeWorktreeScript(c, branch, path, saved) {
   ].join("; ");
   const steps = [
     `wt=${shellQuote(path)}; src="$wt"/${shellQuote(workOf(c))}`,
-    `if [ ! -e "$wt" ]; then ${MARK("run worktree gone")}; if [ -d ${dst} ]; then ${MARK("work dir saved")}; fi; exit 0; fi`,
+    `if [ ! -e "$wt" ]; then common=$(git rev-parse --git-common-dir) || exit 1; for m in "$common"/worktrees/*/${OWNER_FILE}; do if [ -f "$m" ] && [ "$(cat "$m")" = "$wt" ]; then ${MARK("run worktree listed")}; exit 1; fi; done; ${MARK("run worktree gone")}; if [ -d ${dst} ]; then ${MARK("work dir saved")}; fi; exit 0; fi`,
     `${GIT_DIR} || exit 1; [ -f ${ownerFile} ] || exit 1; ${MARK("run worktree owned")}`,
     `[ "$(git -C "$wt" symbolic-ref -q HEAD)" = ${shellQuote(`refs/heads/${branch}`)} ] || exit 1; ${MARK("run worktree on branch")}`,
     `changes=$(git -C "$wt" status --porcelain) || exit 1; if [ -n "$changes" ]; then git -C "$wt" status --short; exit 1; fi; ${MARK("run worktree clean")}`,
@@ -1970,9 +1970,14 @@ function removeWorktreeScript(c, branch, path, saved) {
   ];
   return `{ ${steps.join("; ")}; }`;
 }
-function removalOf(output, branch, saved) {
+function removalOf(output, branch, saved, code) {
+  if (code !== undefined && typeof code !== "number" && !output.split(`
+`).some((l) => l.trim().startsWith("[granny] ")))
+    return { removed: false, kept: "the removal did not run: its runner returned no exit code" };
   const reached = (m) => output.split(`
 `).some((l) => l.trim() === `[granny] ${m}`);
+  if (reached("run worktree listed"))
+    return { removed: false, kept: "the worktree folder is gone, but git still lists it - git worktree prune removes the entry" };
   if (reached("run worktree gone") || reached("run worktree removed"))
     return { removed: true, ...reached("work dir saved") ? { saved } : {} };
   if (!reached("run worktree owned"))
@@ -3444,7 +3449,7 @@ ${note}` : note } : result;
     const saved = savedDir(config, repo, input.branch);
     try {
       const r = await shell(repo === primary ? "remove worktree" : `remove worktree ${baseName(repo)}`, "PR ready", removeWorktreeScript(config, input.branch, cwd, saved), repo, worktreeRemovalPrompt);
-      const end = removalOf(r.output, input.branch, saved);
+      const end = removalOf(r.output, input.branch, saved, r.code);
       if (!end.removed)
         return keep(end.kept, `: ${r.output.trim().slice(-500)}`);
       host.log(`${named} removed: ${cwd} - the branch ${input.branch} is left${end.saved ? `, and its work dir files are in ${end.saved}` : ""}`);
