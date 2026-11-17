@@ -254,6 +254,19 @@ describe('worktree', () => {
   }
 })
 
+describe('keepWorktree', () => {
+  it('is off by default and takes a boolean from any layer', () => {
+    expect(DEFAULT_CONFIG.keepWorktree).toBe(false)
+    expect(resolveConfig([]).keepWorktree).toBe(false)
+    expect(resolveConfig([{ keepWorktree: true }]).keepWorktree).toBe(true)
+    expect(resolveConfig([{ keepWorktree: true }, { keepWorktree: false }]).keepWorktree).toBe(false)
+  })
+
+  it('rejects a keepWorktree that is not a boolean', () => {
+    expect(() => resolveConfig([{ keepWorktree: 'yes' }])).toThrow('keepWorktree must be a boolean')
+  })
+})
+
 describe('stepAgents', () => {
   it('is off by default and takes a boolean from any layer', () => {
     expect(DEFAULT_CONFIG.stepAgents).toBe(false)

@@ -51,6 +51,7 @@ var DEFAULT_CONFIG = {
   gates: "auto",
   workDir: ".granny",
   worktree: true,
+  keepWorktree: false,
   planReview: false,
   finalReview: true,
   trail: true,
@@ -301,6 +302,8 @@ function validate(c, effortLayer) {
     else if (c.worktreeDir.startsWith("~"))
       errors.push("worktreeDir is not expanded by a shell - write the absolute path instead of ~");
   }
+  if (typeof c.keepWorktree !== "boolean")
+    errors.push("keepWorktree must be a boolean");
   if (typeof c.planReview !== "boolean")
     errors.push("planReview must be a boolean");
   if (typeof c.finalReview !== "boolean")
