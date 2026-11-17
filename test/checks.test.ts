@@ -807,7 +807,7 @@ describe('checks on a parallel lane in a real git repo', () => {
           { name: 'pre', task: 'WP-02', repo: b, after: [], checks: [] },
           { name: 'two', task: 'WP-03', after: [2] },
         ],
-        config: { reviewers: [{ name: 'a', engine: 'agent' }], maxRepairs: 0, checks: [{ name: 'tests', run: 'test ! -e red.txt' }] },
+        config: { reviewers: [{ name: 'a', engine: 'agent' }], maxRepairs: 0, checks: [{ name: 'tests', run: 'test ! -e red.txt' }], keepWorktree: true },
       })
       expect(r.stages.map(s => s.outcome)).toEqual(['clean', 'clean', 'clean'])
       expect(r.stages[2]!.note).toBe('ran in parallel on feat/x--s3-two, merged')

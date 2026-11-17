@@ -219,10 +219,17 @@ export interface FinalReport {
   issues: string
 }
 
+export interface WorktreeEnd {
+  removed: boolean
+  kept?: string
+  saved?: string
+}
+
 export interface RepoResult {
   repo: string
   base: string
   worktree: string
+  worktreeEnd?: WorktreeEnd
   finalReview?: PlanResult
   checks?: CheckRun[]
   recheck?: Recheck
@@ -271,7 +278,7 @@ export interface TrailRound {
 }
 
 export interface TrailSummary {
-  /** The primary repo's trail dir. In a run over several repos, each other repo's records are in its own worktree's `<workDir>/trail`. */
+  /** The primary repo's trail dir: in its worktree, or in the saved copy once the worktree is removed. In a run over several repos, each other repo's records are in its own worktree's or saved copy's `<workDir>/trail`. */
   dir: string
   written: number
   /** `<loop>-r<round>` of each record that could not be written. */
@@ -283,6 +290,7 @@ export interface RunResult {
   branch: string
   base: string
   worktree: string
+  worktreeEnd?: WorktreeEnd
   draft?: PlanDraft
   plan?: PlanResult
   stages: StageResult[]

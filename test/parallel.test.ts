@@ -259,7 +259,7 @@ describe('parallel stages in a real git repo', () => {
         branch: 'feat/x',
         base: 'main',
         stages: [{ name: 'one', task: 'WP-01' }, { name: 'two', task: 'WP-02', after: [] }],
-        config: { reviewers: [{ name: 'a', engine: 'agent' }] },
+        config: { reviewers: [{ name: 'a', engine: 'agent' }], keepWorktree: true },
       },
     )
 

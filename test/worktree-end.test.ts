@@ -1,0 +1,98 @@
+import { describe, expect, it } from 'bun:test'
+import { runGranny, type RunInput } from '../src/core/engine'
+import { fakeHost, finding, review, type FakeOptions, type Review } from './fake-host'
+
+const A = '/work/a'
+const B = '/work/b'
+const WT = '/work/a-worktrees/feat-x'
+const SAVED = '/work/a/.granny/branches/feat-x'
+const DONE = ['owned', 'on branch', 'clean'].map(m => `[granny] run worktree ${m}\n`).join('') + '[granny] work dir saved\n[granny] run worktree removed\n'
+const isRemoval = (command: string) => command.includes('git worktree remove') && !command.includes('--force')
+const lanePath = (command: string, cwd: string) => /wt='?([^';]+)'?; git worktree add/.exec(command)?.[1] ?? cwd
+const input: RunInput = { repo: A, branch: 'feat/x', stages: [{ name: 'one', task: 'a' }] }
+const host = (opts: FakeOptions = {}, removal: Review = DONE) => fakeHost({ worktree: lanePath, made: true, checks: c => (isRemoval(c) ? removal : undefined), ...opts })
+
+describe('the end of a run', () => {
+  it('removes the worktree granny made, from the repo, and points the result at the saved files', async () => {
+    const f = host()
+    const r = await runGranny(f.host, input)
+    expect(r.worktree).toBe(WT)
+    expect(r.worktreeEnd).toEqual({ removed: true, saved: SAVED })
+    expect(r.trail!.dir).toBe(`${SAVED}/trail`)
+    expect(r.final!.prBodyPath).toBe(`${SAVED}/PR-BODY.md`)
+    const at = f.commands.findIndex(isRemoval)
+    expect(at).toBe(f.commands.length - 1)
+    expect(f.cwds[at]).toBe(A)
+  })
+
+  it('asks nothing of a worktree it did not make, with keepWorktree on, or with the worktree off', async () => {
+    for (const [opts, config, kept] of [
+      [{ made: false }, {}, 'granny did not create it'],
+      [{}, { keepWorktree: true }, 'keepWorktree is on'],
+    ] as const) {
+      const f = host(opts)
+      const r = await runGranny(f.host, { ...input, config })
+      expect(r.worktreeEnd).toEqual({ removed: false, kept })
+      expect(f.commands.some(isRemoval)).toBe(false)
+      expect(r.trail!.dir).toBe(`${WT}/.granny/trail`)
+    }
+    const off = host()
+    const r = await runGranny(off.host, { ...input, config: { worktree: false } })
+    expect('worktreeEnd' in r).toBe(false)
+    expect(off.commands.some(isRemoval)).toBe(false)
+  })
+
+  it('leaves every worktree when the run did not end PR-ready', async () => {
+    const capped = host({ reviews: [review(finding('P1', 'bug')), review(finding('P1', 'bug'))] })
+    const r = await runGranny(capped.host, { ...input, config: { maxRounds: 2, reviewers: [{ name: 'codex', engine: 'auto' }] } })
+    expect(r.worktreeEnd).toEqual({ removed: false, kept: 'the run did not end PR-ready: stage 1 (one) ended round-cap' })
+    expect(capped.commands.some(isRemoval)).toBe(false)
+    const red = host({ override: req => (req.kind === 'final' ? { gatesGreen: false, gates: 'red', commits: [], prBodyPath: '.granny/PR-BODY.md', issues: '' } : undefined) })
+    expect((await runGranny(red.host, input)).worktreeEnd).toEqual({ removed: false, kept: 'the run did not end PR-ready: the final check left the gates red' })
+    const silent = host({ override: req => (req.kind === 'final' ? null : undefined) })
+    expect((await runGranny(silent.host, input)).worktreeEnd).toEqual({ removed: false, kept: 'the run did not end PR-ready: the final check returned nothing' })
+  })
+
+  it('says why a removal stopped, and never fails the run over it', async () => {
+    const f = host({}, { code: 1, output: '[granny] run worktree owned\n[granny] run worktree on branch\n?? left.txt\n' })
+    const r = await runGranny(f.host, input)
+    expect(r.worktreeEnd).toEqual({ removed: false, kept: 'uncommitted changes in the worktree' })
+    expect(r.final!.prBodyPath).toBe('.granny/PR-BODY.md')
+    expect(f.logs).toContainEqual(expect.stringContaining(`worktree left in place: ${WT} - uncommitted changes in the worktree: `))
+    const thrown = fakeHost({ worktree: lanePath, made: true, checks: c => { if (isRemoval(c)) throw new Error('boom'); return undefined } })
+    expect((await runGranny(thrown.host, input)).worktreeEnd).toEqual({ removed: false, kept: 'the removal step failed: boom' })
+  })
+
+  it('treats each repo on its own', async () => {
+    const f = fakeHost({ worktree: lanePath, made: true, checks: c => (isRemoval(c) ? (c.includes('/work/b-') ? { code: 1, output: '[granny] run worktree owned\n' } : DONE) : undefined) })
+    const r = await runGranny(f.host, { repo: A, repos: [B], branch: 'feat/x', stages: [{ name: 'one', task: 'a' }, { name: 'two', task: 'b', repo: B }] })
+    expect(r.repos!.map(x => x.worktreeEnd)).toEqual([{ removed: true, saved: SAVED }, { removed: false, kept: 'it is not on feat/x' }])
+    expect(r.worktreeEnd).toEqual({ removed: true, saved: SAVED })
+    const removals = f.commands.map((c, i) => [c, f.cwds[i]] as const).filter(([c]) => isRemoval(c))
+    expect(removals.map(([, cwd]) => cwd)).toEqual([A, B])
+    expect(removals[1]![0]).toContain('/work/b/.granny/branches/feat-x')
+    expect(removals[1]![0]).toContain('wt=/work/b-worktrees/feat-x; ')
+  })
+
+  it('keeps the run worktree when a lane worktree was left in place', async () => {
+    const f = fakeHost({
+      worktree: lanePath,
+      made: true,
+      reviews: (command: string) => (command.includes('--force') ? { code: 1, output: '[granny] lane merged\n' } : 'No findings.'),
+      override: async req => (req.label === 'implement one' ? new Promise(r => setTimeout(() => r(undefined), 15)) : undefined),
+    })
+    const r = await runGranny(f.host, { repo: A, branch: 'feat/x', stages: [{ name: 'one', task: 'a' }, { name: 'two', task: 'b', after: [] }] })
+    expect(r.worktreeEnd).toEqual({ removed: false, kept: 'a lane worktree was left in place (/work/a-worktrees/feat-x--s2-two)' })
+    expect(f.commands.some(isRemoval)).toBe(false)
+  })
+
+  it('runs the removal through a helper agent on Claude Code', async () => {
+    const f = fakeHost({ name: 'claude-code', direct: false, worktree: lanePath, made: true, checks: c => (isRemoval(c) ? DONE : undefined) })
+    const r = await runGranny(f.host, input)
+    expect(r.worktreeEnd).toEqual({ removed: true, saved: SAVED })
+    const call = f.requests.at(-1)!
+    expect([call.label, call.role, call.kind, call.phase, call.model, call.effort, call.access, call.cwd]).toEqual(['remove worktree', 'helper', 'command', 'PR ready', 'haiku', 'low', 'write', A])
+    expect(call.prompt).toContain(`\n( cd ${A} && { wt=${WT}; `)
+    expect(call.prompt).toContain("copies the run's work dir files into the repo and then removes the worktree granny created for the run")
+  })
+})

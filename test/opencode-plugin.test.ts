@@ -859,7 +859,7 @@ describe('opencode plugin', () => {
 
   it('works in a worktree of its own when repo is on another branch, and keeps the run files in repo', async () => {
     git(repo, 'checkout', '-q', 'main')
-    writeFileSync(join(repo, 'granny.config.json'), JSON.stringify({ reviewers: [{ name: 'codex', engine: 'command', command: REVIEW_ONCE }] }))
+    writeFileSync(join(repo, 'granny.config.json'), JSON.stringify({ reviewers: [{ name: 'codex', engine: 'command', command: REVIEW_ONCE }], keepWorktree: true }))
     const f = fakeContext()
     await plugin.setup(f.ctx)
     const started = await f.tools.get('granny_run').execute({ repo, branch: 'feat/x', stages: [{ name: 'one', task: 'Do it.' }] }, { sessionID: 'parent' })

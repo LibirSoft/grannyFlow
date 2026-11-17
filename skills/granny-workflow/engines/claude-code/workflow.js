@@ -1013,6 +1013,9 @@ function worktreeCommandPrompt(repo, branch, script) {
 function gitCommandPrompt(repo, step, script) {
   return oneCommand(`git command for the "${step}" step`, `Repo ${repo}.`, "Run exactly this:", script);
 }
+function worktreeRemovalPrompt(repo, step, script) {
+  return oneCommand(`shell command for the "${step}" step, which copies the run's work dir files into the repo and then removes the worktree granny created for the run,`, `Repo ${repo}.`, "Run exactly this:", script);
+}
 var VERBATIM = "Run exactly this, as one command with its line breaks and every character kept, down to its last line:";
 function reviewSavePrompt(repo, step, script) {
   return oneCommand(`shell command for the "${step}" step, which saves a reviewer's answer to its review file under the work dir (the one file this step writes),`, `Do not review the code yourself. Repo ${repo}.`, VERBATIM, script);
@@ -1765,6 +1768,7 @@ function excludeScript(c) {
   const entry = shellQuote(`/${c.workDir}/`);
   return `ex="$(git rev-parse --git-common-dir)/info/exclude" && mkdir -p "\${ex%/*}" && { grep -qxF -e ${entry} "$ex" 2>/dev/null || { if [ -s "$ex" ] && [ -n "$(tail -c 1 "$ex")" ]; then echo >> "$ex"; fi; printf '%s\\n' ${entry} >> "$ex"; }; }`;
 }
+var savedDir = (c, repo, branch) => `${trimPath(repo)}/${workOf(c)}/branches/${branchSlug(branch)}`;
 function worktreeScript(c, branch, base, path, saved) {
   const b = shellQuote(branch);
   const find = `wt=$(git worktree list --porcelain | while IFS= read -r l; do case "$l" in "worktree "*) p=\${l#worktree };; "branch refs/heads/"*) if [ "\${l#branch refs/heads/}" = ${b} ]; then printf '%s\\n' "$p"; break; fi;; esac; done)`;
@@ -1778,6 +1782,56 @@ function worktreeScript(c, branch, base, path, saved) {
   const create = `wt=${shellQuote(path)}; git worktree add -b ${b} "$wt" ${shellQuote(base)} || exit 1; ${own}${aside}`;
   const owned = `${GIT_DIR} && if [ -f ${ownerFile} ]; then echo ${shellQuote(OWNED)}; fi`;
   return `${excludeScript(c)} && ${find} && if [ -n "$wt" ]; then ${reuse}; elif git show-ref --verify --quiet ${shellQuote(`refs/heads/${branch}`)}; then ${add}; else ${create}; fi && ${owned} && printf '%s%s\\n' ${shellQuote(SAID2)} "$wt"`;
+}
+var madeByGranny = (output) => output.split(`
+`).some((l) => l.trim() === OWNED);
+function savedNotes(output, saved) {
+  const lines = output.split(`
+`).map((l) => l.trim());
+  const aside = lines.find((l) => l.startsWith(ASIDE));
+  return [
+    ...lines.includes(RESTORED) ? [`work dir files of an earlier run restored from ${saved}`] : [],
+    ...lines.includes(NOT_RESTORED) ? [`the work dir files of an earlier run could not be restored from ${saved} - they stay there`] : [],
+    ...aside ? [`${saved} held the files of an earlier branch of this name - moved to ${aside.slice(ASIDE.length)}`] : []
+  ];
+}
+var MARK = (m) => `echo ${shellQuote(`[granny] ${m}`)}`;
+function removeWorktreeScript(c, branch, path, saved) {
+  const dst = shellQuote(saved);
+  const save = [
+    'cd "$src" || exit 1',
+    `mkdir -p ${dst} || exit 1`,
+    `if [ -d trail ]; then grep -qxF -e "$wt" trail/worktree-paths 2>/dev/null || printf '%s\\n' "$wt" >> trail/worktree-paths; fi`,
+    `cp -R . ${dst}/`,
+    "n=$(find . -type f | wc -l)",
+    `same=$(find . -type f -exec cmp -s {} ${dst}/{} \\; -print | wc -l)`,
+    '[ "$n" -eq "$same" ]'
+  ].join("; ");
+  const steps = [
+    `wt=${shellQuote(path)}; src="$wt"/${shellQuote(workOf(c))}`,
+    `if [ ! -e "$wt" ]; then ${MARK("run worktree gone")}; if [ -d ${dst} ]; then ${MARK("work dir saved")}; fi; exit 0; fi`,
+    `${GIT_DIR} || exit 1; [ -f ${ownerFile} ] || exit 1; ${MARK("run worktree owned")}`,
+    `[ "$(git -C "$wt" symbolic-ref --short -q HEAD)" = ${shellQuote(branch)} ] || exit 1; ${MARK("run worktree on branch")}`,
+    `changes=$(git -C "$wt" status --porcelain) || exit 1; if [ -n "$changes" ]; then git -C "$wt" status --short; exit 1; fi; ${MARK("run worktree clean")}`,
+    `if [ -d "$src" ]; then ( ${save} ) || exit 1; ${MARK("work dir saved")}; else ${MARK("no work dir files")}; fi`,
+    `git worktree remove "$wt" || exit 1; ${MARK("run worktree removed")}`
+  ];
+  return `{ ${steps.join("; ")}; }`;
+}
+function removalOf(output, branch, saved) {
+  const reached = (m) => output.split(`
+`).some((l) => l.trim() === `[granny] ${m}`);
+  if (reached("run worktree gone") || reached("run worktree removed"))
+    return { removed: true, ...reached("work dir saved") ? { saved } : {} };
+  if (!reached("run worktree owned"))
+    return { removed: false, kept: "the removal could not confirm that granny created it" };
+  if (!reached("run worktree on branch"))
+    return { removed: false, kept: `it is not on ${branch}` };
+  if (!reached("run worktree clean"))
+    return { removed: false, kept: "uncommitted changes in the worktree" };
+  if (!reached("work dir saved") && !reached("no work dir files"))
+    return { removed: false, kept: `its work dir files could not be saved to ${saved}` };
+  return { removed: false, kept: "git worktree remove failed" };
 }
 function reportedWorktree(output) {
   return REPORTED.exec(output)?.[1];
@@ -2243,13 +2297,21 @@ async function runGranny(host, input) {
     const theirs = specs.filter((st) => repoOf(st) === repo).map(checksOf);
     return config.checks.filter((c) => theirs.some((list) => list.includes(c)));
   };
-  const setUpWorktree = async (repo, branch, from, label, shared) => {
-    const script = worktreeScript(config, branch, from, worktreePath(repo, branch, config.worktreeDir, shared));
+  const made = new Set;
+  const setUpWorktree = async (repo, branch, from, label, shared, ofRun = false) => {
+    const saved = ofRun ? savedDir(config, repo, branch) : undefined;
+    const script = worktreeScript(config, branch, from, worktreePath(repo, branch, config.worktreeDir, shared), saved);
     const r = await shell(label, "Worktree", script, repo, (_cwd, _step, command) => worktreeCommandPrompt(repo, branch, command));
     const path = r.ran ? reportedWorktree(r.output) : undefined;
     if (!path)
       throw new Error(`worktree setup failed${repo === primary && branch === input.branch ? "" : ` for ${repo} ${branch}`} (exit ${r.code}): ${r.output.slice(-2000)}`);
-    host.log(`worktree${repo === primary && branch === input.branch ? "" : ` ${baseName(repo)} ${branch}`}: ${path}`);
+    const named = `worktree${repo === primary && branch === input.branch ? "" : ` ${baseName(repo)} ${branch}`}`;
+    host.log(`${named}: ${path}`);
+    if (ofRun && madeByGranny(r.output))
+      made.add(repo);
+    if (saved)
+      for (const line of savedNotes(r.output, saved))
+        host.log(`${named}: ${line}`);
     return path;
   };
   const findTimeout = async (timed) => {
@@ -2277,7 +2339,7 @@ async function runGranny(host, input) {
   if (config.worktree) {
     host.phase("Worktree");
     for (const r of used)
-      cwdOf.set(r, await setUpWorktree(r, input.branch, baseOf(r), r === primary ? "worktree" : `worktree ${baseName(r)}`, r !== primary));
+      cwdOf.set(r, await setUpWorktree(r, input.branch, baseOf(r), r === primary ? "worktree" : `worktree ${baseName(r)}`, r !== primary, true));
   }
   const worktree = cwdOf.get(primary);
   const draftPlan = async (goal) => {
@@ -2333,7 +2395,7 @@ async function runGranny(host, input) {
   const repoState = new Map(used.map((r) => {
     const cwd = cwdOf.get(r);
     const others = used.filter((o) => o !== r).map((o) => cwdOf.get(o));
-    return [r, { lane: { repo: r, base: baseOf(r), branch: input.branch, cwd, p: promptFor(r, cwd, input.branch, others), readable }, locked: false, waiters: [], setup: Promise.resolve(), merges: 0, ledger: new Map }];
+    return [r, { lane: { repo: r, base: baseOf(r), branch: input.branch, cwd, p: promptFor(r, cwd, input.branch, others), readable }, locked: false, waiters: [], setup: Promise.resolve(), merges: 0, left: [], ledger: new Map }];
   }));
   const primaryLane = repoState.get(primary).lane;
   const implement = async (lane, label, prompt) => {
@@ -2502,7 +2564,8 @@ the last repair's deviations: ${deviations}` : ""}`;
       return;
     }
   };
-  const trailOf = () => config.trail ? { trail: { dir: trailDir(config, worktree), written: trailed.written, failed: [...trailed.failed] } } : {};
+  const trailOf = (end) => config.trail ? { trail: { dir: end?.saved ? `${end.saved}/trail` : trailDir(config, worktree), written: trailed.written, failed: [...trailed.failed] } } : {};
+  const keptAll = (why) => config.worktree ? { worktreeEnd: { removed: false, kept: why } } : {};
   const reviewLoop = async (lane, name, subject, reviewers = config.reviewers, opts) => {
     const { gates, checks = [], runs = [], notes = [], prior = [], record } = opts;
     const { p } = lane;
@@ -2735,11 +2798,11 @@ the last repair's deviations: ${deviations}` : ""}`;
   const planResult = await reviewThePlan();
   if (draft) {
     host.log(`plan written - the run stops here; launch again with plan and the approved stages to implement it`);
-    return { repo: input.repo, branch: input.branch, base, worktree, draft, ...planResult ? { plan: planResult } : {}, stages: [], final: null, ...trailOf() };
+    return { repo: input.repo, branch: input.branch, base, worktree, ...keptAll("a planning run keeps its worktree for the implement run"), draft, ...planResult ? { plan: planResult } : {}, stages: [], final: null, ...trailOf() };
   }
   if (planResult && (planResult.outcome === "round-cap" || planResult.outcome === "review-failed")) {
     host.log(`plan review ended ${planResult.outcome} - stopping before stage 1; nothing was implemented`);
-    return { repo: input.repo, branch: input.branch, base, worktree, plan: planResult, stages: [], final: null, ...trailOf() };
+    return { repo: input.repo, branch: input.branch, base, worktree, ...keptAll(`the plan review ended ${planResult.outcome}, so the run stopped before stage 1`), plan: planResult, stages: [], final: null, ...trailOf() };
   }
   const tryLock = (s) => s.locked ? false : s.locked = true;
   const lock = (s) => new Promise((resolve) => tryLock(s) ? resolve() : s.waiters.push(resolve));
@@ -2912,6 +2975,8 @@ the last repair's deviations: ${deviations}` : ""}`;
     if (cleaned.ran)
       return done;
     const reached = (marker) => cleaned.output.includes(`[granny] ${marker}`);
+    if (!reached("lane worktree removed"))
+      state.left.push(lane.cwd);
     const left = reached("lane worktree removed") ? `its worktree ${lane.cwd} was removed, but its branch ${lane.branch} was left in place` : `its worktree ${lane.cwd} and branch ${lane.branch} were left in place (${reached("lane worktree clean") ? "git worktree remove failed" : reached("lane merged") ? "uncommitted changes in the worktree" : "the cleanup could not confirm the merge"})`;
     host.log(`${label}: left ${reached("lane worktree removed") ? lane.branch : `${lane.cwd} (${lane.branch})`} in place - remove it yourself once you have checked it: ${cleaned.output.slice(-500)}`);
     return `${done}; ${left}`;
@@ -3187,15 +3252,76 @@ ${note}` : note } : result;
   else
     for (const s of states)
       finals.push(await check(s));
+  const READY_STAGE = ["clean", "residual-only", "review-skipped"];
+  const READY_REVIEW = [...READY_STAGE, "skipped"];
+  const notReady = () => {
+    for (let i = fromStage - 1;i < specs.length; i++)
+      if (!READY_STAGE.includes(results[i].outcome))
+        return `stage ${nameOf(i)} ended ${results[i].outcome}`;
+    for (const r of finals) {
+      const of = r.repo === primary ? "" : ` in ${baseName(r.repo)}`;
+      if (r.finalReview && !READY_REVIEW.includes(r.finalReview.outcome))
+        return `the final review${of} ended ${r.finalReview.outcome}`;
+      if (!r.final)
+        return `the final check${of} returned nothing`;
+      if (!r.final.gatesGreen)
+        return `the final check${of} left the gates red`;
+      if (r.recheck && !r.recheck.passed)
+        return `the checks after the final check${of} are red`;
+    }
+    return;
+  };
+  const endWorktree = async (s, blocked) => {
+    const { repo, cwd } = s.lane;
+    const named = `worktree${repo === primary ? "" : ` ${baseName(repo)}`}`;
+    const keep = (kept, more = "") => {
+      host.log(`${named} left in place: ${cwd} - ${kept}${more}`);
+      return { removed: false, kept };
+    };
+    if (config.keepWorktree)
+      return keep("keepWorktree is on");
+    if (!made.has(repo))
+      return keep("granny did not create it");
+    if (blocked)
+      return keep(blocked);
+    if (s.left.length)
+      return keep(`a lane worktree was left in place (${s.left.join(", ")})`);
+    const saved = savedDir(config, repo, input.branch);
+    try {
+      const r = await shell(repo === primary ? "remove worktree" : `remove worktree ${baseName(repo)}`, "PR ready", removeWorktreeScript(config, input.branch, cwd, saved), repo, worktreeRemovalPrompt);
+      const end = removalOf(r.output, input.branch, saved);
+      if (!end.removed)
+        return keep(end.kept, `: ${r.output.trim().slice(-500)}`);
+      host.log(`${named} removed: ${cwd} - the branch ${input.branch} is left${end.saved ? `, and its work dir files are in ${end.saved}` : ""}`);
+      return end;
+    } catch (e) {
+      if (isCancelled(e))
+        throw e;
+      return keep(`the removal step failed: ${String(e?.message ?? e)}`);
+    }
+  };
+  if (config.worktree) {
+    const why = notReady();
+    const blocked = why ? `the run did not end PR-ready: ${why}` : undefined;
+    for (const [i, s] of states.entries()) {
+      const end = await endWorktree(s, blocked);
+      const r = finals[i];
+      const from = [`${trimPath(s.lane.cwd)}/${work}/`, `${work}/`];
+      const moved = end.saved && r.final ? from.find((prefix) => r.final.prBodyPath.startsWith(prefix)) : undefined;
+      finals[i] = { ...r, worktreeEnd: end, ...moved !== undefined ? { final: { ...r.final, prBodyPath: `${end.saved}/${r.final.prBodyPath.slice(moved.length)}` } } : {} };
+    }
+  }
   const final = finals[0].final;
   const primaryReview = finals[0].finalReview;
   const primaryChecks = finals[0].checks;
   const primaryRecheck = finals[0].recheck;
+  const primaryEnd = finals[0].worktreeEnd;
   return {
     repo: input.repo,
     branch: input.branch,
     base,
     worktree,
+    ...primaryEnd ? { worktreeEnd: primaryEnd } : {},
     ...planResult ? { plan: planResult } : {},
     stages: results,
     ...primaryReview ? { finalReview: primaryReview } : {},
@@ -3203,7 +3329,7 @@ ${note}` : note } : result;
     ...primaryRecheck ? { recheck: primaryRecheck } : {},
     final,
     ...finals.length > 1 ? { repos: finals } : {},
-    ...trailOf()
+    ...trailOf(primaryEnd)
   };
 }
 
