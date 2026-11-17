@@ -179,6 +179,11 @@ describe('granny tag', () => {
     expect(r.store.size).toBe(1)
   })
 
+  it('does not send remove to a file whose entry for the name is only a null', () => {
+    const r = run(['remove', 'typo'], { [PROJECT]: json({ tags: { typo: null } }) })
+    expect({ code: r.code, out: r.out }).toEqual({ code: 1, out: [`tag typo is not in ${USER}`] })
+  })
+
   it('removes a tag from the repo file with --project, and says which file holds a user tag it was not asked to take', () => {
     const files = { [USER]: json({ tags: { typo: TYPO } }), [PROJECT]: json({ threshold: 70, tags: { naming: { description: 'n', points: 5 } } }) }
     const removed = run(['remove', 'naming', '--project'], files)

@@ -208,7 +208,7 @@ function add(io: TagsIo, o: Options, store: Store, target: File): number {
 
 function remove(io: TagsIo, o: Options, store: Store, target: File, other: File | undefined): number {
   if (!hasOwn(target.tags, o.name)) {
-    const elsewhere = other !== undefined && hasOwn(other.tags, o.name) ? ` - it is in ${other.path}` : ''
+    const elsewhere = other !== undefined && hasOwn(other.tags, o.name) && other.tags[o.name] !== null ? ` - it is in ${other.path}` : ''
     return fail(io, `tag ${o.name} is not in ${target.path}${elsewhere}`)
   }
   const tags = new Map(Object.entries(target.tags))

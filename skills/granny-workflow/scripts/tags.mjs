@@ -290,7 +290,7 @@ function add(io, o, store, target) {
 }
 function remove(io, o, store, target, other) {
   if (!hasOwn(target.tags, o.name)) {
-    const elsewhere = other !== undefined && hasOwn(other.tags, o.name) ? ` - it is in ${other.path}` : "";
+    const elsewhere = other !== undefined && hasOwn(other.tags, o.name) && other.tags[o.name] !== null ? ` - it is in ${other.path}` : "";
     return fail(io, `tag ${o.name} is not in ${target.path}${elsewhere}`);
   }
   const tags = new Map(Object.entries(target.tags));
