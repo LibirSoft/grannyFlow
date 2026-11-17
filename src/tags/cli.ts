@@ -37,6 +37,11 @@ const io: TagsIo = {
       throw e
     }
   },
+  remove: path => rmSync(path, { force: true }),
+  linkCount(path) {
+    const target = targetOf(path)
+    return existsSync(target) ? statSync(target).nlink : 1
+  },
   print: line => console.log(line),
   toplevel(dir) {
     const r = spawnSync('git', ['rev-parse', '--show-toplevel'], { cwd: dir, encoding: 'utf8' })

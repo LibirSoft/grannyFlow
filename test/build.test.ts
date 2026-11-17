@@ -1,6 +1,6 @@
 import { describe, expect, it, mock } from 'bun:test'
 import { spawnSync } from 'node:child_process'
-import { chmodSync, existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { builtinModules } from 'node:module'
 import { join } from 'node:path'
@@ -391,6 +391,25 @@ describe('tags.mjs', () => {
       expect({ code: r.status, stderr: r.stderr }).toEqual({ code: 0, stderr: '' })
       expect(JSON.parse(readFileSync(other, 'utf8'))).toEqual({ threshold: 80, tags: { typo: { description: 'x', fix: true } } })
       expect(statSync(file).ino).toBe(statSync(other).ino)
+      expect(readdirSync(dir).sort()).toEqual(['config.json', 'dotfiles.json'])
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('refuses to write a hard-linked config while its backup copy is there, and leaves both names as they are', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'granny-tags-'))
+    try {
+      const file = join(dir, 'config.json')
+      const other = join(dir, 'dotfiles.json')
+      const backup = `${file}.granny-backup`
+      writeFileSync(file, '{ "threshold": 80 }\n')
+      linkSync(file, other)
+      writeFileSync(backup, 'an older copy\n')
+      const r = spawnSync('node', [script, 'add', 'typo', '--fix', '--description', 'x'], { cwd: dir, encoding: 'utf8', env: { ...process.env, GRANNY_CONFIG: file } })
+      expect({ code: r.status, stdout: r.stdout }).toEqual({ code: 1, stdout: `could not write ${file}: ${backup} is already there - nothing written\n` })
+      expect(readFileSync(other, 'utf8')).toBe('{ "threshold": 80 }\n')
+      expect(readFileSync(backup, 'utf8')).toBe('an older copy\n')
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }

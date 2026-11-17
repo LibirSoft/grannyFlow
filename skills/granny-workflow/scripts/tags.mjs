@@ -220,11 +220,47 @@ var checkAfter = (store, project, tags) => {
 };
 function save(io, path, object) {
   try {
-    io.write(path, serialize(object));
+    const text = serialize(object);
+    if (io.linkCount(path) > 1)
+      return inPlace(io, path, text);
+    io.write(path, text);
     return;
   } catch (e) {
     return `could not write ${path}: ${reason(e)} - nothing written`;
   }
+}
+function inPlace(io, path, text) {
+  const backup = `${path}.granny-backup`;
+  const previous = io.read(path) ?? "";
+  if (io.read(backup) !== undefined)
+    return `could not write ${path}: ${backup} is already there - nothing written`;
+  try {
+    io.write(backup, previous);
+  } catch (e) {
+    discard(io, backup);
+    return `could not write ${path}: ${reason(e)} - nothing written`;
+  }
+  try {
+    io.write(path, text);
+  } catch (e) {
+    return putBack(io, path, previous, backup, e);
+  }
+  discard(io, backup);
+  return;
+}
+function putBack(io, path, previous, backup, failure) {
+  try {
+    io.write(path, previous);
+  } catch {
+    return `could not write ${path}: ${reason(failure)}, and the file could not be put back - its previous content is in ${backup}`;
+  }
+  discard(io, backup);
+  return `could not write ${path}: ${reason(failure)} - nothing written`;
+}
+function discard(io, path) {
+  try {
+    io.remove(path);
+  } catch {}
 }
 function add(io, o, store, target) {
   const existed = hasOwn(target.tags, o.name);
@@ -342,6 +378,11 @@ var io = {
       rmSync(temp, { force: true });
       throw e;
     }
+  },
+  remove: (path) => rmSync(path, { force: true }),
+  linkCount(path) {
+    const target = targetOf(path);
+    return existsSync(target) ? statSync(target).nlink : 1;
   },
   print: (line) => console.log(line),
   toplevel(dir) {

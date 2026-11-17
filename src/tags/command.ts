@@ -7,6 +7,8 @@ export interface TagsIo {
   userPath: string
   read(path: string): string | undefined
   write(path: string, text: string): void
+  remove(path: string): void
+  linkCount(path: string): number
   print(line: string): void
   toplevel(dir?: string): string | undefined
 }
@@ -140,11 +142,48 @@ const checkAfter = (store: Store, project: boolean, tags: Obj) => {
 
 function save(io: TagsIo, path: string, object: Obj): string | undefined {
   try {
-    io.write(path, serialize(object))
+    const text = serialize(object)
+    if (io.linkCount(path) > 1) return inPlace(io, path, text)
+    io.write(path, text)
     return undefined
   } catch (e) {
     return `could not write ${path}: ${reason(e)} - nothing written`
   }
+}
+
+function inPlace(io: TagsIo, path: string, text: string): string | undefined {
+  const backup = `${path}.granny-backup`
+  const previous = io.read(path) ?? ''
+  if (io.read(backup) !== undefined) return `could not write ${path}: ${backup} is already there - nothing written`
+  try {
+    io.write(backup, previous)
+  } catch (e) {
+    discard(io, backup)
+    return `could not write ${path}: ${reason(e)} - nothing written`
+  }
+  try {
+    io.write(path, text)
+  } catch (e) {
+    return putBack(io, path, previous, backup, e)
+  }
+  discard(io, backup)
+  return undefined
+}
+
+function putBack(io: TagsIo, path: string, previous: string, backup: string, failure: unknown): string {
+  try {
+    io.write(path, previous)
+  } catch {
+    return `could not write ${path}: ${reason(failure)}, and the file could not be put back - its previous content is in ${backup}`
+  }
+  discard(io, backup)
+  return `could not write ${path}: ${reason(failure)} - nothing written`
+}
+
+function discard(io: TagsIo, path: string): void {
+  try {
+    io.remove(path)
+  } catch {}
 }
 
 function add(io: TagsIo, o: Options, store: Store, target: File): number {

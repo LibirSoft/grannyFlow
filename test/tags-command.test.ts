@@ -23,6 +23,10 @@ function fake(files: Record<string, string>, top: string | null = TOP, over: Par
     write: (path, text) => {
       store.set(path, text)
     },
+    remove: path => {
+      store.delete(path)
+    },
+    linkCount: () => 1,
     print: line => out.push(line),
     toplevel: dir => (dir === undefined ? (top ?? undefined) : dir === '/other' ? '/other' : undefined),
     ...over,
@@ -254,5 +258,82 @@ describe('granny tag', () => {
     })
     expect(runTags(['add', 'typo', '--fix', '--description', 'x'], unwritable.io)).toBe(1)
     expect(unwritable.out).toEqual([`could not write ${USER}: EACCES - nothing written`])
+  })
+})
+
+describe('granny tag on a hard-linked config', () => {
+  const BACKUP = `${USER}.granny-backup`
+  const before = json({ threshold: 80 })
+  const after = json({ threshold: 80, tags: { typo: TYPO } })
+
+  function linked(write: (store: Map<string, string>, path: string, text: string) => void, extra: Record<string, string> = {}) {
+    const store = new Map<string, string>([[USER, before], ...Object.entries(extra)])
+    const out: string[] = []
+    const io: TagsIo = {
+      userPath: USER,
+      read: path => store.get(path),
+      write: (path, text) => write(store, path, text),
+      remove: path => {
+        store.delete(path)
+      },
+      linkCount: path => (path === USER ? 2 : 1),
+      print: line => out.push(line),
+      toplevel: () => TOP,
+    }
+    return { code: runTags(['add', 'typo', '--fix', '--description', 'a misspelled word'], io), out, store }
+  }
+
+  it('writes the config in place and removes the backup copy once the write has worked', () => {
+    const r = linked((store, path, text) => store.set(path, text))
+    expect({ code: r.code, out: r.out }).toEqual({ code: 0, out: [`added tag typo (fix) to ${USER}`] })
+    expect(r.store.get(USER)).toBe(after)
+    expect(r.store.has(BACKUP)).toBe(false)
+  })
+
+  it('puts the config back from its backup when the in-place write fails, and says nothing was written', () => {
+    const r = linked((store, path, text) => {
+      if (path === USER && text !== before) {
+        store.set(USER, '')
+        throw new Error('EIO')
+      }
+      store.set(path, text)
+    })
+    expect({ code: r.code, out: r.out }).toEqual({ code: 1, out: [`could not write ${USER}: EIO - nothing written`] })
+    expect(r.store.get(USER)).toBe(before)
+    expect(r.store.has(BACKUP)).toBe(false)
+  })
+
+  it('keeps the backup and says where the content is when the config cannot be put back', () => {
+    const r = linked((store, path, text) => {
+      if (path === USER && text !== before) {
+        store.set(USER, '')
+        throw new Error('EIO')
+      }
+      if (path === USER) throw new Error('ENOSPC')
+      store.set(path, text)
+    })
+    expect({ code: r.code, out: r.out }).toEqual({
+      code: 1,
+      out: [`could not write ${USER}: EIO, and the file could not be put back - its previous content is in ${BACKUP}`],
+    })
+    expect(r.store.get(USER)).toBe('')
+    expect(r.store.get(BACKUP)).toBe(before)
+  })
+
+  it('leaves the config as it is when its backup copy cannot be written', () => {
+    const r = linked((store, path, text) => {
+      if (path === BACKUP) throw new Error('EACCES')
+      store.set(path, text)
+    })
+    expect({ code: r.code, out: r.out }).toEqual({ code: 1, out: [`could not write ${USER}: EACCES - nothing written`] })
+    expect(r.store.get(USER)).toBe(before)
+    expect(r.store.has(BACKUP)).toBe(false)
+  })
+
+  it('refuses while a backup copy is already there, and leaves both files as they are', () => {
+    const r = linked((store, path, text) => store.set(path, text), { [BACKUP]: 'an older copy' })
+    expect({ code: r.code, out: r.out }).toEqual({ code: 1, out: [`could not write ${USER}: ${BACKUP} is already there - nothing written`] })
+    expect(r.store.get(USER)).toBe(before)
+    expect(r.store.get(BACKUP)).toBe('an older copy')
   })
 })
