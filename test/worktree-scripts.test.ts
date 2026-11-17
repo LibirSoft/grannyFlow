@@ -4,7 +4,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSyn
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { resolveConfig } from '../src/core/config'
-import { madeByGranny, removalOf, removeWorktreeScript, reportedWorktree, savedDir, savedNotes, worktreeScript } from '../src/core/worktree'
+import { madeByGranny, removalOf, removeWorktreeScript, reportedWorktree, savedDir, savedKey, savedNotes, worktreeScript } from '../src/core/worktree'
 
 const c = resolveConfig([])
 const WT = '/work/a-worktrees/feat-x'
@@ -14,6 +14,7 @@ const REACHED = ['run worktree owned', 'run worktree on branch', 'run worktree c
 describe('the worktree scripts as text', () => {
   it('names the saved dir per repo and branch', () => {
     expect(savedDir(c, '/work/a/', 'feat/x')).toBe(SAVED)
+    expect(savedKey('feat/x')).toBe('feat%2Fx')
     expect(savedDir({ workDir: 'tmp/g/' }, '/work/a', 'fix/a b')).toBe('/work/a/tmp/g/branches/fix%2Fa%20b')
   })
 
