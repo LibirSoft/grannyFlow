@@ -1919,7 +1919,8 @@ function excludeScript(c) {
   const entry = shellQuote(`/${c.workDir}/`);
   return `ex="$(git rev-parse --git-common-dir)/info/exclude" && mkdir -p "\${ex%/*}" && { grep -qxF -e ${entry} "$ex" 2>/dev/null || { if [ -s "$ex" ] && [ -n "$(tail -c 1 "$ex")" ]; then echo >> "$ex"; fi; printf '%s\\n' ${entry} >> "$ex"; }; }`;
 }
-var savedDir = (c, repo, branch) => `${trimPath(repo)}/${workOf(c)}/branches/${branchSlug(branch)}`;
+var savedKey = (branch) => encodeURIComponent(branch).replace(/[!'()*~]/g, (ch) => `%${ch.charCodeAt(0).toString(16).toUpperCase()}`);
+var savedDir = (c, repo, branch) => `${trimPath(repo)}/${workOf(c)}/branches/${savedKey(branch)}`;
 function worktreeScript(c, branch, base, path, saved) {
   const b = shellQuote(branch);
   const find = `wt=$(git worktree list --porcelain | while IFS= read -r l; do case "$l" in "worktree "*) p=\${l#worktree };; "branch refs/heads/"*) if [ "\${l#branch refs/heads/}" = ${b} ]; then printf '%s\\n' "$p"; break; fi;; esac; done)`;
@@ -1962,7 +1963,7 @@ function removeWorktreeScript(c, branch, path, saved) {
     `wt=${shellQuote(path)}; src="$wt"/${shellQuote(workOf(c))}`,
     `if [ ! -e "$wt" ]; then ${MARK("run worktree gone")}; if [ -d ${dst} ]; then ${MARK("work dir saved")}; fi; exit 0; fi`,
     `${GIT_DIR} || exit 1; [ -f ${ownerFile} ] || exit 1; ${MARK("run worktree owned")}`,
-    `[ "$(git -C "$wt" symbolic-ref --short -q HEAD)" = ${shellQuote(branch)} ] || exit 1; ${MARK("run worktree on branch")}`,
+    `[ "$(git -C "$wt" symbolic-ref -q HEAD)" = ${shellQuote(`refs/heads/${branch}`)} ] || exit 1; ${MARK("run worktree on branch")}`,
     `changes=$(git -C "$wt" status --porcelain) || exit 1; if [ -n "$changes" ]; then git -C "$wt" status --short; exit 1; fi; ${MARK("run worktree clean")}`,
     `if [ -d "$src" ]; then ( ${save} ) || exit 1; ${MARK("work dir saved")}; else ${MARK("no work dir files")}; fi`,
     `git worktree remove "$wt" || exit 1; ${MARK("run worktree removed")}`

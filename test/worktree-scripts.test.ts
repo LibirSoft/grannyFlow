@@ -8,13 +8,18 @@ import { madeByGranny, removalOf, removeWorktreeScript, reportedWorktree, savedD
 
 const c = resolveConfig([])
 const WT = '/work/a-worktrees/feat-x'
-const SAVED = '/work/a/.granny/branches/feat-x'
+const SAVED = '/work/a/.granny/branches/feat%2Fx'
 const REACHED = ['run worktree owned', 'run worktree on branch', 'run worktree clean', 'work dir saved', 'run worktree removed'].map(m => `[granny] ${m}\n`)
 
 describe('the worktree scripts as text', () => {
   it('names the saved dir per repo and branch', () => {
     expect(savedDir(c, '/work/a/', 'feat/x')).toBe(SAVED)
-    expect(savedDir({ workDir: 'tmp/g/' }, '/work/a', 'fix/a b')).toBe('/work/a/tmp/g/branches/fix-a-b')
+    expect(savedDir({ workDir: 'tmp/g/' }, '/work/a', 'fix/a b')).toBe('/work/a/tmp/g/branches/fix%2Fa%20b')
+  })
+
+  it('gives branches that differ only in a slash or a dash their own saved dirs', () => {
+    expect(savedDir(c, '/work/a', 'feat/x')).not.toBe(savedDir(c, '/work/a', 'feat-x'))
+    expect(savedDir(c, '/work/a', 'feat%2Fx')).not.toBe(savedDir(c, '/work/a', 'feat/x'))
   })
 
   it('leaves the saved dir out of a setup script that is given none, and marks the worktree either way', () => {
@@ -197,5 +202,29 @@ describe('the worktree scripts in a real git repo', () => {
     const aside = readdirSync(join(repo, '.granny/branches'))
     expect(aside).toHaveLength(1)
     expect(readFileSync(join(repo, '.granny/branches', aside[0]!, 'PR-BODY.md'), 'utf8')).toBe('# one\n')
+  })
+
+  it('keeps the saved files of a branch apart from a branch whose name differs only in a slash', () => {
+    setup()
+    workDir({ 'PR-BODY.md': '# feat/x\n' })
+    expect(remove().end).toEqual({ removed: true, saved })
+    sh('git branch feat-x main')
+    const other = savedDir(c, repo, 'feat-x')
+    const restored = sh(worktreeScript(c, 'feat-x', 'main', wt, other))
+    expect(savedNotes(restored.output, other)).toEqual([])
+    expect(existsSync(join(wt, '.granny'))).toBe(false)
+    workDir({ 'PR-BODY.md': '# feat-x\n' })
+    const r = sh(removeWorktreeScript(c, 'feat-x', wt, other))
+    expect(removalOf(r.output, 'feat-x', other)).toEqual({ removed: true, saved: other })
+    expect(readFileSync(join(saved, 'PR-BODY.md'), 'utf8')).toBe('# feat/x\n')
+    expect(readFileSync(join(other, 'PR-BODY.md'), 'utf8')).toBe('# feat-x\n')
+  })
+
+  it('removes the worktree when a tag has the branch name too', () => {
+    sh('git tag feat/x')
+    setup()
+    workDir({ 'PR-BODY.md': '# one\n' })
+    expect(remove().end).toEqual({ removed: true, saved })
+    expect(sh('git branch --list feat/x').output).toContain('feat/x')
   })
 })

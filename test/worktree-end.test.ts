@@ -5,7 +5,7 @@ import { fakeHost, finding, review, type FakeOptions, type Review } from './fake
 const A = '/work/a'
 const B = '/work/b'
 const WT = '/work/a-worktrees/feat-x'
-const SAVED = '/work/a/.granny/branches/feat-x'
+const SAVED = '/work/a/.granny/branches/feat%2Fx'
 const DONE = ['owned', 'on branch', 'clean'].map(m => `[granny] run worktree ${m}\n`).join('') + '[granny] work dir saved\n[granny] run worktree removed\n'
 const isRemoval = (command: string) => command.includes('git worktree remove') && !command.includes('--force')
 const lanePath = (command: string, cwd: string) => /wt='?([^';]+)'?; git worktree add/.exec(command)?.[1] ?? cwd
@@ -70,7 +70,7 @@ describe('the end of a run', () => {
     expect(r.worktreeEnd).toEqual({ removed: true, saved: SAVED })
     const removals = f.commands.map((c, i) => [c, f.cwds[i]] as const).filter(([c]) => isRemoval(c))
     expect(removals.map(([, cwd]) => cwd)).toEqual([A, B])
-    expect(removals[1]![0]).toContain('/work/b/.granny/branches/feat-x')
+    expect(removals[1]![0]).toContain('/work/b/.granny/branches/feat%2Fx')
     expect(removals[1]![0]).toContain('wt=/work/b-worktrees/feat-x; ')
   })
 

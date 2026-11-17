@@ -30,7 +30,7 @@ describe('the worktree removal in a real git repo', () => {
   afterEach(() => rmSync(root, { recursive: true, force: true }))
 
   const wt = () => join(root, 'my repo-worktrees', 'feat-x')
-  const saved = () => join(repo, '.granny/branches/feat-x')
+  const saved = () => join(repo, '.granny/branches/feat%2Fx')
   const worktrees = () => git(repo, 'worktree', 'list', '--porcelain').split('\n').filter(l => l.startsWith('worktree ')).map(l => l.slice(9))
   const body = (text: string) => (req: AgentRequest) => {
     if (req.kind !== 'final') return undefined
@@ -121,7 +121,7 @@ describe('the worktree removal in a real git repo', () => {
         git(repo, 'branch', '-D', 'feat/x')
         const { f, result } = run(host, {}, { override: body('# new\n') })
         await result
-        const kept = readdirSync(join(repo, '.granny/branches')).filter(n => n.startsWith('feat-x.before-'))
+        const kept = readdirSync(join(repo, '.granny/branches')).filter(n => n.startsWith('feat%2Fx.before-'))
         expect(kept).toHaveLength(1)
         expect(readFileSync(join(repo, '.granny/branches', kept[0]!, 'PR-BODY.md'), 'utf8')).toBe('# one\n')
         expect(readFileSync(join(saved(), 'PR-BODY.md'), 'utf8')).toBe('# new\n')

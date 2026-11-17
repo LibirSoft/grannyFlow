@@ -131,7 +131,7 @@ export function renderPrompts(): string {
   ]
   const stageLedger: EarlierRound[] = [{ ...earlier[0]!, loop: { id: 's<k>', name: 'Stage <k> (<stage name>)' } }]
   const overruled = [{ id: '<id>', repeatOf: 'r1/<reviewer>-F<n>', reason: "<the judge's reason>", said: "<the fixer's reason>" }]
-  const saved = '<repo>/.granny/branches/<branch-slug>'
+  const saved = '<repo>/.granny/branches/<branch-key>'
   const setup = `cd '<repo>' && ${worktreeScript(p.config, '<branch>', '<base>', '<worktreeDir>/<branch-slug>', saved)}`
   const job = detachedReview({ script: '', body: '<review script>' }, p.config, '.granny/review-<stage>-r<n>-<name>', '<repo>')
   const sections: Array<[string, string]> = [
