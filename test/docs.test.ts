@@ -177,6 +177,22 @@ describe('skill docs', () => {
     expect(read('references/cursor.md')).toContain('`git -C <repo> worktree list --porcelain`')
   })
 
+  it('documents the worktree removal in the config reference, SKILL.md, the host references, the Cursor protocol and the README', () => {
+    const config = read('references/config.md')
+    expect(config).toMatch(/^\| `keepWorktree` \| `false` \|.*\[When the run ends\]\(#when-the-run-ends\)/m)
+    for (const topic of ['### When the run ends', '<repo>/<workDir>/branches/<branch-key>/', '[granny] worktree made by granny', 'It runs without `--force`', '**A later run on the branch.**', 'worktree-paths']) expect({ topic, has: config.includes(topic) }).toEqual({ topic, has: true })
+    const md = read('SKILL.md')
+    for (const topic of ['from `worktreeEnd`', '`removed: true`', 'config keepWorktree, default off', 'in the checkout that has the branch']) expect({ topic, has: md.includes(topic) }).toEqual({ topic, has: true })
+    expect(md).not.toContain('granny never removes it')
+    for (const host of ['claude-code', 'opencode', 'omp']) {
+      const reference = read(`references/${host}.md`)
+      for (const topic of ['config.md#when-the-run-ends', 'in the checkout that has the branch']) expect({ host, topic, has: reference.includes(topic) }).toEqual({ host, topic, has: true })
+    }
+    expect(read('references/claude-code.md')).toContain('label `remove worktree`')
+    expect(read('references/cursor.md')).toContain('`keepWorktree` has no effect here')
+    expect(readRoot('README.md')).toMatch(/^\| `keepWorktree` \| `false` \|/m)
+    expect(read('references/prompts.md')).toMatch(/^## Granny - worktree removal/m)
+  })
   it('documents the review trail and its poster in the config keys, SKILL.md, the host references and the README', () => {
     expect(readFileSync(join(skill, 'scripts/pr-comments.mjs'), 'utf8')).toContain('granny-trail')
     const config = read('references/config.md')
@@ -188,7 +204,7 @@ describe('skill docs', () => {
     expect(md).toContain('a GitLab MR')
     expect(md).toContain('`--out <file>`')
     expect(md).toContain('### When the PR is opened')
-    expect(md).toContain('run `node <skill-dir>/scripts/pr-comments.mjs` in the worktree')
+    expect(md).toContain('run `node <skill-dir>/scripts/pr-comments.mjs` in the checkout that has the branch')
     expect(md).toContain('Never write, edit or post review comments yourself. Only the script posts them.')
     expect(md).toContain('No push, no `git remote add`, no PR, no tag - the user decides.')
     expect(md).toContain('`trail.failed`')

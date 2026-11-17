@@ -28,7 +28,7 @@ With `worktree` on (the default), set it up by hand before the first stage - als
 3. Otherwise, when `git -C <repo> show-ref --verify --quiet refs/heads/<branch>` succeeds: `git -C <repo> worktree add <worktreeDir>/<branch-slug> <branch>`.
 4. Otherwise: `git -C <repo> worktree add -b <branch> <worktreeDir>/<branch-slug> <base>`.
 
-`<worktreeDir>` defaults to `<parent of repo>/<repo name>-worktrees`; `<branch-slug>` is the branch with every character other than letters, digits, `.`, `_` and `-` as `-` (`feat/login` → `feat-login`). The "Granny - worktree setup" command in [prompts.md](prompts.md) does all four steps in one go and prints `[granny] worktree: <path>`. From then on the worktree is `<repo>` in every prompt and every terminal command; name it in the report and never remove it. With `worktree: false`, work in `repo` on the branch checked out there.
+`<worktreeDir>` defaults to `<parent of repo>/<repo name>-worktrees`; `<branch-slug>` is the branch with every character other than letters, digits, `.`, `_` and `-` as `-` (`feat/login` → `feat-login`). The "Granny - worktree setup" command in [prompts.md](prompts.md) does all four steps in one go and prints `[granny] worktree: <path>`. From then on the worktree is `<repo>` in every prompt and every terminal command; name it in the report and never remove it: `keepWorktree` has no effect here, because the removal is a step of the engines. With `worktree: false`, work in `repo` on the branch checked out there.
 
 ## Planning
 
