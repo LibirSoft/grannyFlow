@@ -1972,12 +1972,13 @@ function removeWorktreeScript(c, branch, path, saved) {
   ];
   return `{ ${steps.join("; ")}; }`;
 }
+var printed = (output, marker) => output.split(`
+`).some((l) => l.trim() === `[granny] ${marker}`);
 function removalOf(output, branch, saved, code) {
   if (code !== undefined && typeof code !== "number" && !output.split(`
 `).some((l) => l.trim().startsWith("[granny] ")))
     return { removed: false, kept: "the removal did not run: its runner returned no exit code" };
-  const reached = (m) => output.split(`
-`).some((l) => l.trim() === `[granny] ${m}`);
+  const reached = (m) => printed(output, m);
   if (reached("run worktree listed"))
     return { removed: false, kept: "the worktree folder is gone, but git still lists it - git worktree prune removes the entry" };
   if (reached("run worktree gone") || reached("run worktree removed"))
@@ -3136,7 +3137,7 @@ the last repair's deviations: ${deviations}` : ""}`;
     const cleaned = await shell(`cleanup ${name}`, "Implement", cleanup, main.cwd);
     if (cleaned.ran)
       return done;
-    const reached = (marker) => cleaned.output.includes(`[granny] ${marker}`);
+    const reached = (marker) => printed(cleaned.output, marker);
     if (!reached("lane worktree removed"))
       state.left.push(lane.cwd);
     const left = reached("lane worktree removed") ? `its worktree ${lane.cwd} was removed, but its branch ${lane.branch} was left in place` : `its worktree ${lane.cwd} and branch ${lane.branch} were left in place (${reached("lane worktree clean") ? "git worktree remove failed" : reached("lane merged") ? "uncommitted changes in the worktree" : "the cleanup could not confirm the merge"})`;

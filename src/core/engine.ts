@@ -51,7 +51,7 @@ import { detachedReview, MAX_WAITS, planReviewScript, reportedBackend, reviewerM
 import { SCHEMAS } from './schemas'
 import { heredocWriteScript, shellQuote } from './shell'
 import { trailDir, trailId, trailPath, trailRound, trailText, type RoundFacts } from './trail'
-import { branchSlug, excludeScript, madeByGranny, removalOf, removeWorktreeScript, reportedWorktree, savedDir, savedNotes, worktreePath, worktreeScript } from './worktree'
+import { branchSlug, excludeScript, madeByGranny, printed, removalOf, removeWorktreeScript, reportedWorktree, savedDir, savedNotes, worktreePath, worktreeScript } from './worktree'
 import type {
   AgentRequest,
   CheckResult,
@@ -1301,7 +1301,7 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
     ].join(' && ')
     const cleaned = await shell(`cleanup ${name}`, 'Implement', cleanup, main.cwd)
     if (cleaned.ran) return done
-    const reached = (marker: string) => cleaned.output.includes(`[granny] ${marker}`)
+    const reached = (marker: string) => printed(cleaned.output, marker)
     if (!reached('lane worktree removed')) state.left.push(lane.cwd)
     const left = reached('lane worktree removed')
       ? `its worktree ${lane.cwd} was removed, but its branch ${lane.branch} was left in place`

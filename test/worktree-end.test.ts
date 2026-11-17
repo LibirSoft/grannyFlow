@@ -86,6 +86,18 @@ describe('the end of a run', () => {
     expect(f.commands.some(isRemoval)).toBe(false)
   })
 
+  it('keeps the run worktree when a lane cleanup only quotes the marker of a removed lane worktree', async () => {
+    const f = fakeHost({
+      worktree: lanePath,
+      made: true,
+      reviews: (command: string) => (command.includes('--force') ? { code: 1, output: "echo '[granny] lane worktree removed'\n" } : 'No findings.'),
+      override: async req => (req.label === 'implement one' ? new Promise(r => setTimeout(() => r(undefined), 15)) : undefined),
+    })
+    const r = await runGranny(f.host, { repo: A, branch: 'feat/x', stages: [{ name: 'one', task: 'a' }, { name: 'two', task: 'b', after: [] }] })
+    expect(r.worktreeEnd).toEqual({ removed: false, kept: 'a lane worktree was left in place (/work/a-worktrees/feat-x--s2-two)' })
+    expect(f.commands.some(isRemoval)).toBe(false)
+  })
+
   it('runs the removal through a helper agent on Claude Code', async () => {
     const f = fakeHost({ name: 'claude-code', direct: false, worktree: lanePath, made: true, checks: c => (isRemoval(c) ? DONE : undefined) })
     const r = await runGranny(f.host, input)

@@ -95,11 +95,13 @@ export function removeWorktreeScript(c: Pick<GrannyConfig, 'workDir'>, branch: s
   return `{ ${steps.join('; ')}; }`
 }
 
+export const printed = (output: string, marker: string) => output.split('\n').some(l => l.trim() === `[granny] ${marker}`)
+
 export type Removal = { removed: true; saved?: string } | { removed: false; kept: string }
 
 export function removalOf(output: string, branch: string, saved: string, code?: number | string): Removal {
   if (code !== undefined && typeof code !== 'number' && !output.split('\n').some(l => l.trim().startsWith('[granny] '))) return { removed: false, kept: 'the removal did not run: its runner returned no exit code' }
-  const reached = (m: string) => output.split('\n').some(l => l.trim() === `[granny] ${m}`)
+  const reached = (m: string) => printed(output, m)
   if (reached('run worktree listed')) return { removed: false, kept: 'the worktree folder is gone, but git still lists it - git worktree prune removes the entry' }
   if (reached('run worktree gone') || reached('run worktree removed')) return { removed: true, ...(reached('work dir saved') ? { saved } : {}) }
   if (!reached('run worktree owned')) return { removed: false, kept: 'the removal could not confirm that granny created it' }
