@@ -3818,8 +3818,12 @@ ${result.draft.questions.trim()}`);
     const { dir, written, failed } = result.trail;
     lines.push(`- trail: ${dir} - ${written} record(s) written${failed.length ? `; NOT written: ${failed.join(", ")} - the PR will not get these rounds' comments` : ""}`);
   }
-  if (worktree)
-    lines.push(`- worktree: ${result.worktree}${result.repos?.length ? ` (and ${result.repos.slice(1).map((r) => r.worktree).join(", ")})` : ""} - review and push from there; granny never removes it`);
+  if (worktree) {
+    for (const r of [{ repo: result.repo, worktree: result.worktree, worktreeEnd: result.worktreeEnd }, ...result.repos?.slice(1) ?? []]) {
+      const end = r.worktreeEnd;
+      lines.push(end?.removed ? `- worktree: removed (${r.worktree}) - only the branch ${result.branch} is left; check it out in ${r.repo} to review and push${end.saved ? `. The PR body, the review outputs and the trail are in ${end.saved}` : ""}` : `- worktree: ${r.worktree} - review and push from there${end?.kept ? `; granny left it in place: ${end.kept}` : ""}`);
+    }
+  }
   return lines.join(`
 `);
 }
