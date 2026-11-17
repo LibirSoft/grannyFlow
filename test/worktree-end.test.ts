@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'bun:test'
 import { runGranny, type RunInput } from '../src/core/engine'
+import type { AgentRequest } from '../src/core/types'
 import { fakeHost, finding, review, type FakeOptions, type Review } from './fake-host'
 
 const A = '/work/a'
@@ -113,6 +114,90 @@ describe('the end of a run', () => {
     const r = await runGranny(f.host, input)
     expect(r.worktreeEnd).toEqual({ removed: false, kept: 'the removal did not run: its runner returned no exit code' })
     expect(f.logs.some(l => l.includes('the removal did not run') && l.includes('the remove worktree runner returned nothing'))).toBe(true)
+    expect(f.commands.some(isRemoval)).toBe(false)
+  })
+
+  it('keeps the worktree when the final review ends round-cap, and names the review', async () => {
+    const f = host({
+      override: req => (req.label.startsWith('review final review') ? { findings: [{ id: 'F1', severity: 'P1', file: 'src/a.ts', line: 3, title: 'broken merge', detail: 'd' }] } : undefined),
+    })
+    const r = await runGranny(f.host, { repo: A, branch: 'feat/x', stages: [{ name: 'one', task: 'a' }, { name: 'two', task: 'b' }], config: { maxRounds: 1 } })
+    expect(r.finalReview!.outcome).toBe('round-cap')
+    expect(r.worktreeEnd).toEqual({ removed: false, kept: 'the run did not end PR-ready: the final review ended round-cap' })
+    expect(f.commands.some(isRemoval)).toBe(false)
+  })
+
+  it('keeps the worktree when the final checks fail, and names the final review', async () => {
+    let runs = 0
+    const f = host({
+      checks: c => {
+        if (isRemoval(c)) return DONE
+        if (!c.includes('run-tests')) return undefined
+        return ++runs >= 3 ? { code: 1, output: 'red\n' } : undefined
+      },
+    })
+    const r = await runGranny(f.host, { repo: A, branch: 'feat/x', stages: [{ name: 'one', task: 'a' }, { name: 'two', task: 'b' }], config: { checks: [{ name: 'tests', run: 'run-tests' }] } })
+    expect(r.finalReview!.outcome).toBe('checks-failed')
+    expect(f.logs.some(l => l.includes('final review not run - the final checks failed'))).toBe(true)
+    expect(r.worktreeEnd).toEqual({ removed: false, kept: 'the run did not end PR-ready: the final review ended checks-failed' })
+    expect(f.commands.some(isRemoval)).toBe(false)
+  })
+
+  it('keeps the worktree when the checks are red after the pr-ready check', async () => {
+    let moved = false
+    const f: ReturnType<typeof fakeHost> = fakeHost({
+      worktree: lanePath,
+      made: true,
+      checks: c => (isRemoval(c) ? DONE : moved && c.includes('run-tests') ? { code: 1, output: 'red\n' } : undefined),
+      override: async req => {
+        if (req.kind === 'final' && !moved) {
+          moved = true
+          await f.host.agent({ ...req, kind: 'implementation' } as AgentRequest)
+        }
+        return undefined
+      },
+    })
+    const r = await runGranny(f.host, { repo: A, branch: 'feat/x', stages: [{ name: 'one', task: 'a' }], config: { checks: [{ name: 'tests', run: 'run-tests' }] } })
+    expect(r.worktreeEnd).toEqual({ removed: false, kept: 'the run did not end PR-ready: the checks after the final check are red' })
+    expect(f.commands.some(isRemoval)).toBe(false)
+  })
+
+  it('names the repo of a final check that left its gates red', async () => {
+    const f = host({
+      override: req => (req.kind === 'final' && req.cwd.startsWith('/work/b-') ? { gatesGreen: false, gates: 'red', commits: [], prBodyPath: '.granny/PR-BODY.md', issues: '' } : undefined),
+    })
+    const r = await runGranny(f.host, { repo: A, repos: [B], branch: 'feat/x', stages: [{ name: 'one', task: 'a' }, { name: 'two', task: 'b', repo: B }] })
+    const kept = 'the run did not end PR-ready: the final check in b left the gates red'
+    expect(r.repos!.map(x => x.worktreeEnd)).toEqual([{ removed: false, kept }, { removed: false, kept }])
+    expect(r.worktreeEnd).toEqual({ removed: false, kept })
+    expect(f.commands.some(isRemoval)).toBe(false)
+  })
+
+  it('stops before stage 1 when the plan review ends round-cap, and keeps the worktree', async () => {
+    const f = host({
+      override: req => (req.label.startsWith('review plan review') ? { findings: [{ id: 'F1', severity: 'P1', file: 'src/a.ts', line: 3, title: 'bad plan', detail: 'd' }] } : undefined),
+    })
+    const r = await runGranny(f.host, { repo: A, branch: 'feat/x', plan: '/work/a/.granny/plans/feat-x.md', stages: [{ name: 'one', task: 'a' }], config: { planReview: true, maxRounds: 1 } })
+    expect(r.plan!.outcome).toBe('round-cap')
+    expect(r.stages).toEqual([])
+    expect(r.worktreeEnd).toEqual({ removed: false, kept: 'the plan review ended round-cap, so the run stopped before stage 1' })
+    expect(f.commands.some(isRemoval)).toBe(false)
+  })
+
+  it('stops before stage 1 when no reviewer can review the plan, and keeps the worktree', async () => {
+    const f = host()
+    const r = await runGranny(f.host, { repo: A, branch: 'feat/x', plan: '/work/a/.granny/plans/feat-x.md', stages: [{ name: 'one', task: 'a' }], config: { planReview: true, reviewers: [{ name: 'cmd', engine: 'command', command: 'echo {base}' }] } })
+    expect(r.plan!.outcome).toBe('review-failed')
+    expect(r.stages).toEqual([])
+    expect(r.worktreeEnd).toEqual({ removed: false, kept: 'the plan review ended review-failed, so the run stopped before stage 1' })
+    expect(f.commands.some(isRemoval)).toBe(false)
+  })
+
+  it('keeps the worktree of a planning run, for the implement run to remove', async () => {
+    const f = host()
+    const r = await runGranny(f.host, { repo: A, branch: 'feat/x', goal: 'add a thing' })
+    expect(r.draft).toBeDefined()
+    expect(r.worktreeEnd).toEqual({ removed: false, kept: 'a planning run keeps its worktree for the implement run' })
     expect(f.commands.some(isRemoval)).toBe(false)
   })
 })
