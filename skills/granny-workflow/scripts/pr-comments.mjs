@@ -423,9 +423,11 @@ function tagErrors(tags) {
     if (typeof description !== "string" || !description.trim() || description.length > 200 || /[\r\n]|\p{Zl}|\p{Zp}/u.test(description)) {
       errors.push(`${at}.description must be a non-empty string of at most 200 characters on one line`);
     }
-    if (points !== undefined && fix !== undefined) {
-      errors.push(fix === true ? `${at} has points and fix - keep one of them` : `${at}.fix must be true - leave it out for a tag with points`);
-    } else if (points !== undefined) {
+    if (fix !== undefined && fix !== true)
+      errors.push(`${at}.fix must be true - leave it out for a tag with points`);
+    else if (points !== undefined && fix !== undefined)
+      errors.push(`${at} has points and fix - keep one of them`);
+    else if (points !== undefined) {
       if (!isTagPoints(points))
         errors.push(`${at}.points must be an integer between 1 and 100`);
     } else if (fix !== true)
