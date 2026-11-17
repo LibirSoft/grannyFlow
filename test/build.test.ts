@@ -640,4 +640,44 @@ esac
       rmSync(dir, { recursive: true, force: true })
     }
   })
+
+  it('stops with a message, and writes nothing, when the trail\'s worktree-paths is not a readable file', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'granny-pr-wtp-'))
+    try {
+      const repo = join(dir, 'repo')
+      const git = (...args: string[]) => {
+        const r = spawnSync('git', ['-C', repo, '-c', 'commit.gpgsign=false', ...args], { encoding: 'utf8', env: { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' } })
+        expect(r.status).toBe(0)
+        return r.stdout.trim()
+      }
+      mkdirSync(repo)
+      git('init', '-q', '-b', 'main')
+      writeFileSync(join(repo, 'a.ts'), 'one\n')
+      git('add', 'a.ts')
+      git('commit', '-q', '-m', 'base')
+      git('checkout', '-q', '-b', 'feat')
+      writeFileSync(join(repo, 'a.ts'), 'one\ntwo\n')
+      git('commit', '-q', '-am', 'two')
+      const head = git('rev-parse', 'HEAD')
+      const record = {
+        version: 1,
+        loop: 's1',
+        name: 'one',
+        round: 1,
+        base: 'main',
+        reviewedSha: head,
+        reviewers: [{ name: 'codex', engine: 'auto' }],
+        findings: [{ id: 'codex-F1', reviewer: 'codex', severity: 'P2', file: 'a.ts', line: 2, title: 'Two', detail: 'd', route: 'residual', decision: { rule: 8, action: 'residual', why: 'low' } }],
+        outcome: 'residual-only',
+      }
+      mkdirSync(join(repo, '.granny/trail/worktree-paths'), { recursive: true })
+      writeFileSync(join(repo, '.granny/trail/s1-r1.json'), JSON.stringify(record))
+      const env = { ...process.env, GRANNY_CONFIG: join(dir, 'none.json') }
+      const r = spawnSync('node', [script, '--out', 'plan.json', '--base', 'main'], { cwd: repo, encoding: 'utf8', env })
+      expect({ code: r.status, stderr: r.stderr, planned: existsSync(join(repo, 'plan.json')) }).toEqual({ code: 1, stderr: '', planned: false })
+      expect(r.stdout).toMatch(/^could not read .+\/worktree-paths: .+ - nothing is posted or written\n$/)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
 })

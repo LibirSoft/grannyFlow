@@ -162,11 +162,18 @@ export function postTrail(argv: string[], io: PosterIo): number {
     }
   }
   const read = readRecords(io, dir)
-  const records = read && withoutLocalPaths(read, localRoots(io, toplevel, main, dir))
-  if (records === undefined) {
+  if (read === undefined) {
     io.print(`no trail at ${dir} - a granny run writes it there (config trail: true)`)
     return 1
   }
+  let roots: LocalRoot[]
+  try {
+    roots = localRoots(io, toplevel, main, dir)
+  } catch (e) {
+    io.print(`could not read ${dir}/worktree-paths: ${(e as Error).message} - nothing is posted or written`)
+    return 1
+  }
+  const records = withoutLocalPaths(read, roots)
   if (options.out !== undefined) return writeOut(io, { ...options, out: options.out }, records, toplevel)
   const platform = options.platform ?? detectPlatform(io)
   if (typeof platform !== 'string') {
