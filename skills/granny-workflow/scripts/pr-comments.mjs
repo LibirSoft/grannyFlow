@@ -1299,7 +1299,7 @@ function findTrail(io, toplevel, main, work) {
   const candidates = [...branch ? [saved(toplevel)] : [], own, ...branch && main && main !== toplevel ? [saved(main)] : []];
   const found = candidates.filter((dir) => io.list(dir) !== undefined);
   if (found.length > 1)
-    io.print(`note: reading the trail in ${found[0]}; another one is in ${found.slice(1).join(" and in ")} - pass --trail <dir> to post that one`);
+    throw new Error(`more than one trail exists: ${found.join(" and ")}`);
   return found[0] ?? own;
 }
 var commitOf = (io, ref) => {

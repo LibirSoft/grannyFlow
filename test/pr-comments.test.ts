@@ -1306,10 +1306,17 @@ describe('the trail of a removed worktree', () => {
     expect(f.out[0]).toBe('s1 r1: posted 1 line comment, 0 in body')
   })
 
-  it('says which trail it reads when the checkout has one of its own too', () => {
+  it('stops, and posts nothing, when the checkout has a trail of its own too', () => {
     const f = fake({ records: one, at: SAVED, also: [DIR], diffs: { [SHA1]: A_DIFF } })
-    expect(postTrail([], f.io)).toBe(0)
-    expect(f.out[0]).toBe(`note: reading the trail in ${SAVED}; another one is in ${DIR} - pass --trail <dir> to post that one`)
+    expect(postTrail([], f.io)).toBe(1)
+    expect(f.out).toEqual([`more than one trail exists: ${SAVED} and ${DIR}\npass the trail directory with --trail <dir>`])
+    expect(f.posted).toHaveLength(0)
+  })
+
+  it('posts the trail that --trail names when the checkout has one of its own too', () => {
+    const f = fake({ records: one, at: SAVED, also: [DIR], diffs: { [SHA1]: A_DIFF } })
+    expect(postTrail(['--trail', SAVED], f.io)).toBe(0)
+    expect(f.out[0]).toBe('s1 r1: posted 1 line comment, 0 in body')
     expect(f.posted).toHaveLength(1)
   })
 
