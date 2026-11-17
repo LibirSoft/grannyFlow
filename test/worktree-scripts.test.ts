@@ -291,6 +291,13 @@ describe('the worktree scripts in a real git repo', () => {
     expect(remove().end).toEqual({ removed: true })
   })
 
+  it('reads a worktree that is already gone under a shell that fails an unmatched glob, as zsh does', () => {
+    setup()
+    expect(remove().end).toEqual({ removed: true })
+    const r = spawnSync('bash', ['-O', 'failglob', '-c', removeWorktreeScript(c, 'feat/x', wt, saved)], { cwd: repo, encoding: 'utf8' })
+    expect(removalOf(r.stdout + r.stderr, 'feat/x', saved)).toEqual({ removed: true })
+  })
+
   it('gives a second move aside within the same second a name of its own', () => {
     const bin = join(root, 'fake-bin')
     mkdirSync(bin)
