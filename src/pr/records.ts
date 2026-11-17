@@ -46,6 +46,23 @@ export function trailProblem(value: unknown): string | undefined {
   return undefined
 }
 
+/** A directory of this machine, and what stands in for it in posted text: '' reads a path under it from the repo root; `flat` keeps only the file name of a path under it. */
+export type LocalRoot = [path: string, as: string, flat?: boolean]
+
+/** `value` with every string freed of the roots, longest first: `<root>/x` reads `<as>/x` (or `x`), a bare `<root>` reads `<as>` (or `.`). */
+export function withoutLocalPaths<T>(value: T, roots: LocalRoot[]): T {
+  const part = '[^\\s/\'"`)\\],;:]'
+  const cuts = roots
+    .map(([path, as, flat]) => [path.replace(/\/+$/, ''), as, flat] as const)
+    .filter(([path]) => path.length > 1)
+    .sort((a, b) => b[0].length - a[0].length)
+    .map(([path, as, flat]) => [new RegExp(`(?<![\\w.~-])${path.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![\\w-]|\\.\\w)${flat ? `((?:/${part}+)*)` : `(/(?=${part}))?`}`, 'g'), as, flat] as const)
+  const cut = (as: string, flat: boolean | undefined, rest: string | undefined) => (!rest ? as || '.' : flat ? `${as}/${rest.slice(rest.lastIndexOf('/') + 1)}` : as ? `${as}/` : '')
+  const clean = (text: string) => cuts.reduce((t, [at, as, flat]) => t.replace(at, (_, rest?: string) => cut(as, flat, rest)), text)
+  const walk = (v: unknown): unknown => (isString(v) ? clean(v) : Array.isArray(v) ? v.map(walk) : isObject(v) ? Object.fromEntries(Object.entries(v).map(([k, x]) => [k, walk(x)])) : v)
+  return walk(value) as T
+}
+
 function loopRank(loop: string): [number, number, string] {
   if (loop === 'plan') return [0, 0, '']
   const stage = /^s(\d+)$/.exec(loop)

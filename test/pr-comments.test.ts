@@ -9,7 +9,7 @@ import { prTarget, type PrInfo, type ReviewPayload } from '../src/pr/github'
 import { type PlannedReview, planRound, type Target } from '../src/pr/plan'
 import { detectPlatform, hostOf } from '../src/pr/platform'
 import { postTrail, type ExecResult, type PosterIo } from '../src/pr/post'
-import { byTrailOrder, trailProblem } from '../src/pr/records'
+import { byTrailOrder, type LocalRoot, trailProblem, withoutLocalPaths } from '../src/pr/records'
 import { summary } from '../src/pr/rounds'
 import { agentText, cleanBody, findingComment, findingMarker, MAX_BODY, outcomeLine, roundBody, roundMarker } from '../src/pr/render'
 
@@ -157,6 +157,9 @@ function fake(opts: {
   refs?: Record<string, string>
   branch?: string
   gitlab?: GitlabOpts
+  home?: string
+  tmp?: string[]
+  commonDir?: string
 }): Fake {
   const out: string[] = []
   const calls: Fake['calls'] = []
@@ -171,6 +174,7 @@ function fake(opts: {
       calls.push({ cmd, args, ...(input === undefined ? {} : { input }) })
       const line = args.join(' ')
       if (cmd === 'git' && line === 'rev-parse --show-toplevel') return ok(`${TOP}\n`)
+      if (cmd === 'git' && line === 'rev-parse --path-format=absolute --git-common-dir') return ok(`${opts.commonDir ?? `${TOP}/.git`}\n`)
       if (cmd === 'git' && args[0] === 'rev-parse' && args[1] === '--verify') {
         const sha = (opts.refs ?? { 'HEAD^{commit}': HEAD, [`${HEAD}^{commit}`]: HEAD, [`${BASE}^{commit}`]: BASE })[args[3]!]
         return sha === undefined ? { code: 1, stdout: '', stderr: '' } : ok(`${sha}\n`)
@@ -199,6 +203,8 @@ function fake(opts: {
     list: dir => (dir === DIR && records ? Object.keys(records) : undefined),
     read: path => records![path.slice(DIR.length + 1)]!,
     workDir: opts.workDir ?? (() => '.granny'),
+    ...(opts.home === undefined ? {} : { home: () => opts.home! }),
+    ...(opts.tmp === undefined ? {} : { tmp: () => opts.tmp! }),
     write: (path, text) => {
       written[path] = text
     },
@@ -716,7 +722,8 @@ describe('postTrail', () => {
     expect(review!.event).toBe('COMMENT')
     expect(review!.comments).toEqual([{ path: 'src/a.ts', line: 12, side: 'RIGHT', body: findingComment(inHunk, r, [r]) }])
     expect(review!.body).toContain('#### `src/a.ts:40`')
-    expect(review!.body).toContain(`#### \`${TOP}/src/c.ts:2\``)
+    expect(review!.body).toContain('#### `src/c.ts:2`')
+    expect(review!.body).not.toContain(TOP)
     expect(review!.body).not.toContain("not in this PR's history")
     expect(f.calls.find(c => c.args.includes('diff'))!.args).toEqual(['-c', 'core.quotePath=false', 'diff', '--unified=3', '--no-color', '--no-ext-diff', '--no-textconv', '--no-relative', '--src-prefix=a/', '--dst-prefix=b/', `mb-${SHA1}`, SHA1])
     expect(f.calls.find(c => c.args[0] === 'merge-base' && c.args[1] !== '--is-ancestor')!.args).toEqual(['merge-base', BASE, SHA1])
@@ -1225,6 +1232,62 @@ describe('--out', () => {
     expect(postTrail(['--base', 'main'], f.io)).toBe(1)
     expect(f.out[0]).toStartWith('--base goes with --out <file>\n')
     expect(f.calls).toEqual([])
+  })
+})
+
+describe('local paths', () => {
+  const roots: LocalRoot[] = [
+    ['/home/u/work/repo', ''],
+    ['/home/u/work/repo-worktrees/feat-x/', ''],
+    ['/home/u', '~'],
+    ['/tmp', '$TMPDIR', true],
+  ]
+
+  it('reads a path in the checkout or the main checkout from the repo root, and the home directory as ~', () => {
+    const value = {
+      evidence: '/home/u/work/repo-worktrees/feat-x/src/a.ts:3 (also /home/u/work/repo/.granny/plans/p.md)',
+      list: ['`/home/u/.config/granny/config.json`', 'cd /home/u/work/repo-worktrees/feat-x && bun test', 'ls /home/u'],
+      line: 3,
+      nested: { why: 'see /home/u/work/repo-worktrees/feat-x/README.md.' },
+    }
+    expect(withoutLocalPaths(value, roots)).toEqual({
+      evidence: 'src/a.ts:3 (also .granny/plans/p.md)',
+      list: ['`~/.config/granny/config.json`', 'cd . && bun test', 'ls ~'],
+      line: 3,
+      nested: { why: 'see README.md.' },
+    })
+  })
+
+  it('keeps only the file name of a path under a temporary directory', () => {
+    expect(withoutLocalPaths('probe at /tmp/claude-1000/-home-u-work-repo/scratch/probe.ts (outside the repo)', roots)).toBe('probe at $TMPDIR/probe.ts (outside the repo)')
+    expect(withoutLocalPaths('logs went to /tmp/claude-1000 instead of /tmp. /tmpfs/x stays', roots)).toBe('logs went to $TMPDIR/claude-1000 instead of $TMPDIR. /tmpfs/x stays')
+  })
+
+  it('leaves a path that only starts like a root, and takes no root of one character', () => {
+    expect(withoutLocalPaths('/home/u/work/repo-old/x.ts /home/user/x /home/u2', roots)).toBe('~/work/repo-old/x.ts /home/user/x /home/u2')
+    expect(withoutLocalPaths('/etc/hosts and a/b', [['/', ''], ['', '~']])).toBe('/etc/hosts and a/b')
+  })
+
+  const leaky = () =>
+    round({
+      findings: [finding('codex-F1', { file: `${TOP}/src/a.ts`, detail: 'reads /home/u/.config/granny/config.json', evidence: `${TOP}/src/a.ts:12 - x is null`, reason: 'the plan /w/main/.granny/plans/p.md says so' })],
+      fix: fix(SHA1, SHA2, ['abc fix'], { deviations: `ran the tests in ${TOP}; the probe is /var/tmp/x/-home-u-w/probe.ts` }),
+    })
+
+  it('posts no path of this machine, in a line comment or in the body', () => {
+    const f = fake({ records: { 's1-r1.json': leaky() }, diffs: { [SHA1]: A_DIFF }, home: '/home/u', tmp: ['/var/tmp', '/tmp'], commonDir: '/w/main/.git' })
+    expect(postTrail([], f.io)).toBe(0)
+    const sent = JSON.stringify(f.posted)
+    for (const path of [TOP, '/home/u', '/w/main', '/var/tmp', 'home-u']) expect({ path, leaked: sent.includes(path) }).toEqual({ path, leaked: false })
+    expect(f.posted[0]!.comments.map(c => c.path)).toEqual(['src/a.ts'])
+    for (const text of ['src/a.ts:12 - x is null', 'reads ~/.config/granny/config.json', 'the plan .granny/plans/p.md says so', 'ran the tests in .; the probe is $TMPDIR/probe.ts']) expect({ text, has: sent.includes(text) }).toEqual({ text, has: true })
+  })
+
+  it('writes no path of this machine with --out, and works without a home directory or a common git dir', () => {
+    const f = fake({ records: { 's1-r1.json': leaky() }, diffs: { [SHA1]: A_DIFF }, commonDir: 'not a path' })
+    expect(postTrail(['--out', 'trail.json'], f.io)).toBe(0)
+    expect(f.written['trail.json']!.includes(TOP)).toBe(false)
+    expect(f.written['trail.json']!).toContain('reads /home/u/.config/granny/config.json')
   })
 })
 

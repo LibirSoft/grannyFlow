@@ -2,6 +2,7 @@
 // src/pr/cli.ts
 import { spawnSync } from "node:child_process";
 import { existsSync as existsSync2, readdirSync, readFileSync as readFileSync2, statSync, writeFileSync } from "node:fs";
+import { homedir as homedir2, tmpdir } from "node:os";
 import { join as join2 } from "node:path";
 
 // src/adapters/config-files.ts
@@ -1182,6 +1183,14 @@ function trailProblem(value) {
     return `outcome ${JSON.stringify(value.outcome)} is unknown`;
   return;
 }
+function withoutLocalPaths(value, roots) {
+  const part = "[^\\s/'\"`)\\],;:]";
+  const cuts = roots.map(([path, as, flat]) => [path.replace(/\/+$/, ""), as, flat]).filter(([path]) => path.length > 1).sort((a, b) => b[0].length - a[0].length).map(([path, as, flat]) => [new RegExp(`(?<![\\w.~-])${path.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![\\w-]|\\.\\w)${flat ? `((?:/${part}+)*)` : `(/(?=${part}))?`}`, "g"), as, flat]);
+  const cut = (as, flat, rest) => !rest ? as || "." : flat ? `${as}/${rest.slice(rest.lastIndexOf("/") + 1)}` : as ? `${as}/` : "";
+  const clean = (text) => cuts.reduce((t, [at, as, flat]) => t.replace(at, (_, rest) => cut(as, flat, rest)), text);
+  const walk = (v) => isString(v) ? clean(v) : Array.isArray(v) ? v.map(walk) : isObject2(v) ? Object.fromEntries(Object.entries(v).map(([k, x]) => [k, walk(x)])) : v;
+  return walk(value);
+}
 function loopRank(loop) {
   if (loop === "plan")
     return [0, 0, ""];
@@ -1253,6 +1262,13 @@ function readRecords(io, dir) {
       records.push(value);
   }
   return records.sort(byTrailOrder);
+}
+function localRoots(io, toplevel) {
+  const common = io.exec("git", ["rev-parse", "--path-format=absolute", "--git-common-dir"]);
+  const main = common.code === 0 && /\/\.git\/?$/.test(common.stdout.trim()) ? common.stdout.trim().replace(/\/\.git\/?$/, "") : undefined;
+  const home = io.home?.();
+  const tmp = (io.tmp?.() ?? []).map((dir) => [dir, "$TMPDIR", true]);
+  return [[toplevel, ""], ...main ? [[main, ""]] : [], ...home ? [[home, "~"]] : [], ...tmp];
 }
 var commitOf = (io, ref) => {
   const r = io.exec("git", ["rev-parse", "--verify", "--quiet", `${ref}^{commit}`]);
@@ -1330,7 +1346,8 @@ pass the trail directory with --trail <dir>`);
       return 1;
     }
   }
-  const records = readRecords(io, dir);
+  const read = readRecords(io, dir);
+  const records = read && withoutLocalPaths(read, localRoots(io, toplevel));
   if (records === undefined) {
     io.print(`no trail at ${dir} - a granny run writes it there (config trail: true)`);
     return 1;
@@ -1359,6 +1376,8 @@ var io = {
   list: (dir) => existsSync2(dir) && statSync(dir).isDirectory() ? readdirSync(dir).filter((n) => n.endsWith(".json")) : undefined,
   read: (path) => readFileSync2(path, "utf8"),
   workDir: (toplevel) => resolveConfig([readJson(globalConfigPath()), readJson(join2(toplevel, "granny.config.json"))]).workDir,
+  home: homedir2,
+  tmp: () => [...new Set([tmpdir(), "/tmp"])],
   write: (path, text) => writeFileSync(path, text),
   print: (line) => console.log(line)
 };
