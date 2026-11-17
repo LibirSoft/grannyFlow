@@ -94,6 +94,10 @@ export async function buildPrComments(): Promise<string> {
   return BANNER + (await bundle('src/pr/cli.ts', 'node'))
 }
 
+export async function buildTags(): Promise<string> {
+  return BANNER + (await bundle('src/tags/cli.ts', 'node'))
+}
+
 export function renderPrompts(): string {
   const p = {
     repo: '<repo>',
@@ -194,6 +198,10 @@ export function renderPrompts(): string {
     ],
     ['Judge', judgePrompt(p, '<stage start sha>', [], [], stage).replace(/\[\]$/, '<findings as JSON>')],
     [
+      "Judge - with config tags (the TAGS block follows the rubric, one line per tag in the config's order; the final review's judge gets the same block; with no tags the judge prompts are the entries around this one)",
+      judgePrompt({ ...p, config: resolveConfig([{ tags: { typo: { description: 'a misspelled word in a comment, a string or a doc', fix: true } } }]) }, '<stage start sha>', [], [], stage).replace(/\[\]$/, '<findings as JSON>'),
+    ],
+    [
       'Judge - from round 2 on (the plan judge gets the same EARLIER DECISIONS block; one "Round N sent" entry per earlier fix round, followed by its "kept as residual" list when that round left residual findings, and P0/P1 findings join the list once a fixer declined findings; a field the finding does not have, such as the classes of an unjudged P0/P1, is left out; `(ratchet raised <what>)` follows the why when the ratchet raised the finding)',
       judgePrompt(p, '<stage start sha>', [], earlier, stage).replace(/\[\]$/, '<findings as JSON>'),
     ],
@@ -251,5 +259,6 @@ if (import.meta.main) {
   write(join(engines, 'opencode/plugin/granny-workflow/tui.js'), await buildOpencodeTui())
   write(join(engines, 'omp/extensions/granny-workflow/index.js'), await buildOmp())
   write(join(skill, 'scripts/pr-comments.mjs'), await buildPrComments())
+  write(join(skill, 'scripts/tags.mjs'), await buildTags())
   write(join(skill, 'references/prompts.md'), renderPrompts())
 }

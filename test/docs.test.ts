@@ -572,6 +572,72 @@ describe('skill docs', () => {
     expect(read('references/config.md')).toContain("that agent's `commit`")
   })
 
+  it('documents config tags in the config reference, SKILL.md, tags.md, the Cursor protocol and the README', () => {
+    const command = 'node <skill-dir>/scripts/tags.mjs add <name> --description <text> (--points <1-100> | --fix) [--project] [--replace] [--repo <dir>]'
+    const config = read('references/config.md')
+    expect(read('SKILL.md')).toContain('granny tag')
+    expect(read('SKILL.md')).toContain('(references/tags.md')
+    expect(read('references/tags.md')).toContain(command)
+    expect(config).toContain(command)
+    for (const text of ['## Tags', 'tag <name> is marked fix', 'a tag starts a fix round by itself']) expect({ text, has: config.includes(text) }).toEqual({ text, has: true })
+    expect(read('references/cursor.md')).toContain('"Judge - with config tags" prompt')
+    expect(readRoot('README.md')).toContain('scripts/tags.mjs')
+    expect(read('engines/opencode/agents/granny.md')).toContain('granny tag')
+  })
+
+  it('reads the user config at the path granny tag writes on Claude Code and Cursor, and applies tags and rideAlong on Cursor', () => {
+    const path = '`$GRANNY_CONFIG` when it is set, else `$XDG_CONFIG_HOME/granny/config.json`, else `~/.config/granny/config.json`'
+    for (const file of ['references/tags.md', 'references/claude-code.md', 'references/cursor.md']) {
+      expect({ file, has: read(file).includes(path) }).toEqual({ file, has: true })
+    }
+    const cursorConfig = read('references/cursor.md').split('\n').find(line => line.startsWith('Config: '))!
+    for (const key of ['`rideAlong`', '`tags`']) expect({ key, has: cursorConfig.includes(key) }).toEqual({ key, has: true })
+  })
+
+  it('gives setup, judge, SKILL.md, the README and the opencode and omp references the same user config path rule', () => {
+    const path = '`$GRANNY_CONFIG` when it is set, else `$XDG_CONFIG_HOME/granny/config.json`, else `~/.config/granny/config.json`'
+    const docs: Record<string, string> = {
+      'references/setup.md': read('references/setup.md'),
+      'references/judge.md': read('references/judge.md'),
+      'SKILL.md': read('SKILL.md'),
+      'README.md': readRoot('README.md'),
+      'references/opencode.md': read('references/opencode.md'),
+      'references/omp.md': read('references/omp.md'),
+    }
+    for (const [file, text] of Object.entries(docs)) expect({ file, has: text.includes(path) }).toEqual({ file, has: true })
+  })
+
+  it('sends granny tag to the tags reference, not to the run launch in the opencode agent', () => {
+    const agent = read('engines/opencode/agents/granny.md')
+    expect(agent).toContain('references/tags.md')
+    expect(agent.split('. ').find(sentence => sentence.includes('launch `granny_run`'))).not.toContain('granny tag')
+  })
+
+  it('tells the user that --project writes the worktree\'s file, and that a run reads the main checkout\'s', () => {
+    const project = read('references/tags.md').split('\n').find(line => line.startsWith('- With `--project`'))
+    expect(project).toContain('main checkout')
+    expect(project).toContain('worktree')
+  })
+
+  it('runs granny tag from the user repo or with --repo, not from the skill directory, in tags.md and the README', () => {
+    const tags = read('references/tags.md')
+    expect(tags).not.toContain('from the skill directory')
+    expect(tags).toContain("from the user's repo")
+    expect(readRoot('README.md')).not.toContain('from the skill directory')
+    expect(readRoot('README.md')).toContain('run the script yourself from your repo')
+  })
+
+  it('names every host that reads $GRANNY_CONFIG in the layer list of the config reference', () => {
+    const layer = read('references/config.md').split('\n').find(line => line.startsWith('2. `~/.config/granny/config.json`'))!
+    expect(layer).not.toContain('opencode and omp also honour')
+    expect(layer).toContain('on Claude Code, opencode, omp and Cursor')
+  })
+
+  it('gives the Cursor final-review judge the TAGS block, as the stage judge gets it', () => {
+    const judge = read('references/cursor.md').split('\n').find(line => line.startsWith('4. **Judge**'))!
+    expect(judge).toContain('("Judge - final review", with `tags` in the config, with the same TAGS block after its rubric)')
+  })
+
   it('points every repo reference at LibirSoft/grannyFlow', () => {
     expect(readRoot('README.md')).toContain('npx skills add LibirSoft/grannyFlow')
     const docs: Record<string, string> = {

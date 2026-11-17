@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test'
-import { DEFAULT_CONFIG, resolveConfig, resolveEffort, resolveModel } from '../src/core/config'
+import { DEFAULT_CONFIG, isTagPoints, mergeTags, resolveConfig, resolveEffort, resolveModel } from '../src/core/config'
 import type { HostName } from '../src/core/types'
 import { cliCommand } from '../src/core/reviewer'
 
@@ -470,5 +470,78 @@ describe('watch', () => {
 
   it('is accepted, and ignored, on Claude Code and opencode', () => {
     for (const host of ['claude-code', 'opencode', 'omp'] as HostName[]) expect(resolveConfig([{ watch: 'off' }], host).watch).toBe('off')
+  })
+})
+
+describe('tags', () => {
+  const typo = { description: 'a misspelled word in a comment, a string or a doc', fix: true } as const
+  const naming = { description: 'a name that says something other than what the code does', points: 20 }
+  const NAME_MESSAGE = 'a tag name is 1 to 32 characters of a-z, 0-9 and -, and not "none"'
+  const SHAPE = 'tags.t must be an object: { description, points } or { description, fix: true }'
+
+  it('defaults to no tags, and resolves the two tags of the example as written', () => {
+    expect(DEFAULT_CONFIG.tags).toEqual({})
+    expect(resolveConfig([]).tags).toEqual({})
+    expect(resolveConfig([{ tags: { typo, naming } }]).tags).toEqual({ typo, naming })
+  })
+
+  it('takes the far ends of the limits: 20 tags, a 200-character description, points 1 and 100', () => {
+    const twenty = Object.fromEntries(Array.from({ length: 20 }, (_, i) => [`t${i}`, { description: 'x'.repeat(200), points: 1 }]))
+    expect(Object.keys(resolveConfig([{ tags: twenty }]).tags)).toHaveLength(20)
+    expect(resolveConfig([{ tags: { ['a'.repeat(32)]: { description: 'd', points: 1 } } }]).tags).toHaveProperty(['a'.repeat(32)])
+    expect(resolveConfig([{ tags: { a: { description: 'd', points: 100 }, b: { description: 'd', points: 1 } } }]).tags.a).toEqual({ description: 'd', points: 100 })
+  })
+
+  it('merges tags by name across the layers: a higher layer replaces one whole, and null drops one', () => {
+    const user = { tags: { typo, naming } }
+    const project = { tags: { naming: { description: 'a name that lies', fix: true }, style: { description: 'a style slip', points: 10 } } }
+    expect(resolveConfig([user, project]).tags).toEqual({ typo, naming: { description: 'a name that lies', fix: true }, style: { description: 'a style slip', points: 10 } })
+    expect(resolveConfig([user, { tags: { typo: null } }]).tags).toEqual({ naming })
+  })
+
+  it('names the layer whose tags are not an object keyed by tag name', () => {
+    expect(() => resolveConfig([{ tags: [] }])).toThrow('config layer 1: tags must be an object keyed by tag name')
+    expect(() => resolveConfig([undefined, { tags: 'typo' }])).toThrow('config layer 2: tags must be an object keyed by tag name')
+  })
+
+  const rejected: Array<[string, unknown, string]> = [
+    ['a name with a capital letter', { Typo: typo }, `tags.Typo: ${NAME_MESSAGE}`],
+    ['the name none', { none: typo }, `tags.none: ${NAME_MESSAGE}`],
+    ['a name of 33 characters', { ['a'.repeat(33)]: typo }, `tags.${'a'.repeat(33)}: ${NAME_MESSAGE}`],
+    ['the name __proto__', JSON.parse('{"__proto__":{"description":"d","fix":true}}'), `tags.__proto__: ${NAME_MESSAGE}`],
+    ['21 tags', Object.fromEntries(Array.from({ length: 21 }, (_, i) => [`t${i}`, typo])), 'tags: at most 20 tags (got 21)'],
+    ['a value that is not an object', { t: 'typo' }, SHAPE],
+    ['a description of 201 characters', { t: { ...typo, description: 'x'.repeat(201) } }, 'tags.t.description must be a non-empty string of at most 200 characters on one line'],
+    ['a description with a line break', { t: { ...typo, description: 'a\nb' } }, 'tags.t.description must be a non-empty string of at most 200 characters on one line'],
+    ['a description with a carriage return', { t: { ...typo, description: 'a\rb' } }, 'tags.t.description must be a non-empty string of at most 200 characters on one line'],
+    ['a description with a line separator', { t: { ...typo, description: `a${String.fromCharCode(0x2028)}b` } }, 'tags.t.description must be a non-empty string of at most 200 characters on one line'],
+    ['a description with a paragraph separator', { t: { ...typo, description: `a${String.fromCharCode(0x2029)}b` } }, 'tags.t.description must be a non-empty string of at most 200 characters on one line'],
+    ['a blank description', { t: { ...typo, description: '  ' } }, 'tags.t.description must be a non-empty string of at most 200 characters on one line'],
+    ['points 0', { t: { description: 'd', points: 0 } }, 'tags.t.points must be an integer between 1 and 100'],
+    ['points 1.5', { t: { description: 'd', points: 1.5 } }, 'tags.t.points must be an integer between 1 and 100'],
+    ['points 101', { t: { description: 'd', points: 101 } }, 'tags.t.points must be an integer between 1 and 100'],
+    ['fix false', { t: { description: 'd', fix: false } }, 'tags.t.fix must be true - leave it out for a tag with points'],
+    ['fix of a string', { t: { description: 'd', fix: 'yes' } }, 'tags.t.fix must be true - leave it out for a tag with points'],
+    ['neither points nor fix', { t: { description: 'd' } }, 'tags.t needs points (1-100) or fix: true'],
+    ['both points and fix', { t: { description: 'd', points: 20, fix: true } }, 'tags.t has points and fix - keep one of them'],
+    ['points with fix false', { t: { description: 'd', points: 20, fix: false } }, 'tags.t.fix must be true - leave it out for a tag with points'],
+    ['an extra key', { t: { ...typo, color: 'red' } }, 'unknown key "tags.t.color"'],
+  ]
+  it.each(rejected)('rejects %s with its message', (_label, tags, message) => {
+    expect(() => resolveConfig([{ tags }])).toThrow(message)
+  })
+
+  it('merges one layer of tags into another by name: null drops a tag, undefined keeps it, and a new name goes last', () => {
+    expect(mergeTags({ typo, naming }, { naming: { description: 'd', fix: true }, style: { description: 's', points: 10 } })).toEqual({
+      typo,
+      naming: { description: 'd', fix: true },
+      style: { description: 's', points: 10 },
+    })
+    expect(Object.keys(mergeTags({ typo, naming }, { typo: { description: 'd', points: 5 } }))).toEqual(['typo', 'naming'])
+    expect(mergeTags({ typo, naming }, { typo: null, style: undefined })).toEqual({ naming })
+  })
+
+  it('checks points with one rule for the config and the tag command: an integer from 1 to 100', () => {
+    expect([0, 1, 100, 101, 1.5, Number.NaN, '20', null].map(value => isTagPoints(value))).toEqual([false, true, true, false, false, false, false, false])
   })
 })

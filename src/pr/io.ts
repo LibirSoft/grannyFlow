@@ -12,6 +12,10 @@ export interface PosterIo {
   read(path: string): string
   /** The config's work dir for the checkout at `toplevel`; throws on an invalid config. */
   workDir(toplevel: string): string
+  /** The user's home directory, when the host has one to name. */
+  home?(): string
+  /** The directories temporary files go to. */
+  tmp?(): string[]
   write(path: string, text: string): void
   print(line: string): void
 }

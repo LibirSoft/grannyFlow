@@ -36,6 +36,7 @@ var DEFAULT_CONFIG = {
   threshold: 70,
   alwaysFix: ["critical", "major"],
   rideAlong: 55,
+  tags: {},
   maxRounds: 4,
   base: "main",
   gates: "auto",
@@ -124,8 +125,14 @@ function resolveConfig(layers, host) {
         }
       }
     }
+    if (layer.tags !== undefined) {
+      if (!isObject(layer.tags))
+        errors.push(`${where}: tags must be an object keyed by tag name`);
+      else
+        config.tags = mergeTags(config.tags, layer.tags);
+    }
     for (const [key, value] of Object.entries(layer)) {
-      if (key === "roles" || key === "$schema" || value === undefined || !TOP_KEYS.has(key))
+      if (key === "roles" || key === "tags" || key === "$schema" || value === undefined || !TOP_KEYS.has(key))
         continue;
       config[key] = value;
       if (key === "reviewers")
@@ -319,6 +326,7 @@ function validate(c, effortLayer) {
   if (!isRepairs(c.maxRepairs))
     errors.push("maxRepairs must be an integer >= 0");
   errors.push(...checkErrors(c.checks));
+  errors.push(...tagErrors(c.tags));
   for (const role of ROLES) {
     errors.push(...modelErrors(`roles.${role}.model`, c.roles[role].model), ...effortErrors(`roles.${role}.effort`, c.roles[role].effort, effortLayer[role]));
   }
@@ -378,6 +386,56 @@ function metricErrors(at, m) {
     errors.push(`${at} needs min, max or both`);
   else if (isNumber(m.min) && isNumber(m.max) && m.min > m.max)
     errors.push(`${at}.min must not be above max`);
+  return errors;
+}
+var TAG_KEYS = new Set(["description", "points", "fix"]);
+var TAG_LIMIT = 20;
+function mergeTags(base, layer) {
+  const tags = new Map(Object.entries(base));
+  for (const [name, value] of Object.entries(layer)) {
+    if (value === null)
+      tags.delete(name);
+    else if (value !== undefined)
+      tags.set(name, value);
+  }
+  return Object.fromEntries(tags);
+}
+function isTagPoints(value) {
+  return Number.isInteger(value) && value >= 1 && value <= 100;
+}
+function tagErrors(tags) {
+  if (!isObject(tags))
+    return ["tags must be an object keyed by tag name"];
+  const names = Object.keys(tags);
+  const errors = names.length > TAG_LIMIT ? [`tags: at most ${TAG_LIMIT} tags (got ${names.length})`] : [];
+  for (const name of names) {
+    if (!NAME.test(name) || name.length > 32 || name === "none") {
+      errors.push(`tags.${name}: a tag name is 1 to 32 characters of a-z, 0-9 and -, and not "none"`);
+      continue;
+    }
+    const at = `tags.${name}`;
+    const value = tags[name];
+    if (!isObject(value)) {
+      errors.push(`${at} must be an object: { description, points } or { description, fix: true }`);
+      continue;
+    }
+    for (const key of Object.keys(value))
+      if (!TAG_KEYS.has(key))
+        errors.push(`unknown key "${at}.${key}"`);
+    const { description, points, fix } = value;
+    if (typeof description !== "string" || !description.trim() || description.length > 200 || /[\r\n]|\p{Zl}|\p{Zp}/u.test(description)) {
+      errors.push(`${at}.description must be a non-empty string of at most 200 characters on one line`);
+    }
+    if (fix !== undefined && fix !== true)
+      errors.push(`${at}.fix must be true - leave it out for a tag with points`);
+    else if (points !== undefined && fix !== undefined)
+      errors.push(`${at} has points and fix - keep one of them`);
+    else if (points !== undefined) {
+      if (!isTagPoints(points))
+        errors.push(`${at}.points must be an integer between 1 and 100`);
+    } else if (fix !== true)
+      errors.push(`${at} needs points (1-100) or fix: true`);
+  }
   return errors;
 }
 function resolveModel(spec, host) {
@@ -502,12 +560,11 @@ function reviewFailure(text) {
   return FAILED_RENDER.exec(text)?.[0];
 }
 var isBlocker = (f) => /^\s*(p0|p1|critical|high)\b/i.test(String(f.severity ?? ""));
-var JUDGED = ["verdict", "impact", "likelihood", "fixCost", "scope", "evidence", "priority", "reason", "decision"];
+var JUDGED = ["verdict", "impact", "likelihood", "fixCost", "scope", "evidence", "priority", "tag", "reason", "decision"];
 var fixes = (f) => f.decision?.action !== "residual";
 var rank = (f) => f.priority ?? -1;
-function mergeDuplicates(findings, duplicateOf) {
-  const ids = new Set(findings.map((f) => f.id));
-  const keeper = (id) => {
+function keeperOf(duplicateOf, ids) {
+  return (id) => {
     const seen = new Set([id]);
     for (let current = id;; ) {
       const next = duplicateOf.get(current);
@@ -519,6 +576,10 @@ function mergeDuplicates(findings, duplicateOf) {
       current = next;
     }
   };
+}
+function mergeDuplicates(findings, duplicateOf) {
+  const ids = new Set(findings.map((f) => f.id));
+  const keeper = keeperOf(duplicateOf, ids);
   const into = new Map;
   for (const f of findings) {
     const k = keeper(f.id);
@@ -611,6 +672,13 @@ function ratchet(fields, label, earlier) {
   }
   return raised.length ? `repeat of ${label}: ${raised.join(", ")}` : undefined;
 }
+function namedTag(entry) {
+  if (typeof entry?.tag !== "string")
+    return;
+  const name = entry.tag.trim().toLowerCase();
+  return name === "" || name === "none" ? undefined : name;
+}
+var knownTag = (tags, name) => tags !== undefined && Object.prototype.hasOwnProperty.call(tags, name);
 function decide(f, entry, policy, repeatsDeclined = () => false, earlierOf = () => {
   return;
 }) {
@@ -637,7 +705,6 @@ function decide(f, entry, policy, repeatsDeclined = () => false, earlierOf = () 
   if (c.kind === "none")
     return done(2, "fix", c.why);
   const { verdict, impact, likelihood, fixCost, scope } = c.fields;
-  const p = out.priority;
   const classes = `${impact}/${likelihood}/${fixCost}`;
   if (verdict === "refuted")
     return done(3, "residual", "refuted");
@@ -647,11 +714,23 @@ function decide(f, entry, policy, repeatsDeclined = () => false, earlierOf = () 
     const attention = impact === "critical" || impact === "major";
     return done(5, "residual", attention ? `pre-existing - ATTENTION: impact ${impact}` : "pre-existing", attention);
   }
+  const name = namedTag(entry);
+  const tagged = name !== undefined && knownTag(policy.tags, name) && verdict === "confirmed" && impact !== "none" && !repeatsDeclined(out) ? name : undefined;
+  const tag = tagged === undefined ? undefined : policy.tags[tagged];
+  const base = out.priority;
+  if (tagged !== undefined)
+    out.tag = tagged;
+  if (tag?.points !== undefined)
+    out.priority = Math.min(100, base + tag.points);
+  const p = out.priority;
+  const sum = tag?.points === undefined ? undefined : `${classes} -> ${base} + ${tag.points} (tag ${tagged}) = ${p}`;
   if (policy.alwaysFix.includes(impact))
-    return done(6, "fix", `impact ${impact} is in alwaysFix (${classes} -> ${p})${c.note}`);
+    return done(6, "fix", `impact ${impact} is in alwaysFix (${sum ?? `${classes} -> ${p}`})${c.note}`);
   if (p > policy.threshold)
-    return done(7, "fix", `priority ${p} > threshold ${policy.threshold} (${classes})${c.note}`);
-  return done(8, "residual", `under the bar: ${classes} -> ${p}${c.note}`);
+    return done(7, "fix", `priority ${p} > threshold ${policy.threshold} (${sum ?? classes})${c.note}`);
+  if (tag?.fix)
+    return done(10, "fix", `tag ${tagged} is marked fix (${classes} -> ${p})`);
+  return done(8, "residual", `under the bar: ${sum ?? `${classes} -> ${p}`}${c.note}`);
 }
 
 function shellQuote(value) {
@@ -1353,6 +1432,7 @@ var SCHEMAS = {
             scope: { type: "string", enum: [...SCOPES] },
             evidence: { type: "string", description: "path:line plus the concrete trigger steps, one line" },
             reason: { type: "string", description: "one short sentence, at most 25 words" },
+            tag: { type: "string", description: "only when the prompt has a TAGS list: the name of the tag that fits this finding, exactly as listed; omit when none fits" },
             duplicateOf: { type: "string", description: "id of another finding in this list that reports the same problem; omit when there is none" },
             repeatOf: { type: "string", description: "label of the earlier finding this one repeats, exactly as listed under EARLIER DECISIONS (e.g. r1/codex-F2, or s1/r2/codex-F1 from a stage review); omit when it repeats none" }
           },

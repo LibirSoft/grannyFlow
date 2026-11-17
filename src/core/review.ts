@@ -1,5 +1,6 @@
 import { FIX_COSTS, IMPACTS, LIKELIHOODS, SCOPES, VERDICTS } from './types'
 import type { Decision, Declined, Finding, FixCost, Impact, Likelihood } from './types'
+import type { TagConfig } from './config'
 
 const MARKER = /^\s*[-*]\s*\[(P[0-3]|[A-Za-z]+)\](.*)$/
 const WORD_SEVERITY = new Map([['critical', 'P0'], ['high', 'P1'], ['medium', 'P2'], ['low', 'P3']])
@@ -106,15 +107,13 @@ export function reviewFailure(text: string): string | undefined {
 export const isBlocker =(f: Pick<Finding, 'severity'>): boolean =>
   /^\s*(p0|p1|critical|high)\b/i.test(String(f.severity ?? ''))
 
-const JUDGED = ['verdict', 'impact', 'likelihood', 'fixCost', 'scope', 'evidence', 'priority', 'reason', 'decision'] as const
+const JUDGED = ['verdict', 'impact', 'likelihood', 'fixCost', 'scope', 'evidence', 'priority', 'tag', 'reason', 'decision'] as const
 
 const fixes = (f: Finding) => f.decision?.action !== 'residual'
 const rank = (f: Finding) => f.priority ?? -1
 
-/** Of merged copies the strongest one's judgement wins: a fix one first, then the higher priority. */
-export function mergeDuplicates(findings: Finding[], duplicateOf: Map<string, string>): { findings: Finding[]; merged: Array<{ id: string; into: string }> } {
-  const ids = new Set(findings.map(f => f.id))
-  const keeper = (id: string): string => {
+export function keeperOf(duplicateOf: Map<string, string>, ids: Set<string>): (id: string) => string {
+  return (id: string): string => {
     const seen = new Set([id])
     for (let current = id; ; ) {
       const next = duplicateOf.get(current)
@@ -124,6 +123,12 @@ export function mergeDuplicates(findings: Finding[], duplicateOf: Map<string, st
       current = next
     }
   }
+}
+
+/** Of merged copies the strongest one's judgement wins: a fix one first, then the higher priority. */
+export function mergeDuplicates(findings: Finding[], duplicateOf: Map<string, string>): { findings: Finding[]; merged: Array<{ id: string; into: string }> } {
+  const ids = new Set(findings.map(f => f.id))
+  const keeper = keeperOf(duplicateOf, ids)
   const into = new Map<string, string>()
   for (const f of findings) {
     const k = keeper(f.id)
@@ -149,6 +154,7 @@ export interface Policy {
   threshold: number
   alwaysFix: Impact[]
   rideAlong?: number | false
+  tags?: Record<string, TagConfig>
 }
 
 const PRIORITY: Record<Impact, Record<Likelihood, number>> = {
@@ -227,6 +233,14 @@ function ratchet(fields: { verdict: string; impact: Impact; likelihood: Likeliho
   return raised.length ? `repeat of ${label}: ${raised.join(', ')}` : undefined
 }
 
+export function namedTag(entry: Record<string, unknown> | undefined): string | undefined {
+  if (typeof entry?.tag !== 'string') return undefined
+  const name = entry.tag.trim().toLowerCase()
+  return name === '' || name === 'none' ? undefined : name
+}
+
+export const knownTag = (tags: Record<string, TagConfig> | undefined, name: string) => tags !== undefined && Object.prototype.hasOwnProperty.call(tags, name)
+
 /**
  * Applies the judge's entry for a finding (undefined when the judge did not judge it) and the decision table: the first
  * matching rule wins.
@@ -257,7 +271,6 @@ export function decide(
   if (isBlocker(f) && !repeatsDeclined(out)) return done(1, 'fix', 'P0/P1')
   if (c.kind === 'none') return done(2, 'fix', c.why)
   const { verdict, impact, likelihood, fixCost, scope } = c.fields
-  const p = out.priority!
   const classes = `${impact}/${likelihood}/${fixCost}`
   if (verdict === 'refuted') return done(3, 'residual', 'refuted')
   if (scope === 'other-stage') return done(4, 'residual', 'left to the stage that owns it')
@@ -265,9 +278,18 @@ export function decide(
     const attention = impact === 'critical' || impact === 'major'
     return done(5, 'residual', attention ? `pre-existing - ATTENTION: impact ${impact}` : 'pre-existing', attention)
   }
-  if (policy.alwaysFix.includes(impact)) return done(6, 'fix', `impact ${impact} is in alwaysFix (${classes} -> ${p})${c.note}`)
-  if (p > policy.threshold) return done(7, 'fix', `priority ${p} > threshold ${policy.threshold} (${classes})${c.note}`)
-  return done(8, 'residual', `under the bar: ${classes} -> ${p}${c.note}`)
+  const name = namedTag(entry)
+  const tagged = name !== undefined && knownTag(policy.tags, name) && verdict === 'confirmed' && impact !== 'none' && !repeatsDeclined(out) ? name : undefined
+  const tag = tagged === undefined ? undefined : policy.tags![tagged]
+  const base = out.priority!
+  if (tagged !== undefined) out.tag = tagged
+  if (tag?.points !== undefined) out.priority = Math.min(100, base + tag.points)
+  const p = out.priority!
+  const sum = tag?.points === undefined ? undefined : `${classes} -> ${base} + ${tag.points} (tag ${tagged}) = ${p}`
+  if (policy.alwaysFix.includes(impact)) return done(6, 'fix', `impact ${impact} is in alwaysFix (${sum ?? `${classes} -> ${p}`})${c.note}`)
+  if (p > policy.threshold) return done(7, 'fix', `priority ${p} > threshold ${policy.threshold} (${sum ?? classes})${c.note}`)
+  if (tag?.fix) return done(10, 'fix', `tag ${tagged} is marked fix (${classes} -> ${p})`)
+  return done(8, 'residual', `under the bar: ${sum ?? `${classes} -> ${p}`}${c.note}`)
 }
 
 /**
@@ -280,7 +302,7 @@ export function rideAlong(findings: Finding[], policy: Policy, except: (f: Findi
   if (typeof bar !== 'number' || !findings.some(fixes)) return findings
   return findings.map(f => {
     if (f.decision?.rule !== 8 || f.priority === undefined || f.priority < bar || except(f)) return f
-    const why = `rides along with this round's fixes: priority ${f.priority} >= rideAlong ${bar} (${f.impact}/${f.likelihood}/${f.fixCost})`
+    const why = `rides along with this round's fixes: priority ${f.priority} >= rideAlong ${bar} (${f.impact}/${f.likelihood}/${f.fixCost}${f.tag === undefined ? '' : `, tag ${f.tag}`})`
     return { ...f, decision: { ...f.decision, rule: 9, action: 'fix' as const, why } }
   })
 }

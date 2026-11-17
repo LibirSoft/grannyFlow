@@ -4,7 +4,7 @@ The engine is three Workflow scripts, one per mode: `engines/claude-code/plan.js
 
 ## Launch
 
-1. Collect the config layers. Read `~/.config/granny/config.json` and `<repo>/granny.config.json` if they exist; do not merge them yourself - the engine does that and rejects bad keys.
+1. Collect the config layers. Read the user config (`$GRANNY_CONFIG` when it is set, else `$XDG_CONFIG_HOME/granny/config.json`, else `~/.config/granny/config.json`) and `<repo>/granny.config.json` if they exist; do not merge them yourself - the engine does that and rejects bad keys.
 2. Pick the script for the mode: `workflow.js` to implement a plan, `plan.js` to plan a goal ([Planning](#planning)). Read `engines/claude-code/<script>` (relative to the skill directory) and pass the full text unchanged as `script`. Alternative: copy the file into the session's scratchpad directory (the one your session names, not `/tmp`) and pass that copy's path as `scriptPath` instead of `script`. Never point `scriptPath` into the skill directory: when the skill lives outside the session's working directories, Workflow refuses that path; the scratchpad path works.
 3. Tell the user what will launch and wait for the start word ([The start word](#the-start-word)). Launch only in the turn after the user sent it.
 4. Call:

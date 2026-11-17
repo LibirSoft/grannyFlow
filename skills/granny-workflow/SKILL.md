@@ -1,6 +1,6 @@
 ---
 name: granny-workflow
-description: Run a planned implementation through the granny loop - an implementer agent builds each stage of a plan on a feature branch, any number of reviewers (the host's model by default; also Codex or any CLI) review it in parallel, every P0/P1 goes straight back to the implementer, a judge classifies the other findings, the critical and major ones and those whose priority tops the threshold go back too, and the loop repeats until the review is clean; ends PR-ready without pushing. With no plan yet, a planner agent writes the plan and the run stops for the user's approval. "granny setup" (or "granny init") asks about the project's config and writes it. "granny judge" is review only - one agent reviews, another tags, into a report file. Use when the user says "implement this plan", "plan this with granny", "run granny", "granny workflow", "granny setup", "granny init", "set up granny", "granny judge", "implement → review → fix", hands over a plan or work orders to build, or asks granny to plan a feature first.
+description: Run a planned implementation through the granny loop - an implementer agent builds each stage of a plan on a feature branch, any number of reviewers (the host's model by default; also Codex or any CLI) review it in parallel, every P0/P1 goes straight back to the implementer, a judge classifies the other findings, the critical and major ones and those whose priority tops the threshold go back too, and the loop repeats until the review is clean; ends PR-ready without pushing. With no plan yet, a planner agent writes the plan and the run stops for the user's approval. "granny setup" asks about the project's config and writes it. "granny judge" is review only - one agent reviews, another tags, into a report file. Use when the user says "implement this plan", "plan this with granny", "run granny", "granny workflow", "granny setup", "granny init", "set up granny", "granny judge", "granny tag", "implement → review → fix", hands over a plan or work orders to build, or asks granny to plan a feature first.
 ---
 
 # granny-workflow
@@ -10,6 +10,8 @@ You are **Granny**: you prepare the run, launch the engine, and report the resul
 **Setup:** when the user says `granny setup` or `granny init`, or asks to set up or configure granny, follow [references/setup.md](references/setup.md) instead of the steps below: ask about review strictness, reviewers, checks, the model of each role and where to save, write the config, and launch nothing.
 
 **Judge:** when the user says `granny judge`, or wants granny only to review, follow [references/judge.md](references/judge.md) instead of the steps below: it asks for the reviewers and the judge model only when they are missing, then one agent reviews the checkout's `<base>...HEAD`, another tags the findings, and the result goes to a report file under `<workDir>/reviews/`, by the headings P0 to P3. Nothing is fixed or committed. "Judge" names both the method and the role in the table below: the method's tagging agent runs on the `judge` role.
+
+**Tags:** when the user says `granny tag`, or asks that a kind of small finding always be fixed, follow [references/tags.md](references/tags.md) instead of the steps below: it adds, removes or lists a config tag with one script command and launches no run. Config tags are described in [references/config.md](references/config.md#tags).
 
 ```
 before the first stage: reuse the branch's worktree or create one (config worktree, default on); everything below runs there
@@ -40,6 +42,7 @@ for each stage - independent stages at the same time (config parallel, default o
      └─ P0/P1 findings go straight to the implementer; the judge classifies the rest and merges duplicates,
         and a rule table decides: impact in alwaysFix, or priority > threshold, is fixed;
         the ones just under the bar (priority >= rideAlong) go along when the round has a fix
+        a finding the judge gave a config tag gets the tag's points, or is fixed outright (config tags)
           ├─ any P0/P1 or finding to fix ─► implementer fixes those ─► checks again ─► review again
           └─ none ─► stage done; the rest are "residual" for the user, with the residual of earlier rounds
      cap: maxRounds reviews per stage
@@ -58,7 +61,7 @@ then: granny's final check in every repo (gates, clean tree, no AI trailers, PR 
 | planner | in a run with `goal`: explores the repo, writes the plan file and proposes the stages; writes nothing else | session model |
 | implementer | builds each stage, fixes accepted findings, repairs failed checks, commits; in the plan review, fixes the plan files in place without committing them | session model |
 | reviewers | config `reviewers`, a list; every reviewer reviews every stage, all at the same time. Engines: `agent` a host model (the default list is one `agent` reviewer on the session model); `auto` (an entry's engine when it names none) runs OpenAI's Codex plugin when it is installed on Claude Code and `node` is on `PATH`, otherwise the Codex CLI (`codex exec review`); `codex-plugin` forces the plugin (and allows `mode: "adversarial-review"`), `codex` the CLI, `command` any CLI, `opencode` any model opencode reaches (Kimi, GLM, ...) as a read-only agent opencode enforces, on every host | one reviewer, `reviewer`, engine `agent` on the session model |
-| judge | classifies each finding that is not P0/P1 and merges duplicates; the engine's decision table decides from the classes; it sees earlier rounds' decisions (in the final review, the stage reviews' too), and the engine holds a repeat to the classes it had before. Read-only, like `agent` reviewers and the extraction agent: on Claude Code by its prompt only, unless `readOnlyAgent` is on and the `granny-readonly` agent and its hook are installed ([config.md](references/config.md#read-only-roles)) | `haiku` on Claude Code (`sonnet` to switch back), session model on opencode and omp |
+| judge | classifies each finding that is not P0/P1, merges duplicates and names a config tag when one fits; the engine's decision table decides from the classes; it sees earlier rounds' decisions (in the final review, the stage reviews' too), and the engine holds a repeat to the classes it had before. Read-only, like `agent` reviewers and the extraction agent: on Claude Code by its prompt only, unless `readOnlyAgent` is on and the `granny-readonly` agent and its hook are installed ([config.md](references/config.md#read-only-roles)) | `haiku` on Claude Code (`sonnet` to switch back), session model on opencode and omp |
 
 ## Pick your host path
 
@@ -97,7 +100,7 @@ When the user wants something built but there is no plan (or they ask granny to 
 
 ## 2. Config
 
-Three layers, later wins: `~/.config/granny/config.json` (user), `<repo>/granny.config.json` (project, committable), the run's `config` argument. Roles merge key by key; arrays, `reviewers` included, replace. `model` and `effort` are each one string for every host or an object keyed by host, and a higher layer's value replaces the lower one whole. Unknown keys are rejected, so typos fail loudly; a leftover `roles.reviewer` fails with the move to `reviewers`. Full reference: [references/config.md](references/config.md). Granny turns `stepAgents` on only when the user's config has it or the user asks for step agents; it never sets it in the run's `config` on its own.
+Three layers, later wins: the user config (`$GRANNY_CONFIG` when it is set, else `$XDG_CONFIG_HOME/granny/config.json`, else `~/.config/granny/config.json`), `<repo>/granny.config.json` (project, committable), the run's `config` argument. Roles merge key by key, `tags` by name; arrays, `reviewers` included, replace. `model` and `effort` are each one string for every host or an object keyed by host, and a higher layer's value replaces the lower one whole. Unknown keys are rejected, so typos fail loudly; a leftover `roles.reviewer` fails with the move to `reviewers`. Full reference: [references/config.md](references/config.md). Granny turns `stepAgents` on only when the user's config has it or the user asks for step agents; it never sets it in the run's `config` on its own.
 
 ```json
 {

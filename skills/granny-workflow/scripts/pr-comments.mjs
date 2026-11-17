@@ -2,6 +2,7 @@
 // src/pr/cli.ts
 import { spawnSync } from "node:child_process";
 import { existsSync as existsSync2, readdirSync, readFileSync as readFileSync2, statSync, writeFileSync } from "node:fs";
+import { homedir as homedir2, tmpdir } from "node:os";
 import { join as join2 } from "node:path";
 
 // src/adapters/config-files.ts
@@ -44,6 +45,7 @@ var DEFAULT_CONFIG = {
   threshold: 70,
   alwaysFix: ["critical", "major"],
   rideAlong: 55,
+  tags: {},
   maxRounds: 4,
   base: "main",
   gates: "auto",
@@ -132,8 +134,14 @@ function resolveConfig(layers, host) {
         }
       }
     }
+    if (layer.tags !== undefined) {
+      if (!isObject(layer.tags))
+        errors.push(`${where}: tags must be an object keyed by tag name`);
+      else
+        config.tags = mergeTags(config.tags, layer.tags);
+    }
     for (const [key, value] of Object.entries(layer)) {
-      if (key === "roles" || key === "$schema" || value === undefined || !TOP_KEYS.has(key))
+      if (key === "roles" || key === "tags" || key === "$schema" || value === undefined || !TOP_KEYS.has(key))
         continue;
       config[key] = value;
       if (key === "reviewers")
@@ -316,6 +324,7 @@ function validate(c, effortLayer) {
   if (!isRepairs(c.maxRepairs))
     errors.push("maxRepairs must be an integer >= 0");
   errors.push(...checkErrors(c.checks));
+  errors.push(...tagErrors(c.tags));
   for (const role of ROLES) {
     errors.push(...modelErrors(`roles.${role}.model`, c.roles[role].model), ...effortErrors(`roles.${role}.effort`, c.roles[role].effort, effortLayer[role]));
   }
@@ -375,6 +384,56 @@ function metricErrors(at, m) {
     errors.push(`${at} needs min, max or both`);
   else if (isNumber(m.min) && isNumber(m.max) && m.min > m.max)
     errors.push(`${at}.min must not be above max`);
+  return errors;
+}
+var TAG_KEYS = new Set(["description", "points", "fix"]);
+var TAG_LIMIT = 20;
+function mergeTags(base, layer) {
+  const tags = new Map(Object.entries(base));
+  for (const [name, value] of Object.entries(layer)) {
+    if (value === null)
+      tags.delete(name);
+    else if (value !== undefined)
+      tags.set(name, value);
+  }
+  return Object.fromEntries(tags);
+}
+function isTagPoints(value) {
+  return Number.isInteger(value) && value >= 1 && value <= 100;
+}
+function tagErrors(tags) {
+  if (!isObject(tags))
+    return ["tags must be an object keyed by tag name"];
+  const names = Object.keys(tags);
+  const errors = names.length > TAG_LIMIT ? [`tags: at most ${TAG_LIMIT} tags (got ${names.length})`] : [];
+  for (const name of names) {
+    if (!NAME.test(name) || name.length > 32 || name === "none") {
+      errors.push(`tags.${name}: a tag name is 1 to 32 characters of a-z, 0-9 and -, and not "none"`);
+      continue;
+    }
+    const at = `tags.${name}`;
+    const value = tags[name];
+    if (!isObject(value)) {
+      errors.push(`${at} must be an object: { description, points } or { description, fix: true }`);
+      continue;
+    }
+    for (const key of Object.keys(value))
+      if (!TAG_KEYS.has(key))
+        errors.push(`unknown key "${at}.${key}"`);
+    const { description, points, fix } = value;
+    if (typeof description !== "string" || !description.trim() || description.length > 200 || /[\r\n]|\p{Zl}|\p{Zp}/u.test(description)) {
+      errors.push(`${at}.description must be a non-empty string of at most 200 characters on one line`);
+    }
+    if (fix !== undefined && fix !== true)
+      errors.push(`${at}.fix must be true - leave it out for a tag with points`);
+    else if (points !== undefined && fix !== undefined)
+      errors.push(`${at} has points and fix - keep one of them`);
+    else if (points !== undefined) {
+      if (!isTagPoints(points))
+        errors.push(`${at}.points must be an integer between 1 and 100`);
+    } else if (fix !== true)
+      errors.push(`${at} needs points (1-100) or fix: true`);
+  }
   return errors;
 }
 
@@ -557,7 +616,7 @@ ${CUT}
 ${marker}`;
 }
 function judgeLine(f) {
-  const tags = f.impact === undefined ? code("not judged") : [[f.verdict, f.impact, f.likelihood, f.fixCost, f.scope].filter(Boolean).map((t) => code(String(t))).join(" "), `priority ${f.priority ?? "?"}`].join(" · ");
+  const tags = f.impact === undefined ? code("not judged") : [[f.verdict, f.impact, f.likelihood, f.fixCost, f.scope].filter(Boolean).map((t) => code(String(t))).join(" "), `priority ${f.priority ?? "?"}`, ...typeof f.tag === "string" ? [`tag ${code(f.tag)}`] : []].join(" · ");
   const d = f.decision;
   const rule = d ? ` · rule ${d.rule} → ${d.action}: ${agentLine(d.why)}${d.raised ? ` (ratchet raised ${agentLine(d.raised)})` : ""}` : "";
   return `**Judge:** ${tags}${rule}`;
@@ -1102,6 +1161,8 @@ function trailProblem(value) {
         return `${at}.${key} ${JSON.stringify(f[key])} is unknown`;
     if (!optional(f.priority, (v) => typeof v === "number" && Number.isFinite(v)))
       return `${at}.priority is not a number`;
+    if (!optional(f.tag, isString))
+      return `${at}.tag is not a string`;
     if (!optional(f.reviewer, isString))
       return `${at}.reviewer is not a string`;
     if (!optional(f.route, (v) => ROUTES.includes(v)))
@@ -1121,6 +1182,14 @@ function trailProblem(value) {
   if (!optional(value.outcome, (v) => OUTCOMES.includes(v)))
     return `outcome ${JSON.stringify(value.outcome)} is unknown`;
   return;
+}
+function withoutLocalPaths(value, roots) {
+  const part = "[^\\s/'\"`)\\],;:]";
+  const cuts = roots.map(([path, as, flat]) => [path.replace(/\/+$/, ""), as, flat]).filter(([path]) => path.length > 1).sort((a, b) => b[0].length - a[0].length).map(([path, as, flat]) => [new RegExp(`(?<![\\w.~-])${path.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![\\w-]|\\.\\w)${flat ? `((?:/${part}+)*)` : `(/(?=${part}))?`}`, "g"), as, flat]);
+  const cut = (as, flat, rest) => !rest ? as || "." : flat ? `${as}/${rest.slice(rest.lastIndexOf("/") + 1)}` : as ? `${as}/` : "";
+  const clean = (text) => cuts.reduce((t, [at, as, flat]) => t.replace(at, (_, rest) => cut(as, flat, rest)), text);
+  const walk = (v) => isString(v) ? clean(v) : Array.isArray(v) ? v.map(walk) : isObject2(v) ? Object.fromEntries(Object.entries(v).map(([k, x]) => [k, walk(x)])) : v;
+  return walk(value);
 }
 function loopRank(loop) {
   if (loop === "plan")
@@ -1193,6 +1262,13 @@ function readRecords(io, dir) {
       records.push(value);
   }
   return records.sort(byTrailOrder);
+}
+function localRoots(io, toplevel) {
+  const common = io.exec("git", ["rev-parse", "--path-format=absolute", "--git-common-dir"]);
+  const main = common.code === 0 && /\/\.git\/?$/.test(common.stdout.trim()) ? common.stdout.trim().replace(/\/\.git\/?$/, "") : undefined;
+  const home = io.home?.();
+  const tmp = (io.tmp?.() ?? []).map((dir) => [dir, "$TMPDIR", true]);
+  return [[toplevel, ""], ...main ? [[main, ""]] : [], ...home ? [[home, "~"]] : [], ...tmp];
 }
 var commitOf = (io, ref) => {
   const r = io.exec("git", ["rev-parse", "--verify", "--quiet", `${ref}^{commit}`]);
@@ -1270,7 +1346,8 @@ pass the trail directory with --trail <dir>`);
       return 1;
     }
   }
-  const records = readRecords(io, dir);
+  const read = readRecords(io, dir);
+  const records = read && withoutLocalPaths(read, localRoots(io, toplevel));
   if (records === undefined) {
     io.print(`no trail at ${dir} - a granny run writes it there (config trail: true)`);
     return 1;
@@ -1299,6 +1376,8 @@ var io = {
   list: (dir) => existsSync2(dir) && statSync(dir).isDirectory() ? readdirSync(dir).filter((n) => n.endsWith(".json")) : undefined,
   read: (path) => readFileSync2(path, "utf8"),
   workDir: (toplevel) => resolveConfig([readJson(globalConfigPath()), readJson(join2(toplevel, "granny.config.json"))]).workDir,
+  home: homedir2,
+  tmp: () => [...new Set([tmpdir(), "/tmp"])],
   write: (path, text) => writeFileSync(path, text),
   print: (line) => console.log(line)
 };

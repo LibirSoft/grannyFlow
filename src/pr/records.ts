@@ -32,6 +32,7 @@ export function trailProblem(value: unknown): string | undefined {
     if (!optional(f.line, isCount)) return `${at}.line is not a positive integer`
     for (const [key, known] of Object.entries(TAGS)) if (!optional(f[key], v => known.includes(v as string))) return `${at}.${key} ${JSON.stringify(f[key])} is unknown`
     if (!optional(f.priority, v => typeof v === 'number' && Number.isFinite(v))) return `${at}.priority is not a number`
+    if (!optional(f.tag, isString)) return `${at}.tag is not a string`
     if (!optional(f.reviewer, isString)) return `${at}.reviewer is not a string`
     if (!optional(f.route, v => ROUTES.includes(v as string))) return `${at}.route is not sent or residual`
     if (!optional(f.decision, d => isObject(d) && Number.isInteger(d.rule) && isString(d.action) && isString(d.why))) return `${at}.decision is malformed`
@@ -43,6 +44,23 @@ export function trailProblem(value: unknown): string | undefined {
   if (fix && !optional(fix.declined, d => Array.isArray(d) && d.every(x => isObject(x) && isString(x.id)))) return 'fix.declined is malformed'
   if (!optional(value.outcome, v => OUTCOMES.includes(v as string))) return `outcome ${JSON.stringify(value.outcome)} is unknown`
   return undefined
+}
+
+/** A directory of this machine, and what stands in for it in posted text: '' reads a path under it from the repo root; `flat` keeps only the file name of a path under it. */
+export type LocalRoot = [path: string, as: string, flat?: boolean]
+
+/** `value` with every string freed of the roots, longest first: `<root>/x` reads `<as>/x` (or `x`), a bare `<root>` reads `<as>` (or `.`). */
+export function withoutLocalPaths<T>(value: T, roots: LocalRoot[]): T {
+  const part = '[^\\s/\'"`)\\],;:]'
+  const cuts = roots
+    .map(([path, as, flat]) => [path.replace(/\/+$/, ''), as, flat] as const)
+    .filter(([path]) => path.length > 1)
+    .sort((a, b) => b[0].length - a[0].length)
+    .map(([path, as, flat]) => [new RegExp(`(?<![\\w.~-])${path.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![\\w-]|\\.\\w)${flat ? `((?:/${part}+)*)` : `(/(?=${part}))?`}`, 'g'), as, flat] as const)
+  const cut = (as: string, flat: boolean | undefined, rest: string | undefined) => (!rest ? as || '.' : flat ? `${as}/${rest.slice(rest.lastIndexOf('/') + 1)}` : as ? `${as}/` : '')
+  const clean = (text: string) => cuts.reduce((t, [at, as, flat]) => t.replace(at, (_, rest?: string) => cut(as, flat, rest)), text)
+  const walk = (v: unknown): unknown => (isString(v) ? clean(v) : Array.isArray(v) ? v.map(walk) : isObject(v) ? Object.fromEntries(Object.entries(v).map(([k, x]) => [k, walk(x)])) : v)
+  return walk(value) as T
 }
 
 function loopRank(loop: string): [number, number, string] {

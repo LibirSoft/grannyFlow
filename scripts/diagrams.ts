@@ -152,6 +152,7 @@ function loop(theme: Theme): string {
   c.path('M722,380 L722,530 L560,530', 'amber', { head: false })
   c.label(730, 410, 'critical · major · priority > 70', 'amber', 'start')
   c.label(730, 428, '+ near misses (≥ 55) ride along', 'amber', 'start')
+  c.label(730, 446, '+ config tags: points or a fix', 'amber', 'start')
   c.text(300, 555, 'implementer fixes them → checks again → every reviewer reviews again · cap: maxRounds', { size: 12.5, fill: c.p.muted, anchor: 'middle' })
 
   c.path('M185,590 L185,632', 'neutral')

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'bun:test'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { decide, declinedOf, isBlocker, mergeDuplicates, parseCodexReview, priorityOf, reviewFailure, rideAlong, saysNoFindings, triage } from '../src/core/review'
+import { decide, declinedOf, isBlocker, mergeDuplicates, parseCodexReview, priorityOf, reviewFailure, rideAlong, saysNoFindings, triage, type Policy } from '../src/core/review'
 import type { Finding, Impact } from '../src/core/types'
 
 const fixture = (name: string) => readFileSync(join(import.meta.dir, 'fixtures', name), 'utf8')
@@ -609,5 +609,119 @@ describe('declinedOf', () => {
   it('reads a missing or non-array value as nothing declined', () => {
     expect(declinedOf(undefined, sent)).toEqual({ declined: [], unknown: [] })
     expect(declinedOf('x-F1', sent)).toEqual({ declined: [], unknown: [] })
+  })
+})
+
+describe('config tags', () => {
+  const tagged = {
+    threshold: 70,
+    alwaysFix: ['critical', 'major'] as Impact[],
+    rideAlong: 55 as number | false,
+    tags: {
+      typo: { description: 'a misspelled word', fix: true as const },
+      naming: { description: 'a name that lies', points: 40 },
+      style: { description: 'a style slip', points: 20 },
+    },
+  }
+  const f = (id: string, severity = 'P2'): Finding => ({ id, severity, file: 'src/a.ts', line: 3, title: id, detail: '' })
+  const judged = (id: string, c: Record<string, unknown>, policy: Policy = tagged, severity = 'P2'): Finding =>
+    decide(f(id, severity), { verdict: 'confirmed', impact: 'minor', likelihood: 'edge', fixCost: 'trivial', scope: 'in-scope', evidence: 'src/a.ts:3 - call save twice', reason: 'real', ...c }, policy)
+
+  it('gives a fix tag rule 10 and a points tag its sum on the priority, and names the tag on the finding', () => {
+    expect(judged('x', { tag: 'typo' })).toMatchObject({ priority: 40, tag: 'typo', decision: { rule: 10, action: 'fix', why: 'tag typo is marked fix (minor/edge/trivial -> 40)' } })
+    expect(judged('x', { tag: 'naming' })).toMatchObject({
+      priority: 80,
+      tag: 'naming',
+      decision: { rule: 7, action: 'fix', why: 'priority 80 > threshold 70 (minor/edge/trivial -> 40 + 40 (tag naming) = 80)' },
+    })
+    expect(judged('x', { tag: 'style' })).toMatchObject({ priority: 60, tag: 'style', decision: { rule: 8, action: 'residual', why: 'under the bar: minor/edge/trivial -> 40 + 20 (tag style) = 60' } })
+  })
+
+  it('adds a points tag to the priority of the classes the ratchet raised', () => {
+    const earlier: Finding = { ...f('codex-F1'), verdict: 'confirmed', impact: 'moderate', likelihood: 'edge', fixCost: 'small', scope: 'in-scope', evidence: 'src/a.ts:3 - x', priority: 55 }
+    const d = decide(
+      { ...f('codex-F2'), repeatOf: 'r1/codex-F1' },
+      { verdict: 'confirmed', impact: 'moderate', likelihood: 'rare', fixCost: 'small', scope: 'in-scope', evidence: 'src/a.ts:3 - x', tag: 'style' },
+      tagged,
+      () => false,
+      x => (x.repeatOf === 'r1/codex-F1' ? earlier : undefined),
+    )
+    expect(d).toMatchObject({
+      likelihood: 'edge',
+      priority: 75,
+      tag: 'style',
+      decision: { rule: 7, why: 'priority 75 > threshold 70 (moderate/edge/small -> 55 + 20 (tag style) = 75)', raised: 'repeat of r1/codex-F1: likelihood rare -> edge' },
+    })
+  })
+
+  it('clamps a points tag to 100 and sums it in the why of rules 6 and 7, and a fix tag keeps the plain why of rule 6', () => {
+    expect(judged('x', { impact: 'moderate', likelihood: 'common', fixCost: 'small', tag: 'naming' })).toMatchObject({
+      priority: 100,
+      decision: { rule: 7, why: `priority 100 > threshold 70 (moderate/common/small -> ${priorityOf('moderate', 'common', 'small')} + 40 (tag naming) = 100)` },
+    })
+    expect(judged('x', { impact: 'major', likelihood: 'edge', fixCost: 'small', tag: 'naming' })).toMatchObject({
+      priority: 100,
+      decision: { rule: 6, why: 'impact major is in alwaysFix (major/edge/small -> 80 + 40 (tag naming) = 100)' },
+    })
+    expect(judged('x', { impact: 'major', likelihood: 'edge', fixCost: 'small', tag: 'typo' })).toMatchObject({
+      priority: 80,
+      tag: 'typo',
+      decision: { rule: 6, why: 'impact major is in alwaysFix (major/edge/small -> 80)' },
+    })
+  })
+
+  it('gives a points tag under the bar rule 8, and rule 9 when a round with a fix sends it along', () => {
+    const style = judged('style', { tag: 'style' })
+    expect(style.decision).toEqual({ rule: 8, action: 'residual', why: 'under the bar: minor/edge/trivial -> 40 + 20 (tag style) = 60' })
+    const out = rideAlong([judged('fix', { impact: 'major', likelihood: 'edge', fixCost: 'small' }), style, judged('plain', {})], tagged)
+    expect(out.map(x => [x.id, x.decision!.rule])).toEqual([
+      ['fix', 6],
+      ['style', 9],
+      ['plain', 8],
+    ])
+    expect(out[1]!.decision!.why).toBe("rides along with this round's fixes: priority 60 >= rideAlong 55 (minor/edge/trivial, tag style)")
+  })
+
+  it('leaves no tag on a finding that rules 1 to 5 decide, and on an unverified, zero-impact or declined repeat', () => {
+    const cases: Array<[Record<string, unknown>, number]> = [
+      [{ verdict: 'refuted' }, 3],
+      [{ scope: 'other-stage' }, 4],
+      [{ scope: 'pre-existing' }, 5],
+    ]
+    for (const [c, rule] of cases) {
+      const out = judged('x', { ...c, tag: 'typo' })
+      expect(out).not.toHaveProperty('tag')
+      expect(out.decision!.rule).toBe(rule)
+      expect(out.priority).toBe(40)
+    }
+    expect(judged('x', { tag: 'typo' }, tagged, 'P1')).toEqual(judged('x', {}, tagged, 'P1'))
+    expect(judged('x', { tag: 'typo' }, tagged, 'P1').decision).toEqual({ rule: 1, action: 'fix', why: 'P0/P1' })
+    expect(judged('x', { evidence: 'the save call', tag: 'typo' })).toEqual(judged('x', { evidence: 'the save call' }))
+    expect(judged('x', { impact: 'none', tag: 'typo' })).toEqual(judged('x', { impact: 'none' }))
+    const declined = (c: Record<string, unknown>) =>
+      decide(f('x'), { verdict: 'confirmed', impact: 'minor', likelihood: 'edge', fixCost: 'trivial', scope: 'in-scope', evidence: 'src/a.ts:3 - call save twice', ...c }, tagged, () => true)
+    expect(declined({ tag: 'typo' })).toEqual(declined({}))
+  })
+
+  it('reads the tag name trimmed and lower-cased, and takes no tag for an empty, none, non-string or unknown name', () => {
+    expect(judged('x', { tag: ' Typo ' })).toMatchObject({ tag: 'typo', decision: { rule: 10 } })
+    for (const tag of ['', 'none', 'nit', 7, 'constructor']) expect(judged('x', { tag })).toEqual(judged('x', {}))
+  })
+
+  it('applies nothing without tags in the policy, and at threshold 100 a points tag stays under the bar while a fix tag still applies', () => {
+    const plain = { threshold: 70, alwaysFix: ['critical', 'major'] as Impact[] }
+    expect(judged('x', { tag: 'typo' }, plain)).toEqual(judged('x', {}, plain))
+    const capped = { ...tagged, threshold: 100 }
+    expect(judged('x', { impact: 'moderate', likelihood: 'common', fixCost: 'small', tag: 'naming' }, capped)).toMatchObject({
+      priority: 100,
+      decision: { rule: 8, action: 'residual', why: 'under the bar: moderate/common/small -> 75 + 40 (tag naming) = 100' },
+    })
+    expect(judged('x', { tag: 'typo' }, capped).decision!.rule).toBe(10)
+  })
+
+  it('gives a merged group the tag and decision of its strongest copy', () => {
+    const { findings } = mergeDuplicates([judged('a', {}), judged('b', { tag: 'typo' })], new Map([['b', 'a']]))
+    expect(findings).toHaveLength(1)
+    expect(findings[0]).toMatchObject({ id: 'a', tag: 'typo', duplicates: ['b'], decision: { rule: 10, action: 'fix' } })
   })
 })

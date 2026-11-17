@@ -45,7 +45,7 @@ import {
 } from './prompts'
 import { opencodeAnswer, readGrant } from './opencode'
 import { bucketOf, countsOf, isDemoted, isJudged, renderReport, severityOf, utf8Length, type ReportMeta } from './report'
-import { decide, declinedOf, isBlocker, mergeDuplicates, parseCodexReview, reviewFailure, rideAlong, saysNoFindings, triage, type Policy } from './review'
+import { decide, declinedOf, isBlocker, keeperOf, knownTag, mergeDuplicates, namedTag, parseCodexReview, reviewFailure, rideAlong, saysNoFindings, triage, type Policy } from './review'
 import { detachedReview, MAX_WAITS, planReviewScript, reportedBackend, reviewerModel, reviewPlan, reviewStem, WAIT_SECONDS } from './reviewer'
 import { SCHEMAS } from './schemas'
 import { heredocWriteScript, shellQuote } from './shell'
@@ -945,7 +945,8 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
         host.log(`${name} r${round}: ${blockers.length} P0/P1 finding(s) go to the implementer without the judge: ${blockers.map(f => f.id).join(', ')}`)
       }
       const declinedBefore = (f: Finding) => f.repeatOf !== undefined && declined.has(f.repeatOf)
-      const policy = { threshold: config.threshold, alwaysFix: config.alwaysFix, rideAlong: config.rideAlong }
+      const untagged: Policy = { threshold: config.threshold, alwaysFix: config.alwaysFix, rideAlong: config.rideAlong }
+      const policy: Policy = subject.kind === 'diff' && Object.keys(config.tags).length ? { ...untagged, tags: config.tags } : untagged
       let findings = found.map(f => decide(f, undefined, policy, declinedBefore))
       unmerged = findings
       if (judged.length) {
@@ -953,12 +954,23 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
         const label = `judge ${name} r${round}`
         const judgedIds = new Set(judged.map(f => f.id))
         const blockerIds = new Set(blockers.map(f => f.id))
-        const decideAll = (per: JudgeEntry[]) =>
-          found.map(f => {
+        const duplicatesOf = (per: JudgeEntry[]) =>
+          new Map(
+            per
+              .filter(x => judgedIds.has(x.id) && typeof x.duplicateOf === 'string' && judgedIds.has(x.duplicateOf))
+              .filter(x => !blockerIds.has(x.id) || blockerIds.has(x.duplicateOf as string))
+              .map(x => [x.id, x.duplicateOf as string]),
+          )
+        const decideAll = (per: JudgeEntry[]) => {
+          const entries = found.map(f => {
             const s = judgedIds.has(f.id) ? per.find(x => x.id === f.id) : undefined
             const repeat = typeof s?.repeatOf === 'string' && ledger.has(s.repeatOf) ? { repeatOf: s.repeatOf } : {}
-            return decide({ ...f, ...repeat }, s, policy, declinedBefore, earlierOf)
+            return { f: { ...f, ...repeat }, s }
           })
+          const keeper = keeperOf(duplicatesOf(per), new Set(found.map(f => f.id)))
+          const declinedGroups = new Set(entries.filter(e => declinedBefore(e.f)).map(e => keeper(e.f.id)))
+          return entries.map(({ f, s }) => decide(f, s, declinedGroups.has(keeper(f.id)) ? untagged : policy, declinedBefore, earlierOf))
+        }
         const { per, decided: withScores } = await judgeAnswers({
           at: `${name} r${round}`,
           label,
@@ -968,16 +980,18 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
           apply: decideAll,
           leftTo: 'to the implementer unjudged (rule 2)',
         })
-        const duplicateOf = new Map(
-          per
-            .filter(x => judgedIds.has(x.id) && typeof x.duplicateOf === 'string' && judgedIds.has(x.duplicateOf))
-            .filter(x => !blockerIds.has(x.id) || blockerIds.has(x.duplicateOf as string))
-            .map(x => [x.id, x.duplicateOf as string]),
-        )
-        const merge = mergeDuplicates(withScores, duplicateOf)
+        const unknownTags = policy.tags
+          ? per.flatMap(x => {
+              const tagName = namedTag(x)
+              return judgedIds.has(x.id) && tagName !== undefined && !knownTag(policy.tags, tagName) ? [`${x.id} ${JSON.stringify(tagName.length > 40 ? `${tagName.slice(0, 40)}...` : tagName)}`] : []
+            })
+          : []
+        if (unknownTags.length) host.log(`${name} r${round}: the judge named tag(s) the config does not have - ignored: ${unknownTags.join(', ')}`)
+        const merge = mergeDuplicates(withScores, duplicatesOf(per))
         for (const m of merge.merged) host.log(`${name} r${round}: judge merged ${m.id} into ${m.into} (duplicate)`)
         unmerged = withScores
-        findings = rideAlong(merge.findings, policy, declinedBefore)
+        const declinedIds = new Set(withScores.filter(declinedBefore).map(f => f.id))
+        findings = rideAlong(merge.findings, policy, f => declinedBefore(f) || (f.duplicates ?? []).some(id => declinedIds.has(id)))
       }
       history.push({ round, findings })
       host.log(`${name} r${round}: ${findings.length} finding(s)`)

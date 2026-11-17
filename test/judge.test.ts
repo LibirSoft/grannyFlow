@@ -142,6 +142,15 @@ function judgeHost(opts: {
   return { ...f, writes }
 }
 
+describe('runJudge and config tags', () => {
+  it('keeps config tags out of granny judge: its tagging prompt has no TAGS block and no finding gets a tag', async () => {
+    const f = judgeHost({ findings: { kimi: [raw('F1', 'P3')] }, scores: [{ 'kimi-F1': { ...classes('minor'), tag: 'typo' } }] })
+    const r = await runJudge(f.host, { repo: REPO, config: [ONE, { tags: { typo: { description: 'a misspelled word', fix: true } } }] })
+    expect(f.calls.find(c => c.label === 'tag feat/x')!.prompt).not.toContain('TAGS - ')
+    expect(r.findings.every(x => x.tag === undefined)).toBe(true)
+  })
+})
+
 describe('runJudge: the headings', () => {
   it('returns the repo without the trailing slash it was given', async () => {
     const r = await runJudge(judgeHost().host, { repo: `${REPO}/`, config: ONE })

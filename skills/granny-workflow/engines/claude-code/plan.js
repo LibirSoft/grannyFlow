@@ -36,6 +36,7 @@ var DEFAULT_CONFIG = {
   threshold: 70,
   alwaysFix: ["critical", "major"],
   rideAlong: 55,
+  tags: {},
   maxRounds: 4,
   base: "main",
   gates: "auto",
@@ -127,8 +128,14 @@ function resolveConfig(layers, host) {
         }
       }
     }
+    if (layer.tags !== undefined) {
+      if (!isObject(layer.tags))
+        errors.push(`${where}: tags must be an object keyed by tag name`);
+      else
+        config.tags = mergeTags(config.tags, layer.tags);
+    }
     for (const [key, value] of Object.entries(layer)) {
-      if (key === "roles" || key === "$schema" || value === undefined || !TOP_KEYS.has(key))
+      if (key === "roles" || key === "tags" || key === "$schema" || value === undefined || !TOP_KEYS.has(key))
         continue;
       config[key] = value;
       if (key === "reviewers")
@@ -311,6 +318,7 @@ function validate(c, effortLayer) {
   if (!isRepairs(c.maxRepairs))
     errors.push("maxRepairs must be an integer >= 0");
   errors.push(...checkErrors(c.checks));
+  errors.push(...tagErrors(c.tags));
   for (const role of ROLES) {
     errors.push(...modelErrors(`roles.${role}.model`, c.roles[role].model), ...effortErrors(`roles.${role}.effort`, c.roles[role].effort, effortLayer[role]));
   }
@@ -370,6 +378,56 @@ function metricErrors(at, m) {
     errors.push(`${at} needs min, max or both`);
   else if (isNumber(m.min) && isNumber(m.max) && m.min > m.max)
     errors.push(`${at}.min must not be above max`);
+  return errors;
+}
+var TAG_KEYS = new Set(["description", "points", "fix"]);
+var TAG_LIMIT = 20;
+function mergeTags(base, layer) {
+  const tags = new Map(Object.entries(base));
+  for (const [name, value] of Object.entries(layer)) {
+    if (value === null)
+      tags.delete(name);
+    else if (value !== undefined)
+      tags.set(name, value);
+  }
+  return Object.fromEntries(tags);
+}
+function isTagPoints(value) {
+  return Number.isInteger(value) && value >= 1 && value <= 100;
+}
+function tagErrors(tags) {
+  if (!isObject(tags))
+    return ["tags must be an object keyed by tag name"];
+  const names = Object.keys(tags);
+  const errors = names.length > TAG_LIMIT ? [`tags: at most ${TAG_LIMIT} tags (got ${names.length})`] : [];
+  for (const name of names) {
+    if (!NAME.test(name) || name.length > 32 || name === "none") {
+      errors.push(`tags.${name}: a tag name is 1 to 32 characters of a-z, 0-9 and -, and not "none"`);
+      continue;
+    }
+    const at = `tags.${name}`;
+    const value = tags[name];
+    if (!isObject(value)) {
+      errors.push(`${at} must be an object: { description, points } or { description, fix: true }`);
+      continue;
+    }
+    for (const key of Object.keys(value))
+      if (!TAG_KEYS.has(key))
+        errors.push(`unknown key "${at}.${key}"`);
+    const { description, points, fix } = value;
+    if (typeof description !== "string" || !description.trim() || description.length > 200 || /[\r\n]|\p{Zl}|\p{Zp}/u.test(description)) {
+      errors.push(`${at}.description must be a non-empty string of at most 200 characters on one line`);
+    }
+    if (fix !== undefined && fix !== true)
+      errors.push(`${at}.fix must be true - leave it out for a tag with points`);
+    else if (points !== undefined && fix !== undefined)
+      errors.push(`${at} has points and fix - keep one of them`);
+    else if (points !== undefined) {
+      if (!isTagPoints(points))
+        errors.push(`${at}.points must be an integer between 1 and 100`);
+    } else if (fix !== true)
+      errors.push(`${at} needs points (1-100) or fix: true`);
+  }
   return errors;
 }
 function resolveModel(spec, host) {
@@ -494,12 +552,11 @@ function reviewFailure(text) {
   return FAILED_RENDER.exec(text)?.[0];
 }
 var isBlocker = (f) => /^\s*(p0|p1|critical|high)\b/i.test(String(f.severity ?? ""));
-var JUDGED = ["verdict", "impact", "likelihood", "fixCost", "scope", "evidence", "priority", "reason", "decision"];
+var JUDGED = ["verdict", "impact", "likelihood", "fixCost", "scope", "evidence", "priority", "tag", "reason", "decision"];
 var fixes = (f) => f.decision?.action !== "residual";
 var rank = (f) => f.priority ?? -1;
-function mergeDuplicates(findings, duplicateOf) {
-  const ids = new Set(findings.map((f) => f.id));
-  const keeper = (id) => {
+function keeperOf(duplicateOf, ids) {
+  return (id) => {
     const seen = new Set([id]);
     for (let current = id;; ) {
       const next = duplicateOf.get(current);
@@ -511,6 +568,10 @@ function mergeDuplicates(findings, duplicateOf) {
       current = next;
     }
   };
+}
+function mergeDuplicates(findings, duplicateOf) {
+  const ids = new Set(findings.map((f) => f.id));
+  const keeper = keeperOf(duplicateOf, ids);
   const into = new Map;
   for (const f of findings) {
     const k = keeper(f.id);
@@ -603,6 +664,13 @@ function ratchet(fields, label, earlier) {
   }
   return raised.length ? `repeat of ${label}: ${raised.join(", ")}` : undefined;
 }
+function namedTag(entry) {
+  if (typeof entry?.tag !== "string")
+    return;
+  const name = entry.tag.trim().toLowerCase();
+  return name === "" || name === "none" ? undefined : name;
+}
+var knownTag = (tags, name) => tags !== undefined && Object.prototype.hasOwnProperty.call(tags, name);
 function decide(f, entry, policy, repeatsDeclined = () => false, earlierOf = () => {
   return;
 }) {
@@ -629,7 +697,6 @@ function decide(f, entry, policy, repeatsDeclined = () => false, earlierOf = () 
   if (c.kind === "none")
     return done(2, "fix", c.why);
   const { verdict, impact, likelihood, fixCost, scope } = c.fields;
-  const p = out.priority;
   const classes = `${impact}/${likelihood}/${fixCost}`;
   if (verdict === "refuted")
     return done(3, "residual", "refuted");
@@ -639,11 +706,23 @@ function decide(f, entry, policy, repeatsDeclined = () => false, earlierOf = () 
     const attention = impact === "critical" || impact === "major";
     return done(5, "residual", attention ? `pre-existing - ATTENTION: impact ${impact}` : "pre-existing", attention);
   }
+  const name = namedTag(entry);
+  const tagged = name !== undefined && knownTag(policy.tags, name) && verdict === "confirmed" && impact !== "none" && !repeatsDeclined(out) ? name : undefined;
+  const tag = tagged === undefined ? undefined : policy.tags[tagged];
+  const base = out.priority;
+  if (tagged !== undefined)
+    out.tag = tagged;
+  if (tag?.points !== undefined)
+    out.priority = Math.min(100, base + tag.points);
+  const p = out.priority;
+  const sum = tag?.points === undefined ? undefined : `${classes} -> ${base} + ${tag.points} (tag ${tagged}) = ${p}`;
   if (policy.alwaysFix.includes(impact))
-    return done(6, "fix", `impact ${impact} is in alwaysFix (${classes} -> ${p})${c.note}`);
+    return done(6, "fix", `impact ${impact} is in alwaysFix (${sum ?? `${classes} -> ${p}`})${c.note}`);
   if (p > policy.threshold)
-    return done(7, "fix", `priority ${p} > threshold ${policy.threshold} (${classes})${c.note}`);
-  return done(8, "residual", `under the bar: ${classes} -> ${p}${c.note}`);
+    return done(7, "fix", `priority ${p} > threshold ${policy.threshold} (${sum ?? classes})${c.note}`);
+  if (tag?.fix)
+    return done(10, "fix", `tag ${tagged} is marked fix (${classes} -> ${p})`);
+  return done(8, "residual", `under the bar: ${sum ?? `${classes} -> ${p}`}${c.note}`);
 }
 function rideAlong(findings, policy, except = () => false) {
   const bar = policy.rideAlong;
@@ -652,7 +731,7 @@ function rideAlong(findings, policy, except = () => false) {
   return findings.map((f) => {
     if (f.decision?.rule !== 8 || f.priority === undefined || f.priority < bar || except(f))
       return f;
-    const why = `rides along with this round's fixes: priority ${f.priority} >= rideAlong ${bar} (${f.impact}/${f.likelihood}/${f.fixCost})`;
+    const why = `rides along with this round's fixes: priority ${f.priority} >= rideAlong ${bar} (${f.impact}/${f.likelihood}/${f.fixCost}${f.tag === undefined ? "" : `, tag ${f.tag}`})`;
     return { ...f, decision: { ...f.decision, rule: 9, action: "fix", why } };
   });
 }
@@ -710,6 +789,16 @@ var rubric = (task) => `Classify every finding with exactly these fields:
 - reason: one short sentence, at most 25 words: what decided the classification. Do not repeat the finding or the evidence.
 Example: a late save response re-binds the editor to another post's id, so the next save can overwrite the wrong post: confirmed, critical, edge, small, in-scope, though the window is narrow.`;
 var decided = (f) => f.decision ? `${f.decision.action} - rule ${f.decision.rule}: ${f.decision.why}${f.decision.raised ? ` (ratchet raised ${f.decision.raised})` : ""}` : undefined;
+function tagsSection(tags) {
+  const names = Object.entries(tags ?? {});
+  if (!names.length)
+    return "";
+  return `
+TAGS - names the user gave to kinds of findings. Classify every finding first, exactly as above: a tag never changes a class. Then, when a finding is of one of these kinds, set its tag to that name; when several fit, the first one listed; when none fits, leave tag out. Use only these names:
+${names.map(([name, tag]) => `- ${name}: ${tag.description}`).join(`
+`)}
+`;
+}
 function judgeHistory(earlier) {
   if (!earlier.length)
     return "";
@@ -727,6 +816,7 @@ function judgeHistory(earlier) {
     fixCost: f.fixCost,
     scope: f.scope,
     priority: f.priority,
+    tag: f.tag,
     evidence: f.evidence
   })));
   const rounds = earlier.map((e) => {
@@ -1087,7 +1177,7 @@ ${note ? note + `
 ${judgeRouting(findings)}
 For each finding, open the cited code and check that it is real and correctly described.${stage ? " Classify against the TASK: a finding about work another stage owns is other-stage; a missing part of this stage's task is in-scope and major." : ""} ${JUDGE_DUPES}
 ${rubric(stage ? "the stage's TASK" : "what the change set out to do")}
-${judgeHistory(earlier)}
+${tagsSection(p.config.tags)}${judgeHistory(earlier)}
 REVIEW:
 ${JSON.stringify(findings)}`;
 }
@@ -1541,6 +1631,7 @@ var SCHEMAS = {
             scope: { type: "string", enum: [...SCOPES] },
             evidence: { type: "string", description: "path:line plus the concrete trigger steps, one line" },
             reason: { type: "string", description: "one short sentence, at most 25 words" },
+            tag: { type: "string", description: "only when the prompt has a TAGS list: the name of the tag that fits this finding, exactly as listed; omit when none fits" },
             duplicateOf: { type: "string", description: "id of another finding in this list that reports the same problem; omit when there is none" },
             repeatOf: { type: "string", description: "label of the earlier finding this one repeats, exactly as listed under EARLIER DECISIONS (e.g. r1/codex-F2, or s1/r2/codex-F1 from a stage review); omit when it repeats none" }
           },
@@ -1579,6 +1670,7 @@ var FINDING_KEYS = [
   "scope",
   "evidence",
   "priority",
+  "tag",
   "reason",
   "decision",
   "duplicates",
@@ -2449,7 +2541,8 @@ the last repair's deviations: ${deviations}` : ""}`;
         host.log(`${name} r${round}: ${blockers.length} P0/P1 finding(s) go to the implementer without the judge: ${blockers.map((f) => f.id).join(", ")}`);
       }
       const declinedBefore = (f) => f.repeatOf !== undefined && declined.has(f.repeatOf);
-      const policy = { threshold: config.threshold, alwaysFix: config.alwaysFix, rideAlong: config.rideAlong };
+      const untagged = { threshold: config.threshold, alwaysFix: config.alwaysFix, rideAlong: config.rideAlong };
+      const policy = subject.kind === "diff" && Object.keys(config.tags).length ? { ...untagged, tags: config.tags } : untagged;
       let findings = found.map((f) => decide(f, undefined, policy, declinedBefore));
       unmerged = findings;
       if (judged.length) {
@@ -2457,11 +2550,17 @@ the last repair's deviations: ${deviations}` : ""}`;
         const label = `judge ${name} r${round}`;
         const judgedIds = new Set(judged.map((f) => f.id));
         const blockerIds = new Set(blockers.map((f) => f.id));
-        const decideAll = (per) => found.map((f) => {
-          const s = judgedIds.has(f.id) ? per.find((x) => x.id === f.id) : undefined;
-          const repeat = typeof s?.repeatOf === "string" && ledger.has(s.repeatOf) ? { repeatOf: s.repeatOf } : {};
-          return decide({ ...f, ...repeat }, s, policy, declinedBefore, earlierOf);
-        });
+        const duplicatesOf = (per) => new Map(per.filter((x) => judgedIds.has(x.id) && typeof x.duplicateOf === "string" && judgedIds.has(x.duplicateOf)).filter((x) => !blockerIds.has(x.id) || blockerIds.has(x.duplicateOf)).map((x) => [x.id, x.duplicateOf]));
+        const decideAll = (per) => {
+          const entries = found.map((f) => {
+            const s = judgedIds.has(f.id) ? per.find((x) => x.id === f.id) : undefined;
+            const repeat = typeof s?.repeatOf === "string" && ledger.has(s.repeatOf) ? { repeatOf: s.repeatOf } : {};
+            return { f: { ...f, ...repeat }, s };
+          });
+          const keeper = keeperOf(duplicatesOf(per), new Set(found.map((f) => f.id)));
+          const declinedGroups = new Set(entries.filter((e) => declinedBefore(e.f)).map((e) => keeper(e.f.id)));
+          return entries.map(({ f, s }) => decide(f, s, declinedGroups.has(keeper(f.id)) ? untagged : policy, declinedBefore, earlierOf));
+        };
         const { per, decided: withScores } = await judgeAnswers({
           at: `${name} r${round}`,
           label,
@@ -2471,12 +2570,18 @@ the last repair's deviations: ${deviations}` : ""}`;
           apply: decideAll,
           leftTo: "to the implementer unjudged (rule 2)"
         });
-        const duplicateOf = new Map(per.filter((x) => judgedIds.has(x.id) && typeof x.duplicateOf === "string" && judgedIds.has(x.duplicateOf)).filter((x) => !blockerIds.has(x.id) || blockerIds.has(x.duplicateOf)).map((x) => [x.id, x.duplicateOf]));
-        const merge = mergeDuplicates(withScores, duplicateOf);
+        const unknownTags = policy.tags ? per.flatMap((x) => {
+          const tagName = namedTag(x);
+          return judgedIds.has(x.id) && tagName !== undefined && !knownTag(policy.tags, tagName) ? [`${x.id} ${JSON.stringify(tagName.length > 40 ? `${tagName.slice(0, 40)}...` : tagName)}`] : [];
+        }) : [];
+        if (unknownTags.length)
+          host.log(`${name} r${round}: the judge named tag(s) the config does not have - ignored: ${unknownTags.join(", ")}`);
+        const merge = mergeDuplicates(withScores, duplicatesOf(per));
         for (const m of merge.merged)
           host.log(`${name} r${round}: judge merged ${m.id} into ${m.into} (duplicate)`);
         unmerged = withScores;
-        findings = rideAlong(merge.findings, policy, declinedBefore);
+        const declinedIds = new Set(withScores.filter(declinedBefore).map((f) => f.id));
+        findings = rideAlong(merge.findings, policy, (f) => declinedBefore(f) || (f.duplicates ?? []).some((id) => declinedIds.has(id)));
       }
       history.push({ round, findings });
       host.log(`${name} r${round}: ${findings.length} finding(s)`);

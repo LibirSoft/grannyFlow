@@ -7,7 +7,7 @@ Talk to the user in their language. Ask with your host's question tool when you 
 ## 1. Look first
 
 1. The repo: `git rev-parse --show-toplevel` in the current directory. Not in a git repo → ask which repo; setup can still write the user config.
-2. What is already set: read `<repo>/granny.config.json` and `~/.config/granny/config.json` (`$XDG_CONFIG_HOME/granny/config.json` when that is set) when they exist. Tell the user what they hold and offer those values as the current answers.
+2. What is already set: read `<repo>/granny.config.json` and the user config (`$GRANNY_CONFIG` when it is set, else `$XDG_CONFIG_HOME/granny/config.json`, else `~/.config/granny/config.json`) when they exist. Tell the user what they hold and offer those values as the current answers.
 3. Which reviewers can run here (see [config.md](config.md#reviewers)):
    - Codex: `codex --version` works and `codex login status` says logged in.
    - Claude Code only, the Codex plugin: `ls "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"/plugins/cache/openai-codex/codex/*/scripts/codex-companion.mjs` finds it and `node --version` works. Engine `auto` uses it then.
@@ -58,7 +58,7 @@ Ask these five, each with the current value (or the default) marked:
 
    When the answers leave every reviewer an `agent` reviewer on the implementer's model (two roles with no model share the session model; a Codex, `command` or `opencode` reviewer counts as different), tell the user: "reviewers share the implementer's model; a different model may catch more". This is advice on every host: never refuse, and write what the user chose.
 
-5. **Where to save** - this project (`<repo>/granny.config.json`, default; commit it to share it with the team) or every project (`~/.config/granny/config.json`).
+5. **Where to save** - this project (`<repo>/granny.config.json`, default; commit it to share it with the team) or every project (the user config: `$GRANNY_CONFIG` when it is set, else `$XDG_CONFIG_HOME/granny/config.json`, else `~/.config/granny/config.json`).
 
 Plan review, round cap and language keep their defaults. Mention in one line that the user can ask for them (`planReview`, `maxRounds`, `language`), and set them only when asked; say that plan review is off by default because every round is a full review + judge + fix, which uses many more tokens and makes runs much longer. When the user asks to turn it on, state that cost, with the round cap (`maxRounds`), before writing it.
 
@@ -75,7 +75,7 @@ Build the config from the answers:
 
 When the file already exists, keep every key the user did not answer for and replace only the ones they did. Use only keys from [config.md](config.md#keys): granny rejects unknown keys when a run starts.
 
-Show the JSON, write it, and read it back as JSON to be sure it parses. Create `~/.config/granny/` when it is missing. Do not commit the file and do not start a run. Then tell the user, in two or three lines: where the file is, what each choice does, and how to start - `implement <plan> with granny` or `plan <goal> with granny on <branch>`.
+Show the JSON, write it, and read it back as JSON to be sure it parses. Create the directory of that file when it is missing. Do not commit the file and do not start a run. Then tell the user, in two or three lines: where the file is, what each choice does, and how to start - `implement <plan> with granny` or `plan <goal> with granny on <branch>`.
 
 Example - strict, the host model and Codex, two checks, the defaults for models:
 

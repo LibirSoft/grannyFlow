@@ -5,7 +5,7 @@ import { mrOf, mrTarget, postGitlab } from './gitlab'
 import { failure, plural, type PosterIo } from './io'
 import { type PlannedReview, planRound, type Target } from './plan'
 import { detectPlatform, type Platform, PLATFORMS } from './platform'
-import { byTrailOrder, trailProblem } from './records'
+import { byTrailOrder, type LocalRoot, trailProblem, withoutLocalPaths } from './records'
 
 export type { ExecResult, PosterIo } from './io'
 
@@ -63,6 +63,15 @@ function readRecords(io: PosterIo, dir: string): TrailRound[] | undefined {
     else records.push(value as TrailRound)
   }
   return records.sort(byTrailOrder)
+}
+
+/** The checkout, the main checkout it is a worktree of, the home directory and the temporary directories: what a record's text may name of this machine. */
+function localRoots(io: PosterIo, toplevel: string): LocalRoot[] {
+  const common = io.exec('git', ['rev-parse', '--path-format=absolute', '--git-common-dir'])
+  const main = common.code === 0 && /\/\.git\/?$/.test(common.stdout.trim()) ? common.stdout.trim().replace(/\/\.git\/?$/, '') : undefined
+  const home = io.home?.()
+  const tmp = (io.tmp?.() ?? []).map((dir): LocalRoot => [dir, '$TMPDIR', true])
+  return [[toplevel, ''], ...(main ? [[main, ''] as LocalRoot] : []), ...(home ? [[home, '~'] as LocalRoot] : []), ...tmp]
 }
 
 const commitOf = (io: PosterIo, ref: string) => {
@@ -137,7 +146,8 @@ export function postTrail(argv: string[], io: PosterIo): number {
       return 1
     }
   }
-  const records = readRecords(io, dir)
+  const read = readRecords(io, dir)
+  const records = read && withoutLocalPaths(read, localRoots(io, toplevel))
   if (records === undefined) {
     io.print(`no trail at ${dir} - a granny run writes it there (config trail: true)`)
     return 1

@@ -34,7 +34,7 @@ In your project, ask your agent:
 
 > granny setup
 
-It asks five questions and writes `granny.config.json` in your repo, or `~/.config/granny/config.json` for every project. It does not start a run. The questions are: how strict the review is, who reviews, which checks to run, which model each role uses, and where to save.
+It asks five questions and writes `granny.config.json` in your repo, or your user config for every project (see [Configure](#configure)). It does not start a run. The questions are: how strict the review is, who reviews, which checks to run, which model each role uses, and where to save.
 
 Strictness sets how many findings go back to the implementer. P0/P1 findings and critical or major issues are always fixed. The preset decides the rest:
 
@@ -89,14 +89,14 @@ The report groups the findings by that rating: `critical` under P0, `major` unde
 - **Implementer** - builds one stage, commits it, and later fixes the findings sent back to it.
 - **Checks** (optional) - your test, typecheck or lint commands. Granny runs them itself, and a red one goes back to the implementer before any review.
 - **Reviewers** - all of them review every stage at the same time.
-- **Judge** - P0/P1 findings skip it and go straight back. It rates the rest by impact, likelihood and fix cost, and code turns the rating into a priority. Critical and major issues are always fixed, the others when their priority is above the threshold. What is not fixed is listed for you, with the reason.
+- **Judge** - P0/P1 findings skip it and go straight back. It rates the rest by impact, likelihood and fix cost, and code turns the rating into a priority. Critical and major issues are always fixed, the others when their priority is above the threshold. A finding the judge gives one of your config tags gets the tag's points on its priority, or is fixed outright. What is not fixed is listed for you, with the reason.
 - **Final review** - after the last stage, the whole branch is reviewed once more for problems between stages.
 
 Stages that do not depend on each other run at the same time, also in other repos. The full rules: [the decision table](skills/granny-workflow/references/config.md#the-decision-table).
 
 ## Configure
 
-`granny setup` covers the common choices. To edit by hand: settings are read from `~/.config/granny/config.json`, then `<repo>/granny.config.json`, then the run's own overrides. Later wins.
+`granny setup` covers the common choices. To edit by hand: settings are read from the user config (`$GRANNY_CONFIG` when it is set, else `$XDG_CONFIG_HOME/granny/config.json`, else `~/.config/granny/config.json`), then `<repo>/granny.config.json`, then the run's own overrides. Later wins.
 
 ```json
 {
@@ -125,6 +125,7 @@ Stages that do not depend on each other run at the same time, also in other repo
 | `finalReview` | `true` | review the whole branch after the last stage |
 | `parallel` | `true` | run independent stages at the same time |
 | `stepAgents` | `false` | build a stage with one agent per step: [step agents](skills/granny-workflow/references/config.md#step-agents) |
+| `tags` | none | kinds of small finding that get points or a straight fix: [config tags](skills/granny-workflow/references/config.md#tags) |
 | `roles.<role>.model` | the session model | model per role: `implementer`, `planner`, `judge`, `granny`, `helper` |
 
 A reviewer is one of these:
@@ -133,6 +134,23 @@ A reviewer is one of these:
 - `auto` - Codex. Install the [Codex CLI](https://github.com/openai/codex) and run `codex login`. Not on omp.
 - `opencode` - any model [opencode](https://opencode.ai) reaches, such as Kimi or GLM, on every host: [opencode reviewers](skills/granny-workflow/references/config.md#opencode-reviewers).
 - `command` - any other CLI.
+
+A config tag names a kind of small finding that should not be left behind. Say `granny tag` to your agent, or run the script yourself from your repo (with `--repo <dir>` from anywhere else):
+
+```sh
+node <skill-dir>/scripts/tags.mjs add typo --fix --description "a misspelled word in a comment, a string or a doc"
+```
+
+In the config file, with a second tag that adds 20 points to the priority instead:
+
+```json
+{
+  "tags": {
+    "typo": { "description": "a misspelled word in a comment, a string or a doc", "fix": true },
+    "naming": { "description": "a name that says something other than what the code does", "points": 20 }
+  }
+}
+```
 
 Every key and more examples: [config.md](skills/granny-workflow/references/config.md).
 
@@ -153,11 +171,11 @@ To resume a stopped run: on Claude Code relaunch it with `resumeFromRunId`; on o
 
 ```sh
 bun install
-bun run build   # regenerates the engines, scripts/pr-comments.mjs and references/prompts.md from src/
+bun run build   # regenerates the engines, scripts/pr-comments.mjs, scripts/tags.mjs and references/prompts.md from src/
 bun run check   # typecheck + tests
 ```
 
-`src/core` holds the loop, shared by every engine. `src/adapters` connects it to each host, and `src/pr` posts the review trail. The generated engine files are committed, so the skill installs without a build step.
+`src/core` holds the loop, shared by every engine. `src/adapters` connects it to each host, `src/pr` posts the review trail, and `src/tags` is the `granny tag` command. The generated engine files are committed, so the skill installs without a build step.
 
 ## License
 
