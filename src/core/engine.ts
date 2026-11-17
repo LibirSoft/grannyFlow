@@ -990,7 +990,8 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
         const merge = mergeDuplicates(withScores, duplicatesOf(per))
         for (const m of merge.merged) host.log(`${name} r${round}: judge merged ${m.id} into ${m.into} (duplicate)`)
         unmerged = withScores
-        findings = rideAlong(merge.findings, policy, declinedBefore)
+        const declinedIds = new Set(withScores.filter(declinedBefore).map(f => f.id))
+        findings = rideAlong(merge.findings, policy, f => declinedBefore(f) || (f.duplicates ?? []).some(id => declinedIds.has(id)))
       }
       history.push({ round, findings })
       host.log(`${name} r${round}: ${findings.length} finding(s)`)

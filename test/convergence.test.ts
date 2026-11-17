@@ -210,6 +210,27 @@ describe('a finding the fixer declined', () => {
     expect(f.logs).toContain('core r2: the judge overruled the fixer on codex-F1 (repeat of r1/codex-F1, rule 7: priority 90 > threshold 70 (moderate/common/trivial))')
   })
 
+  it('does not let a declined repeat ride along inside a fresh finding the judge merged it into', async () => {
+    const f = fakeHost({
+      reviews: [review(finding('P2', 'Late save')), review(finding('P2', 'Late save again'), finding('P2', 'Slow save', 'src/c.ts', 5), finding('P2', 'Lost save', 'src/d.ts', 9)), 'No findings.'],
+      scores: [
+        { 'codex-F1': { verdict: 'confirmed', impact: 'moderate', likelihood: 'common', fixCost: 'small', scope: 'in-scope', evidence: 'src/a.ts:3 - late save' } },
+        {
+          'codex-F1': { verdict: 'confirmed', impact: 'moderate', likelihood: 'edge', fixCost: 'large', scope: 'in-scope', evidence: 'src/a.ts:3 - late save', repeatOf: 'r1/codex-F1', duplicateOf: 'codex-F2' },
+          'codex-F2': { verdict: 'confirmed', impact: 'moderate', likelihood: 'edge', fixCost: 'small', scope: 'in-scope', evidence: 'src/c.ts:5 - slow save' },
+          'codex-F3': { verdict: 'confirmed', impact: 'major', likelihood: 'common', fixCost: 'small', scope: 'in-scope', evidence: 'src/d.ts:9 - lost save' },
+        },
+      ],
+      override: declineIn('fix core r1'),
+    })
+    const r = await runGranny(f.host, input({ config: { maxRounds: 3 } }))
+    const r2 = prompt(f.calls, 'fix core r2')!
+    expect(r2).toContain('"id":"codex-F3"')
+    expect(r2).not.toContain('"id":"codex-F2"')
+    expect(r.stages[0]).toMatchObject({ outcome: 'clean', rounds: 3 })
+    expect(r.stages[0]!.residual).toEqual([expect.objectContaining({ id: 'codex-F2', duplicates: ['codex-F1'], decision: expect.objectContaining({ rule: 8 }) })])
+  })
+
   it('does not take a repeat of a residual finding for a repeat of a declined one', async () => {
     const f = fakeHost({
       reviews: [review(finding('P2', 'Phantom crash'), finding('P3', 'Nit')), review(finding('P3', 'Nit'))],
