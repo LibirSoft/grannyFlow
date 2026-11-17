@@ -140,43 +140,73 @@ const tooWide = (dir: string) => dir.split('/').length < 3 || HOME.test(dir)
 
 const parent = (path: string) => path.slice(0, path.lastIndexOf('/'))
 
+const within = (path: string, dir: string) => path === dir || path.startsWith(`${dir}/`)
+
+interface Asked {
+  path: string
+  at: string
+  whole: boolean
+}
+
+function named(text: string): Asked[] {
+  return (text.match(ABSOLUTE_PATH) ?? []).map(p => p.replace(/[.:]+$/, '')).flatMap((p): Asked[] => {
+    const at = normalize(p)
+    if (at === '/') return []
+    if (p.endsWith('/')) return [{ path: p, at, whole: true }]
+    return at.slice(at.lastIndexOf('/') + 1).includes('.') ? [{ path: p, at, whole: false }] : []
+  })
+}
+
+const home = (a: Asked) => (a.whole ? a.at : parent(a.at))
+
 export interface ReadGrant {
   dirs: string[]
+  files: string[]
   /** The paths given whose directory is too wide or holds the worktree, so the reviewer cannot read them. */
   refused: string[]
 }
 
 /**
- * The directories of `files`, of the absolute paths named in `text` (a path ending in `/` is the directory itself, one whose last part has no `.` names nothing)
- * and the directories in `dirs` themselves, that lie outside `cwd`; never a top-level directory, a home directory, a dot directory right under one or a directory above `cwd`.
+ * What the reviewer may read outside `cwd`. `files`: each of `files` and each absolute path named in `text` whose last part has a `.`, unless it lies in one of the returned `dirs`.
+ * `dirs`: each path in `text` ending in `/` and each of `dirs`, whole. Any other path in `text` names nothing.
+ * Never in a top-level directory, a home directory, a dot directory right under one or a directory above `cwd`.
  */
 export function readGrant(text: string, files: string[], cwd: string, dirs: string[] = []): ReadGrant {
   const root = normalize(cwd)
-  const named = (text.match(ABSOLUTE_PATH) ?? []).map(p => p.replace(/[.:]+$/, '')).flatMap(p => {
-    const path = normalize(p)
-    if (path === '/') return []
-    if (p.endsWith('/')) return [{ path: p, dir: path }]
-    return path.slice(path.lastIndexOf('/') + 1).includes('.') ? [{ path: p, dir: parent(path) }] : []
-  })
-  const asked = [...named, ...files.map(f => ({ path: f, dir: parent(normalize(f)) })), ...dirs.map(d => ({ path: d, dir: normalize(d) }))]
-  const outside = asked.filter(a => a.dir !== root && !a.dir.startsWith(`${root}/`))
-  const refuse = (dir: string) => tooWide(dir) || root.startsWith(`${dir}/`)
+  const asked: Asked[] = [...named(text), ...files.map(f => ({ path: f, at: normalize(f), whole: false })), ...dirs.map(d => ({ path: d, at: normalize(d), whole: true }))]
+  const outside = asked.filter(a => !within(home(a), root))
+  const refuse = (a: Asked) => tooWide(home(a)) || root.startsWith(`${home(a)}/`)
+  const granted = outside.filter(a => !refuse(a))
+  const whole = [...new Set(granted.filter(a => a.whole).map(a => a.at))]
   return {
-    dirs: [...new Set(outside.filter(a => !refuse(a.dir)).map(a => a.dir))],
-    refused: [...new Set(outside.filter(a => refuse(a.dir)).map(a => a.path))],
+    dirs: whole,
+    files: [...new Set(granted.filter(a => !a.whole && !whole.some(d => within(a.at, d))).map(a => a.at))],
+    refused: [...new Set(outside.filter(refuse).map(a => a.path))],
   }
 }
 
+export function ungranted(text: string, cwd: string, grant: ReadGrant): string[] {
+  const root = normalize(cwd)
+  const refused = grant.refused.map(normalize)
+  const open = (a: Asked) => grant.dirs.some(d => within(a.at, d)) || (!a.whole && grant.files.includes(a.at))
+  return [...new Set(named(text).filter(a => !within(home(a), root) && !open(a) && !refused.includes(a.at)).map(a => a.path))]
+}
+
 /** OPENCODE_CONFIG_CONTENT for the reviewer: an agent opencode itself keeps to reading and read-only git. */
-export function opencodeAgentConfig(dirs: string[]): string {
+export function opencodeAgentConfig(dirs: string[], files: string[] = []): string {
+  const parents = [...new Set(files.map(parent))]
+  const read = files.length
+    ? Object.fromEntries([['*', 'allow'], ...parents.flatMap(d => [[d, 'deny'], [`${d}/*`, 'deny']]), ...files.map(f => [f, 'allow']), ...dirs.flatMap(d => [[d, 'allow'], [`${d}/*`, 'allow']])])
+    : 'allow'
+  const external = [...new Set([...dirs, ...parents])]
   const permission = {
     '*': 'deny',
-    read: 'allow',
+    read,
     grep: 'allow',
     glob: 'allow',
     list: 'allow',
     bash: { '*': 'deny', ...Object.fromEntries(READ_ONLY_GIT.map(p => [p, 'allow'])), ...Object.fromEntries(['git * --output*', ...REDIRECT, ...OUTSIDE_PATH].map(p => [p, 'deny'])) },
-    ...(dirs.length ? { external_directory: Object.fromEntries(dirs.map(d => [`${d}/*`, 'allow'])) } : {}),
+    ...(external.length ? { external_directory: Object.fromEntries(external.map(d => [`${d}/*`, 'allow'])) } : {}),
   }
   return JSON.stringify({ agent: { [OPENCODE_AGENT]: { mode: 'primary', permission } } })
 }

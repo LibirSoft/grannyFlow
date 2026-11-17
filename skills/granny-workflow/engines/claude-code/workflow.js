@@ -1487,33 +1487,49 @@ function normalize(path) {
 var HOME = /^\/(?:root|(?:home|Users|var\/home)\/[^/]+)(?:\/\.[^/]+)?$/;
 var tooWide = (dir) => dir.split("/").length < 3 || HOME.test(dir);
 var parent = (path) => path.slice(0, path.lastIndexOf("/"));
-function readGrant(text, files, cwd, dirs = []) {
-  const root = normalize(cwd);
-  const named = (text.match(ABSOLUTE_PATH) ?? []).map((p) => p.replace(/[.:]+$/, "")).flatMap((p) => {
-    const path = normalize(p);
-    if (path === "/")
+var within2 = (path, dir) => path === dir || path.startsWith(`${dir}/`);
+function named(text) {
+  return (text.match(ABSOLUTE_PATH) ?? []).map((p) => p.replace(/[.:]+$/, "")).flatMap((p) => {
+    const at = normalize(p);
+    if (at === "/")
       return [];
     if (p.endsWith("/"))
-      return [{ path: p, dir: path }];
-    return path.slice(path.lastIndexOf("/") + 1).includes(".") ? [{ path: p, dir: parent(path) }] : [];
+      return [{ path: p, at, whole: true }];
+    return at.slice(at.lastIndexOf("/") + 1).includes(".") ? [{ path: p, at, whole: false }] : [];
   });
-  const asked = [...named, ...files.map((f) => ({ path: f, dir: parent(normalize(f)) })), ...dirs.map((d) => ({ path: d, dir: normalize(d) }))];
-  const outside = asked.filter((a) => a.dir !== root && !a.dir.startsWith(`${root}/`));
-  const refuse = (dir) => tooWide(dir) || root.startsWith(`${dir}/`);
+}
+var home = (a) => a.whole ? a.at : parent(a.at);
+function readGrant(text, files, cwd, dirs = []) {
+  const root = normalize(cwd);
+  const asked = [...named(text), ...files.map((f) => ({ path: f, at: normalize(f), whole: false })), ...dirs.map((d) => ({ path: d, at: normalize(d), whole: true }))];
+  const outside = asked.filter((a) => !within2(home(a), root));
+  const refuse = (a) => tooWide(home(a)) || root.startsWith(`${home(a)}/`);
+  const granted = outside.filter((a) => !refuse(a));
+  const whole = [...new Set(granted.filter((a) => a.whole).map((a) => a.at))];
   return {
-    dirs: [...new Set(outside.filter((a) => !refuse(a.dir)).map((a) => a.dir))],
-    refused: [...new Set(outside.filter((a) => refuse(a.dir)).map((a) => a.path))]
+    dirs: whole,
+    files: [...new Set(granted.filter((a) => !a.whole && !whole.some((d) => within2(a.at, d))).map((a) => a.at))],
+    refused: [...new Set(outside.filter(refuse).map((a) => a.path))]
   };
 }
-function opencodeAgentConfig(dirs) {
+function ungranted(text, cwd, grant) {
+  const root = normalize(cwd);
+  const refused = grant.refused.map(normalize);
+  const open = (a) => grant.dirs.some((d) => within2(a.at, d)) || !a.whole && grant.files.includes(a.at);
+  return [...new Set(named(text).filter((a) => !within2(home(a), root) && !open(a) && !refused.includes(a.at)).map((a) => a.path))];
+}
+function opencodeAgentConfig(dirs, files = []) {
+  const parents = [...new Set(files.map(parent))];
+  const read = files.length ? Object.fromEntries([["*", "allow"], ...parents.flatMap((d) => [[d, "deny"], [`${d}/*`, "deny"]]), ...files.map((f) => [f, "allow"]), ...dirs.flatMap((d) => [[d, "allow"], [`${d}/*`, "allow"]])]) : "allow";
+  const external = [...new Set([...dirs, ...parents])];
   const permission = {
     "*": "deny",
-    read: "allow",
+    read,
     grep: "allow",
     glob: "allow",
     list: "allow",
     bash: { "*": "deny", ...Object.fromEntries(READ_ONLY_GIT.map((p) => [p, "allow"])), ...Object.fromEntries(["git * --output*", ...REDIRECT, ...OUTSIDE_PATH].map((p) => [p, "deny"])) },
-    ...dirs.length ? { external_directory: Object.fromEntries(dirs.map((d) => [`${d}/*`, "allow"])) } : {}
+    ...external.length ? { external_directory: Object.fromEntries(external.map((d) => [`${d}/*`, "allow"])) } : {}
   };
   return JSON.stringify({ agent: { [OPENCODE_AGENT]: { mode: "primary", permission } } });
 }
@@ -1575,10 +1591,10 @@ function wrapper(c, stem) {
   };
   return { wrap, md, log };
 }
-function opencodePlan(rv, c, host, stem, prompt, dirs) {
+function opencodePlan(rv, c, host, stem, prompt, dirs, files) {
   const { wrap, log } = wrapper(c, stem);
   const model = opencodeModel(rv, host);
-  const run = `OPENCODE_DISABLE_PROJECT_CONFIG=1 OPENCODE_CONFIG_CONTENT=${shellQuote(opencodeAgentConfig(dirs))} opencode run --standalone --archived --format json --agent ${OPENCODE_AGENT} -m ${shellQuote(model)} ${shellQuote(prompt)} </dev/null`;
+  const run = `OPENCODE_DISABLE_PROJECT_CONFIG=1 OPENCODE_CONFIG_CONTENT=${shellQuote(opencodeAgentConfig(dirs, files))} opencode run --standalone --archived --format json --agent ${OPENCODE_AGENT} -m ${shellQuote(model)} ${shellQuote(prompt)} </dev/null`;
   return wrap(`{ echo ${shellQuote(`${SAID}opencode ${model} (read-only agent)`)}; ${run}; } > ${log} 2>&1`, undefined, `LC_ALL=C awk ${shellQuote(OPENCODE_DECODE)} ${log} || echo "${DECODER_FAILED}(awk exit $?) - the raw answer is in "${log}`);
 }
 function script(rv, c, host, stem, b) {
@@ -1598,9 +1614,9 @@ function script(rv, c, host, stem, b) {
   const plugin = `echo "${SAID}codex-plugin ${b.pluginLabel} ($companion)" && ${ownBroker} && ${b.plugin} > ${md} 2> ${log}`;
   return wrap(`${find}; if [ -z "$companion_version" ]; then ${missing}; elif ! command -v node >/dev/null 2>&1; then ${noNode}; else ${plugin}; fi`);
 }
-function reviewPlan(rv, c, host, base, stem, prompt = "", dirs = []) {
+function reviewPlan(rv, c, host, base, stem, prompt = "", dirs = [], files = []) {
   if (rv.engine === "opencode")
-    return opencodePlan(rv, c, host, stem, prompt, dirs);
+    return opencodePlan(rv, c, host, stem, prompt, dirs, files);
   const mode = rv.mode ?? "review";
   return script(rv, c, host, stem, {
     cli: cliCommand(rv, host, base, `${stem}.md`, prompt),
@@ -1610,11 +1626,11 @@ function reviewPlan(rv, c, host, base, stem, prompt = "", dirs = []) {
     fallback: rv.engine === "auto" && mode === "review"
   });
 }
-function planReviewScript(rv, c, host, base, stem, prompt, dirs = []) {
+function planReviewScript(rv, c, host, base, stem, prompt, dirs = [], files = []) {
   if (rv.engine === "agent" || rv.engine === "command" && !rv.command?.includes("{prompt}"))
     return;
   if (rv.engine === "opencode")
-    return opencodePlan(rv, c, host, stem, prompt, dirs);
+    return opencodePlan(rv, c, host, stem, prompt, dirs, files);
   const m = resolveModel(rv.model, host);
   const model = m ? ` -m ${shellQuote(m)}` : "";
   const cli = rv.engine === "command" ? cliCommand(rv, host, base, `${stem}.md`, prompt) : `codex exec --sandbox read-only${model} -o ${shellQuote(`${stem}.md`)} ${shellQuote(prompt)} </dev/null`;
@@ -2180,11 +2196,14 @@ ${note}` : ""}` : missing };
     }
     const stem = reviewStem(config, slug(name), round, rv);
     const { text, files } = lane.readable;
-    const { dirs, refused } = rv.engine === "opencode" ? subject.kind === "plan" ? readGrant(text, [...files, ...subject.files], cwd, p.others ?? []) : readGrant([text, subject.stage?.task ?? ""].join(`
-`), files, cwd) : { dirs: [], refused: [] };
+    const grant = rv.engine !== "opencode" ? { dirs: [], files: [], refused: [] } : subject.kind === "plan" ? readGrant(text, [...files, ...subject.files], cwd, p.others ?? []) : readGrant(text, files, cwd);
+    const { refused } = grant;
     if (refused.length)
       host.log(`${tag}: opencode cannot read ${refused.join(", ")} - move ${refused.length > 1 ? "them" : "it"} under a project directory`);
-    const plan = subject.kind === "plan" ? planReviewScript(rv, config, host.name, lane.base, stem, planReviewPrompt(p, subject.files), dirs) : reviewPlan(rv, config, host.name, subject.base, stem, commandReviewPrompt(p, name, subject.base, subject.stage, subject.note, rv.engine === "opencode", known), dirs);
+    const taskOnly = rv.engine === "opencode" && subject.kind === "diff" && subject.stage ? ungranted(subject.stage.task, cwd, grant) : [];
+    if (taskOnly.length)
+      host.log(`${tag}: opencode cannot read ${taskOnly.join(", ")} - name ${taskOnly.length > 1 ? "them" : "it"} in the run's context`);
+    const plan = subject.kind === "plan" ? planReviewScript(rv, config, host.name, lane.base, stem, planReviewPrompt(p, subject.files), grant.dirs, grant.files) : reviewPlan(rv, config, host.name, subject.base, stem, commandReviewPrompt(p, name, subject.base, subject.stage, subject.note, rv.engine === "opencode", known), grant.dirs, grant.files);
     if (!plan)
       return { ran: false, findings: [], note: "this reviewer has no command for a plan review" };
     const failed = (out) => (rv.engine === "opencode" ? opencodeAnswer(out).error : undefined) ?? out.slice(-2000);

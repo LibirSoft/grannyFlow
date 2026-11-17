@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { resolveConfig } from '../src/core/config'
 import { runGranny, type RunInput } from '../src/core/engine'
-import { OPENCODE_AGENT, OPENCODE_DECODE, opencodeAgentConfig, opencodeAnswer, readGrant } from '../src/core/opencode'
+import { OPENCODE_AGENT, OPENCODE_DECODE, opencodeAgentConfig, opencodeAnswer, readGrant, ungranted } from '../src/core/opencode'
 import { commandReviewPrompt, WHOLE_BRANCH_NOTE } from '../src/core/prompts'
 import { parseCodexReview, saysNoFindings } from '../src/core/review'
 import { planReviewScript, reportedBackend, reviewerModel, reviewPlan } from '../src/core/reviewer'
@@ -148,53 +148,83 @@ describe('opencodeAnswer', () => {
   })
 })
 
-const readableDirs = (...args: Parameters<typeof readGrant>) => readGrant(...args).dirs
+const granted = (...args: Parameters<typeof readGrant>) => {
+  const { dirs, files } = readGrant(...args)
+  return { dirs, files }
+}
 
-describe('readGrant dirs', () => {
-  it('takes the directory of every absolute path in the text and of every file, once, outside the worktree only', () => {
-    const context = 'Plan files - read them first: /repo/.granny/plans/a.md, /repo/.granny/plans/b.md\nSee "/srv/notes/wo-1.md" and (/srv/specs/api/) and https://x.dev/doc and plans/rel.md and /wt/src/a.ts.'
-    expect(readableDirs(context, ['/srv/other/plan.md'], '/wt')).toEqual(['/repo/.granny/plans', '/srv/notes', '/srv/specs/api', '/srv/other'])
+describe('readGrant', () => {
+  it('grants each file the text names or the file list gives alone, and a path ending in / as a whole directory, once, outside the worktree only', () => {
+    const context = 'Plan files - read them first: /repo/.granny/plans/a.md, /repo/.granny/plans/b.md\nSee "/srv/notes/wo-1.md" and (/srv/specs/api/) and https://x.dev/doc and plans/rel.md and /wt/src/a.ts, again /srv/notes/wo-1.md.'
+    expect(granted(context, ['/srv/other/plan.md'], '/wt')).toEqual({
+      dirs: ['/srv/specs/api'],
+      files: ['/repo/.granny/plans/a.md', '/repo/.granny/plans/b.md', '/srv/notes/wo-1.md', '/srv/other/plan.md'],
+    })
   })
 
   it('normalizes . and .. and never opens the root or the worktree', () => {
-    expect(readableDirs('/a/./b/../c/x.md /top.md /wt2/x/y.md', [], '/wt/')).toEqual(['/a/c', '/wt2/x'])
-    expect(readableDirs('/wt/x.md /wt/sub/y.md', [], '/wt')).toEqual([])
-    expect(readableDirs('', [], '/wt')).toEqual([])
+    expect(granted('/a/./b/../c/x.md /top.md /wt2/x/y.md', [], '/wt/')).toEqual({ dirs: [], files: ['/a/c/x.md', '/wt2/x/y.md'] })
+    expect(granted('/wt/x.md /wt/sub/y.md /wt/sub/', [], '/wt')).toEqual({ dirs: [], files: [] })
+    expect(granted('', [], '/wt')).toEqual({ dirs: [], files: [] })
   })
 
-  it('never opens a top-level directory, a home directory or a dot directory right under one', () => {
-    expect(readableDirs('Main checkout /home/u/proj, notes in /home/u/todo.md, see /etc/hosts', [], '/home/u/wt/feat')).toEqual([])
-    expect(readableDirs('/Users/u/notes.md /root/plan.md /var/home/u/x.md /home/u/.ssh/id_ed25519 /home/u/.claude/CLAUDE.md /tmp/plan.md', ['/home/u/.aws/config'], '/wt')).toEqual([])
-    expect(readableDirs('/home/u/proj/.granny/plans/a.md /home/u/.claude/plans/b.md /tmp/run/plan.md', [], '/wt')).toEqual(['/home/u/proj/.granny/plans', '/home/u/.claude/plans', '/tmp/run'])
+  it('never opens a file in a top-level directory, a home directory or a dot directory right under one', () => {
+    expect(granted('Main checkout /home/u/proj, notes in /home/u/todo.md, see /etc/hosts', [], '/home/u/wt/feat')).toEqual({ dirs: [], files: [] })
+    expect(granted('/Users/u/notes.md /root/plan.md /var/home/u/x.md /home/u/.ssh/id_ed25519 /home/u/.claude/CLAUDE.md /tmp/plan.md', ['/home/u/.aws/config'], '/wt')).toEqual({ dirs: [], files: [] })
+    expect(granted('/home/u/proj/.granny/plans/a.md /home/u/.claude/plans/b.md /tmp/run/plan.md', [], '/wt')).toEqual({
+      dirs: [],
+      files: ['/home/u/proj/.granny/plans/a.md', '/home/u/.claude/plans/b.md', '/tmp/run/plan.md'],
+    })
   })
 
-  it('never grants the parent of a path in the text that names no file, so a directory named without a trailing slash opens neither itself nor its project', () => {
-    expect(readableDirs('Specs in /home/u/proj/docs and /srv/notes/README', [], '/home/u/wt/feat')).toEqual([])
-    expect(readableDirs('Specs in /home/u/proj/docs/ and /home/u/proj/docs/api.md', [], '/home/u/wt/feat')).toEqual(['/home/u/proj/docs'])
-    expect(readableDirs('', ['/srv/plans/PLAN'], '/wt')).toEqual(['/srv/plans'])
+  it('grants nothing for a path in the text that names no file, a directory only with a trailing slash, and a given file whatever its name', () => {
+    expect(granted('Specs in /home/u/proj/docs and /srv/notes/README', [], '/home/u/wt/feat')).toEqual({ dirs: [], files: [] })
+    expect(granted('Specs in /home/u/proj/docs/ and /home/u/proj/notes/api.md', [], '/home/u/wt/feat')).toEqual({ dirs: ['/home/u/proj/docs'], files: ['/home/u/proj/notes/api.md'] })
+    expect(granted('', ['/srv/plans/PLAN'], '/wt')).toEqual({ dirs: [], files: ['/srv/plans/PLAN'] })
   })
 
-  it('never grants the worktree or a directory above it', () => {
+  it('never grants the worktree, a directory above it or a file in one', () => {
     const wt = '/home/u/Desktop/ws/proj-worktrees/feat'
-    expect(readableDirs(`Working repo: ${wt}`, [], wt)).toEqual([])
-    expect(readableDirs('Main checkout: /home/u/Desktop/ws/proj', [], wt)).toEqual([])
-    expect(readableDirs('see /home/u/Desktop/notes.md', [], wt)).toEqual([])
-    expect(readableDirs('/home/u/Desktop/ws/proj/.granny/plans/a.md', [`${wt}-old/plan.md`], `${wt}/`)).toEqual(['/home/u/Desktop/ws/proj/.granny/plans', `${wt}-old`])
+    expect(granted(`Working repo: ${wt}`, [], wt)).toEqual({ dirs: [], files: [] })
+    expect(granted('Main checkout: /home/u/Desktop/ws/proj', [], wt)).toEqual({ dirs: [], files: [] })
+    expect(granted('see /home/u/Desktop/notes.md and /home/u/Desktop/ws/', [], wt)).toEqual({ dirs: [], files: [] })
+    expect(granted('/home/u/Desktop/ws/proj/.granny/plans/a.md', [`${wt}-old/plan.md`], `${wt}/`)).toEqual({ dirs: [], files: ['/home/u/Desktop/ws/proj/.granny/plans/a.md', `${wt}-old/plan.md`] })
   })
 
   it('grants each given directory itself, not its parent, under the same limits', () => {
-    expect(readableDirs('', [], '/wt/a', ['/wt/b', '/srv/repos/c/', '/home/u', '/wt'])).toEqual(['/wt/b', '/srv/repos/c'])
+    expect(granted('', [], '/wt/a', ['/wt/b', '/srv/repos/c/', '/home/u', '/wt'])).toEqual({ dirs: ['/wt/b', '/srv/repos/c'], files: [] })
   })
-})
 
-describe('readGrant', () => {
+  it('lists no file that lies in a granted directory or under one, and keeps a file beside a granted directory', () => {
+    expect(granted('/srv/a/x.md /srv/a/sub/ /srv/a/sub/deep/y.md /srv/b/z.md /srv/b/', ['/srv/c/p.md'], '/wt', ['/srv/d'])).toEqual({
+      dirs: ['/srv/a/sub', '/srv/b', '/srv/d'],
+      files: ['/srv/a/x.md', '/srv/c/p.md'],
+    })
+  })
+
   it('names each path it refuses as given, once, and never one inside the worktree or one that names nothing', () => {
     const wt = '/home/u/ws/proj-wt'
     expect(readGrant('Plans in /tmp/plan.md and /home/u/notes.md, again /tmp/plan.md; specs /srv/s/a.md, /home/u/ws/x.md, /home/u/proj, A / B', ['/home/u/plan.md', `${wt}/p.md`], wt, ['/home/u/ws'])).toEqual({
-      dirs: ['/srv/s'],
+      dirs: [],
+      files: ['/srv/s/a.md'],
       refused: ['/tmp/plan.md', '/home/u/notes.md', '/home/u/ws/x.md', '/home/u/plan.md', '/home/u/ws'],
     })
-    expect(readGrant('', [], wt)).toEqual({ dirs: [], refused: [] })
+    expect(readGrant('', [], wt)).toEqual({ dirs: [], files: [], refused: [] })
+  })
+})
+
+describe('ungranted', () => {
+  const grant = readGrant('See /srv/orders/wo-1.md and /srv/specs/ and /tmp/plan.md', ['/repo/.granny/plans/a.md'], '/wt')
+
+  it('names the outside paths of a text that the grant neither opens nor refuses, as given, once', () => {
+    expect(grant).toEqual({ dirs: ['/srv/specs'], files: ['/srv/orders/wo-1.md', '/repo/.granny/plans/a.md'], refused: ['/tmp/plan.md'] })
+    const task = 'Do /srv/orders/WP-01.md, /srv/orders/wo-1.md, /srv/specs/api/v1.md, /srv/specs/, /srv/else/, /repo/.granny/plans/a.md, /repo/.granny/plans/b.md, /wt/src/a.ts, /home/u/proj, /tmp/./plan.md and again /srv/orders/WP-01.md.'
+    expect(ungranted(task, '/wt', grant)).toEqual(['/srv/orders/WP-01.md', '/srv/else/', '/repo/.granny/plans/b.md'])
+  })
+
+  it('names nothing for a text without an outside path', () => {
+    expect(ungranted('Do WP-01 in /wt/src/a.ts.', '/wt', grant)).toEqual([])
+    expect(ungranted('', '/wt', grant)).toEqual([])
   })
 })
 
@@ -298,8 +328,47 @@ describe('opencodeAgentConfig', () => {
   it('allows reading in the given directories outside the worktree, after the deny-all', () => {
     const agent = JSON.parse(opencodeAgentConfig(['/repo/.granny/plans', "/my dir's"])).agent[OPENCODE_AGENT]
     expect(agent.permission.external_directory).toEqual({ '/repo/.granny/plans/*': 'allow', "/my dir's/*": 'allow' })
+    expect(agent.permission.read).toBe('allow')
     expect(Object.keys(agent.permission).indexOf('external_directory')).toBeGreaterThan(Object.keys(agent.permission).indexOf('*'))
     expect(agent.permission.edit).toBeUndefined()
+  })
+
+  it("opens the directory of a given file to opencode and holds read to that file: the directory and what is in it denied, then the file allowed", () => {
+    const { permission } = JSON.parse(opencodeAgentConfig([], ['/repo/.granny/plans/a.md', '/repo/.granny/plans/b.md', "/my dir's/wo-1.md"])).agent[OPENCODE_AGENT]
+    expect(Object.entries(permission.read)).toEqual([
+      ['*', 'allow'],
+      ['/repo/.granny/plans', 'deny'],
+      ['/repo/.granny/plans/*', 'deny'],
+      ["/my dir's", 'deny'],
+      ["/my dir's/*", 'deny'],
+      ['/repo/.granny/plans/a.md', 'allow'],
+      ['/repo/.granny/plans/b.md', 'allow'],
+      ["/my dir's/wo-1.md", 'allow'],
+    ])
+    expect(permission.external_directory).toEqual({ '/repo/.granny/plans/*': 'allow', "/my dir's/*": 'allow' })
+    expect(Object.keys(permission)).toEqual(['*', 'read', 'grep', 'glob', 'list', 'bash', 'external_directory'])
+  })
+
+  it('allows a whole directory again after the denies, so one under the directory of a given file stays readable', () => {
+    const { permission } = JSON.parse(opencodeAgentConfig(['/srv/a/sub', '/work/other'], ['/srv/a/x.md'])).agent[OPENCODE_AGENT]
+    expect(Object.entries(permission.read)).toEqual([
+      ['*', 'allow'],
+      ['/srv/a', 'deny'],
+      ['/srv/a/*', 'deny'],
+      ['/srv/a/x.md', 'allow'],
+      ['/srv/a/sub', 'allow'],
+      ['/srv/a/sub/*', 'allow'],
+      ['/work/other', 'allow'],
+      ['/work/other/*', 'allow'],
+    ])
+    expect(permission.external_directory).toEqual({ '/srv/a/sub/*': 'allow', '/work/other/*': 'allow', '/srv/a/*': 'allow' })
+  })
+
+  it("decides read the way opencode does, by the last rule that matches: only the given file in its directory, everything in a whole directory", () => {
+    const rules = Object.entries(JSON.parse(opencodeAgentConfig(['/srv/a/sub'], ['/srv/a/x.md'])).agent[OPENCODE_AGENT].permission.read as Record<string, string>)
+    const read = (path: string) => [...rules].reverse().find(([pattern]) => OPENCODE_WILDCARD(path, pattern))?.[1]
+    expect(['/srv/a/x.md', '/srv/a/sub/deep/y.md', '/srv/a/sub', 'src/a.ts'].map(read)).toEqual(['allow', 'allow', 'allow', 'allow'])
+    expect(['/srv/a/y.md', '/srv/a', '/srv/a/other/z.md', '/srv/a/x.md.bak'].map(read)).toEqual(['deny', 'deny', 'deny', 'deny'])
   })
 })
 
@@ -583,7 +652,7 @@ describe('an opencode reviewer in a run', () => {
     const f = fakeHost({ reviews: o.reviews, worktree: '/wt/feat-x' })
     await runGranny(f.host, input({ plan: ['/work/repo/.granny/plans/feat-x.md', '/wt/feat-x/docs/plan-2.md'], context: 'Work orders in /srv/orders/wo-1.md' }))
     const run = f.commands.find(c => c.includes('opencode run'))!
-    expect(run).toContain(`OPENCODE_CONFIG_CONTENT=${shellQuote(opencodeAgentConfig(['/srv/orders', '/work/repo/.granny/plans']))} opencode run`)
+    expect(run).toContain(`OPENCODE_CONFIG_CONTENT=${shellQuote(opencodeAgentConfig([], ['/srv/orders/wo-1.md', '/work/repo/.granny/plans/feat-x.md']))} opencode run`)
     expect(f.cwds[f.commands.indexOf(run)]).toBe('/wt/feat-x')
   })
 
@@ -597,20 +666,32 @@ describe('an opencode reviewer in a run', () => {
     for (const command of commands) expect([command, bashDecision(command)]).toEqual([command, 'allow'])
   })
 
-  it('grants the plan directories from the plan list, so a plan path with a space opens its own directory and nothing wider', async () => {
+  it('grants the plan files from the plan list, so a plan path with a space opens that file and nothing wider', async () => {
     const o = opencode([stream('No findings.')])
     const f = fakeHost({ reviews: o.reviews, worktree: '/wt/feat-x' })
     await runGranny(f.host, input({ plan: ['/Users/u/Library/Mobile Documents/plans/a.md', '/home/u/My Plans/feat.md'] }))
     const run = f.commands.find(c => c.includes('opencode run'))!
-    expect(run).toContain(`OPENCODE_CONFIG_CONTENT=${shellQuote(opencodeAgentConfig(['/Users/u/Library/Mobile Documents/plans', '/home/u/My Plans']))} opencode run`)
+    expect(run).toContain(`OPENCODE_CONFIG_CONTENT=${shellQuote(opencodeAgentConfig([], ['/Users/u/Library/Mobile Documents/plans/a.md', '/home/u/My Plans/feat.md']))} opencode run`)
   })
 
-  it('grants the directory of a path only the stage task names', async () => {
+  it('grants nothing for a path only the stage task names, and says to name it in the context', async () => {
     const o = opencode([stream('No findings.')])
     const f = fakeHost({ reviews: o.reviews, worktree: '/wt/feat-x' })
-    await runGranny(f.host, input({ stages: [{ name: 'core', task: 'Do /srv/orders/WP-01.md.' }] }))
+    await runGranny(f.host, input({ stages: [{ name: 'core', task: 'Do /srv/orders/WP-01.md and /srv/orders/WP-02.md, then /wt/feat-x/docs/a.md.' }] }))
     const run = f.commands.find(c => c.includes('opencode run'))!
-    expect(run).toContain(`OPENCODE_CONFIG_CONTENT=${shellQuote(opencodeAgentConfig(['/srv/orders']))} opencode run`)
+    expect(run).toContain(`OPENCODE_CONFIG_CONTENT=${shellQuote(opencodeAgentConfig([]))} opencode run`)
+    expect(f.logs.filter(l => l.includes('cannot read'))).toEqual(["core r1 kimi: opencode cannot read /srv/orders/WP-01.md, /srv/orders/WP-02.md - name them in the run's context"])
+  })
+
+  it('says nothing about a task path the plan or the context already opens, and names one path as it', async () => {
+    const o = opencode([stream('No findings.'), stream('No findings.')])
+    const f = fakeHost({ reviews: o.reviews, worktree: '/wt/feat-x' })
+    await runGranny(f.host, input({ plan: '/srv/plans/v1.md', context: 'Work orders in /srv/orders/', stages: [{ name: 'core', task: 'Do /srv/orders/WP-01.md of /srv/plans/v1.md.' }] }))
+    expect(f.commands.find(c => c.includes('opencode run'))!).toContain(`OPENCODE_CONFIG_CONTENT=${shellQuote(opencodeAgentConfig(['/srv/orders'], ['/srv/plans/v1.md']))} opencode run`)
+    expect(f.logs.filter(l => l.includes('cannot read'))).toEqual([])
+    const g = fakeHost({ reviews: o.reviews, worktree: '/wt/feat-x' })
+    await runGranny(g.host, input({ stages: [{ name: 'core', task: 'Do /srv/orders/WP-01.md.' }] }))
+    expect(g.logs.filter(l => l.includes('cannot read'))).toEqual(["core r1 kimi: opencode cannot read /srv/orders/WP-01.md - name it in the run's context"])
   })
 
   it('names a plan file or context path it cannot grant, once per review, with the fix', async () => {
@@ -637,9 +718,9 @@ describe('an opencode reviewer in a run', () => {
       input({ repos: ['/work/other'], plan: '/srv/plans/v1.md', stages: [{ name: 'a', task: 'A' }, { name: 'b', task: 'B', repo: '/work/other' }], config: { reviewers: [KIMI], planReview: true, parallel: false } }),
     )
     const plan = f.commands.find(c => c.includes('review-plan-review-r1-kimi.log'))!
-    expect(plan).toContain(`OPENCODE_CONFIG_CONTENT=${shellQuote(opencodeAgentConfig(['/srv/plans', '/work/other']))} opencode run`)
+    expect(plan).toContain(`OPENCODE_CONFIG_CONTENT=${shellQuote(opencodeAgentConfig(['/work/other'], ['/srv/plans/v1.md']))} opencode run`)
     const stage = f.commands.find(c => c.includes('review-a-r1-kimi.log'))!
-    expect(stage).toContain(`OPENCODE_CONFIG_CONTENT=${shellQuote(opencodeAgentConfig(['/srv/plans']))} opencode run`)
+    expect(stage).toContain(`OPENCODE_CONFIG_CONTENT=${shellQuote(opencodeAgentConfig([], ['/srv/plans/v1.md']))} opencode run`)
   })
 
   it('says how many text parts did not come back whole', async () => {
@@ -650,12 +731,12 @@ describe('an opencode reviewer in a run', () => {
     expect(f.logs).toContain('core r1 kimi: opencode: 1 text part(s) did not come back whole and may be missing from the answer - check .granny/review-core-r1-kimi.log')
   })
 
-  it('runs the plan review through opencode too, with the plan directory readable', async () => {
+  it('runs the plan review through opencode too, with the plan file readable', async () => {
     const o = opencode([stream('No findings.'), stream('No findings.')])
     const f = fakeHost({ reviews: o.reviews, worktree: '/wt/feat-x' })
     await runGranny(f.host, input({ plan: '/srv/plans/v1.md', config: { reviewers: [KIMI], planReview: true } }))
     const plan = f.commands.find(c => c.includes('review-plan-review-r1-kimi.log'))!
-    expect(plan).toContain(`OPENCODE_CONFIG_CONTENT=${shellQuote(opencodeAgentConfig(['/srv/plans']))} opencode run`)
+    expect(plan).toContain(`OPENCODE_CONFIG_CONTENT=${shellQuote(opencodeAgentConfig([], ['/srv/plans/v1.md']))} opencode run`)
     expect(o.saves[0]).toContain('cat > .granny/review-plan-review-r1-kimi.md')
   })
 
