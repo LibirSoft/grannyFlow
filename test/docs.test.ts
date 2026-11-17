@@ -193,6 +193,26 @@ describe('skill docs', () => {
     expect(readRoot('README.md')).toMatch(/^\| `keepWorktree` \| `false` \|/m)
     expect(read('references/prompts.md')).toMatch(/^## Granny - worktree removal/m)
   })
+  it('lists in config.md every reason a worktree stays, with the started-in check among the conditions', () => {
+    const config = read('references/config.md')
+    for (const reason of [
+      'the run was started in this worktree',
+      'the worktree folder is gone, but git still lists it - git worktree prune removes the entry',
+      'git could not compare the worktree with the checkout the run starts in',
+      'the removal did not run: its runner returned no exit code',
+      'a lane worktree was left in place (<paths>), and the removal could not be confirmed',
+      'Steps 5 to 9 are one shell script',
+      'a file `granny-worktree` in the worktree',
+    ]) expect({ reason, has: config.includes(reason) }).toEqual({ reason, has: true })
+    expect(config).not.toContain('an empty file `granny-worktree`')
+  })
+  it('says a worktree granny did not create always stays, in SKILL.md, omp.md and the CHANGELOG entry', () => {
+    expect(read('SKILL.md')).toContain('a worktree granny did not create always stays')
+    expect(read('SKILL.md')).not.toContain('a reused one always stays')
+    expect(read('references/omp.md')).toContain('After the worktree is removed they are in `<repo>/.granny/branches/<branch-key>/`.')
+    const changelog = readRoot('CHANGELOG.md')
+    for (const phrase of ['when the run was started in that worktree', 'when git still lists a worktree whose folder is gone', 'when git cannot compare it with the checkout the run starts in', 'the removal did not run because its runner returned no exit code']) expect({ phrase, has: changelog.includes(phrase) }).toEqual({ phrase, has: true })
+  })
   it('documents the review trail and its poster in the config keys, SKILL.md, the host references and the README', () => {
     expect(readFileSync(join(skill, 'scripts/pr-comments.mjs'), 'utf8')).toContain('granny-trail')
     const config = read('references/config.md')
