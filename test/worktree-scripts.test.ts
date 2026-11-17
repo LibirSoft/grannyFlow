@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test'
 import { spawnSync } from 'node:child_process'
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { resolveConfig } from '../src/core/config'
@@ -77,6 +77,7 @@ describe('the worktree scripts as text', () => {
     expect(removalOf(upTo(4, 'fatal: locked\n'), 'feat/x', SAVED)).toEqual({ removed: false, kept: 'git worktree remove failed' })
     expect(removalOf(`{ wt=x; echo '[granny] run worktree removed'; }\n`, 'feat/x', SAVED)).toEqual({ removed: false, kept: 'the removal could not confirm that granny created it' })
     expect(removalOf('[granny] run worktree listed\n', 'feat/x', SAVED)).toEqual({ removed: false, kept: 'the worktree folder is gone, but git still lists it - git worktree prune removes the entry' })
+    expect(removalOf('[granny] run worktree owned\n[granny] run worktree is where the run starts\n', 'feat/x', SAVED)).toEqual({ removed: false, kept: 'the run was started in this worktree' })
     expect(removalOf('the remove worktree runner returned nothing', 'feat/x', SAVED, '?')).toEqual({ removed: false, kept: 'the removal did not run: its runner returned no exit code' })
     expect(removalOf('No findings.', 'feat/x', SAVED, 1)).toEqual({ removed: false, kept: 'the removal could not confirm that granny created it' })
   })
@@ -189,6 +190,21 @@ describe('the worktree scripts in a real git repo', () => {
     const r = remove()
     expect(r.end).toEqual({ removed: false, kept: `its work dir files could not be saved to ${saved}` })
     expect(existsSync(wt)).toBe(true)
+  })
+
+  it('keeps the worktree the run was started in, whichever path the run starts from', () => {
+    setup()
+    workDir({ 'PR-BODY.md': '# one\n' })
+    mkdirSync(join(wt, 'sub'))
+    const link = join(root, 'through-link')
+    symlinkSync(wt, link)
+    for (const from of [wt, link, join(wt, 'sub')]) {
+      const r = sh(removeWorktreeScript(c, 'feat/x', wt, saved), from)
+      expect(removalOf(r.output, 'feat/x', saved)).toEqual({ removed: false, kept: 'the run was started in this worktree' })
+    }
+    expect(existsSync(wt)).toBe(true)
+    expect(existsSync(saved)).toBe(false)
+    expect(readFileSync(join(wt, '.granny/PR-BODY.md'), 'utf8')).toBe('# one\n')
   })
 
   it('never removes the main checkout or a worktree the user added, and does nothing from a directory that is not there', () => {
