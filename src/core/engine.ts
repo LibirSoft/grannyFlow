@@ -879,10 +879,12 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
   }
   const trailOf = (end?: WorktreeEnd): { trail?: TrailSummary } =>
     config.trail ? { trail: { dir: end?.saved ? `${end.saved}/trail` : trailDir(config, worktree), written: trailed.written, failed: [...trailed.failed] } } : {}
+  const ownerReason = (repo: string): string | undefined => (config.keepWorktree ? 'keepWorktree is on' : made.has(repo) ? undefined : 'granny did not create it')
   const keptAll = (why: string): { worktreeEnd?: WorktreeEnd } => {
     if (!config.worktree) return {}
-    host.log(`worktree left in place: ${worktree} - ${why}`)
-    return { worktreeEnd: { removed: false, kept: why } }
+    const kept = ownerReason(primary) ?? (trimPath(worktree) === primary ? 'the run was started in this worktree' : why)
+    host.log(`worktree left in place: ${worktree} - ${kept}`)
+    return { worktreeEnd: { removed: false, kept } }
   }
 
   const reviewLoop = async (
@@ -1591,8 +1593,8 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
       host.log(`${named} left in place: ${cwd} - ${kept}${more}`)
       return { removed: false, kept }
     }
-    if (config.keepWorktree) return keep('keepWorktree is on')
-    if (!made.has(repo)) return keep('granny did not create it')
+    const kept = ownerReason(repo)
+    if (kept) return keep(kept)
     if (blocked) return keep(blocked)
     if (s.left.length) return keep(`a lane worktree was left in place (${s.left.join(', ')}), and the removal could not be confirmed`)
     if (trimPath(cwd) === repo) return keep('the run was started in this worktree')

@@ -237,4 +237,29 @@ describe('the end of a run', () => {
     expect(f.logs).toContain(`worktree left in place: ${WT} - a planning run keeps its worktree for the implement run`)
     expect(f.commands.some(isRemoval)).toBe(false)
   })
+
+  it('gives the reason the implement run would not remove the worktree either, for a planning run', async () => {
+    for (const [opts, config, path, kept] of [
+      [{}, { keepWorktree: true }, WT, 'keepWorktree is on'],
+      [{ made: false }, {}, WT, 'granny did not create it'],
+      [{ worktree: A }, {}, A, 'the run was started in this worktree'],
+    ] as const) {
+      const f = host(opts)
+      const r = await runGranny(f.host, { repo: A, branch: 'feat/x', goal: 'add a thing', config })
+      expect(r.worktreeEnd).toEqual({ removed: false, kept })
+      expect(f.logs).toContain(`worktree left in place: ${path} - ${kept}`)
+      expect(f.commands.some(isRemoval)).toBe(false)
+    }
+  })
+
+  it('gives keepWorktree as the reason a plan review that stops the run keeps the worktree', async () => {
+    const f = host({
+      override: req => (req.label.startsWith('review plan review') ? { findings: [{ id: 'F1', severity: 'P1', file: 'src/a.ts', line: 3, title: 'bad plan', detail: 'd' }] } : undefined),
+    })
+    const r = await runGranny(f.host, { repo: A, branch: 'feat/x', plan: '/work/a/.granny/plans/feat-x.md', stages: [{ name: 'one', task: 'a' }], config: { planReview: true, maxRounds: 1, keepWorktree: true } })
+    expect(r.plan!.outcome).toBe('round-cap')
+    expect(r.worktreeEnd).toEqual({ removed: false, kept: 'keepWorktree is on' })
+    expect(f.logs).toContain(`worktree left in place: ${WT} - keepWorktree is on`)
+    expect(f.commands.some(isRemoval)).toBe(false)
+  })
 })

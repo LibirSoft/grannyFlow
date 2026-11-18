@@ -2742,11 +2742,13 @@ the last repair's deviations: ${deviations}` : ""}`;
     }
   };
   const trailOf = (end) => config.trail ? { trail: { dir: end?.saved ? `${end.saved}/trail` : trailDir(config, worktree), written: trailed.written, failed: [...trailed.failed] } } : {};
+  const ownerReason = (repo) => config.keepWorktree ? "keepWorktree is on" : made.has(repo) ? undefined : "granny did not create it";
   const keptAll = (why) => {
     if (!config.worktree)
       return {};
-    host.log(`worktree left in place: ${worktree} - ${why}`);
-    return { worktreeEnd: { removed: false, kept: why } };
+    const kept = ownerReason(primary) ?? (trimPath(worktree) === primary ? "the run was started in this worktree" : why);
+    host.log(`worktree left in place: ${worktree} - ${kept}`);
+    return { worktreeEnd: { removed: false, kept } };
   };
   const reviewLoop = async (lane, name, subject, reviewers = config.reviewers, opts) => {
     const { gates, checks = [], runs = [], notes = [], prior = [], record } = opts;
@@ -3460,10 +3462,9 @@ ${note}` : note } : result;
       host.log(`${named} left in place: ${cwd} - ${kept}${more}`);
       return { removed: false, kept };
     };
-    if (config.keepWorktree)
-      return keep("keepWorktree is on");
-    if (!made.has(repo))
-      return keep("granny did not create it");
+    const kept = ownerReason(repo);
+    if (kept)
+      return keep(kept);
     if (blocked)
       return keep(blocked);
     if (s.left.length)

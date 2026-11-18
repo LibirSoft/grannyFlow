@@ -127,7 +127,7 @@ describe('the plan review', () => {
 
   it('stops before stage 1 when it hits the round cap, and reports the plan result', async () => {
     const bad = review(planFinding('P2', 'Still missing a migration step'))
-    const f = fakeHost({ reviews: [bad, bad], scores: [{ 'codex-F1': 90 }, { 'codex-F1': 90 }] })
+    const f = fakeHost({ worktree: '/work/repo-worktrees/feat-x', made: true, reviews: [bad, bad], scores: [{ 'codex-F1': 90 }, { 'codex-F1': 90 }] })
     const r = await runGranny(f.host, input({ plan: PLAN, config: { planReview: true, maxRounds: 2 } }))
     expect(r.plan).toMatchObject({ outcome: 'round-cap', rounds: 2 })
     expect(r.plan!.unresolved.map(x => x.title)).toEqual(['Still missing a migration step'])
@@ -140,7 +140,7 @@ describe('the plan review', () => {
   })
 
   it('stops before stage 1 when a reviewer fails twice', async () => {
-    const f = fakeHost({ reviews: [{ code: 1, output: 'codex: not logged in' }, { code: 1, output: 'codex: still not logged in' }] })
+    const f = fakeHost({ worktree: '/work/repo-worktrees/feat-x', made: true, reviews: [{ code: 1, output: 'codex: not logged in' }, { code: 1, output: 'codex: still not logged in' }] })
     const r = await runGranny(f.host, input({ plan: PLAN, config: { planReview: true } }))
     expect(r.plan).toMatchObject({ outcome: 'review-failed', rounds: 1 })
     expect(r.plan!.note).toContain('still not logged in')
