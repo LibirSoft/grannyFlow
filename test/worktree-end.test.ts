@@ -12,6 +12,14 @@ const isRemoval = (command: string) => command.includes('git worktree remove') &
 const lanePath = (command: string, cwd: string) => /wt='?([^';]+)'?; git worktree add/.exec(command)?.[1] ?? cwd
 const input: RunInput = { repo: A, branch: 'feat/x', stages: [{ name: 'one', task: 'a' }] }
 const host = (opts: FakeOptions = {}, removal: Review = DONE) => fakeHost({ worktree: lanePath, made: true, checks: c => (isRemoval(c) ? removal : undefined), ...opts })
+const laneInput: RunInput = { repo: A, branch: 'feat/x', stages: [{ name: 'one', task: 'a' }, { name: 'two', task: 'b', after: [] }] }
+const laneHost = (cleanup: string) =>
+  fakeHost({
+    worktree: lanePath,
+    made: true,
+    reviews: (command: string) => (command.includes('--force') ? { code: 1, output: cleanup } : 'No findings.'),
+    override: async req => (req.label === 'implement one' ? new Promise(r => setTimeout(() => r(undefined), 15)) : undefined),
+  })
 
 describe('the end of a run', () => {
   it('removes the worktree granny made, from the repo, and points the result at the saved files', async () => {
@@ -92,37 +100,22 @@ describe('the end of a run', () => {
   })
 
   it('keeps the run worktree when a lane worktree was left in place', async () => {
-    const f = fakeHost({
-      worktree: lanePath,
-      made: true,
-      reviews: (command: string) => (command.includes('--force') ? { code: 1, output: '[granny] lane merged\n' } : 'No findings.'),
-      override: async req => (req.label === 'implement one' ? new Promise(r => setTimeout(() => r(undefined), 15)) : undefined),
-    })
-    const r = await runGranny(f.host, { repo: A, branch: 'feat/x', stages: [{ name: 'one', task: 'a' }, { name: 'two', task: 'b', after: [] }] })
+    const f = laneHost('[granny] lane merged\n')
+    const r = await runGranny(f.host, laneInput)
     expect(r.worktreeEnd).toEqual({ removed: false, kept: 'a lane worktree was left in place (/work/a-worktrees/feat-x--s2-two), and the removal could not be confirmed' })
     expect(f.commands.some(isRemoval)).toBe(false)
   })
 
   it('keeps the run worktree when a lane cleanup only quotes the marker of a removed lane worktree', async () => {
-    const f = fakeHost({
-      worktree: lanePath,
-      made: true,
-      reviews: (command: string) => (command.includes('--force') ? { code: 1, output: "echo '[granny] lane worktree removed'\n" } : 'No findings.'),
-      override: async req => (req.label === 'implement one' ? new Promise(r => setTimeout(() => r(undefined), 15)) : undefined),
-    })
-    const r = await runGranny(f.host, { repo: A, branch: 'feat/x', stages: [{ name: 'one', task: 'a' }, { name: 'two', task: 'b', after: [] }] })
+    const f = laneHost("echo '[granny] lane worktree removed'\n")
+    const r = await runGranny(f.host, laneInput)
     expect(r.worktreeEnd).toEqual({ removed: false, kept: 'a lane worktree was left in place (/work/a-worktrees/feat-x--s2-two), and the removal could not be confirmed' })
     expect(f.commands.some(isRemoval)).toBe(false)
   })
 
   it('says the lane worktree was left, not removed, when its marker shares its line with other text, and keeps the run worktree', async () => {
-    const f = fakeHost({
-      worktree: lanePath,
-      made: true,
-      reviews: (command: string) => (command.includes('--force') ? { code: 1, output: 'Helper: [granny] lane worktree removed\n' } : 'No findings.'),
-      override: async req => (req.label === 'implement one' ? new Promise(r => setTimeout(() => r(undefined), 15)) : undefined),
-    })
-    const r = await runGranny(f.host, { repo: A, branch: 'feat/x', stages: [{ name: 'one', task: 'a' }, { name: 'two', task: 'b', after: [] }] })
+    const f = laneHost('Helper: [granny] lane worktree removed\n')
+    const r = await runGranny(f.host, laneInput)
     expect(f.logs).toContainEqual(expect.stringContaining('merge two: left /work/a-worktrees/feat-x--s2-two (feat/x--s2-two) in place'))
     expect(r.stages[1]!.note).toBe('ran in parallel on feat/x--s2-two, merged; its worktree /work/a-worktrees/feat-x--s2-two and branch feat/x--s2-two were left in place (the cleanup could not confirm the merge)')
     expect(r.worktreeEnd).toEqual({ removed: false, kept: 'a lane worktree was left in place (/work/a-worktrees/feat-x--s2-two), and the removal could not be confirmed' })
