@@ -197,6 +197,10 @@ describe('skill docs', () => {
     const cursor = read('references/cursor.md')
     for (const text of ['`<branch-key>` is the branch name', '`feat%2Flogin`', '`granny-worktree`', '[granny] worktree made by granny', '[granny] work dir restored', '[granny] work dir not restored', '[granny] earlier work dir files moved aside: ', '[granny] earlier work dir files not moved aside: ']) expect({ text, has: cursor.includes(text) }).toEqual({ text, has: true })
   })
+  it('says in config.md that the main checkout keeps its own trail, which makes the default run stop after a removal', () => {
+    const config = read('references/config.md')
+    for (const text of ['The checkout\'s own `<workDir>/trail` is written by a `worktree: false` run', 'when neither holds every record of the other, the script stops there without `--trail`']) expect({ text, has: config.includes(text) }).toEqual({ text, has: true })
+  })
   it('names the hash of a long branch key in config.md, and has a Cursor run stop on such a branch', () => {
     const config = read('references/config.md')
     for (const text of ['FNV-1a 32-bit hash of the whole key', '`811c9dc5`', 'multiply by `01000193`', 'The FNV-1a of `a` is `e40c292c`']) expect({ text, has: config.includes(text) }).toEqual({ text, has: true })
