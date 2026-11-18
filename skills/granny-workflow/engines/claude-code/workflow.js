@@ -1778,7 +1778,7 @@ var hashOf = (text) => {
   return (h >>> 0).toString(16).padStart(8, "0");
 };
 var savedKey = (branch) => {
-  const key = encodeURIComponent(branch).replace(/[!'()*~]/g, (ch) => `%${ch.charCodeAt(0).toString(16).toUpperCase()}`);
+  const key = encodeURIComponent(branch).replace(/[!'().*~]/g, (ch) => `%${ch.charCodeAt(0).toString(16).toUpperCase()}`);
   return key.length <= KEY_MAX ? key : `${key.slice(0, KEY_MAX - 9)}-${hashOf(key)}`;
 };
 var savedDir = (c, repo, branch) => `${trimPath(repo)}/${workOf(c)}/branches/${savedKey(branch)}`;

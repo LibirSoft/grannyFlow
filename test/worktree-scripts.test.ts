@@ -16,6 +16,7 @@ describe('the worktree scripts as text', () => {
     expect(savedDir(c, '/work/a/', 'feat/x')).toBe(SAVED)
     expect(savedKey('feat/x')).toBe('feat%2Fx')
     expect(savedDir({ workDir: 'tmp/g/' }, '/work/a', 'fix/a b')).toBe('/work/a/tmp/g/branches/fix%2Fa%20b')
+    expect(savedKey('feat/x.before-20261117-120000')).toBe('feat%2Fx%2Ebefore-20261117-120000')
   })
 
   it('gives branches that differ only in a slash or a dash their own saved dirs', () => {
@@ -289,6 +290,22 @@ describe('the worktree scripts in a real git repo', () => {
     expect(removalOf(r.output, 'feat-x', other)).toEqual({ removed: true, saved: other })
     expect(readFileSync(join(saved, 'PR-BODY.md'), 'utf8')).toBe('# feat/x\n')
     expect(readFileSync(join(other, 'PR-BODY.md'), 'utf8')).toBe('# feat-x\n')
+  })
+
+  it('does not restore the files moved aside for one branch into a branch named like their folder', () => {
+    setup()
+    workDir({ 'PR-BODY.md': '# feat/x\n' })
+    remove()
+    sh('git branch -D feat/x')
+    const aside = /moved aside: (.+)/.exec(setup().output)![1]!.trim()
+    const other = `feat/x${aside.slice(saved.length)}`
+    sh(`git branch ${quoted(other)} main`)
+    const lookalike = join(root, 'my repo-worktrees', 'lookalike')
+    const restored = sh(worktreeScript(c, other, 'main', lookalike, savedDir(c, repo, other)))
+    expect(restored.code).toBe(0)
+    expect(savedNotes(restored.output, savedDir(c, repo, other))).toEqual([])
+    expect(existsSync(join(lookalike, '.granny'))).toBe(false)
+    expect(readFileSync(join(aside, 'PR-BODY.md'), 'utf8')).toBe('# feat/x\n')
   })
 
   it('removes the worktree when a tag has the branch name too', () => {

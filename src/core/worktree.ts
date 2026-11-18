@@ -51,7 +51,7 @@ const hashOf = (text: string) => {
 }
 
 export const savedKey = (branch: string) => {
-  const key = encodeURIComponent(branch).replace(/[!'()*~]/g, ch => `%${ch.charCodeAt(0).toString(16).toUpperCase()}`)
+  const key = encodeURIComponent(branch).replace(/[!'().*~]/g, ch => `%${ch.charCodeAt(0).toString(16).toUpperCase()}`)
   return key.length <= KEY_MAX ? key : `${key.slice(0, KEY_MAX - 9)}-${hashOf(key)}`
 }
 
