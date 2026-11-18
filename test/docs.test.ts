@@ -201,11 +201,19 @@ describe('skill docs', () => {
     const config = read('references/config.md')
     for (const text of ['The checkout\'s own `<workDir>/trail` is written by a `worktree: false` run', 'when neither holds every record of the other, the script stops there without `--trail`']) expect({ text, has: config.includes(text) }).toEqual({ text, has: true })
   })
-  it('names the hash of a long branch key in config.md, and has a Cursor run stop on such a branch', () => {
+  it('names the hash of a long branch key in config.md, and has a Cursor run set up such a branch without the saved dir', () => {
     const config = read('references/config.md')
     for (const text of ['FNV-1a 32-bit hash of the whole key', '`811c9dc5`', 'multiply by `01000193`', 'The FNV-1a of `a` is `e40c292c`']) expect({ text, has: config.includes(text) }).toEqual({ text, has: true })
     const cursor = read('references/cursor.md')
-    for (const text of ['A Cursor agent cannot compute that hash by hand', 'it stops before the setup step']) expect({ text, has: cursor.includes(text) }).toEqual({ text, has: true })
+    for (const text of ['A Cursor agent cannot compute that hash by hand', 'the "Granny - worktree setup without a saved dir" prompt', 'neither restored nor moved aside']) expect({ text, has: cursor.includes(text) }).toEqual({ text, has: true })
+  })
+  it('gives the setup without a saved dir the marks of the setup, and neither a restore nor a move-aside', () => {
+    const prompts = read('references/prompts.md')
+    const start = prompts.indexOf('## Granny - worktree setup without a saved dir,')
+    expect(start).toBeGreaterThan(-1)
+    const section = prompts.slice(start, prompts.indexOf('\n## ', start + 1))
+    for (const text of ['granny-worktree', '[granny] worktree made by granny', 'git worktree add -b']) expect({ text, has: section.includes(text) }).toEqual({ text, has: true })
+    for (const text of ['branches/', 'work dir restored', 'moved aside']) expect({ text, has: section.includes(text) }).toEqual({ text, has: false })
   })
   it('lists in config.md every reason a worktree stays, with the started-in check among the conditions', () => {
     const config = read('references/config.md')

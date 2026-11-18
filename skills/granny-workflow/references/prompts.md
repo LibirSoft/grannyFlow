@@ -15,6 +15,18 @@ cd '<repo>' && ex="$(git rev-parse --git-common-dir)/info/exclude" && mkdir -p "
 Return ran: true only if it exited 0; exitCode: its exit code; output: everything it printed, verbatim and complete. If it failed, set ran=false and explain in note. Never invent output.
 ```
 
+## Granny - worktree setup without a saved dir, on Cursor for a branch whose key is longer than 200 bytes (the setup above without the restore and the move-aside; run the command yourself)
+
+```text
+Run one shell command that sets up the git worktree of branch `<branch>` and return its output. Run nothing else; edit, stage or commit nothing.
+Repo <repo>.
+
+Run exactly this:
+cd '<repo>' && ex="$(git rev-parse --git-common-dir)/info/exclude" && mkdir -p "${ex%/*}" && { grep -qxF -e /.granny/ "$ex" 2>/dev/null || { if [ -s "$ex" ] && [ -n "$(tail -c 1 "$ex")" ]; then echo >> "$ex"; fi; printf '%s\n' /.granny/ >> "$ex"; }; } && wt=$(git worktree list --porcelain | while IFS= read -r l; do case "$l" in "worktree "*) p=${l#worktree };; "branch refs/heads/"*) if [ "${l#branch refs/heads/}" = '<branch>' ]; then printf '%s\n' "$p"; break; fi;; esac; done) && if [ -n "$wt" ]; then changes=$(git -C "$wt" status --porcelain) || exit 1; if [ -n "$changes" ]; then printf '[granny] worktree failed: %s has %s checked out with uncommitted changes - commit or discard them, then run again:\n' "$wt" '<branch>'; git -C "$wt" status --short; exit 1; fi; elif git show-ref --verify --quiet 'refs/heads/<branch>'; then wt='<worktreeDir>/<branch-slug>'; git worktree add "$wt" '<branch>' || exit 1; gd=$(git -C "$wt" rev-parse --absolute-git-dir) && { printf '%s\n' "$wt"; printf '%s\n' "$(cd "$wt" && pwd -P)"; } > "$gd"/granny-worktree || :; else wt='<worktreeDir>/<branch-slug>'; git worktree add -b '<branch>' "$wt" '<base>' || exit 1; gd=$(git -C "$wt" rev-parse --absolute-git-dir) && { printf '%s\n' "$wt"; printf '%s\n' "$(cd "$wt" && pwd -P)"; } > "$gd"/granny-worktree || :; fi && gd=$(git -C "$wt" rev-parse --absolute-git-dir) && if [ -f "$gd"/granny-worktree ]; then echo '[granny] worktree made by granny'; fi && printf '%s%s\n' '[granny] worktree: ' "$wt"
+
+Return ran: true only if it exited 0; exitCode: its exit code; output: everything it printed, verbatim and complete. If it failed, set ran=false and explain in note. Never invent output.
+```
+
 ## Planner - a run with goal (context here is the run's context only; the plan files do not exist yet)
 
 ```text
