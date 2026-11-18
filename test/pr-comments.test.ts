@@ -1328,6 +1328,13 @@ describe('the trail of a removed worktree', () => {
     expect(f.posted).toHaveLength(2)
   })
 
+  it('reads the checkout\'s own trail when the saved one holds the same records, and says so', () => {
+    const f = fake({ trails: { [SAVED]: one, [DIR]: one }, diffs: { [SHA1]: A_DIFF } })
+    expect(postTrail([], f.io)).toBe(0)
+    expect(f.out[0]).toBe(`note: reading the trail in ${DIR}; it holds every record of ${SAVED}`)
+    expect(f.posted).toHaveLength(1)
+  })
+
   it('stops, and posts nothing, when a linked worktree and the saved trail hold different records under one name', () => {
     const wt = `${TOP}-worktrees/feat-x`
     const f = fake({ top: wt, trails: { [`${wt}/.granny/trail`]: { 's1-r1.json': round({ findings: [finding('codex-F9')] }) }, [SAVED]: one }, diffs: { [SHA1]: A_DIFF } })
