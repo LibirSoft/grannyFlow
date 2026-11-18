@@ -228,8 +228,9 @@ describe('skill docs', () => {
     expect(md).toContain('Never write, edit or post review comments yourself. Only the script posts them.')
     expect(md).toContain('No push, no `git remote add`, no PR, no tag - the user decides.')
     expect(md).toContain('`trail.failed`')
-    expect(md).toContain('If it stops with `more than one trail exists`, it has posted nothing: run it again with `--trail` set to the checkout\'s own `<workDir>/trail`')
+    expect(md).toContain('If it stops with `more than one trail exists`, it has posted nothing: run it again with `--trail` set to the run\'s `trail.dir` from the result - after a removal the saved `branches/<branch-key>/trail` of this branch, which holds this run\'s records, not the checkout\'s own `<workDir>/trail`, which can hold another branch\'s records')
     expect(config).toContain('none holds every record of the others')
+    expect(config).toContain('pass `--trail <dir>` with the run\'s `trail.dir` from the result - after a removal the saved `branches/<branch-key>/trail` of the branch, which holds this run\'s records, not the checkout\'s own `<workDir>/trail`, which can hold another branch\'s records')
     expect(readRoot('CHANGELOG.md')).toContain('and stops, naming them, when none holds every record of the others')
     for (const host of ['claude-code', 'opencode', 'omp', 'cursor']) {
       const ref = read(`references/${host}.md`)
