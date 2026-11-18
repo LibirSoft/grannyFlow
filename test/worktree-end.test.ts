@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'bun:test'
+import { GrannyCancelled } from '../src/core/cancel'
 import { runGranny, type RunInput } from '../src/core/engine'
 import type { AgentRequest } from '../src/core/types'
 import { fakeHost, finding, review, type FakeOptions, type Review } from './fake-host'
@@ -70,6 +71,16 @@ describe('the end of a run', () => {
     expect(f.logs).toContainEqual(expect.stringContaining(`worktree left in place: ${WT} - uncommitted changes in the worktree: `))
     const thrown = fakeHost({ worktree: lanePath, made: true, checks: c => { if (isRemoval(c)) throw new Error('boom'); return undefined } })
     expect((await runGranny(thrown.host, input)).worktreeEnd).toEqual({ removed: false, kept: 'the removal step failed: boom' })
+  })
+
+  it('rethrows a cancel that comes during the removal, so the run is cancelled and not kept', async () => {
+    const f = host({
+      checks: c => {
+        if (isRemoval(c)) throw new GrannyCancelled()
+        return undefined
+      },
+    })
+    await expect(runGranny(f.host, input)).rejects.toBeInstanceOf(GrannyCancelled)
   })
 
   it('keeps a worktree the run was started in, and starts no removal in it', async () => {
