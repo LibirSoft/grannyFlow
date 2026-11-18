@@ -93,7 +93,7 @@ export function removeWorktreeScript(c: Pick<GrannyConfig, 'workDir'>, branch: s
   const save = [
     'cd "$src" || exit 1',
     `mkdir -p ${dst} || exit 1`,
-    `if [ -d trail ]; then grep -qxF -e "$wt" trail/worktree-paths 2>/dev/null || printf '%s\\n' "$wt" >> trail/worktree-paths; fi`,
+    `if [ -d trail ]; then for p in "$wt" "$(cd "$wt" && pwd -P)"; do case "$p" in /*) grep -qxF -e "$p" trail/worktree-paths 2>/dev/null || printf '%s\\n' "$p" >> trail/worktree-paths;; esac; done; fi`,
     `cp -R . ${dst}/`,
     'n=$(find . -type f | wc -l)',
     `same=$(find . -type f -exec cmp -s {} ${dst}/{} \\; -print | wc -l)`,

@@ -158,6 +158,16 @@ describe('the worktree scripts in a real git repo', () => {
     }
   })
 
+  it('lists the real path of a worktree reached through a symlink too, so a finding that names that path is stripped', () => {
+    mkdirSync(join(root, 'real-worktrees'))
+    symlinkSync(join(root, 'real-worktrees'), join(root, 'linked-worktrees'))
+    wt = join(root, 'linked-worktrees', 'feat-x')
+    setup()
+    workDir({ 'PR-BODY.md': '# one\n', 'trail/s1-r1.json': '{}\n' })
+    expect(remove().end).toEqual({ removed: true, saved })
+    expect(readFileSync(join(saved, 'trail/worktree-paths'), 'utf8')).toBe(`${join(root, 'linked-worktrees', 'feat-x')}\n${join(root, 'real-worktrees', 'feat-x')}\n`)
+  })
+
   it('removes a worktree with no work dir, and says nothing was saved', () => {
     setup()
     expect(remove().end).toEqual({ removed: true })
