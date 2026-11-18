@@ -28,7 +28,19 @@ With `worktree` on (the default), set it up by hand before the first stage - als
 3. Otherwise, when `git -C <repo> show-ref --verify --quiet refs/heads/<branch>` succeeds: `git -C <repo> worktree add <worktreeDir>/<branch-slug> <branch>`.
 4. Otherwise: `git -C <repo> worktree add -b <branch> <worktreeDir>/<branch-slug> <base>`.
 
-`<worktreeDir>` defaults to `<parent of repo>/<repo name>-worktrees`; `<branch-slug>` is the branch with every character other than letters, digits, `.`, `_` and `-` as `-` (`feat/login` → `feat-login`). The "Granny - worktree setup" command in [prompts.md](prompts.md) does all four steps in one go and prints `[granny] worktree: <path>`. From then on the worktree is `<repo>` in every prompt and every terminal command; name it in the report and never remove it: `keepWorktree` has no effect here, because the removal is a step of the engines. With `worktree: false`, work in `repo` on the branch checked out there.
+`<worktreeDir>` defaults to `<parent of repo>/<repo name>-worktrees`; `<branch-slug>` is the branch with every character other than letters, digits, `.`, `_` and `-` as `-` (`feat/login` → `feat-login`).
+
+`<branch-key>` is the branch name with every UTF-8 byte other than ASCII letters, digits, `_` and `-` written as `%XX` in uppercase hex (`feat/login` → `feat%2Flogin`); the saved dir is `<repo>/<workDir>/branches/<branch-key>`. A key longer than 200 bytes is cut and hashed, as [config.md](config.md#when-the-run-ends) describes.
+
+The "Granny - worktree setup" command in [prompts.md](prompts.md) does all four steps in one go, plus three more that the engines' setup does, and prints `[granny] worktree: <path>`:
+
+- it marks the worktree it creates: the file `granny-worktree` in its git admin directory, and the line `[granny] worktree made by granny`. Cursor never removes a worktree, so nothing reads the mark here;
+- for an existing branch that no checkout has, when the saved dir exists, it copies the saved files into `<worktree>/<workDir>/` and prints `[granny] work dir restored`, or `[granny] work dir not restored` when the copy fails;
+- for a branch it creates, when the saved dir exists, it moves that dir to `<saved dir>.before-<YYYYMMDD-HHMMSS>` (with `-2`, `-3`, ... after it when that name is taken) and prints `[granny] earlier work dir files moved aside: <new path>`; when the move fails it prints `[granny] earlier work dir files not moved aside: <saved dir> - move or delete them, then run again`, and stops.
+
+Tell the user each of these lines with its paths: nothing is deleted, the restore leaves the saved files where they are, and a moved-aside dir stays under its new name. A checkout that already has the branch is reused, and nothing is copied into it.
+
+From then on the worktree is `<repo>` in every prompt and every terminal command; name it in the report and never remove it: `keepWorktree` has no effect here, because the removal is a step of the engines. With `worktree: false`, work in `repo` on the branch checked out there.
 
 ## Planning
 

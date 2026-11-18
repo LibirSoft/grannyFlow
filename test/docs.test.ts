@@ -193,6 +193,10 @@ describe('skill docs', () => {
     expect(readRoot('README.md')).toMatch(/^\| `keepWorktree` \| `false` \|/m)
     expect(read('references/prompts.md')).toMatch(/^## Granny - worktree removal/m)
   })
+  it('tells a Cursor agent what the setup command does beyond the four steps, and defines <branch-key>', () => {
+    const cursor = read('references/cursor.md')
+    for (const text of ['`<branch-key>` is the branch name', '`feat%2Flogin`', '`granny-worktree`', '[granny] worktree made by granny', '[granny] work dir restored', '[granny] work dir not restored', '[granny] earlier work dir files moved aside: ', '[granny] earlier work dir files not moved aside: ']) expect({ text, has: cursor.includes(text) }).toEqual({ text, has: true })
+  })
   it('lists in config.md every reason a worktree stays, with the started-in check among the conditions', () => {
     const config = read('references/config.md')
     for (const reason of [
