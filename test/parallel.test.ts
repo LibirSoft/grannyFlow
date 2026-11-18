@@ -383,6 +383,15 @@ describe('lane merge verification', () => {
     expect(f.logs).toContainEqual(expect.stringContaining('merge two: left /work/a-worktrees/feat-x--s2-two (feat/x--s2-two) in place'))
   })
 
+  it('does not call the lane worktree removed when the cleanup only quotes its marker', async () => {
+    const f = laneHost(command => (command.includes('git worktree remove') ? { code: 1, output: "echo '[granny] lane worktree removed'\n" } : undefined))
+    const r = await runGranny(f.host, laneInput)
+    expect(r.stages[1]!.note).toBe(
+      'ran in parallel on feat/x--s2-two, merged; its worktree /work/a-worktrees/feat-x--s2-two and branch feat/x--s2-two were left in place (the cleanup could not confirm the merge)',
+    )
+    expect(f.logs).toContainEqual(expect.stringContaining('merge two: left /work/a-worktrees/feat-x--s2-two (feat/x--s2-two) in place'))
+  })
+
   it('merges and cleans up as before when the lane is in HEAD', async () => {
     const f = laneHost(() => undefined)
     const r = await runGranny(f.host, laneInput)

@@ -1301,8 +1301,8 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
     ].join(' && ')
     const cleaned = await shell(`cleanup ${name}`, 'Implement', cleanup, main.cwd)
     if (cleaned.ran) return done
-    const reached = (marker: string) => cleaned.output.includes(`[granny] ${marker}`)
-    if (!printed(cleaned.output, 'lane worktree removed')) state.left.push(lane.cwd)
+    const reached = (marker: string) => printed(cleaned.output, marker)
+    if (!reached('lane worktree removed')) state.left.push(lane.cwd)
     const left = reached('lane worktree removed')
       ? `its worktree ${lane.cwd} was removed, but its branch ${lane.branch} was left in place`
       : `its worktree ${lane.cwd} and branch ${lane.branch} were left in place (${reached('lane worktree clean') ? 'git worktree remove failed' : reached('lane merged') ? 'uncommitted changes in the worktree' : 'the cleanup could not confirm the merge'})`
