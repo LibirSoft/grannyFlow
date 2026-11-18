@@ -30,7 +30,7 @@ With `worktree` on (the default), set it up by hand before the first stage - als
 
 `<worktreeDir>` defaults to `<parent of repo>/<repo name>-worktrees`; `<branch-slug>` is the branch with every character other than letters, digits, `.`, `_` and `-` as `-` (`feat/login` → `feat-login`).
 
-`<branch-key>` is the branch name with every UTF-8 byte other than ASCII letters, digits, `_` and `-` written as `%XX` in uppercase hex (`feat/login` → `feat%2Flogin`); the saved dir is `<repo>/<workDir>/branches/<branch-key>`. A key longer than 200 bytes is cut and hashed, as [config.md](config.md#when-the-run-ends) describes.
+`<branch-key>` is the branch name with every UTF-8 byte other than ASCII letters, digits, `_` and `-` written as `%XX` in uppercase hex (`feat/login` → `feat%2Flogin`); the saved dir is `<repo>/<workDir>/branches/<branch-key>`. A key longer than 200 bytes is cut and hashed, as [config.md](config.md#when-the-run-ends) describes. A Cursor agent cannot compute that hash by hand, so for such a branch it stops before the setup step and tells the user the branch name is too long for a Cursor run.
 
 The "Granny - worktree setup" command in [prompts.md](prompts.md) does all four steps in one go, plus three more that the engines' setup does, and prints `[granny] worktree: <path>`:
 

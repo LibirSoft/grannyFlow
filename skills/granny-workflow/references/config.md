@@ -104,7 +104,7 @@ With `worktree: false` the run works in `repo` itself, on the branch you checked
 
 With `keepWorktree` off (the default) the last step of a run removes each repo's worktree and leaves the branch. You then check the branch out in the main checkout like any other branch, and review and push from there. The step runs after the final check, in phase "PR ready", once per repo, from the repo (label `remove worktree`, `remove worktree <repo name>` for another repo of `repos`): on Claude Code a helper agent (`roles.helper`) runs it, on opencode and omp the plugin or extension runs it directly ([prompts.md](prompts.md) shows the command). A worktree that stays never fails the run.
 
-`<branch-key>` in the saved paths is the branch name encoded as `encodeURIComponent` encodes it, with `!'().*~` encoded too (`feat/login` → `feat%2Flogin`); a key longer than 200 characters is shortened to 200 and ends in a hash of it.
+`<branch-key>` in the saved paths is the branch name encoded as `encodeURIComponent` encodes it, with `!'().*~` encoded too (`feat/login` → `feat%2Flogin`); a key longer than 200 characters is cut to its first 191 characters, then `-` and the 8-digit FNV-1a 32-bit hash of the whole key, written as lowercase hex (offset basis `811c9dc5`; for each character of the key, XOR its code into the hash, then multiply by `01000193` modulo 2^32). The FNV-1a of `a` is `e40c292c`.
 
 A worktree is removed only when every one of these holds, checked in this order:
 
