@@ -211,6 +211,7 @@ describe('the end of a run', () => {
     expect(r.plan!.outcome).toBe('round-cap')
     expect(r.stages).toEqual([])
     expect(r.worktreeEnd).toEqual({ removed: false, kept: 'the plan review ended round-cap, so the run stopped before stage 1' })
+    expect(f.logs).toContain(`worktree left in place: ${WT} - the plan review ended round-cap, so the run stopped before stage 1`)
     expect(f.commands.some(isRemoval)).toBe(false)
   })
 
@@ -220,6 +221,7 @@ describe('the end of a run', () => {
     expect(r.plan!.outcome).toBe('review-failed')
     expect(r.stages).toEqual([])
     expect(r.worktreeEnd).toEqual({ removed: false, kept: 'the plan review ended review-failed, so the run stopped before stage 1' })
+    expect(f.logs).toContain(`worktree left in place: ${WT} - the plan review ended review-failed, so the run stopped before stage 1`)
     expect(f.commands.some(isRemoval)).toBe(false)
   })
 
@@ -228,6 +230,7 @@ describe('the end of a run', () => {
     const r = await runGranny(f.host, { repo: A, branch: 'feat/x', goal: 'add a thing' })
     expect(r.draft).toBeDefined()
     expect(r.worktreeEnd).toEqual({ removed: false, kept: 'a planning run keeps its worktree for the implement run' })
+    expect(f.logs).toContain(`worktree left in place: ${WT} - a planning run keeps its worktree for the implement run`)
     expect(f.commands.some(isRemoval)).toBe(false)
   })
 })

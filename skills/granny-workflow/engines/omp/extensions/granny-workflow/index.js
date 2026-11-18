@@ -2744,7 +2744,12 @@ the last repair's deviations: ${deviations}` : ""}`;
     }
   };
   const trailOf = (end) => config.trail ? { trail: { dir: end?.saved ? `${end.saved}/trail` : trailDir(config, worktree), written: trailed.written, failed: [...trailed.failed] } } : {};
-  const keptAll = (why) => config.worktree ? { worktreeEnd: { removed: false, kept: why } } : {};
+  const keptAll = (why) => {
+    if (!config.worktree)
+      return {};
+    host.log(`worktree left in place: ${worktree} - ${why}`);
+    return { worktreeEnd: { removed: false, kept: why } };
+  };
   const reviewLoop = async (lane, name, subject, reviewers = config.reviewers, opts) => {
     const { gates, checks = [], runs = [], notes = [], prior = [], record } = opts;
     const { p } = lane;

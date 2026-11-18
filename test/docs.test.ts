@@ -205,6 +205,8 @@ describe('skill docs', () => {
       'git could not compare the worktree with the checkout the run starts in',
       'the removal did not run: its runner returned no exit code',
       'a lane worktree was left in place (<paths>), and the removal could not be confirmed',
+      'a planning run keeps its worktree for the implement run',
+      'the plan review ended <outcome>, so the run stopped before stage 1',
       'Steps 5 to 9 are one shell script',
       'a file `granny-worktree` in the worktree',
     ]) expect({ reason, has: config.includes(reason) }).toEqual({ reason, has: true })

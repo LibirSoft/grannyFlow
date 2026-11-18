@@ -136,7 +136,7 @@ describe('the plan review', () => {
     expect(r.final).toBeNull()
     expect(f.calls.map(c => c.label)).toEqual(['judge plan review r1', 'fix plan review r1', 'judge plan review r2', 'fix plan review r2'])
     expect(f.phases).toEqual(['Worktree', 'Plan review'])
-    expect(f.logs.at(-1)).toBe('plan review ended round-cap - stopping before stage 1; nothing was implemented')
+    expect(f.logs.slice(-2)).toEqual(['plan review ended round-cap - stopping before stage 1; nothing was implemented', `worktree left in place: ${r.worktree} - the plan review ended round-cap, so the run stopped before stage 1`])
   })
 
   it('stops before stage 1 when a reviewer fails twice', async () => {
@@ -147,7 +147,7 @@ describe('the plan review', () => {
     expect(r.stages).toEqual([])
     expect(r.final).toBeNull()
     expect(f.calls).toHaveLength(0)
-    expect(f.logs.at(-1)).toBe('plan review ended review-failed - stopping before stage 1; nothing was implemented')
+    expect(f.logs.slice(-2)).toEqual(['plan review ended review-failed - stopping before stage 1; nothing was implemented', `worktree left in place: ${r.worktree} - the plan review ended review-failed, so the run stopped before stage 1`])
   })
 
   it('keeps a residual plan finding of an earlier round when a later round is clean', async () => {

@@ -879,7 +879,11 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
   }
   const trailOf = (end?: WorktreeEnd): { trail?: TrailSummary } =>
     config.trail ? { trail: { dir: end?.saved ? `${end.saved}/trail` : trailDir(config, worktree), written: trailed.written, failed: [...trailed.failed] } } : {}
-  const keptAll = (why: string): { worktreeEnd?: WorktreeEnd } => (config.worktree ? { worktreeEnd: { removed: false, kept: why } } : {})
+  const keptAll = (why: string): { worktreeEnd?: WorktreeEnd } => {
+    if (!config.worktree) return {}
+    host.log(`worktree left in place: ${worktree} - ${why}`)
+    return { worktreeEnd: { removed: false, kept: why } }
+  }
 
   const reviewLoop = async (
     lane: Lane,
