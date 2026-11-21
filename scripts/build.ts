@@ -178,6 +178,13 @@ export function renderPrompts(): string {
     ['Implementer - merge (a stage that ran in its own worktree; its merge stopped on conflicts)', mergePrompt(p, '<stage name>', '<lane branch>', '<git merge output>')],
     ['Reviewer - agent engine', agentReviewPrompt(p, '<stage name>', '<stage start sha>', stage)],
     [
+      'Reviewer - agent engine, from round 2 on (and in the final review from round 1 on, when a stage review left findings: the last lines list the findings earlier rounds left as they are - the residual ones, and each one a fixer declined with its reason; a command or opencode reviewer gets the same list as one sentence before the bullet form)',
+      agentReviewPrompt(p, '<stage name>', '<stage start sha>', stage, undefined, [
+        { file: '<file>', line: 12, title: '<title>' },
+        { file: '<file>', line: 34, title: '<title>', declined: "<the fixer's reason>" },
+      ]),
+    ],
+    [
       'Granny - a review command, start: the helper agent on Claude Code for a Codex, command or opencode reviewer, in the diff review and the plan review (on opencode and omp granny runs the review script itself and waits for it)',
       reviewStartPrompt(p, '<stage name>', '<reviewer>', job.start),
     ],

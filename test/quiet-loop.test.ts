@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'bun:test'
 import { resolveConfig } from '../src/core/config'
 import { runGranny, type RunInput } from '../src/core/engine'
-import { judgePrompt, planJudgePrompt, tagPrompt } from '../src/core/prompts'
+import { agentReviewPrompt, commandReviewPrompt, declinedKnown, judgePrompt, knownOf, planJudgePrompt, tagPrompt, type EarlierRound } from '../src/core/prompts'
 import { decide, isPrBody, type Policy } from '../src/core/review'
 import { SCHEMAS } from '../src/core/schemas'
 import { trailRound } from '../src/core/trail'
@@ -513,5 +513,68 @@ describe('a repeat of a kept finding', () => {
     const last = r.finalReview!.history[0]!.findings[0]!
     expect(last.decision).toMatchObject({ rule: 6, action: 'fix', raised: 'repeat of s1/r2/opus-F1: impact major -> critical' })
     expect(last.decision!.held).toBeUndefined()
+  })
+})
+
+describe('what a reviewer is told to leave out', () => {
+  it('ends an agent reviewer prompt with the not-findings sentence, after the severity tiers', () => {
+    const text = agentReviewPrompt(P, 'core', 'abc')
+    const lines = text.split('\n')
+    expect(lines.at(-1)).toBe('These are not findings, also when a rule or the plan asks for them, so leave them out: code comments and doc comments (wrong, outdated, missing, too long, or there against a rule; TODO notes and commented-out code too), commit messages and the commit history, the pull request description or its PR-BODY file, and how the work was done (the order tests and code were written in). A doc file such as the README is not a comment: review it like code.')
+    expect(lines.at(-2)).toBe('- P3: naming, style, leftovers.')
+    expect(text.indexOf('Do a thorough code review')).toBeLessThan(text.indexOf('These are not findings'))
+    expect(text).not.toContain('Earlier review rounds')
+  })
+
+  it('lists the known findings last, one per line, a declined one with its reason', () => {
+    const known = [knownOf(f0('x', { title: 'Doc line is\n too long', file: 'src/m.rs', line: 19 })), knownOf(f0('y', { title: 'Null check', line: undefined }), 'parse() checks it\nfirst')]
+    expect(agentReviewPrompt(P, 'core', 'abc', undefined, undefined, known).split('\n').slice(-3)).toEqual([
+      'Earlier review rounds raised the 2 finding(s) below, and they were left as they are on purpose. Do not report them again; report one the fixer declined only when its reason is wrong:',
+      '- src/m.rs:19 - Doc line is too long',
+      '- src/a.ts - Null check (the fixer declined it: parse() checks it first)',
+    ])
+    const command = commandReviewPrompt(P, 'core', 'abc', undefined, undefined, false, known)
+    expect(command).not.toContain('\n')
+    expect(command).toContain('7. Small things last: a name that breaks the convention of its file or schema, leftovers (debug output), a constant')
+    expect(command).toContain('review it like code. Earlier review rounds raised the 2 finding(s) below')
+    expect(command).toContain('reason is wrong: src/m.rs:19 - Doc line is too long; src/a.ts - Null check (the fixer declined it: parse() checks it first). Report each finding as one bullet line')
+  })
+
+  it('cuts each part at 160 characters and leaves out a line that is not a whole number', () => {
+    const long = 'x'.repeat(200)
+    const lines = agentReviewPrompt(P, 'core', 'abc', undefined, undefined, [
+      knownOf(f0('a', { file: long, title: long }), long),
+      knownOf(f0('b', { line: null as unknown as number })),
+      knownOf(f0('c', { line: 2.5 })),
+      knownOf(f0('d', { line: '7' as unknown as number })),
+    ]).split('\n')
+    const cut = 'x'.repeat(160)
+    expect(lines.slice(-4)).toEqual([`- ${cut}:3 - ${cut} (the fixer declined it: ${cut})`, '- src/a.ts - t', '- src/a.ts - t', '- src/a.ts - t'])
+  })
+
+  it('lists the last 40 of more, and says how many there are', () => {
+    const many = Array.from({ length: 45 }, (_, i) => knownOf(f0(`k${i}`, { title: `t${i}` })))
+    const lines = agentReviewPrompt(P, 'core', 'abc', undefined, undefined, many).split('\n')
+    expect(lines.filter(l => l.startsWith('- src/a.ts:3 - t')).length).toBe(40)
+    expect(lines).toContain('Earlier review rounds raised the 45 finding(s) below, and they were left as they are on purpose (the last 40 are listed). Do not report them again:')
+    expect(lines.at(-1)).toBe('- src/a.ts:3 - t44')
+  })
+
+  it('counts a decline as known until a later round sends its repeat back or keeps it as residual', () => {
+    const earlier: EarlierRound[] = [{ round: 1, sent: [f0('codex-F1', { title: 'Phantom' })], declined: [{ id: 'codex-F1', reason: 'no' }] }]
+    expect(declinedKnown(earlier)).toEqual([{ file: 'src/a.ts', line: 3, title: 'Phantom', declined: 'no' }])
+    expect(declinedKnown([...earlier, { round: 2, sent: [f0('codex-F4', { repeatOf: 'r1/codex-F1' })] }])).toEqual([])
+    expect(declinedKnown([...earlier, { round: 2, sent: [f0('codex-F4')], residual: [f0('codex-F5', { repeatOf: 'r1/codex-F1' })] }])).toEqual([])
+    expect(declinedKnown([{ round: 1, sent: [f0('codex-F1')], declined: [{ id: 'codex-F1', reason: '' }] }])[0]!.declined).toBe('no reason given')
+  })
+
+  it("reads a stage's own repeat labels as that stage's when the final review looks at its declines", () => {
+    const loop = { id: 's1', name: 'Stage 1 (one)' }
+    const staged: EarlierRound = { round: 1, sent: [f0('codex-F1', { title: 'Phantom' })], declined: [{ id: 'codex-F1', reason: 'no' }], loop }
+    expect(declinedKnown([staged])).toEqual([{ file: 'src/a.ts', line: 3, title: 'Phantom', declined: 'no' }])
+    expect(declinedKnown([staged, { round: 2, sent: [f0('codex-F4', { repeatOf: 'r1/codex-F1' })], loop }])).toEqual([])
+    expect(declinedKnown([staged, { round: 1, sent: [f0('opus-F2', { repeatOf: 's1/r1/codex-F1' })] }])).toEqual([])
+    const own: EarlierRound = { round: 1, sent: [f0('codex-F1', { title: 'Late save' })], declined: [{ id: 'codex-F1', reason: 'by design' }] }
+    expect(declinedKnown([{ round: 2, sent: [f0('codex-F4', { repeatOf: 'r1/codex-F1' })], loop }, own])).toEqual([{ file: 'src/a.ts', line: 3, title: 'Late save', declined: 'by design' }])
   })
 })

@@ -437,7 +437,7 @@ const reviewAsks = (stage: StageTask | undefined, base: string): string[] => [
   `4. Code that was moved or rewritten. When a commit moves code or says it changes no behaviour, compare the old version (\`git show ${base}:<path>\`) with the new one line by line. A check, a branch or a default that did not come along is a finding.`,
   '5. Beyond the diff. For everything the change renames, removes or gives a new meaning (a function, a type, a column, a route, a config key, a stored value), search the repo for what still uses it. Read the untouched code the new code calls or relies on, and the untouched code that reads what the new code writes: does it still hold when the new code feeds it new values? A problem the change causes in a file it does not touch is a finding: cite that file and line.',
   '6. The tests. For each new test ask whether it could fail if the code were wrong: an expectation computed with the same formula as the code, an assertion on a side effect instead of the result, only the happy path. Name the promised behaviours that no test would catch breaking.',
-  '7. Small things last: a name that breaks the convention of its file or schema, leftovers (debug output, TODOs, commented-out code), a constant that is defined and not used, duplication, needless abstraction, a deviation from the design the plan or context lays out.',
+  '7. Small things last: a name that breaks the convention of its file or schema, leftovers (debug output), a constant that is defined and not used, duplication, needless abstraction, a deviation from the design the plan or context lays out.',
   'Before you report a finding, open the code and confirm it; when it is cheap, run it (an existing test, or a one-line command that writes no file) instead of reasoning about it. Before you say something is missing - a test, a check, a doc line - search for it. Do not report what you could not confirm. Give each problem its own finding: do not fold two into one, and do not report one twice.',
   'Severity is what happens when the problem triggers; how rarely it triggers does not lower it.',
   '- P0: data loss or corruption, money or records written wrong, a security or authorization bypass, a leaked secret. A check that guards money, access or data and no longer runs is a bypass, also when it went missing in a refactor.',
@@ -473,6 +473,42 @@ function secondPass(p: PromptContext, base: string): string[] {
   ]
 }
 
+export interface Known {
+  file: string
+  line?: number
+  title: string
+  declined?: string
+}
+
+const KNOWN_LIMIT = 40
+const KNOWN_TEXT = 160
+const short = (text: unknown) => String(text ?? '').replace(/\s+/g, ' ').trim().slice(0, KNOWN_TEXT)
+
+export const knownOf = (f: Finding, declined?: string): Known => ({ file: f.file, ...(Number.isInteger(f.line) ? { line: f.line } : {}), title: f.title, ...(declined === undefined ? {} : { declined }) })
+
+export function declinedKnown(earlier: EarlierRound[]): Known[] {
+  const within = (e: EarlierRound, label: string) => (e.loop ? `${e.loop.id}/${label}` : label)
+  const repeated = new Set(earlier.flatMap(e => [...e.sent, ...(e.residual ?? [])].flatMap(f => (f.repeatOf === undefined ? [] : [within(e, f.repeatOf)]))))
+  return earlier.flatMap(e =>
+    (e.declined ?? []).flatMap(d => {
+      const f = e.sent.find(s => s.id === d.id)
+      return f && !repeated.has(roundLabel(e.round, d, e.loop)) ? [knownOf(f, d.reason || 'no reason given')] : []
+    }),
+  )
+}
+
+const knownLine = (k: Known) => `${short(k.file)}${k.line === undefined ? '' : `:${k.line}`} - ${short(k.title)}${k.declined === undefined ? '' : ` (the fixer declined it: ${short(k.declined)})`}`
+
+const NOT_FINDINGS =
+  'These are not findings, also when a rule or the plan asks for them, so leave them out: code comments and doc comments (wrong, outdated, missing, too long, or there against a rule; TODO notes and commented-out code too), commit messages and the commit history, the pull request description or its PR-BODY file, and how the work was done (the order tests and code were written in). A doc file such as the README is not a comment: review it like code.'
+
+function notFindings(known: Known[], oneLine = false): string[] {
+  const listed = known.slice(-KNOWN_LIMIT)
+  if (!listed.length) return [NOT_FINDINGS]
+  const intro = `Earlier review rounds raised the ${known.length} finding(s) below, and they were left as they are on purpose${known.length > listed.length ? ` (the last ${listed.length} are listed)` : ''}. Do not report them again${listed.some(k => k.declined !== undefined) ? '; report one the fixer declined only when its reason is wrong' : ''}:`
+  return oneLine ? [NOT_FINDINGS, `${intro} ${listed.map(knownLine).join('; ')}.`] : [NOT_FINDINGS, intro, ...listed.map(k => `- ${knownLine(k)}`)]
+}
+
 /** What P0 to P3 mean for an agent reviewer; it follows the return line, so it labels the findings without steering the search for them. */
 const SEVERITY_TIERS = [
   'Severity is what happens when the problem triggers; how rarely it triggers does not lower it.',
@@ -486,8 +522,9 @@ const SEVERITY_TIERS = [
  * The agent reviewer gets a short, open review request and then a second pass. Measured on frozen first versions of one plan
  * (Sonnet reviewer, known defects, blind scoring): a step list, the rules or a clean-stage sentence in front of the open request
  * each cost it known defects (21% raised with the step list, 47% with the open request alone); this form raised 48%.
+ * The lines after the severity tiers (what is not a finding, and the findings earlier rounds left as they are) were added later and are not in that measurement.
  */
-export function agentReviewPrompt(p: PromptContext, name: string, reviewBase: string, stage?: StageTask, note?: string): string {
+export function agentReviewPrompt(p: PromptContext, name: string, reviewBase: string, stage?: StageTask, note?: string, known: Known[] = []): string {
   return [
     `Review a pull request. The repository is ${p.repo}, on branch \`${p.branch}\`; the base is \`${reviewBase}\`.`,
     ...(stage ? [`The change is stage ${stage.number}/${stage.total} "${name}" of a plan. The stage's task:\n${stage.task}`] : []),
@@ -504,11 +541,12 @@ export function agentReviewPrompt(p: PromptContext, name: string, reviewBase: st
     `Return findings with id (F1, F2, ...), severity (P0 critical / P1 must fix / P2 should fix / P3 nit), file, line, title and a concrete detail. Write them in ${p.config.language}.`,
     `Keep every finding short: a title of one line, and a detail of ${SHORT_DETAIL}.`,
     ...SEVERITY_TIERS,
+    ...notFindings(known),
   ].join('\n')
 }
 
 /** `inWorktree`: the reviewer already runs in the worktree and its bash rules refuse `cd` and quoted arguments (the opencode engine). */
-export function commandReviewPrompt(p: PromptContext, name: string, reviewBase: string, stage?: StageTask, note?: string, inWorktree = false): string {
+export function commandReviewPrompt(p: PromptContext, name: string, reviewBase: string, stage?: StageTask, note?: string, inWorktree = false, known: Known[] = []): string {
   const diff = inWorktree
     ? `, from the worktree you run in: \`git diff ${reviewBase}...HEAD\` plus \`git log --oneline ${reviewBase}..HEAD\``
     : `: \`cd ${shellQuote(p.repo)} && git diff ${shellQuote(reviewBase)}...HEAD\` plus \`git log --oneline ${shellQuote(reviewBase)}..HEAD\``
@@ -519,6 +557,7 @@ export function commandReviewPrompt(p: PromptContext, name: string, reviewBase: 
     p.context ? `Design context, read it first: ${p.context}` : '',
     taskSection(stage),
     ...reviewAsks(stage, reviewBase),
+    ...notFindings(known, true),
     ...bulletForm('path/to/file.ts:12', 'must fix', 'the path relative to the repo root and the line'),
   ]
     .filter(Boolean)

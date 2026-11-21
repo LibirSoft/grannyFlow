@@ -1137,7 +1137,7 @@ var reviewAsks = (stage, base) => [
   `4. Code that was moved or rewritten. When a commit moves code or says it changes no behaviour, compare the old version (\`git show ${base}:<path>\`) with the new one line by line. A check, a branch or a default that did not come along is a finding.`,
   "5. Beyond the diff. For everything the change renames, removes or gives a new meaning (a function, a type, a column, a route, a config key, a stored value), search the repo for what still uses it. Read the untouched code the new code calls or relies on, and the untouched code that reads what the new code writes: does it still hold when the new code feeds it new values? A problem the change causes in a file it does not touch is a finding: cite that file and line.",
   "6. The tests. For each new test ask whether it could fail if the code were wrong: an expectation computed with the same formula as the code, an assertion on a side effect instead of the result, only the happy path. Name the promised behaviours that no test would catch breaking.",
-  "7. Small things last: a name that breaks the convention of its file or schema, leftovers (debug output, TODOs, commented-out code), a constant that is defined and not used, duplication, needless abstraction, a deviation from the design the plan or context lays out.",
+  "7. Small things last: a name that breaks the convention of its file or schema, leftovers (debug output), a constant that is defined and not used, duplication, needless abstraction, a deviation from the design the plan or context lays out.",
   "Before you report a finding, open the code and confirm it; when it is cheap, run it (an existing test, or a one-line command that writes no file) instead of reasoning about it. Before you say something is missing - a test, a check, a doc line - search for it. Do not report what you could not confirm. Give each problem its own finding: do not fold two into one, and do not report one twice.",
   "Severity is what happens when the problem triggers; how rarely it triggers does not lower it.",
   "- P0: data loss or corruption, money or records written wrong, a security or authorization bypass, a leaked secret. A check that guards money, access or data and no longer runs is a bypass, also when it went missing in a refactor.",
@@ -1166,6 +1166,18 @@ function secondPass(p, base) {
     ...rules
   ];
 }
+var KNOWN_LIMIT = 40;
+var KNOWN_TEXT = 160;
+var short = (text) => String(text ?? "").replace(/\s+/g, " ").trim().slice(0, KNOWN_TEXT);
+var knownLine = (k) => `${short(k.file)}${k.line === undefined ? "" : `:${k.line}`} - ${short(k.title)}${k.declined === undefined ? "" : ` (the fixer declined it: ${short(k.declined)})`}`;
+var NOT_FINDINGS = "These are not findings, also when a rule or the plan asks for them, so leave them out: code comments and doc comments (wrong, outdated, missing, too long, or there against a rule; TODO notes and commented-out code too), commit messages and the commit history, the pull request description or its PR-BODY file, and how the work was done (the order tests and code were written in). A doc file such as the README is not a comment: review it like code.";
+function notFindings(known, oneLine = false) {
+  const listed = known.slice(-KNOWN_LIMIT);
+  if (!listed.length)
+    return [NOT_FINDINGS];
+  const intro = `Earlier review rounds raised the ${known.length} finding(s) below, and they were left as they are on purpose${known.length > listed.length ? ` (the last ${listed.length} are listed)` : ""}. Do not report them again${listed.some((k) => k.declined !== undefined) ? "; report one the fixer declined only when its reason is wrong" : ""}:`;
+  return oneLine ? [NOT_FINDINGS, `${intro} ${listed.map(knownLine).join("; ")}.`] : [NOT_FINDINGS, intro, ...listed.map((k) => `- ${knownLine(k)}`)];
+}
 var SEVERITY_TIERS = [
   "Severity is what happens when the problem triggers; how rarely it triggers does not lower it.",
   "- P0: data loss or corruption, money or records written wrong, a security or authorization bypass, a leaked secret.",
@@ -1173,7 +1185,7 @@ var SEVERITY_TIERS = [
   "- P2: wrong behaviour with an easy workaround, a wrong or missing error, a missing test for changed behaviour, duplicated logic.",
   "- P3: naming, style, leftovers."
 ];
-function agentReviewPrompt(p, name, reviewBase, stage, note) {
+function agentReviewPrompt(p, name, reviewBase, stage, note, known = []) {
   return [
     `Review a pull request. The repository is ${p.repo}, on branch \`${p.branch}\`; the base is \`${reviewBase}\`.`,
     ...stage ? [`The change is stage ${stage.number}/${stage.total} "${name}" of a plan. The stage's task:
@@ -1190,11 +1202,12 @@ ${stage.task}`] : [],
     "",
     `Return findings with id (F1, F2, ...), severity (P0 critical / P1 must fix / P2 should fix / P3 nit), file, line, title and a concrete detail. Write them in ${p.config.language}.`,
     `Keep every finding short: a title of one line, and a detail of ${SHORT_DETAIL}.`,
-    ...SEVERITY_TIERS
+    ...SEVERITY_TIERS,
+    ...notFindings(known)
   ].join(`
 `);
 }
-function commandReviewPrompt(p, name, reviewBase, stage, note, inWorktree = false) {
+function commandReviewPrompt(p, name, reviewBase, stage, note, inWorktree = false, known = []) {
   const diff = inWorktree ? `, from the worktree you run in: \`git diff ${reviewBase}...HEAD\` plus \`git log --oneline ${reviewBase}..HEAD\`` : `: \`cd ${shellQuote(p.repo)} && git diff ${shellQuote(reviewBase)}...HEAD\` plus \`git log --oneline ${shellQuote(reviewBase)}..HEAD\``;
   return [
     "You are a code REVIEWER. Do not edit, stage or commit anything.",
@@ -1203,6 +1216,7 @@ function commandReviewPrompt(p, name, reviewBase, stage, note, inWorktree = fals
     p.context ? `Design context, read it first: ${p.context}` : "",
     taskSection(stage),
     ...reviewAsks(stage, reviewBase),
+    ...notFindings(known, true),
     ...bulletForm("path/to/file.ts:12", "must fix", "the path relative to the repo root and the line")
   ].filter(Boolean).join(" ").replace(/\s*\n\s*/g, " ");
 }
@@ -2013,7 +2027,7 @@ var lineShaped = (output, shape) => output.split(`
 `).map((l) => l.trim()).find((l) => shape.test(l));
 var SHA = /^[0-9a-f]{7,64}$/i;
 var COUNT = /^\d+$/;
-var short = (sha) => sha.slice(0, 8);
+var short2 = (sha) => sha.slice(0, 8);
 var STATUS_LINE = /^\s*[MADRCUT?!]{1,2}\s+\S/;
 var listed = (status) => status.map((l) => l.trim()).join(", ");
 var entriesOf = (answer) => Array.isArray(answer?.perFinding) ? answer.perFinding.filter((x) => x && typeof x === "object" && typeof x.id === "string") : [];
@@ -3313,15 +3327,15 @@ ${note}` : note } : result;
       reusedHead.set(s, now);
       const failed = last.results.filter((r) => !r.passed);
       if (!failed.length)
-        host.log(`${name}: final checks not rerun - ${nameOf(single)} ran them green last on ${short(now)}, HEAD unchanged`);
+        host.log(`${name}: final checks not rerun - ${nameOf(single)} ran them green last on ${short2(now)}, HEAD unchanged`);
       else {
-        const note = `checks failed at final: ${nameOf(single)} ended with ${failed.map((r) => r.name).join(", ")} red on ${short(now)}, HEAD unchanged`;
+        const note = `checks failed at final: ${nameOf(single)} ended with ${failed.map((r) => r.name).join(", ")} red on ${short2(now)}, HEAD unchanged`;
         host.log(`${name} not run - ${note}; the branch is not PR-ready, the final check still runs`);
         return { outcome: "checks-failed", rounds: 0, residual: [], unresolved: [], history: [], note };
       }
     } else if (checks.length) {
       if (same) {
-        const why = !last.head ? `could not read the HEAD ${nameOf(single)} last ran them on` : !now ? "could not read HEAD" : `${nameOf(single)} ran them last on ${short(last.head)}, but HEAD is now ${short(now)}`;
+        const why = !last.head ? `could not read the HEAD ${nameOf(single)} last ran them on` : !now ? "could not read HEAD" : `${nameOf(single)} ran them last on ${short2(last.head)}, but HEAD is now ${short2(now)}`;
         host.log(`${name}: running the final checks - ${why}${now && last.head ? "" : ", so their result is not reused"}`);
       }
       finalRuns.set(s, runs);
@@ -3376,7 +3390,7 @@ ${note}` : note } : result;
     const now = (await readHead(`head ${label}`, "PR ready", s.lane.cwd)).sha;
     if (gated && now === gated)
       return;
-    host.log(`${label}: ${gated && now ? `HEAD moved from ${short(gated)} to ${short(now)} after the final checks` : "could not read HEAD after the pr-ready check or at the final checks"} - running them once more, without repairs`);
+    host.log(`${label}: ${gated && now ? `HEAD moved from ${short2(gated)} to ${short2(now)} after the final checks` : "could not read HEAD after the pr-ready check or at the final checks"} - running them once more, without repairs`);
     const gate = await checkGate(s.lane, label, "pr-ready", checks.map((c) => ({ ...c, maxRepairs: 0 })), runs);
     if (!gate.passed) {
       host.log(`${label}: the checks are red after the pr-ready check - the branch is not PR-ready`);
@@ -3485,7 +3499,7 @@ async function runJudge(host, input) {
   if (!read.sha)
     throw new Error(`granny judge could not read HEAD in ${repo} (exit ${read.code}): ${read.output.slice(-500)}`);
   const head = read.sha;
-  const branch = current ?? short(head);
+  const branch = current ?? short2(head);
   const count = await shell("commits", REVIEW_PHASE, `git rev-list --count ${shellQuote(base)}..HEAD`, repo);
   const commits = count.ran ? lineShaped(count.output, COUNT) : undefined;
   if (commits === undefined) {
@@ -3575,7 +3589,7 @@ ${notes}`);
   const meta = {
     branch,
     base,
-    head: short(head),
+    head: short2(head),
     commits: Number(commits),
     repo,
     when: date,
