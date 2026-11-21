@@ -438,6 +438,13 @@ describe('config tags in the trail and the PR comment', () => {
       '**Judge:** `confirmed` `minor` `edge` `trivial` `in-scope` · priority 40 · rule 8 → residual: under the bar: minor/edge/trivial -> 40\n',
     )
   })
+
+  it('shows what the engine held on the judge line, after the why', () => {
+    const held = finding('codex-F1', { ...judge, decision: { rule: 8, action: 'residual', why: 'under the bar: minor/edge/trivial -> 40', held: 'repeat of r1/codex-F3: moderate/edge/small -> minor/edge/trivial' } })
+    expect(findingComment(held, round({ findings: [held] }), [round({ findings: [held] })])).toContain(
+      '**Judge:** `confirmed` `minor` `edge` `trivial` `in-scope` · priority 40 · rule 8 → residual: under the bar: minor/edge/trivial -> 40 (held: repeat of r1/codex-F3: moderate/edge/small -> minor/edge/trivial)\n',
+    )
+  })
 })
 
 describe('rendering', () => {

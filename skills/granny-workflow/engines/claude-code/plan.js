@@ -825,7 +825,7 @@ var rubric = (task) => `Classify every finding with exactly these fields:
 - evidence: path:line plus the concrete trigger steps, e.g. \`Editor.tsx:225\` + "save -> go back -> late response arrives -> save again". Always give a path:line: without one the finding counts as unverified, which lowers its impact one class. One line: the one or two places that show it and the trigger as a chain of short steps. Do not retell the finding.
 - reason: one short sentence, at most 25 words: what decided the classification. Do not repeat the finding or the evidence.
 Example: a late save response re-binds the editor to another post's id, so the next save can overwrite the wrong post: confirmed, critical, edge, small, in-scope, though the window is narrow.`;
-var decided = (f) => f.decision ? `${f.decision.action} - rule ${f.decision.rule}: ${f.decision.why}${f.decision.raised ? ` (ratchet raised ${f.decision.raised})` : ""}` : undefined;
+var decided = (f) => f.decision ? `${f.decision.action} - rule ${f.decision.rule}: ${f.decision.why}${f.decision.raised ? ` (ratchet raised ${f.decision.raised})` : ""}${f.decision.held ? ` (held: ${f.decision.held})` : ""}` : undefined;
 function tagsSection(tags) {
   const names = Object.entries(tags ?? {});
   if (!names.length)
@@ -882,7 +882,8 @@ When a finding below repeats an earlier one, set its repeatOf to that label, the
 - if the fixer's reason is wrong: classify the repeat on its merits and say in reason why that reason does not hold.
 - a repeat of a finding the fixer applied: check the fix in the code and classify what is still wrong.
 - a repeat of a residual finding (the fixer never saw it): classify it on its merits.
-A repeat cannot drop below the impact and likelihood of the finding it repeats: the engine raises them back, unless you classify it refuted with path:line evidence the earlier finding did not cite.
+A finding that reports another problem at the same place, or a problem that a later commit made worse, is not a repeat: leave repeatOf out and say in reason what changed.
+The engine holds a repeat to the finding it repeats. A repeat of one kept as residual under the bar, or as not-code, is not rated above what that one was kept at, unless you rate its impact critical: being reported again is no reason to rate it higher. A repeat of any other one cannot drop below its impact and likelihood: the engine raises them back, unless you classify it refuted with path:line evidence the earlier finding did not cite.
 `;
 }
 function overruledSection(overruled) {
@@ -2603,7 +2604,9 @@ the last repair's deviations: ${deviations}` : ""}`;
           });
           const keeper = keeperOf(duplicatesOf(per), new Set(found.map((f) => f.id)));
           const declinedGroups = new Set(entries.filter((e) => declinedBefore(e.f)).map((e) => keeper(e.f.id)));
-          return entries.map(({ f, s }) => decide(f, s, declinedGroups.has(keeper(f.id)) ? untagged : policy, declinedBefore, earlierOf));
+          const keptGroups = new Map(entries.flatMap((e) => isKept(earlierOf(e.f)) ? [[keeper(e.f.id), e.f.repeatOf]] : []));
+          const repeating = (f) => f.repeatOf === undefined && keptGroups.has(keeper(f.id)) ? { ...f, repeatOf: keptGroups.get(keeper(f.id)) } : f;
+          return entries.map(({ f, s }) => decide(repeating(f), s, declinedGroups.has(keeper(f.id)) ? untagged : policy, declinedBefore, earlierOf));
         };
         const { per, decided: withScores } = await judgeAnswers({
           at: `${name} r${round}`,
@@ -2639,6 +2642,8 @@ the last repair's deviations: ${deviations}` : ""}`;
       const ruled = (f) => `rule ${f.decision.rule}: ${f.decision.why}`;
       for (const f of findings.filter((f) => f.decision.raised))
         host.log(`${name} r${round}: the ratchet raised ${f.id} - ${f.decision.raised}`);
+      for (const f of findings.filter((f) => f.decision.held))
+        host.log(`${name} r${round}: ${f.id} held - ${f.decision.held}`);
       if (accepted.length)
         host.log(`${name} r${round}: to the implementer: ${accepted.map((f) => `${f.id} (${ruled(f)})`).join(", ")}`);
       for (const f of residual.filter(declinedBefore)) {

@@ -202,7 +202,7 @@ export function renderPrompts(): string {
       judgePrompt({ ...p, config: resolveConfig([{ tags: { typo: { description: 'a misspelled word in a string or a doc', fix: true } } }]) }, '<stage start sha>', [], [], stage).replace(/\[\]$/, '<findings as JSON>'),
     ],
     [
-      'Judge - from round 2 on (the plan judge gets the same EARLIER DECISIONS block; one "Round N sent" entry per earlier fix round, followed by its "kept as residual" list when that round left residual findings, and P0/P1 findings join the list once a fixer declined findings; a field the finding does not have, such as the classes of an unjudged P0/P1, is left out; `(ratchet raised <what>)` follows the why when the ratchet raised the finding)',
+      'Judge - from round 2 on (the plan judge gets the same EARLIER DECISIONS block; one "Round N sent" entry per earlier fix round, followed by its "kept as residual" list when that round left residual findings, and P0/P1 findings join the list once a fixer declined findings; a field the finding does not have, such as the classes of an unjudged P0/P1, is left out; `(ratchet raised <what>)` follows the why when the ratchet raised the finding, and `(held: <what>)` when the engine held a repeat of a kept finding)',
       judgePrompt(p, '<stage start sha>', [], earlier, stage).replace(/\[\]$/, '<findings as JSON>'),
     ],
     [

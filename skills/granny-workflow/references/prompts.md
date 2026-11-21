@@ -675,7 +675,7 @@ REVIEW:
 <findings as JSON>
 ```
 
-## Judge - from round 2 on (the plan judge gets the same EARLIER DECISIONS block; one "Round N sent" entry per earlier fix round, followed by its "kept as residual" list when that round left residual findings, and P0/P1 findings join the list once a fixer declined findings; a field the finding does not have, such as the classes of an unjudged P0/P1, is left out; `(ratchet raised <what>)` follows the why when the ratchet raised the finding)
+## Judge - from round 2 on (the plan judge gets the same EARLIER DECISIONS block; one "Round N sent" entry per earlier fix round, followed by its "kept as residual" list when that round left residual findings, and P0/P1 findings join the list once a fixer declined findings; a field the finding does not have, such as the classes of an unjudged P0/P1, is left out; `(ratchet raised <what>)` follows the why when the ratchet raised the finding, and `(held: <what>)` when the engine held a repeat of a kept finding)
 
 ```text
 You are the JUDGE classifying the findings of a code review. Repo <repo>, branch <branch>, stage diff `'<stage start sha>'...HEAD`. Do not edit anything.
@@ -723,7 +723,8 @@ When a finding below repeats an earlier one, set its repeatOf to that label, the
 - if the fixer's reason is wrong: classify the repeat on its merits and say in reason why that reason does not hold.
 - a repeat of a finding the fixer applied: check the fix in the code and classify what is still wrong.
 - a repeat of a residual finding (the fixer never saw it): classify it on its merits.
-A repeat cannot drop below the impact and likelihood of the finding it repeats: the engine raises them back, unless you classify it refuted with path:line evidence the earlier finding did not cite.
+A finding that reports another problem at the same place, or a problem that a later commit made worse, is not a repeat: leave repeatOf out and say in reason what changed.
+The engine holds a repeat to the finding it repeats. A repeat of one kept as residual under the bar, or as not-code, is not rated above what that one was kept at, unless you rate its impact critical: being reported again is no reason to rate it higher. A repeat of any other one cannot drop below its impact and likelihood: the engine raises them back, unless you classify it refuted with path:line evidence the earlier finding did not cite.
 
 REVIEW:
 <findings as JSON>
@@ -783,7 +784,8 @@ When a finding below repeats an earlier one, set its repeatOf to that label, the
 - if the fixer's reason is wrong: classify the repeat on its merits and say in reason why that reason does not hold.
 - a repeat of a finding the fixer applied: check the fix in the code and classify what is still wrong.
 - a repeat of a residual finding (the fixer never saw it): classify it on its merits.
-A repeat cannot drop below the impact and likelihood of the finding it repeats: the engine raises them back, unless you classify it refuted with path:line evidence the earlier finding did not cite.
+A finding that reports another problem at the same place, or a problem that a later commit made worse, is not a repeat: leave repeatOf out and say in reason what changed.
+The engine holds a repeat to the finding it repeats. A repeat of one kept as residual under the bar, or as not-code, is not rated above what that one was kept at, unless you rate its impact critical: being reported again is no reason to rate it higher. A repeat of any other one cannot drop below its impact and likelihood: the engine raises them back, unless you classify it refuted with path:line evidence the earlier finding did not cite.
 
 REVIEW:
 <findings as JSON>

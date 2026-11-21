@@ -125,6 +125,7 @@ describe('findings on the PR body', () => {
 })
 
 const P = { repo: '/w/repo', branch: 'feat/x', base: 'main', config: resolveConfig([]) }
+const TWO_STAGES = { stages: [{ name: 'one', task: 'WP-01' }, { name: 'two', task: 'WP-02' }], config: { parallel: false } }
 const POLICY: Policy = { threshold: 70, alwaysFix: ['critical', 'major'], rideAlong: 55, tags: { typo: { description: 'd', fix: true }, naming: { description: 'd', points: 40 } } }
 
 describe('not-code findings', () => {
@@ -233,5 +234,58 @@ describe('a repeat of a kept finding', () => {
     const d = repeat(judged('minor', 'common', 'trivial'), sent)
     expect(d).toMatchObject({ impact: 'moderate', likelihood: 'common', decision: { raised: 'repeat of r3/reviewer-F2: impact minor -> moderate' } })
     expect(d.decision!.held).toBeUndefined()
+  })
+
+  it('shows what was held in the EARLIER DECISIONS block, with the rule on repeats', () => {
+    const text = judgePrompt(P, 'abc', [], [{ round: 1, sent: [], residual: [f0('a', { decision: { rule: 8, action: 'residual', why: 'w', held: 'repeat of r1/x: a -> b' } })] }])
+    expect(text).toContain('"decision":"residual - rule 8: w (held: repeat of r1/x: a -> b)"')
+    expect(text).toContain('is not a repeat: leave repeatOf out and say in reason what changed.')
+    expect(text).toContain('The engine holds a repeat to the finding it repeats. A repeat of one kept as residual under the bar, or as not-code, is not rated above what that one was kept at, unless you rate its impact critical: being reported again is no reason to rate it higher.')
+    expect(text).not.toContain('A repeat cannot drop below the impact and likelihood of the finding it repeats')
+  })
+
+  const twoRounds = (second: Record<string, Record<string, unknown>>, again: ReturnType<typeof found>) =>
+    fakeHost({
+      scores: [{ 'opus-F1': judged('major', 'edge', 'small'), 'opus-F2': judged('minor', 'common', 'trivial') }, second],
+      override: req => {
+        if (req.label === 'review core r1 opus') return found(['P2', 'Late save', 'src/a.ts', 3], ['P3', 'Long doc line', 'src/m.rs', 19])
+        if (req.label === 'review core r2 opus') return again
+        return undefined
+      },
+    })
+
+  it('ends the stage residual-only when round 2 repeats the residual of round 1 with higher classes', async () => {
+    const f = twoRounds({ 'opus-F1': judged('moderate', 'edge', 'small', { repeatOf: 'r1/opus-F2' }) }, found(['P2', 'Long doc line again', 'src/m.rs', 19]))
+    const r = await runGranny(f.host, input())
+    expect(r.stages[0]).toMatchObject({ outcome: 'residual-only', rounds: 2 })
+    expect(r.stages[0]!.residual).toEqual([expect.objectContaining({ id: 'opus-F1', priority: 50, decision: expect.objectContaining({ rule: 8, held: 'repeat of r1/opus-F2: moderate/edge/small -> minor/common/trivial' }) })])
+    expect(f.logs).toContain('core r2: opus-F1 held - repeat of r1/opus-F2: moderate/edge/small -> minor/common/trivial')
+    expect(f.calls.some(c => c.label === 'fix core r2')).toBe(false)
+  })
+
+  it('holds a fresh finding the judge merges with such a repeat', async () => {
+    const f = twoRounds(
+      { 'opus-F1': judged('moderate', 'common', 'small', { duplicateOf: 'opus-F2' }), 'opus-F2': judged('minor', 'common', 'trivial', { repeatOf: 'r1/opus-F2' }) },
+      found(['P2', 'Doc line', 'src/m.rs', 19], ['P3', 'Long doc line', 'src/m.rs', 19]),
+    )
+    const r = await runGranny(f.host, input())
+    expect(r.stages[0]).toMatchObject({ outcome: 'residual-only', rounds: 2 })
+    expect(f.calls.some(c => c.label === 'fix core r2')).toBe(false)
+  })
+
+  it("holds a final-review repeat of a stage's residual finding", async () => {
+    const f = fakeHost({
+      scores: [{ 'opus-F1': judged('minor', 'common', 'trivial') }, { 'opus-F1': judged('moderate', 'common', 'small', { repeatOf: 's1/r1/opus-F1' }) }],
+      override: req => {
+        if (req.label === 'review one r1 opus') return found(['P3', 'Long doc line', 'src/m.rs', 19])
+        if (req.label === 'review final review r1 opus') return found(['P2', 'Long doc line again', 'src/m.rs', 19])
+        return undefined
+      },
+    })
+    const r = await runGranny(f.host, input(TWO_STAGES))
+    expect(r.finalReview).toMatchObject({ outcome: 'residual-only', rounds: 1 })
+    expect(r.finalReview!.residual[0]).toMatchObject({ priority: 50, decision: { rule: 8, held: 'repeat of s1/r1/opus-F1: moderate/common/small -> minor/common/trivial' } })
+    expect(f.logs).toContain('final review r1: opus-F1 held - repeat of s1/r1/opus-F1: moderate/common/small -> minor/common/trivial')
+    expect(f.calls.some(c => c.label === 'fix final review r1')).toBe(false)
   })
 })
