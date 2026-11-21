@@ -412,4 +412,82 @@ describe('a repeat of a kept finding', () => {
     expect(f.logs).toContain('final review r1: opus-F1 held - repeat of s1/r1/opus-F1: moderate/common/small -> minor/common/trivial')
     expect(f.calls.some(c => c.label === 'fix final review r1')).toBe(false)
   })
+
+  const declining = (id: string) => ({ startSha: 's', headSha: 'h', gatesGreen: true, gates: 'all green', commits: [], untested: '', declined: [{ id, reason: 'parse() already checks it at src/p.ts:7' }] })
+
+  it('sends a fresh P0/P1 by rule 1 when it leads a group with a repeat of a declined finding whose later repeat was kept', async () => {
+    const f = fakeHost({
+      scores: [
+        { 'opus-F1': judged('minor', 'common', 'trivial', { repeatOf: 'r1/opus-F1' }), 'opus-F2': judged('major', 'edge', 'small') },
+        { 'opus-F1': judged('major', 'edge', 'small'), 'opus-F2': judged('minor', 'common', 'trivial', { repeatOf: 'r1/opus-F1', duplicateOf: 'opus-F1' }) },
+      ],
+      override: req => {
+        if (req.label === 'review core r1 opus') return found(['P1', 'Crash on load', 'src/m.rs', 19])
+        if (req.label === 'review core r2 opus') return found(['P3', 'Crash on load again', 'src/m.rs', 19], ['P2', 'Lost write', 'src/b.ts', 7])
+        if (req.label === 'review core r3 opus') return found(['P1', 'New crash on save', 'src/m.rs', 19], ['P3', 'Crash on load again', 'src/m.rs', 19])
+        if (req.label === 'fix core r1') return declining('opus-F1')
+        return undefined
+      },
+    })
+    const r = await runGranny(f.host, input())
+    expect(r.stages[0]!.history[1]!.findings.map(x => [x.id, x.decision!.rule])).toEqual([['opus-F1', 8], ['opus-F2', 6]])
+    const third = r.stages[0]!.history[2]!.findings[0]!
+    expect([third.id, third.decision]).toEqual(['opus-F1', { rule: 1, action: 'fix', why: 'P0/P1' }])
+    expect(f.calls.some(c => c.label === 'fix core r3')).toBe(true)
+    expect(f.logs.some(l => l.includes('core r3: opus-F1 dropped as a repeat'))).toBe(false)
+  })
+
+  it('overrules the fixer when the newest finding of a kept chain was sent and declined', async () => {
+    const f = fakeHost({
+      scores: [
+        { 'opus-F1': judged('major', 'edge', 'small'), 'opus-F2': judged('minor', 'common', 'trivial') },
+        { 'opus-F1': judged('critical', 'edge', 'small', { repeatOf: 'r1/opus-F2' }) },
+        { 'opus-F1': judged('minor', 'common', 'trivial', { repeatOf: 'r1/opus-F2', tag: 'typo' }) },
+      ],
+      override: req => {
+        if (req.label === 'review core r1 opus') return found(['P2', 'Late save', 'src/a.ts', 3], ['P3', 'Long doc line', 'src/m.rs', 19])
+        if (req.label === 'review core r2 opus') return found(['P2', 'Doc line breaks the parser', 'src/m.rs', 19])
+        if (req.label === 'review core r3 opus') return found(['P3', 'Doc line again', 'src/m.rs', 19])
+        if (req.label === 'fix core r2') return declining('opus-F1')
+        return undefined
+      },
+    })
+    const r = await runGranny(f.host, input({ config: { tags: { typo: { description: 'd', fix: true } } } }))
+    const third = r.stages[0]!.history[2]!.findings[0]!
+    expect(third.decision).toMatchObject({ rule: 6, action: 'fix', raised: 'repeat of r2/opus-F1: impact minor -> critical' })
+    expect(third.tag).toBeUndefined()
+    expect(f.logs).toContain('core r3: the judge overruled the fixer on opus-F1 (repeat of r2/opus-F1, rule 6: impact critical is in alwaysFix (critical/common/trivial -> 100))')
+    expect(prompt(f.calls, 'fix core r3')).toContain('- opus-F1 (repeat of r2/opus-F1): reason opus-F1\n  you said: parse() already checks it at src/p.ts:7')
+  })
+
+  it('does not hold a fresh finding merged with a repeat of a kept finding that the hold leaves alone', async () => {
+    const f = twoRounds(
+      { 'opus-F1': judged('minor', 'common', 'trivial', { repeatOf: 'r1/opus-F2', scope: 'pre-existing' }), 'opus-F2': judged('major', 'edge', 'small', { duplicateOf: 'opus-F1' }) },
+      found(['P3', 'Long doc line', 'src/m.rs', 19], ['P2', 'Doc line breaks the parser', 'src/m.rs', 19]),
+    )
+    const r = await runGranny(f.host, input())
+    expect(r.stages[0]!.history[1]!.findings[0]!.decision).toMatchObject({ rule: 6, action: 'fix' })
+    expect(r.stages[0]!.history[1]!.findings[0]!.decision!.held).toBeUndefined()
+    expect(f.calls.some(c => c.label === 'fix core r2')).toBe(true)
+  })
+
+  it("reads a stage's repeat chain from the final review, through the stage's own labels", async () => {
+    const f = fakeHost({
+      scores: [
+        { 'opus-F1': judged('major', 'edge', 'small'), 'opus-F2': judged('minor', 'common', 'trivial') },
+        { 'opus-F1': judged('critical', 'edge', 'small', { repeatOf: 'r1/opus-F2' }) },
+        { 'opus-F1': judged('major', 'edge', 'small', { repeatOf: 's1/r1/opus-F2' }) },
+      ],
+      override: req => {
+        if (req.label === 'review one r1 opus') return found(['P2', 'Late save', 'src/a.ts', 3], ['P3', 'Long doc line', 'src/m.rs', 19])
+        if (req.label === 'review one r2 opus') return found(['P2', 'Doc line breaks the parser', 'src/m.rs', 19])
+        if (req.label === 'review final review r1 opus') return found(['P2', 'Doc line still breaks the parser', 'src/m.rs', 19])
+        return undefined
+      },
+    })
+    const r = await runGranny(f.host, input(TWO_STAGES))
+    const last = r.finalReview!.history[0]!.findings[0]!
+    expect(last.decision).toMatchObject({ rule: 6, action: 'fix', raised: 'repeat of s1/r2/opus-F1: impact major -> critical' })
+    expect(last.decision!.held).toBeUndefined()
+  })
 })

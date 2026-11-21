@@ -687,9 +687,13 @@ function ratchet(fields, label, earlier) {
   return raised.length ? `repeat of ${label}: ${raised.join(", ")}` : undefined;
 }
 var isKept = (earlier) => earlier?.decision?.rule === 8 || earlier?.decision?.rule === 11;
+function holds(f, entry, repeatsDeclined, earlier) {
+  const c = classify(entry);
+  if (c.kind !== "classified" || !isKept(earlier) || c.fields.impact === "critical")
+    return false;
+  return c.fields.scope !== "pre-existing" && c.fields.scope !== "other-stage" && !(isBlocker(f) && !repeatsDeclined(f));
+}
 function hold(fields, label, earlier) {
-  if (fields.scope === "pre-existing" || fields.scope === "other-stage")
-    return;
   const held = [];
   if (earlier.decision?.rule === 11 && fields.scope !== "not-code") {
     held.push(`scope ${fields.scope} -> not-code`);
@@ -730,7 +734,7 @@ function decide(f, entry, policy, repeatsDeclined = () => false, earlierOf = () 
   if (c.kind === "classified") {
     const read = f.repeatOf === undefined ? undefined : earlierOf(f);
     const earlier = read?.finding;
-    kept = isKept(earlier) && c.fields.impact !== "critical" && !(isBlocker(f) && !repeatsDeclined(out));
+    kept = holds(out, entry, repeatsDeclined, earlier);
     if (earlier && kept)
       held = hold(c.fields, read.label, earlier);
     else if (earlier && !isKept(earlier))
