@@ -645,4 +645,15 @@ describe('what a reviewer is told to leave out', () => {
     expect(prompt(f.calls, 'review one r3 opus')).not.toContain('the fixer declined it')
     expect(prompt(f.calls, 'review final review r1 opus')).not.toContain('Earlier review rounds')
   })
+
+  it('gives the final review the residual-decided findings a stage left unresolved at the round cap, not the sent ones', async () => {
+    const f = fakeHost({
+      scores: [{ 'opus-F1': judged('major', 'edge', 'small'), 'opus-F2': judged('minor', 'common', 'trivial') }],
+      override: req => (req.label === 'review one r1 opus' ? found(['P2', 'Late save', 'src/a.ts', 3], ['P3', 'Long doc line', 'src/m.rs', 19]) : undefined),
+    })
+    const r = await runGranny(f.host, input({ ...TWO_STAGES, config: { parallel: false, maxRounds: 1 } }))
+    expect(r.stages[0]).toMatchObject({ outcome: 'round-cap', residual: [] })
+    expect(r.stages[0]!.unresolved.map(x => [x.id, x.decision?.action])).toEqual([['opus-F1', 'fix'], ['opus-F2', 'residual']])
+    expect(prompt(f.calls, 'review final review r1 opus').split('\n').slice(-2)).toEqual([INTRO, '- src/m.rs:19 - Long doc line'])
+  })
 })
