@@ -533,6 +533,14 @@ describe('mergeDuplicates', () => {
     expect(findings).toEqual([expect.objectContaining({ id: 'a', title: 'a', impact: 'major', priority: 65, decision: expect.objectContaining({ action: 'fix', rule: 6 }) })])
   })
 
+  it('lets an in-scope copy decide the group ahead of a not-code copy with a higher priority', () => {
+    const { findings } = mergeDuplicates(
+      [judged('a', { impact: 'major', scope: 'not-code' }), judged('b', { likelihood: 'edge' })],
+      new Map([['b', 'a']]),
+    )
+    expect(findings).toEqual([expect.objectContaining({ id: 'a', scope: 'in-scope', priority: 55, reason: 'reason b', decision: expect.objectContaining({ rule: 8, action: 'residual' }) })])
+  })
+
   it('keeps a not-judged copy fixed and drops the stale fields of the keeper', () => {
     const keeper = judged('a', { impact: 'minor' })
     const unjudged = decide({ id: 'b', severity: 'P2', file: 'a.ts', title: 'b', detail: '' }, undefined, policy)

@@ -151,6 +151,35 @@ describe('not-code findings', () => {
     expect(trailProblem(JSON.parse(JSON.stringify(record)))).toBeUndefined()
   })
 
+  it('never lets a not-code finding ride along with a fix round, and leaves it out of the fix prompt', async () => {
+    const f = fakeHost({
+      scores: [{ 'opus-F1': judged('major', 'edge', 'small'), 'opus-F2': judged('critical', 'common', 'small', { scope: 'not-code' }) }],
+      override: req => (req.label === 'review core r1 opus' ? found(['P2', 'Late save', 'src/a.ts', 3], ['P2', 'Doc comment is stale', 'src/b.ts', 7]) : undefined),
+    })
+    const r = await runGranny(f.host, input())
+    const round = r.stages[0]!.history[0]!.findings
+    expect(round.map(x => [x.id, x.priority, x.decision?.rule, x.decision?.action])).toEqual([
+      ['opus-F1', 80, 6, 'fix'],
+      ['opus-F2', 100, 11, 'residual'],
+    ])
+    expect(prompt(f.calls, 'fix core r1')).toContain('Late save')
+    expect(prompt(f.calls, 'fix core r1')).not.toContain('Doc comment is stale')
+  })
+
+  it('lets a code copy merged into a not-code copy ride along with a fix round', async () => {
+    const f = fakeHost({
+      scores: [{ 'opus-F1': judged('major', 'edge', 'small'), 'opus-F2': judged('major', 'common', 'small', { scope: 'not-code' }), 'opus-F3': { ...judged('moderate', 'edge', 'small'), duplicateOf: 'opus-F2' } }],
+      override: req => (req.label === 'review core r1 opus' ? found(['P2', 'Late save', 'src/a.ts', 3], ['P2', 'Doc says it returns null', 'src/b.ts', 7], ['P2', 'Throws instead of returning null', 'src/b.ts', 9]) : undefined),
+    })
+    const r = await runGranny(f.host, input())
+    const round = r.stages[0]!.history[0]!.findings
+    expect(round.map(x => [x.id, x.scope, x.priority, x.decision?.rule, x.decision?.action])).toEqual([
+      ['opus-F1', 'in-scope', 80, 6, 'fix'],
+      ['opus-F2', 'in-scope', 55, 9, 'fix'],
+    ])
+    expect(prompt(f.calls, 'fix core r1')).toContain('Doc says it returns null')
+  })
+
   it('tells the stage judge that what the task asks of comments, commits and the PR description is not-code', () => {
     const text = judgePrompt(P, 'abc', [], [], { number: 1, total: 1, name: 'core', task: 'WP-01' })
     expect(text).toContain("a missing part of this stage's task is in-scope and major; what the task or a rule asks of comments, commits, the pull request description or the way of working is not-code.")

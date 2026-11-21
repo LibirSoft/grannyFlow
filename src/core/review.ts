@@ -125,6 +125,7 @@ const JUDGED = ['verdict', 'impact', 'likelihood', 'fixCost', 'scope', 'evidence
 
 const fixes = (f: Finding) => f.decision?.action !== 'residual'
 const rank = (f: Finding) => f.priority ?? -1
+const tier = (f: Finding) => (fixes(f) ? 2 : f.decision?.rule === 11 ? 0 : 1)
 
 export function keeperOf(duplicateOf: Map<string, string>, ids: Set<string>): (id: string) => string {
   return (id: string): string => {
@@ -139,7 +140,7 @@ export function keeperOf(duplicateOf: Map<string, string>, ids: Set<string>): (i
   }
 }
 
-/** Of merged copies the strongest one's judgement wins: a fix one first, then the higher priority. */
+/** Of merged copies the strongest one's judgement wins: a fix one first, then one not kept as not-code, then the higher priority. */
 export function mergeDuplicates(findings: Finding[], duplicateOf: Map<string, string>): { findings: Finding[]; merged: Array<{ id: string; into: string }> } {
   const ids = new Set(findings.map(f => f.id))
   const keeper = keeperOf(duplicateOf, ids)
@@ -153,7 +154,7 @@ export function mergeDuplicates(findings: Finding[], duplicateOf: Map<string, st
     .map(f => {
       const dups = findings.filter(d => into.get(d.id) === f.id)
       if (!dups.length) return f
-      const top = [f, ...dups].reduce((a, b) => (fixes(b) !== fixes(a) ? (fixes(b) ? b : a) : rank(b) > rank(a) ? b : a))
+      const top = [f, ...dups].reduce((a, b) => (tier(b) !== tier(a) ? (tier(b) > tier(a) ? b : a) : rank(b) > rank(a) ? b : a))
       const merged: Finding = { ...f, duplicates: dups.map(d => d.id) }
       for (const key of JUDGED) {
         if (top[key] === undefined) delete merged[key]

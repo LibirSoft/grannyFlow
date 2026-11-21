@@ -576,6 +576,7 @@ var isBlocker = (f) => /^\s*(p0|p1|critical|high)\b/i.test(String(f.severity ?? 
 var JUDGED = ["verdict", "impact", "likelihood", "fixCost", "scope", "evidence", "priority", "tag", "reason", "decision"];
 var fixes = (f) => f.decision?.action !== "residual";
 var rank = (f) => f.priority ?? -1;
+var tier = (f) => fixes(f) ? 2 : f.decision?.rule === 11 ? 0 : 1;
 function keeperOf(duplicateOf, ids) {
   return (id) => {
     const seen = new Set([id]);
@@ -603,7 +604,7 @@ function mergeDuplicates(findings, duplicateOf) {
     const dups = findings.filter((d) => into.get(d.id) === f.id);
     if (!dups.length)
       return f;
-    const top = [f, ...dups].reduce((a, b) => fixes(b) !== fixes(a) ? fixes(b) ? b : a : rank(b) > rank(a) ? b : a);
+    const top = [f, ...dups].reduce((a, b) => tier(b) !== tier(a) ? tier(b) > tier(a) ? b : a : rank(b) > rank(a) ? b : a);
     const merged = { ...f, duplicates: dups.map((d) => d.id) };
     for (const key of JUDGED) {
       if (top[key] === undefined)
