@@ -104,6 +104,14 @@ export function reviewFailure(text: string): string | undefined {
   return FAILED_RENDER.exec(text)?.[0]
 }
 
+const literal = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+
+export function isPrBody(file: unknown, workDir: string): boolean {
+  const path = String(file ?? '').trim().replace(/\\/g, '/').replace(/(?::\d+(?:-\d+)?){1,2}$/, '')
+  const dir = workDir.replace(/^(?:\.\/)+/, '').replace(/\/+$/, '')
+  return new RegExp(`(?:^|/)${literal(dir)}/PR-BODY(?:-[^/]+)?\\.md$`, 'i').test(path)
+}
+
 export const isBlocker =(f: Pick<Finding, 'severity'>): boolean =>
   /^\s*(p0|p1|critical|high)\b/i.test(String(f.severity ?? ''))
 
