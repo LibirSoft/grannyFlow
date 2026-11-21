@@ -291,6 +291,8 @@ describe('a repeat of a kept finding', () => {
     const r = await runGranny(f.host, input())
     expect(r.stages[0]).toMatchObject({ outcome: 'residual-only', rounds: 2 })
     expect(f.calls.some(c => c.label === 'fix core r2')).toBe(false)
+    expect(r.stages[0]!.history[1]!.findings).toEqual([expect.objectContaining({ id: 'opus-F2', duplicates: ['opus-F1'], decision: expect.objectContaining({ rule: 8, held: 'repeat of r1/opus-F2: moderate/common/small -> minor/common/trivial' }) })])
+    expect(f.logs).toContain('core r2: opus-F2 held - repeat of r1/opus-F2: moderate/common/small -> minor/common/trivial')
   })
 
   it('reads the newest entry when a repeat names a kept finding whose later repeat was sent', async () => {
@@ -460,7 +462,7 @@ describe('a repeat of a kept finding', () => {
     expect(prompt(f.calls, 'fix core r3')).toContain('- opus-F1 (repeat of r2/opus-F1): reason opus-F1\n  you said: parse() already checks it at src/p.ts:7')
   })
 
-  it('drops a P0/P1 repeat the judge refutes when the newest finding of its kept chain was declined', async () => {
+  it('sends a P0/P1 repeat by rule 1 when only the newest finding of its kept chain was declined, not the one it names', async () => {
     const f = fakeHost({
       scores: [
         { 'opus-F1': judged('major', 'edge', 'small'), 'opus-F2': judged('minor', 'common', 'trivial') },
@@ -476,10 +478,10 @@ describe('a repeat of a kept finding', () => {
       },
     })
     const r = await runGranny(f.host, input())
-    expect(r.stages[0]).toMatchObject({ outcome: 'residual-only', rounds: 3 })
-    expect(r.stages[0]!.history[2]!.findings[0]!.decision).toEqual({ rule: 3, action: 'residual', why: 'refuted' })
-    expect(f.calls.some(c => c.label === 'fix core r3')).toBe(false)
-    expect(f.logs).toContain('core r3: opus-F1 dropped as a repeat of r2/opus-F1, which the fixer declined (rule 3: refuted) - kept as residual')
+    expect(r.stages[0]!.history[2]!.findings[0]!.decision).toMatchObject({ rule: 1, action: 'fix', why: 'P0/P1' })
+    expect(f.calls.some(c => c.label === 'fix core r3')).toBe(true)
+    expect(prompt(f.calls, 'fix core r3')).not.toContain('OVERRULED')
+    expect(f.logs.some(l => l.includes('dropped as a repeat'))).toBe(false)
   })
 
   it('does not hold a fresh finding merged with a repeat of a kept finding that the hold leaves alone', async () => {

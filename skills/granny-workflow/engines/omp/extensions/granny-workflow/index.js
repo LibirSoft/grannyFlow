@@ -617,6 +617,9 @@ function mergeDuplicates(findings, duplicateOf) {
       else
         merged[key] = top[key];
     }
+    const held = [f, ...dups].find((d) => d.decision?.held && d.decision.action === top.decision?.action)?.decision.held;
+    if (merged.decision && held && !merged.decision.held)
+      merged.decision = { ...merged.decision, held };
     return merged;
   });
   return { findings: kept, merged: [...into].map(([id, k]) => ({ id, into: k })) };
@@ -2785,7 +2788,7 @@ the last repair's deviations: ${deviations}` : ""}`;
         const read = earlierOf(f)?.label;
         return read !== undefined && declined.has(read) ? read : undefined;
       };
-      const declinedBefore = (f) => declinedLabel(f) !== undefined;
+      const declinedBefore = (f) => isBlocker(f) ? f.repeatOf !== undefined && declined.has(f.repeatOf) : declinedLabel(f) !== undefined;
       const untagged = { threshold: config.threshold, alwaysFix: config.alwaysFix, rideAlong: config.rideAlong };
       const policy = subject.kind === "diff" && Object.keys(config.tags).length ? { ...untagged, tags: config.tags } : untagged;
       let findings = found.map((f) => decide(f, undefined, policy, declinedBefore));

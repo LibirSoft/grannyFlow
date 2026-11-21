@@ -981,7 +981,7 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
         const read = earlierOf(f)?.label
         return read !== undefined && declined.has(read) ? read : undefined
       }
-      const declinedBefore = (f: Finding) => declinedLabel(f) !== undefined
+      const declinedBefore = (f: Finding) => (isBlocker(f) ? f.repeatOf !== undefined && declined.has(f.repeatOf) : declinedLabel(f) !== undefined)
       const untagged: Policy = { threshold: config.threshold, alwaysFix: config.alwaysFix, rideAlong: config.rideAlong }
       const policy: Policy = subject.kind === 'diff' && Object.keys(config.tags).length ? { ...untagged, tags: config.tags } : untagged
       let findings = found.map(f => decide(f, undefined, policy, declinedBefore))

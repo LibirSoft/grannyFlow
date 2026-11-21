@@ -612,6 +612,9 @@ function mergeDuplicates(findings, duplicateOf) {
       else
         merged[key] = top[key];
     }
+    const held = [f, ...dups].find((d) => d.decision?.held && d.decision.action === top.decision?.action)?.decision.held;
+    if (merged.decision && held && !merged.decision.held)
+      merged.decision = { ...merged.decision, held };
     return merged;
   });
   return { findings: kept, merged: [...into].map(([id, k]) => ({ id, into: k })) };
