@@ -731,12 +731,13 @@ function decide(f, entry, policy, repeatsDeclined = () => false, earlierOf = () 
     decision: { rule, action, why, ...attention ? { attention: true } : {}, ...raised ? { raised } : {}, ...held ? { held } : {} }
   });
   if (c.kind === "classified") {
-    const earlier = f.repeatOf === undefined ? undefined : earlierOf(f);
+    const read = f.repeatOf === undefined ? undefined : earlierOf(f);
+    const earlier = read?.finding;
     kept = isKept(earlier) && c.fields.impact !== "critical" && !(isBlocker(f) && !repeatsDeclined(out));
     if (earlier && kept)
-      held = hold(c.fields, f.repeatOf, earlier);
+      held = hold(c.fields, read.label, earlier);
     else if (earlier && !isKept(earlier))
-      raised = ratchet(c.fields, f.repeatOf, earlier);
+      raised = ratchet(c.fields, read.label, earlier);
     Object.assign(out, c.fields);
     out.priority = priorityOf(c.fields.impact, c.fields.likelihood, c.fields.fixCost);
   }
@@ -2735,20 +2736,35 @@ the last repair's deviations: ${deviations}` : ""}`;
         return { outcome: "clean", rounds: round, residual: kept(), unresolved: [], history };
       }
       const declined = new Map(earlier.flatMap((e) => (e.declined ?? []).map((d) => [roundLabel(e.round, d, e.loop), d.reason])));
-      const ledger = new Map(earlier.flatMap((e) => [...e.sent, ...e.residual ?? []].map((f) => [roundLabel(e.round, f, e.loop), f])));
-      const newer = new Map(earlier.flatMap((e) => [...e.sent, ...e.residual ?? []].flatMap((f) => f.repeatOf === undefined ? [] : [[e.loop ? `${e.loop.id}/${f.repeatOf}` : f.repeatOf, roundLabel(e.round, f, e.loop)]])));
-      const newest = (label) => {
+      const entries = earlier.flatMap((e, at) => [...e.sent.map((f) => ({ f, sent: true })), ...(e.residual ?? []).map((f) => ({ f, sent: false }))].map(({ f, sent }) => ({
+        label: roundLabel(e.round, f, e.loop),
+        parent: f.repeatOf === undefined ? undefined : e.loop ? `${e.loop.id}/${f.repeatOf}` : f.repeatOf,
+        finding: f,
+        sent,
+        at
+      })));
+      const ledger = new Map(entries.map((x) => [x.label, x.finding]));
+      const node = new Map(entries.map((x) => [x.label, x]));
+      const rootOf = (label) => {
         const seen = new Set;
         let at = label;
-        while (newer.has(at) && !seen.has(at)) {
+        while (!seen.has(at)) {
           seen.add(at);
-          at = newer.get(at);
+          const parent = node.get(at)?.parent;
+          if (parent === undefined || !node.has(parent))
+            break;
+          at = parent;
         }
         return at;
       };
       const earlierOf = (f) => {
-        const named = f.repeatOf === undefined ? undefined : ledger.get(f.repeatOf);
-        return isKept(named) ? ledger.get(newest(f.repeatOf)) ?? named : named;
+        const named = f.repeatOf === undefined ? undefined : node.get(f.repeatOf);
+        if (!named)
+          return;
+        const root = rootOf(named.label);
+        const chain = entries.filter((x) => (x.sent || isKept(x.finding)) && rootOf(x.label) === root);
+        const newest = chain.some((x) => isKept(x.finding)) ? chain.reduce((a, b) => b.at > a.at || b.at === a.at && b.sent && !a.sent ? b : a) : named;
+        return { label: newest.label, finding: newest.finding };
       };
       const blockers = found.filter(isBlocker);
       const judged = declined.size ? found : found.filter((f) => !isBlocker(f));
@@ -2777,7 +2793,7 @@ the last repair's deviations: ${deviations}` : ""}`;
           });
           const keeper = keeperOf(duplicatesOf(per), new Set(found.map((f) => f.id)));
           const declinedGroups = new Set(entries.filter((e) => declinedBefore(e.f)).map((e) => keeper(e.f.id)));
-          const keptGroups = new Map(entries.flatMap((e) => isKept(earlierOf(e.f)) ? [[keeper(e.f.id), e.f.repeatOf]] : []));
+          const keptGroups = new Map(entries.flatMap((e) => isKept(earlierOf(e.f)?.finding) ? [[keeper(e.f.id), e.f.repeatOf]] : []));
           const repeating = (f) => f.repeatOf === undefined && keptGroups.has(keeper(f.id)) ? { ...f, repeatOf: keptGroups.get(keeper(f.id)) } : f;
           return entries.map(({ f, s }) => decide(repeating(f), s, declinedGroups.has(keeper(f.id)) ? untagged : policy, declinedBefore, earlierOf));
         };

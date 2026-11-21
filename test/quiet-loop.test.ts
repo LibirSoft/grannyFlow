@@ -189,7 +189,7 @@ describe('not-code findings', () => {
 
 describe('a repeat of a kept finding', () => {
   const kept = f0('reviewer-F2', { verdict: 'confirmed', impact: 'minor', likelihood: 'common', fixCost: 'trivial', scope: 'in-scope', evidence: 'src/a.ts:3 - x', priority: 50, decision: { rule: 8, action: 'residual', why: 'under the bar: minor/common/trivial -> 50' } })
-  const repeat = (entry: Record<string, unknown> | undefined, earlier: Finding = kept, severity = 'P2') => decide(f0('reviewer-F1', { severity, repeatOf: 'r3/reviewer-F2' }), entry, POLICY, () => false, () => earlier)
+  const repeat = (entry: Record<string, unknown> | undefined, earlier: Finding = kept, severity = 'P2') => decide(f0('reviewer-F1', { severity, repeatOf: 'r3/reviewer-F2' }), entry, POLICY, () => false, () => ({ label: 'r3/reviewer-F2', finding: earlier }))
 
   it('takes the kept classes when the judge rates it higher, and is not ratcheted', () => {
     const d = repeat(judged('moderate', 'edge', 'small'))
@@ -209,7 +209,7 @@ describe('a repeat of a kept finding', () => {
     const critical = repeat(judged('critical', 'rare', 'small'))
     expect(critical).toMatchObject({ impact: 'critical', likelihood: 'rare', priority: 90 })
     expect(critical.decision).toEqual({ rule: 6, action: 'fix', why: 'impact critical is in alwaysFix (critical/rare/small -> 90)' })
-    expect(decide(f0('reviewer-F1', { repeatOf: 'r3/reviewer-F2' }), judged('critical', 'rare', 'large'), { threshold: 80, alwaysFix: [] }, () => false, () => kept).decision).toEqual({ rule: 8, action: 'residual', why: 'under the bar: critical/rare/large -> 75' })
+    expect(decide(f0('reviewer-F1', { repeatOf: 'r3/reviewer-F2' }), judged('critical', 'rare', 'large'), { threshold: 80, alwaysFix: [] }, () => false, () => ({ label: 'r3/reviewer-F2', finding: kept })).decision).toEqual({ rule: 8, action: 'residual', why: 'under the bar: critical/rare/large -> 75' })
     const unverified = repeat(judged('critical', 'edge', 'small', { evidence: 'no place given' }))
     expect(unverified).toMatchObject({ verdict: 'unverified', impact: 'minor', decision: { rule: 8, held: 'repeat of r3/reviewer-F2: major/edge/small -> minor/common/trivial' } })
     const notCode = decide(f0('reviewer-F2'), judged('moderate', 'edge', 'small', { scope: 'not-code' }), POLICY)
@@ -231,7 +231,7 @@ describe('a repeat of a kept finding', () => {
     const d = repeat(judged('major', 'edge', 'small'), kept, 'P1')
     expect([d.impact, d.likelihood, d.fixCost, d.priority]).toEqual(['major', 'edge', 'small', 80])
     expect(d.decision).toEqual({ rule: 1, action: 'fix', why: 'P0/P1' })
-    const declined = decide(f0('reviewer-F1', { severity: 'P1', repeatOf: 'r3/reviewer-F2' }), judged('major', 'edge', 'small'), POLICY, () => true, () => kept)
+    const declined = decide(f0('reviewer-F1', { severity: 'P1', repeatOf: 'r3/reviewer-F2' }), judged('major', 'edge', 'small'), POLICY, () => true, () => ({ label: 'r3/reviewer-F2', finding: kept }))
     expect(declined).toMatchObject({ impact: 'minor', decision: { rule: 8, held: 'repeat of r3/reviewer-F2: major/edge/small -> minor/common/trivial' } })
   })
 
@@ -309,9 +309,92 @@ describe('a repeat of a kept finding', () => {
     })
     const r = await runGranny(f.host, input())
     const third = r.stages[0]!.history[2]!.findings[0]!
-    expect(third.decision).toMatchObject({ rule: 6, action: 'fix', raised: 'repeat of r1/opus-F2: impact major -> critical' })
+    expect(third.decision).toMatchObject({ rule: 6, action: 'fix', raised: 'repeat of r2/opus-F1: impact major -> critical' })
     expect(third.decision!.held).toBeUndefined()
     expect(f.calls.some(c => c.label === 'fix core r3')).toBe(true)
+  })
+
+  const threeRounds = (scores: Array<Record<string, Record<string, unknown>>>, r1: ReturnType<typeof found>, r2: ReturnType<typeof found>) =>
+    fakeHost({
+      scores,
+      override: req => {
+        if (req.label === 'review core r1 opus') return r1
+        if (req.label === 'review core r2 opus') return r2
+        if (req.label === 'review core r3 opus') return found(['P2', 'Doc line again', 'src/m.rs', 19])
+        return undefined
+      },
+    })
+
+  it('reads the sent repeat when one round both sent and held a repeat of the kept finding', async () => {
+    const f = threeRounds(
+      [
+        { 'opus-F1': judged('major', 'edge', 'small'), 'opus-F2': judged('minor', 'common', 'trivial') },
+        { 'opus-F1': judged('critical', 'edge', 'small', { repeatOf: 'r1/opus-F2' }), 'opus-F2': judged('moderate', 'edge', 'small', { repeatOf: 'r1/opus-F2' }) },
+        { 'opus-F1': judged('major', 'edge', 'small', { repeatOf: 'r1/opus-F2' }) },
+      ],
+      found(['P2', 'Late save', 'src/a.ts', 3], ['P3', 'Long doc line', 'src/m.rs', 19]),
+      found(['P2', 'Doc line breaks the parser', 'src/m.rs', 19], ['P3', 'Doc line too long', 'src/m.rs', 19]),
+    )
+    const r = await runGranny(f.host, input())
+    expect(r.stages[0]!.history[1]!.findings.map(x => [x.id, x.decision!.rule])).toEqual([['opus-F1', 6], ['opus-F2', 8]])
+    const third = r.stages[0]!.history[2]!.findings[0]!
+    expect(third.decision).toMatchObject({ rule: 6, action: 'fix', raised: 'repeat of r2/opus-F1: impact major -> critical' })
+    expect(third.decision!.held).toBeUndefined()
+  })
+
+  it('keeps holding to the kept finding when its newest repeat was refuted', async () => {
+    const f = threeRounds(
+      [
+        { 'opus-F1': judged('major', 'edge', 'small'), 'opus-F2': judged('minor', 'common', 'trivial') },
+        { 'opus-F1': judged('none', 'rare', 'trivial', { verdict: 'refuted', repeatOf: 'r1/opus-F2' }), 'opus-F2': judged('major', 'edge', 'small') },
+        { 'opus-F1': judged('moderate', 'common', 'small', { repeatOf: 'r1/opus-F2' }) },
+      ],
+      found(['P2', 'Late save', 'src/a.ts', 3], ['P3', 'Long doc line', 'src/m.rs', 19]),
+      found(['P3', 'Doc line too long', 'src/m.rs', 19], ['P2', 'Lost write', 'src/b.ts', 7]),
+    )
+    const r = await runGranny(f.host, input())
+    expect(r.stages[0]!.history[1]!.findings.map(x => [x.id, x.decision!.rule])).toEqual([['opus-F1', 3], ['opus-F2', 6]])
+    const third = r.stages[0]!.history[2]!.findings[0]!
+    expect(third).toMatchObject({ priority: 50, decision: { rule: 8, action: 'residual', held: 'repeat of r1/opus-F2: moderate/common/small -> minor/common/trivial' } })
+    expect(r.stages[0]).toMatchObject({ outcome: 'residual-only', rounds: 3 })
+  })
+
+  it('holds a repeat whichever label of the chain the judge names', async () => {
+    const r2: Record<string, Record<string, unknown>> = { 'opus-F1': judged('minor', 'common', 'trivial', { repeatOf: 'r1/opus-F1' }), 'opus-F2': judged('major', 'edge', 'small') }
+    const run = (named: string) =>
+      runGranny(
+        threeRounds(
+          [r2, { 'opus-F1': judged('moderate', 'common', 'small', { repeatOf: named }) }],
+          found(['P1', 'Doc line breaks the build', 'src/m.rs', 19]),
+          found(['P3', 'Long doc line', 'src/m.rs', 19], ['P2', 'Lost write', 'src/b.ts', 7]),
+        ).host,
+        input(),
+      )
+    for (const named of ['r1/opus-F1', 'r2/opus-F1']) {
+      const r = await run(named)
+      expect([named, r.stages[0]!.history[1]!.findings[0]!.decision!.rule]).toEqual([named, 8])
+      expect([named, r.stages[0]!.history[2]!.findings[0]]).toEqual([
+        named,
+        expect.objectContaining({ priority: 50, decision: expect.objectContaining({ rule: 8, held: 'repeat of r2/opus-F1: moderate/common/small -> minor/common/trivial' }) }),
+      ])
+    }
+  })
+
+  it('lets a held repeat ride along with a fix round at the priority it was kept at', async () => {
+    const f = fakeHost({
+      scores: [{ 'opus-F1': judged('moderate', 'edge', 'small') }, { 'opus-F1': judged('major', 'common', 'small', { repeatOf: 's1/r1/opus-F1' }), 'opus-F2': judged('critical', 'edge', 'small') }],
+      override: req => {
+        if (req.label === 'review one r1 opus') return found(['P3', 'Missing test', 'src/m.rs', 19])
+        if (req.label === 'review final review r1 opus') return found(['P2', 'Missing test again', 'src/m.rs', 19], ['P2', 'Crash on save', 'src/a.ts', 3])
+        return undefined
+      },
+    })
+    const r = await runGranny(f.host, input(TWO_STAGES))
+    expect(r.stages[0]!.residual[0]).toMatchObject({ priority: 55, decision: { rule: 8 } })
+    const held = r.finalReview!.history[0]!.findings.find(x => x.id === 'opus-F1')!
+    expect(held).toMatchObject({ impact: 'moderate', likelihood: 'edge', fixCost: 'small', priority: 55 })
+    expect(held.decision).toMatchObject({ rule: 9, action: 'fix', held: 'repeat of s1/r1/opus-F1: major/common/small -> moderate/edge/small' })
+    expect(prompt(f.calls, 'fix final review r1')).toContain('Missing test again')
   })
 
   it("holds a final-review repeat of a stage's residual finding", async () => {

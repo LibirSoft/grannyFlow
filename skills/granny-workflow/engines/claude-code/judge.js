@@ -728,12 +728,13 @@ function decide(f, entry, policy, repeatsDeclined = () => false, earlierOf = () 
     decision: { rule, action, why, ...attention ? { attention: true } : {}, ...raised ? { raised } : {}, ...held ? { held } : {} }
   });
   if (c.kind === "classified") {
-    const earlier = f.repeatOf === undefined ? undefined : earlierOf(f);
+    const read = f.repeatOf === undefined ? undefined : earlierOf(f);
+    const earlier = read?.finding;
     kept = isKept(earlier) && c.fields.impact !== "critical" && !(isBlocker(f) && !repeatsDeclined(out));
     if (earlier && kept)
-      held = hold(c.fields, f.repeatOf, earlier);
+      held = hold(c.fields, read.label, earlier);
     else if (earlier && !isKept(earlier))
-      raised = ratchet(c.fields, f.repeatOf, earlier);
+      raised = ratchet(c.fields, read.label, earlier);
     Object.assign(out, c.fields);
     out.priority = priorityOf(c.fields.impact, c.fields.likelihood, c.fields.fixCost);
   }

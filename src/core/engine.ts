@@ -939,22 +939,35 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
       }
 
       const declined = new Map(earlier.flatMap(e => (e.declined ?? []).map(d => [roundLabel(e.round, d, e.loop), d.reason] as const)))
-      const ledger = new Map(earlier.flatMap(e => [...e.sent, ...(e.residual ?? [])].map(f => [roundLabel(e.round, f, e.loop), f] as const)))
-      const newer = new Map(
-        earlier.flatMap(e => [...e.sent, ...(e.residual ?? [])].flatMap(f => (f.repeatOf === undefined ? [] : [[e.loop ? `${e.loop.id}/${f.repeatOf}` : f.repeatOf, roundLabel(e.round, f, e.loop)] as const]))),
+      const entries = earlier.flatMap((e, at) =>
+        [...e.sent.map(f => ({ f, sent: true })), ...(e.residual ?? []).map(f => ({ f, sent: false }))].map(({ f, sent }) => ({
+          label: roundLabel(e.round, f, e.loop),
+          parent: f.repeatOf === undefined ? undefined : e.loop ? `${e.loop.id}/${f.repeatOf}` : f.repeatOf,
+          finding: f,
+          sent,
+          at,
+        })),
       )
-      const newest = (label: string) => {
+      const ledger = new Map(entries.map(x => [x.label, x.finding] as const))
+      const node = new Map(entries.map(x => [x.label, x] as const))
+      const rootOf = (label: string) => {
         const seen = new Set<string>()
         let at = label
-        while (newer.has(at) && !seen.has(at)) {
+        while (!seen.has(at)) {
           seen.add(at)
-          at = newer.get(at)!
+          const parent = node.get(at)?.parent
+          if (parent === undefined || !node.has(parent)) break
+          at = parent
         }
         return at
       }
       const earlierOf = (f: Finding) => {
-        const named = f.repeatOf === undefined ? undefined : ledger.get(f.repeatOf)
-        return isKept(named) ? (ledger.get(newest(f.repeatOf!)) ?? named) : named
+        const named = f.repeatOf === undefined ? undefined : node.get(f.repeatOf)
+        if (!named) return undefined
+        const root = rootOf(named.label)
+        const chain = entries.filter(x => (x.sent || isKept(x.finding)) && rootOf(x.label) === root)
+        const newest = chain.some(x => isKept(x.finding)) ? chain.reduce((a, b) => (b.at > a.at || (b.at === a.at && b.sent && !a.sent) ? b : a)) : named
+        return { label: newest.label, finding: newest.finding }
       }
       const blockers = found.filter(isBlocker)
       const judged = declined.size ? found : found.filter(f => !isBlocker(f))
@@ -989,7 +1002,7 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
           })
           const keeper = keeperOf(duplicatesOf(per), new Set(found.map(f => f.id)))
           const declinedGroups = new Set(entries.filter(e => declinedBefore(e.f)).map(e => keeper(e.f.id)))
-          const keptGroups = new Map(entries.flatMap(e => (isKept(earlierOf(e.f)) ? [[keeper(e.f.id), e.f.repeatOf!] as const] : [])))
+          const keptGroups = new Map(entries.flatMap(e => (isKept(earlierOf(e.f)?.finding) ? [[keeper(e.f.id), e.f.repeatOf!] as const] : [])))
           const repeating = (f: Finding): Finding => (f.repeatOf === undefined && keptGroups.has(keeper(f.id)) ? { ...f, repeatOf: keptGroups.get(keeper(f.id))! } : f)
           return entries.map(({ f, s }) => decide(repeating(f), s, declinedGroups.has(keeper(f.id)) ? untagged : policy, declinedBefore, earlierOf))
         }
