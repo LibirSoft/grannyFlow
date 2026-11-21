@@ -106,10 +106,16 @@ export function reviewFailure(text: string): string | undefined {
 
 const literal = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 
-export function isPrBody(file: unknown, workDir: string): boolean {
-  const path = String(file ?? '').trim().replace(/\\/g, '/').replace(/(?::\d+(?:-\d+)?){1,2}$/, '')
+export function isPrBody(file: unknown, workDir: string, roots: string[] = []): boolean {
+  const slashed = (text: string) => text.trim().replace(/\\/g, '/')
+  const path = slashed(String(file ?? '')).replace(/(?::\d+(?:-\d+)?){1,2}$/, '')
   const dir = workDir.replace(/^(?:\.\/)+/, '').replace(/\/+$/, '')
-  return new RegExp(`(?:^|/)${literal(dir)}/PR-BODY(?:-[^/]+)?\\.md$`, 'i').test(path)
+  const body = new RegExp(`^${literal(dir)}/PR-BODY(?:-[^/]+)?\\.md$`, 'i')
+  if (!/^(?:\/|[a-z]:\/)/i.test(path)) return body.test(path.replace(/^(?:\.\/)+/, ''))
+  return roots.some(root => {
+    const top = `${slashed(root).replace(/\/+$/, '')}/`
+    return top.length > 1 && path.startsWith(top) && body.test(path.slice(top.length))
+  })
 }
 
 export const isBlocker =(f: Pick<Finding, 'severity'>): boolean =>

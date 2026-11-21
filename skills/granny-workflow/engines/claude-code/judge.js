@@ -560,10 +560,17 @@ function reviewFailure(text) {
   return FAILED_RENDER.exec(text)?.[0];
 }
 var literal = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-function isPrBody(file, workDir) {
-  const path = String(file ?? "").trim().replace(/\\/g, "/").replace(/(?::\d+(?:-\d+)?){1,2}$/, "");
+function isPrBody(file, workDir, roots = []) {
+  const slashed = (text) => text.trim().replace(/\\/g, "/");
+  const path = slashed(String(file ?? "")).replace(/(?::\d+(?:-\d+)?){1,2}$/, "");
   const dir = workDir.replace(/^(?:\.\/)+/, "").replace(/\/+$/, "");
-  return new RegExp(`(?:^|/)${literal(dir)}/PR-BODY(?:-[^/]+)?\\.md$`, "i").test(path);
+  const body = new RegExp(`^${literal(dir)}/PR-BODY(?:-[^/]+)?\\.md$`, "i");
+  if (!/^(?:\/|[a-z]:\/)/i.test(path))
+    return body.test(path.replace(/^(?:\.\/)+/, ""));
+  return roots.some((root) => {
+    const top = `${slashed(root).replace(/\/+$/, "")}/`;
+    return top.length > 1 && path.startsWith(top) && body.test(path.slice(top.length));
+  });
 }
 var isBlocker = (f) => /^\s*(p0|p1|critical|high)\b/i.test(String(f.severity ?? ""));
 var JUDGED = ["verdict", "impact", "likelihood", "fixCost", "scope", "evidence", "priority", "tag", "reason", "decision"];
@@ -1836,7 +1843,7 @@ ${notes}`);
   for (const r of failedReviewers)
     host.log(`${r.name} did not run, also on a retry - going on without it: ${r.note}`);
   const reviewed = results.filter((r) => r.ran).flatMap((r) => r.findings);
-  const aside = reviewed.filter((f) => isPrBody(f.file, config.workDir));
+  const aside = reviewed.filter((f) => isPrBody(f.file, config.workDir, [repo]));
   if (aside.length)
     host.log(`${aside.length} finding(s) about the PR body set aside - not in the report: ${aside.map((f) => f.id).join(", ")}`);
   const found = reviewed.filter((f) => !aside.includes(f));

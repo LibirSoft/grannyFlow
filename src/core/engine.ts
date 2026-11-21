@@ -902,7 +902,8 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
       known = undefined
       const results = await reviewAll(lane, reviewers, name, subject, round)
       const reviewed = results.filter(r => r.ran).flatMap(r => r.findings)
-      const aside = subject.kind === 'diff' ? reviewed.filter(f => isPrBody(f.file, config.workDir)) : []
+      const roots = [lane.cwd, lane.repo, ...(lane.p.others ?? [])]
+      const aside = subject.kind === 'diff' ? reviewed.filter(f => isPrBody(f.file, config.workDir, roots)) : []
       if (aside.length) host.log(`${name} r${round}: ${aside.length} finding(s) about the PR body set aside - not judged, not sent, not kept: ${aside.map(f => f.id).join(', ')}`)
       const facts: RoundFacts = {
         loop: opts.loop,
@@ -1673,7 +1674,7 @@ export async function runJudge(host: Host, input: JudgeInput): Promise<JudgeResu
   }
   for (const r of failedReviewers) host.log(`${r.name} did not run, also on a retry - going on without it: ${r.note}`)
   const reviewed = results.filter(r => r.ran).flatMap(r => r.findings)
-  const aside = reviewed.filter(f => isPrBody(f.file, config.workDir))
+  const aside = reviewed.filter(f => isPrBody(f.file, config.workDir, [repo]))
   if (aside.length) host.log(`${aside.length} finding(s) about the PR body set aside - not in the report: ${aside.map(f => f.id).join(', ')}`)
   const found = reviewed.filter(f => !aside.includes(f))
 
