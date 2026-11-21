@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'bun:test'
+import { resolveConfig } from '../src/core/config'
 import { runGranny, type RunInput } from '../src/core/engine'
-import { isPrBody } from '../src/core/review'
+import { judgePrompt, planJudgePrompt, tagPrompt } from '../src/core/prompts'
+import { decide, isPrBody, type Policy } from '../src/core/review'
+import { SCHEMAS } from '../src/core/schemas'
 import { trailRound } from '../src/core/trail'
 import type { AgentRequest, Finding } from '../src/core/types'
 import { trailProblem } from '../src/pr/records'
@@ -118,5 +121,38 @@ describe('findings on the PR body', () => {
     expect(record.setAside).toEqual([aside])
     expect(trailProblem(JSON.parse(JSON.stringify(record)))).toBeUndefined()
     expect(trailRound({ loop: 's1', name: 'core', round: 1, base: 'main', reviewers: [], findings: [] })).not.toHaveProperty('setAside')
+  })
+})
+
+const P = { repo: '/w/repo', branch: 'feat/x', base: 'main', config: resolveConfig([]) }
+const POLICY: Policy = { threshold: 70, alwaysFix: ['critical', 'major'], rideAlong: 55, tags: { typo: { description: 'd', fix: true }, naming: { description: 'd', points: 40 } } }
+
+describe('not-code findings', () => {
+  it('keeps a not-code finding as residual by rule 11, whatever its classes and tag', () => {
+    const d = decide(f0('a'), judged('major', 'common', 'trivial', { scope: 'not-code', tag: 'typo' }), POLICY)
+    expect(d).toMatchObject({ scope: 'not-code', priority: 100, decision: { rule: 11, action: 'residual', why: 'not about the code or what it does' } })
+    expect(d.tag).toBeUndefined()
+  })
+
+  it('leaves rules 1 and 3 in front of rule 11', () => {
+    const p1 = f0('a', { severity: 'P1' })
+    expect(decide(p1, judged('major', 'common', 'trivial', { scope: 'not-code' }), POLICY).decision).toMatchObject({ rule: 1, action: 'fix' })
+    expect(decide(p1, judged('major', 'common', 'trivial', { scope: 'not-code' }), POLICY, () => true).decision).toMatchObject({ rule: 11, action: 'residual' })
+    expect(decide(f0('a'), judged('major', 'common', 'trivial', { scope: 'not-code', verdict: 'refuted' }), POLICY).decision).toMatchObject({ rule: 3 })
+  })
+
+  it('names the not-code scope in every judge prompt, the schema and the trail check', () => {
+    for (const text of [judgePrompt(P, 'abc', []), planJudgePrompt(P, ['/p.md'], []), tagPrompt(P, 'abc', [])]) {
+      expect(text).toContain("| other-stage (another stage's job) | not-code (not about the code or what it does: a code comment or doc comment that is wrong, outdated, missing, too long or there against a rule, a TODO note or commented-out code included; a commit message or the commit history; the pull request description; how the work was done,")
+      expect(text).toContain('A doc file such as the README is not a comment and stays in scope).')
+    }
+    expect((SCHEMAS.judge.properties.perFinding as { items: { properties: { scope: { enum: string[] } } } }).items.properties.scope.enum).toEqual(['in-scope', 'pre-existing', 'other-stage', 'not-code'])
+    const record = trailRound({ loop: 's1', name: 'core', round: 1, base: 'main', reviewers: [], findings: [f0('a-F1', { scope: 'not-code' })] })
+    expect(trailProblem(JSON.parse(JSON.stringify(record)))).toBeUndefined()
+  })
+
+  it('tells the stage judge that what the task asks of comments, commits and the PR description is not-code', () => {
+    const text = judgePrompt(P, 'abc', [], [], { number: 1, total: 1, name: 'core', task: 'WP-01' })
+    expect(text).toContain("a missing part of this stage's task is in-scope and major; what the task or a rule asks of comments, commits, the pull request description or the way of working is not-code.")
   })
 })

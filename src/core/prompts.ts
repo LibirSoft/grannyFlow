@@ -44,7 +44,7 @@ const rubric = (task: string) => `Classify every finding with exactly these fiel
   - none: not a problem.
 - likelihood: common (the normal flow) | edge (special timing or state: a race, a retry, an expired session, a boundary value, a dependency that fails) | rare (forced or malformed input, a rarely used feature). Upkeep has no trigger: use edge.
 - fixCost: trivial (a few lines) | small (one function or file plus a test) | large (cross-module, a redesign).
-- scope: in-scope | pre-existing (there before this change, and the change neither causes it nor opens a new way to reach it) | other-stage (another stage's job).
+- scope: in-scope | pre-existing (there before this change, and the change neither causes it nor opens a new way to reach it) | other-stage (another stage's job) | not-code (not about the code or what it does: a code comment or doc comment that is wrong, outdated, missing, too long or there against a rule, a TODO note or commented-out code included; a commit message or the commit history; the pull request description; how the work was done, such as the order tests and code were written in. A doc file such as the README is not a comment and stays in scope).
 - evidence: path:line plus the concrete trigger steps, e.g. \`Editor.tsx:225\` + "save -> go back -> late response arrives -> save again". Always give a path:line: without one the finding counts as unverified, which lowers its impact one class. One line: the one or two places that show it and the trigger as a chain of short steps. Do not retell the finding.
 - reason: one short sentence, at most 25 words: what decided the classification. Do not repeat the finding or the evidence.
 Example: a late save response re-binds the editor to another post's id, so the next save can overwrite the wrong post: confirmed, critical, edge, small, in-scope, though the window is narrow.`
@@ -573,7 +573,7 @@ export function judgePrompt(p: PromptContext, reviewBase: string, findings: Find
   return `You are the JUDGE classifying the findings of a code review. Repo ${p.repo}, branch ${p.branch}, ${note === WHOLE_BRANCH_NOTE ? 'branch' : 'stage'} diff \`${shellQuote(reviewBase)}...HEAD\`. Do not edit anything.
 ${note ? note + '\n' : ''}${p.context ? 'Design context:\n' + p.context + '\n' : ''}${taskSection(stage)}
 ${judgeRouting(findings)}
-For each finding, open the cited code and check that it is real and correctly described.${stage ? " Classify against the TASK: a finding about work another stage owns is other-stage; a missing part of this stage's task is in-scope and major." : ''} ${JUDGE_DUPES}
+For each finding, open the cited code and check that it is real and correctly described.${stage ? " Classify against the TASK: a finding about work another stage owns is other-stage; a missing part of this stage's task is in-scope and major; what the task or a rule asks of comments, commits, the pull request description or the way of working is not-code." : ''} ${JUDGE_DUPES}
 ${rubric(stage ? "the stage's TASK" : 'what the change set out to do')}
 ${tagsSection(p.config.tags)}${judgeHistory(earlier)}
 REVIEW:

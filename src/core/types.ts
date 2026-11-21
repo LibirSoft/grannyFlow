@@ -12,7 +12,7 @@ export const LIKELIHOODS = ['common', 'edge', 'rare'] as const
 export type Likelihood = (typeof LIKELIHOODS)[number]
 export const FIX_COSTS = ['trivial', 'small', 'large'] as const
 export type FixCost = (typeof FIX_COSTS)[number]
-export const SCOPES = ['in-scope', 'pre-existing', 'other-stage'] as const
+export const SCOPES = ['in-scope', 'pre-existing', 'other-stage', 'not-code'] as const
 export type Scope = (typeof SCOPES)[number]
 
 export interface Decision {

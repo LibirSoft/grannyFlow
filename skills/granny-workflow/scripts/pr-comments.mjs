@@ -30,7 +30,7 @@ var IMPACTS = ["critical", "major", "moderate", "minor", "none"];
 var VERDICTS = ["confirmed", "refuted", "unverified"];
 var LIKELIHOODS = ["common", "edge", "rare"];
 var FIX_COSTS = ["trivial", "small", "large"];
-var SCOPES = ["in-scope", "pre-existing", "other-stage"];
+var SCOPES = ["in-scope", "pre-existing", "other-stage", "not-code"];
 
 // src/core/config.ts
 var DEFAULT_CONFIG = {

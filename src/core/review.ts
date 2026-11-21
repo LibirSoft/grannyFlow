@@ -292,6 +292,7 @@ export function decide(
     const attention = impact === 'critical' || impact === 'major'
     return done(5, 'residual', attention ? `pre-existing - ATTENTION: impact ${impact}` : 'pre-existing', attention)
   }
+  if (scope === 'not-code') return done(11, 'residual', 'not about the code or what it does')
   const name = namedTag(entry)
   const tagged = name !== undefined && knownTag(policy.tags, name) && verdict === 'confirmed' && impact !== 'none' && !repeatsDeclined(out) ? name : undefined
   const tag = tagged === undefined ? undefined : policy.tags![tagged]
