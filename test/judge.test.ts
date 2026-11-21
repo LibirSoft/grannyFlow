@@ -151,6 +151,18 @@ describe('runJudge and config tags', () => {
   })
 })
 
+describe('runJudge and the PR body', () => {
+  it('sets a finding filed on the PR body aside: it is not tagged and not in the report', async () => {
+    const f = judgeHost({ findings: { kimi: [raw('F1', 'P1', 'PR body is stale', '.granny/PR-BODY.md', 1), raw('F2', 'P3')] }, scores: [{ 'kimi-F2': classes('minor') }] })
+    const r = await runJudge(f.host, { repo: REPO, config: ONE })
+    expect(r.findings.map(x => x.id)).toEqual(['kimi-F2'])
+    expect(r.counts).toEqual({ P0: 0, P1: 0, P2: 0, P3: 1, dismissed: 0 })
+    expect(f.calls.find(c => c.label === 'tag feat/x')!.prompt).not.toContain('PR body is stale')
+    expect(r.report).not.toContain('PR body is stale')
+    expect(f.logs).toContain('1 finding(s) about the PR body set aside - not in the report: kimi-F1')
+  })
+})
+
 describe('runJudge: the headings', () => {
   it('returns the repo without the trailing slash it was given', async () => {
     const r = await runJudge(judgeHost().host, { repo: `${REPO}/`, config: ONE })

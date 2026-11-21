@@ -45,7 +45,7 @@ import {
 } from './prompts'
 import { opencodeAnswer, readGrant } from './opencode'
 import { bucketOf, countsOf, isDemoted, isJudged, renderReport, severityOf, utf8Length, type ReportMeta } from './report'
-import { decide, declinedOf, isBlocker, keeperOf, knownTag, mergeDuplicates, namedTag, parseCodexReview, reviewFailure, rideAlong, saysNoFindings, triage, type Policy } from './review'
+import { decide, declinedOf, isBlocker, isPrBody, keeperOf, knownTag, mergeDuplicates, namedTag, parseCodexReview, reviewFailure, rideAlong, saysNoFindings, triage, type Policy } from './review'
 import { detachedReview, MAX_WAITS, planReviewScript, reportedBackend, reviewerModel, reviewPlan, reviewStem, WAIT_SECONDS } from './reviewer'
 import { SCHEMAS } from './schemas'
 import { heredocWriteScript, shellQuote } from './shell'
@@ -901,6 +901,9 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
       const reviewedSha = config.trail && subject.kind !== 'plan' ? (known ?? (await trailHead(`head ${name} r${round}`, phase, lane.cwd))) : undefined
       known = undefined
       const results = await reviewAll(lane, reviewers, name, subject, round)
+      const reviewed = results.filter(r => r.ran).flatMap(r => r.findings)
+      const aside = subject.kind === 'diff' ? reviewed.filter(f => isPrBody(f.file, config.workDir)) : []
+      if (aside.length) host.log(`${name} r${round}: ${aside.length} finding(s) about the PR body set aside - not judged, not sent, not kept: ${aside.map(f => f.id).join(', ')}`)
       const facts: RoundFacts = {
         loop: opts.loop,
         name,
@@ -909,12 +912,13 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
         ...(reviewedSha ? { reviewedSha } : {}),
         reviewers: results.filter(r => r.ran).map(r => reviewerMeta(r.reviewer, host)),
         findings: [],
+        ...(aside.length ? { setAside: aside } : {}),
       }
       const keep = async (more: Partial<RoundFacts>) => {
         if (config.trail) await saveTrail(trailCwd, trailRound({ ...facts, ...more }), `${name} r${round}`, phase)
       }
       const failed = results.filter(r => !r.ran)
-      const found = results.filter(r => r.ran).flatMap(r => r.findings)
+      const found = reviewed.filter(f => !aside.includes(f))
       if (failed.length) {
         const names = new Set(failed.map(r => r.reviewer.name))
         const byFailed = (f: Finding) => f.reviewer !== undefined && names.has(f.reviewer)
@@ -1668,7 +1672,10 @@ export async function runJudge(host: Host, input: JudgeInput): Promise<JudgeResu
     return finish('review-failed', { failedReviewers, note: notes })
   }
   for (const r of failedReviewers) host.log(`${r.name} did not run, also on a retry - going on without it: ${r.note}`)
-  const found = results.filter(r => r.ran).flatMap(r => r.findings)
+  const reviewed = results.filter(r => r.ran).flatMap(r => r.findings)
+  const aside = reviewed.filter(f => isPrBody(f.file, config.workDir))
+  if (aside.length) host.log(`${aside.length} finding(s) about the PR body set aside - not in the report: ${aside.map(f => f.id).join(', ')}`)
+  const found = reviewed.filter(f => !aside.includes(f))
 
   const tag = async (): Promise<Finding[]> => {
     host.phase(TAGGING_PHASE)

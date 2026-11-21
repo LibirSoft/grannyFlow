@@ -265,6 +265,7 @@ export interface TrailRound {
   reviewedSha?: string
   reviewers: TrailReviewer[]
   findings: TrailFinding[]
+  setAside?: TrailFinding[]
   fix?: TrailFix
   outcome?: TrailOutcome
   note?: string
