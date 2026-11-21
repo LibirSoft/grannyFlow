@@ -25,10 +25,10 @@ The script changes only `tags.<name>`. It writes the whole file again with 2-spa
 
 ## Choosing the effect
 
-- `--fix` for a kind of finding that must be fixed whatever its priority, such as a misspelled word in a comment or a string.
+- `--fix` for a kind of finding that must be fixed whatever its priority, such as a misspelled word in a string or a doc file.
 - `--points <n>` to weigh a kind of finding against the threshold. A finding's priority is its impact and likelihood in [the decision table](config.md#the-decision-table), plus the fix cost (`trivial` +15, `small` 0, `large` -15), plus the points, clamped to 100. A `minor` finding's priority is 0 to 50, and 40 or 50 when its fix is trivial and it is not `rare`. With the default `threshold` of 70 a finding starts a fix round only when its priority is above 70. Points that take it to `rideAlong` (55) but not above 70 only make it go along with a round that has a fix; it never starts one.
 
-A tag applies in the stage reviews and in the final review. It does not apply in the plan review, in `granny judge`, to a P0/P1 finding, or to a repeat of a finding the fixer declined, nor to a finding the judge merges with such a repeat.
+A tag applies in the stage reviews and in the final review. It does not apply in the plan review, in `granny judge`, to a P0/P1 finding, or to a repeat of a finding the fixer declined, nor to a finding the judge merges with such a repeat. Nor does it apply to a finding the judge scopes `not-code`, such as one about a code comment: rule 11 keeps that one residual before any tag is looked at.
 
 ## The cost
 
@@ -47,7 +47,7 @@ The tags apply to the next run. A run that has started keeps the tags it read wh
 ```json
 {
   "tags": {
-    "typo": { "description": "a misspelled word in a comment, a string or a doc", "fix": true },
+    "typo": { "description": "a misspelled word in a string or a doc", "fix": true },
     "naming": { "description": "a name that says something other than what the code does", "points": 20 }
   }
 }

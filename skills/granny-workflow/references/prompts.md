@@ -669,7 +669,7 @@ Classify every finding with exactly these fields:
 Example: a late save response re-binds the editor to another post's id, so the next save can overwrite the wrong post: confirmed, critical, edge, small, in-scope, though the window is narrow.
 
 TAGS - names the user gave to kinds of findings. Classify every finding first, exactly as above: a tag never changes a class. Then, when a finding is of one of these kinds, set its tag to that name; when several fit, the first one listed; when none fits, leave tag out. Use only these names:
-- typo: a misspelled word in a comment, a string or a doc
+- typo: a misspelled word in a string or a doc
 
 REVIEW:
 <findings as JSON>

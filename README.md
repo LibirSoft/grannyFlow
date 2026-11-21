@@ -138,7 +138,7 @@ A reviewer is one of these:
 A config tag names a kind of small finding that should not be left behind. Say `granny tag` to your agent, or run the script yourself from your repo (with `--repo <dir>` from anywhere else):
 
 ```sh
-node <skill-dir>/scripts/tags.mjs add typo --fix --description "a misspelled word in a comment, a string or a doc"
+node <skill-dir>/scripts/tags.mjs add typo --fix --description "a misspelled word in a string or a doc"
 ```
 
 In the config file, with a second tag that adds 20 points to the priority instead:
@@ -146,7 +146,7 @@ In the config file, with a second tag that adds 20 points to the priority instea
 ```json
 {
   "tags": {
-    "typo": { "description": "a misspelled word in a comment, a string or a doc", "fix": true },
+    "typo": { "description": "a misspelled word in a string or a doc", "fix": true },
     "naming": { "description": "a name that says something other than what the code does", "points": 20 }
   }
 }

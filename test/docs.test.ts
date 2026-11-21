@@ -664,4 +664,21 @@ describe('skill docs', () => {
       expect({ file, stale: text.match(/LibirSoft\/(?!grannyFlow(?![\w-]))\S*/gi) }).toEqual({ file, stale: null })
     }
   })
+
+  it('documents the not-code scope and rule 11 in the config reference, the tag docs and the Cursor protocol', () => {
+    const table = read('references/config.md').split('### The decision table')[1]!.split('\n### ')[0]!
+    expect(table).toContain('| `not-code` (not about the code or what it does: a code comment or doc comment')
+    expect(table).toContain('11. (Checked after rule 5 and before rule 6; numbered last so that the rules above keep their numbers.) `scope` `not-code` → residual, `not about the code or what it does`')
+    expect(table).toContain('`refuted`, `other-stage` and `not-code` findings always stay residual')
+    const cursor = read('references/cursor.md')
+    const rules = cursor.slice(cursor.indexOf('take the first rule that matches'))
+    expect(rules.indexOf('11 `not-code` → residual')).toBeGreaterThan(rules.indexOf('5 `pre-existing` → residual'))
+    expect(rules.indexOf('11 `not-code` → residual')).toBeLessThan(rules.indexOf('6 impact in `alwaysFix`'))
+    for (const text of [readRoot('README.md'), read('references/config.md'), read('references/tags.md'), read('references/prompts.md')]) {
+      expect(text).toContain('a misspelled word in a string or a doc')
+      expect(text).not.toContain('a misspelled word in a comment')
+    }
+    expect(read('references/tags.md')).toContain('a finding the judge scopes `not-code`')
+    expect(readRoot('CHANGELOG.md').split('\n## ')[1]!).toContain('a fourth scope, `not-code`, and rule 11')
+  })
 })
