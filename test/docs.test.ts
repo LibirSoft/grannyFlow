@@ -638,6 +638,20 @@ describe('skill docs', () => {
     expect(judge).toContain('("Judge - final review", with `tags` in the config, with the same TAGS block after its rubric)')
   })
 
+  it('documents that a finding filed on the PR body is set aside', () => {
+    const config = read('references/config.md')
+    const routing = config.split('### Judge routing')[1]!.split('\n### ')[0]!
+    expect(routing).toContain('finding(s) about the PR body set aside - not judged, not sent, not kept')
+    expect(routing).toContain('a P0 included')
+    expect(config.split('## Review trail')[1]!.split('\n## ')[0]).toContain('`setAside`')
+    expect(config.split('## Judge runs')[1]!.split('\n## ')[0]).toContain('set aside - not in the report')
+    const cursor = read('references/cursor.md')
+    expect(cursor.slice(cursor.indexOf('2. **Review**'), cursor.indexOf('3. **Route.**'))).toContain('Set aside every finding filed on the PR body')
+    expect(read('references/judge.md')).toContain('A finding filed on the PR body')
+    expect(read('SKILL.md')).toContain('a finding filed on the PR body is set aside first')
+    expect(readRoot('CHANGELOG.md').split('\n## ')[1]!).toContain('Findings on the PR body are set aside')
+  })
+
   it('points every repo reference at LibirSoft/grannyFlow', () => {
     expect(readRoot('README.md')).toContain('npx skills add LibirSoft/grannyFlow')
     const docs: Record<string, string> = {

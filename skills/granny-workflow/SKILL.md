@@ -37,6 +37,7 @@ for each stage - independent stages at the same time (config parallel, default o
      ├─ still red ─► stage checks-failed, not reviewed; the stages that build on it are skipped, and so are the later ones
      │   in its repo when it ran on the run's branch (a red parallel lane is not merged, so it blocks only its dependents)
   every reviewer reviews it, in parallel (base = the HEAD granny read)
+     (a finding filed on the PR body is set aside first: never judged, sent or kept)
      ├─ a reviewer fails, then fails its one retry ─► stage review-failed
      ├─ no reviewer reports a finding ─────────────► stage clean (without checks: gates-red when the last implementer or fix left gates red)
      └─ P0/P1 findings go straight to the implementer; the judge classifies the rest and merges duplicates,

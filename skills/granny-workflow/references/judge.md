@@ -74,6 +74,8 @@ When the user asks to read the last review: the newest file in `<repo>/<workDir>
 
 `<repo>/<workDir>/reviews/<date>-<branch>.md`, by default under `.granny/reviews/`, which git ignores through the excludes.
 
+A finding filed on the PR body (`<workDir>/PR-BODY.md`) is set aside before the tagging and is not in the report.
+
 The heading is the tagging agent's call, through its classification and not the reviewer's severity:
 
 | impact | heading |
