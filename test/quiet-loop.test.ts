@@ -460,6 +460,28 @@ describe('a repeat of a kept finding', () => {
     expect(prompt(f.calls, 'fix core r3')).toContain('- opus-F1 (repeat of r2/opus-F1): reason opus-F1\n  you said: parse() already checks it at src/p.ts:7')
   })
 
+  it('drops a P0/P1 repeat the judge refutes when the newest finding of its kept chain was declined', async () => {
+    const f = fakeHost({
+      scores: [
+        { 'opus-F1': judged('major', 'edge', 'small'), 'opus-F2': judged('minor', 'common', 'trivial') },
+        { 'opus-F1': judged('critical', 'edge', 'small', { repeatOf: 'r1/opus-F2' }) },
+        { 'opus-F1': judged('none', 'rare', 'trivial', { verdict: 'refuted', evidence: 'src/p.ts:7 - parse() checks it first', repeatOf: 'r1/opus-F2' }) },
+      ],
+      override: req => {
+        if (req.label === 'review core r1 opus') return found(['P2', 'Late save', 'src/a.ts', 3], ['P3', 'Long doc line', 'src/m.rs', 19])
+        if (req.label === 'review core r2 opus') return found(['P2', 'Doc line breaks the parser', 'src/m.rs', 19])
+        if (req.label === 'review core r3 opus') return found(['P1', 'Doc line crashes the parser', 'src/m.rs', 19])
+        if (req.label === 'fix core r2') return declining('opus-F1')
+        return undefined
+      },
+    })
+    const r = await runGranny(f.host, input())
+    expect(r.stages[0]).toMatchObject({ outcome: 'residual-only', rounds: 3 })
+    expect(r.stages[0]!.history[2]!.findings[0]!.decision).toEqual({ rule: 3, action: 'residual', why: 'refuted' })
+    expect(f.calls.some(c => c.label === 'fix core r3')).toBe(false)
+    expect(f.logs).toContain('core r3: opus-F1 dropped as a repeat of r2/opus-F1, which the fixer declined (rule 3: refuted) - kept as residual')
+  })
+
   it('does not hold a fresh finding merged with a repeat of a kept finding that the hold leaves alone', async () => {
     const f = twoRounds(
       { 'opus-F1': judged('minor', 'common', 'trivial', { repeatOf: 'r1/opus-F2', scope: 'pre-existing' }), 'opus-F2': judged('major', 'edge', 'small', { duplicateOf: 'opus-F1' }) },
