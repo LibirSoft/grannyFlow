@@ -688,6 +688,8 @@ function ratchet(fields, label, earlier) {
 }
 var isKept = (earlier) => earlier?.decision?.rule === 8 || earlier?.decision?.rule === 11;
 function hold(fields, label, earlier) {
+  if (fields.scope === "pre-existing" || fields.scope === "other-stage")
+    return;
   const held = [];
   if (earlier.decision?.rule === 11 && fields.scope !== "not-code") {
     held.push(`scope ${fields.scope} -> not-code`);
@@ -727,7 +729,7 @@ function decide(f, entry, policy, repeatsDeclined = () => false, earlierOf = () 
   });
   if (c.kind === "classified") {
     const earlier = f.repeatOf === undefined ? undefined : earlierOf(f);
-    kept = isKept(earlier) && c.fields.impact !== "critical";
+    kept = isKept(earlier) && c.fields.impact !== "critical" && !(isBlocker(f) && !repeatsDeclined(out));
     if (earlier && kept)
       held = hold(c.fields, f.repeatOf, earlier);
     else if (earlier && !isKept(earlier))

@@ -251,6 +251,7 @@ function ratchet(fields: { verdict: string; impact: Impact; likelihood: Likeliho
 export const isKept = (earlier: Finding | undefined): boolean => earlier?.decision?.rule === 8 || earlier?.decision?.rule === 11
 
 function hold(fields: { impact: Impact; likelihood: Likelihood; fixCost: FixCost; scope: Scope }, label: string, earlier: Finding): string | undefined {
+  if (fields.scope === 'pre-existing' || fields.scope === 'other-stage') return undefined
   const held: string[] = []
   if (earlier.decision?.rule === 11 && fields.scope !== 'not-code') {
     held.push(`scope ${fields.scope} -> not-code`)
@@ -299,7 +300,7 @@ export function decide(
   })
   if (c.kind === 'classified') {
     const earlier = f.repeatOf === undefined ? undefined : earlierOf(f)
-    kept = isKept(earlier) && c.fields.impact !== 'critical'
+    kept = isKept(earlier) && c.fields.impact !== 'critical' && !(isBlocker(f) && !repeatsDeclined(out))
     if (earlier && kept) held = hold(c.fields, f.repeatOf!, earlier)
     else if (earlier && !isKept(earlier)) raised = ratchet(c.fields, f.repeatOf!, earlier)
     Object.assign(out, c.fields)

@@ -189,7 +189,7 @@ describe('not-code findings', () => {
 
 describe('a repeat of a kept finding', () => {
   const kept = f0('reviewer-F2', { verdict: 'confirmed', impact: 'minor', likelihood: 'common', fixCost: 'trivial', scope: 'in-scope', evidence: 'src/a.ts:3 - x', priority: 50, decision: { rule: 8, action: 'residual', why: 'under the bar: minor/common/trivial -> 50' } })
-  const repeat = (entry: Record<string, unknown>, earlier: Finding = kept, severity = 'P2') => decide(f0('reviewer-F1', { severity, repeatOf: 'r3/reviewer-F2' }), entry, POLICY, () => false, () => earlier)
+  const repeat = (entry: Record<string, unknown> | undefined, earlier: Finding = kept, severity = 'P2') => decide(f0('reviewer-F1', { severity, repeatOf: 'r3/reviewer-F2' }), entry, POLICY, () => false, () => earlier)
 
   it('takes the kept classes when the judge rates it higher, and is not ratcheted', () => {
     const d = repeat(judged('moderate', 'edge', 'small'))
@@ -217,11 +217,31 @@ describe('a repeat of a kept finding', () => {
     expect(repeat({ ...judged('critical', 'edge', 'small'), scope: 'not-code' }, notCode).decision).toMatchObject({ rule: 11, action: 'residual' })
   })
 
-  it('gets no config tag, and a P0/P1 that skipped the judge is still fixed', () => {
+  it('gets no config tag', () => {
     const typo = repeat({ ...judged('minor', 'common', 'trivial'), tag: 'typo' })
     expect([typo.priority, typo.tag, typo.decision!.rule]).toEqual([50, undefined, 8])
     expect(repeat({ ...judged('minor', 'edge', 'trivial'), tag: 'naming' })).toMatchObject({ priority: 40, decision: { rule: 8 } })
-    expect(repeat(judged('moderate', 'edge', 'small'), kept, 'P1').decision).toMatchObject({ rule: 1, action: 'fix' })
+  })
+
+  it('sends a P0/P1 that skipped the judge by rule 1', () => {
+    expect(repeat(undefined, kept, 'P1').decision).toEqual({ rule: 1, action: 'fix', why: 'P0/P1' })
+  })
+
+  it('does not hold a judged P0/P1 that rule 1 sends, so the ledger keeps the classes the judge gave', () => {
+    const d = repeat(judged('major', 'edge', 'small'), kept, 'P1')
+    expect([d.impact, d.likelihood, d.fixCost, d.priority]).toEqual(['major', 'edge', 'small', 80])
+    expect(d.decision).toEqual({ rule: 1, action: 'fix', why: 'P0/P1' })
+    const declined = decide(f0('reviewer-F1', { severity: 'P1', repeatOf: 'r3/reviewer-F2' }), judged('major', 'edge', 'small'), POLICY, () => true, () => kept)
+    expect(declined).toMatchObject({ impact: 'minor', decision: { rule: 8, held: 'repeat of r3/reviewer-F2: major/edge/small -> minor/common/trivial' } })
+  })
+
+  it('leaves a repeat the judge now scopes pre-existing or other-stage to rules 5 and 4, with no hold', () => {
+    const pre = repeat(judged('major', 'edge', 'small', { scope: 'pre-existing' }))
+    expect([pre.impact, pre.likelihood, pre.fixCost, pre.scope]).toEqual(['major', 'edge', 'small', 'pre-existing'])
+    expect(pre.decision).toEqual({ rule: 5, action: 'residual', why: 'pre-existing - ATTENTION: impact major', attention: true })
+    const notCode = decide(f0('reviewer-F2'), judged('moderate', 'edge', 'small', { scope: 'not-code' }), POLICY)
+    expect(repeat(judged('moderate', 'common', 'small', { scope: 'pre-existing' }), notCode).decision).toEqual({ rule: 5, action: 'residual', why: 'pre-existing' })
+    expect(repeat(judged('moderate', 'common', 'small', { scope: 'other-stage' }), notCode).decision).toEqual({ rule: 4, action: 'residual', why: 'left to the stage that owns it' })
   })
 
   it('stays a not-code finding when the kept one was', () => {
@@ -271,6 +291,27 @@ describe('a repeat of a kept finding', () => {
     const r = await runGranny(f.host, input())
     expect(r.stages[0]).toMatchObject({ outcome: 'residual-only', rounds: 2 })
     expect(f.calls.some(c => c.label === 'fix core r2')).toBe(false)
+  })
+
+  it('reads the newest entry when a repeat names a kept finding whose later repeat was sent', async () => {
+    const f = fakeHost({
+      scores: [
+        { 'opus-F1': judged('major', 'edge', 'small'), 'opus-F2': judged('minor', 'common', 'trivial') },
+        { 'opus-F1': judged('critical', 'edge', 'small', { repeatOf: 'r1/opus-F2' }) },
+        { 'opus-F1': judged('major', 'edge', 'small', { repeatOf: 'r1/opus-F2' }) },
+      ],
+      override: req => {
+        if (req.label === 'review core r1 opus') return found(['P2', 'Late save', 'src/a.ts', 3], ['P3', 'Long doc line', 'src/m.rs', 19])
+        if (req.label === 'review core r2 opus') return found(['P2', 'Doc line breaks the parser', 'src/m.rs', 19])
+        if (req.label === 'review core r3 opus') return found(['P2', 'Doc line still breaks the parser', 'src/m.rs', 19])
+        return undefined
+      },
+    })
+    const r = await runGranny(f.host, input())
+    const third = r.stages[0]!.history[2]!.findings[0]!
+    expect(third.decision).toMatchObject({ rule: 6, action: 'fix', raised: 'repeat of r1/opus-F2: impact major -> critical' })
+    expect(third.decision!.held).toBeUndefined()
+    expect(f.calls.some(c => c.label === 'fix core r3')).toBe(true)
   })
 
   it("holds a final-review repeat of a stage's residual finding", async () => {

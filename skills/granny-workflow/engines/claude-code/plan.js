@@ -680,6 +680,8 @@ function ratchet(fields, label, earlier) {
 }
 var isKept = (earlier) => earlier?.decision?.rule === 8 || earlier?.decision?.rule === 11;
 function hold(fields, label, earlier) {
+  if (fields.scope === "pre-existing" || fields.scope === "other-stage")
+    return;
   const held = [];
   if (earlier.decision?.rule === 11 && fields.scope !== "not-code") {
     held.push(`scope ${fields.scope} -> not-code`);
@@ -719,7 +721,7 @@ function decide(f, entry, policy, repeatsDeclined = () => false, earlierOf = () 
   });
   if (c.kind === "classified") {
     const earlier = f.repeatOf === undefined ? undefined : earlierOf(f);
-    kept = isKept(earlier) && c.fields.impact !== "critical";
+    kept = isKept(earlier) && c.fields.impact !== "critical" && !(isBlocker(f) && !repeatsDeclined(out));
     if (earlier && kept)
       held = hold(c.fields, f.repeatOf, earlier);
     else if (earlier && !isKept(earlier))
@@ -2576,7 +2578,20 @@ the last repair's deviations: ${deviations}` : ""}`;
       }
       const declined = new Map(earlier.flatMap((e) => (e.declined ?? []).map((d) => [roundLabel(e.round, d, e.loop), d.reason])));
       const ledger = new Map(earlier.flatMap((e) => [...e.sent, ...e.residual ?? []].map((f) => [roundLabel(e.round, f, e.loop), f])));
-      const earlierOf = (f) => f.repeatOf === undefined ? undefined : ledger.get(f.repeatOf);
+      const newer = new Map(earlier.flatMap((e) => [...e.sent, ...e.residual ?? []].flatMap((f) => f.repeatOf === undefined ? [] : [[e.loop ? `${e.loop.id}/${f.repeatOf}` : f.repeatOf, roundLabel(e.round, f, e.loop)]])));
+      const newest = (label) => {
+        const seen = new Set;
+        let at = label;
+        while (newer.has(at) && !seen.has(at)) {
+          seen.add(at);
+          at = newer.get(at);
+        }
+        return at;
+      };
+      const earlierOf = (f) => {
+        const named = f.repeatOf === undefined ? undefined : ledger.get(f.repeatOf);
+        return isKept(named) ? ledger.get(newest(f.repeatOf)) ?? named : named;
+      };
       const blockers = found.filter(isBlocker);
       const judged = declined.size ? found : found.filter((f) => !isBlocker(f));
       const unjudgedBlockers = new Set(declined.size ? [] : blockers.map((f) => f.id));

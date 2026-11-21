@@ -940,7 +940,22 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
 
       const declined = new Map(earlier.flatMap(e => (e.declined ?? []).map(d => [roundLabel(e.round, d, e.loop), d.reason] as const)))
       const ledger = new Map(earlier.flatMap(e => [...e.sent, ...(e.residual ?? [])].map(f => [roundLabel(e.round, f, e.loop), f] as const)))
-      const earlierOf = (f: Finding) => (f.repeatOf === undefined ? undefined : ledger.get(f.repeatOf))
+      const newer = new Map(
+        earlier.flatMap(e => [...e.sent, ...(e.residual ?? [])].flatMap(f => (f.repeatOf === undefined ? [] : [[e.loop ? `${e.loop.id}/${f.repeatOf}` : f.repeatOf, roundLabel(e.round, f, e.loop)] as const]))),
+      )
+      const newest = (label: string) => {
+        const seen = new Set<string>()
+        let at = label
+        while (newer.has(at) && !seen.has(at)) {
+          seen.add(at)
+          at = newer.get(at)!
+        }
+        return at
+      }
+      const earlierOf = (f: Finding) => {
+        const named = f.repeatOf === undefined ? undefined : ledger.get(f.repeatOf)
+        return isKept(named) ? (ledger.get(newest(f.repeatOf!)) ?? named) : named
+      }
       const blockers = found.filter(isBlocker)
       const judged = declined.size ? found : found.filter(f => !isBlocker(f))
       const unjudgedBlockers = new Set(declined.size ? [] : blockers.map(f => f.id))
