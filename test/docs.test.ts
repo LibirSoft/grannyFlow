@@ -681,4 +681,18 @@ describe('skill docs', () => {
     expect(read('references/tags.md')).toContain('a finding the judge scopes `not-code`')
     expect(readRoot('CHANGELOG.md').split('\n## ')[1]!).toContain('a fourth scope, `not-code`, and rule 11')
   })
+
+  it('documents the hold on a repeat of a kept finding where the ratchet is described', () => {
+    const ledger = read('references/config.md').split('### The decision ledger and the ratchet')[1]!.split('\n### ')[0]!
+    expect(ledger).toContain('being reported again never rates a finding above what it was kept at')
+    expect(ledger).toContain('`<stage> r<n>: <id> held - repeat of <label>: <what>`')
+    expect(ledger).toContain('There is one exception: a repeat the judge rates `critical`.')
+    const cursor = read('references/cursor.md')
+    const triage = cursor.slice(cursor.indexOf('5. **Triage**'), cursor.indexOf('take the first rule that matches'))
+    expect(triage.indexOf('hold a repeat of a finding kept residual by rule 8 or 11')).toBeGreaterThan(triage.indexOf('apply [the ratchet]'))
+    expect(triage.indexOf('hold a repeat of a finding kept residual by rule 8 or 11')).toBeLessThan(triage.indexOf('compute the priority'))
+    expect(readFileSync(join(skill, 'engines/cursor/agents/granny-judge.md'), 'utf8')).toContain('is not rated above what that one was kept at')
+    expect(read('references/prompts.md')).toContain('`(held: <what>)`')
+    expect(readRoot('CHANGELOG.md').split('\n## ')[1]!).toContain('is held, not ratcheted')
+  })
 })
