@@ -560,6 +560,23 @@ describe('what a reviewer is told to leave out', () => {
     expect(lines.at(-1)).toBe('- src/a.ts:3 - t44')
   })
 
+  it('keeps a decline and its clause in the list when more than 40 findings were left', async () => {
+    const minors = Array.from({ length: 41 }, (_, i): [string, string, string, number] => ['P3', `Nit ${i}`, 'src/n.ts', i + 1])
+    const f = fakeHost({
+      scores: [Object.fromEntries([['opus-F1', judged('major', 'edge', 'small')], ...minors.map((_, i) => [`opus-F${i + 2}`, judged('minor', 'common', 'trivial')])])],
+      override: req => {
+        if (req.label === 'review core r1 opus') return found(['P2', 'Phantom crash', 'src/a.ts', 3], ...minors)
+        if (req.label === 'fix core r1') return { startSha: 's', headSha: 'h', gatesGreen: true, gates: 'g', commits: [], untested: '', declined: [{ id: 'opus-F1', reason: 'parse() checks it first' }] }
+        return undefined
+      },
+    })
+    const r = await runGranny(f.host, input())
+    expect(r.stages[0]).toMatchObject({ outcome: 'clean', rounds: 2 })
+    const lines = prompt(f.calls, 'review core r2 opus').split('\n')
+    expect(lines).toContain('Earlier review rounds raised the 42 finding(s) below, and they were left as they are on purpose (the last 40 are listed). Do not report them again; report one the fixer declined only when its reason is wrong:')
+    expect(lines.at(-1)).toBe('- src/a.ts:3 - Phantom crash (the fixer declined it: parse() checks it first)')
+  })
+
   it('counts a decline as known until a later round sends its repeat back or keeps it as residual', () => {
     const earlier: EarlierRound[] = [{ round: 1, sent: [f0('codex-F1', { title: 'Phantom' })], declined: [{ id: 'codex-F1', reason: 'no' }] }]
     expect(declinedKnown(earlier)).toEqual([{ file: 'src/a.ts', line: 3, title: 'Phantom', declined: 'no' }])
@@ -658,6 +675,28 @@ describe('what a reviewer is told to leave out', () => {
     expect(prompt(f.calls, 'review final review r1 opus').split('\n').slice(-2)).toEqual([INTRO, '- src/m.rs:19 - Long doc line'])
   })
 
+  it("gives each repo's final review only the residual findings and declines of its own stages", async () => {
+    const f = fakeHost({
+      scores: [{ 'opus-F1': judged('minor', 'common', 'trivial') }, { 'opus-F1': judged('major', 'edge', 'small'), 'opus-F2': judged('minor', 'common', 'trivial') }],
+      override: req => {
+        if (req.label === 'review one r1 opus') return found(['P3', 'Long doc line', 'src/m.rs', 19])
+        if (req.label === 'review bee one r1 opus') return found(['P2', 'Phantom crash', 'src/b.ts', 3], ['P3', 'Odd name', 'src/n.ts', 5])
+        if (req.label === 'fix bee one r1') return { startSha: 's', headSha: 'h', gatesGreen: true, gates: 'g', commits: [], untested: '', declined: [{ id: 'opus-F1', reason: 'parse() checks it first' }] }
+        return undefined
+      },
+    })
+    const B = '/work/b'
+    const stages = [{ name: 'one', task: 'WP-01' }, { name: 'two', task: 'WP-02' }, { name: 'bee one', task: 'WP-03', repo: B }, { name: 'bee two', task: 'WP-04', repo: B }]
+    const r = await runGranny(f.host, input({ repos: [B], stages, config: { parallel: false } }))
+    expect(r.stages.map(x => x.outcome)).toEqual(['residual-only', 'clean', 'clean', 'clean'])
+    expect(prompt(f.calls, 'review final review r1 opus').split('\n').slice(-2)).toEqual([INTRO, '- src/m.rs:19 - Long doc line'])
+    expect(prompt(f.calls, 'review final review b r1 opus').split('\n').slice(-3)).toEqual([
+      'Earlier review rounds raised the 2 finding(s) below, and they were left as they are on purpose. Do not report them again; report one the fixer declined only when its reason is wrong:',
+      '- src/n.ts:5 - Odd name',
+      '- src/b.ts:3 - Phantom crash (the fixer declined it: parse() checks it first)',
+    ])
+  })
+
   it('takes a stage residual off the final review list once a final round sends its repeat back', async () => {
     const f = fakeHost({
       scores: [{ 'opus-F1': judged('minor', 'common', 'trivial') }, { 'opus-F1': judged('critical', 'edge', 'small', { repeatOf: 's1/r1/opus-F1' }) }],
@@ -671,6 +710,77 @@ describe('what a reviewer is told to leave out', () => {
     expect(r.finalReview).toMatchObject({ outcome: 'clean', rounds: 2 })
     expect(prompt(f.calls, 'review final review r1 opus').split('\n').slice(-2)).toEqual([INTRO, '- src/m.rs:19 - Long doc line'])
     expect(prompt(f.calls, 'review final review r2 opus')).not.toContain('Earlier review rounds')
+  })
+
+  it('keeps one residual when a later final round repeats a stage residual by the stage label after an earlier final round kept a finding merged with its repeat', async () => {
+    const f = fakeHost({
+      scores: [
+        { 'opus-F1': judged('minor', 'common', 'trivial') },
+        {
+          'opus-F1': judged('minor', 'common', 'trivial'),
+          'opus-F2': judged('minor', 'common', 'trivial', { repeatOf: 's1/r1/opus-F1', scope: 'pre-existing', duplicateOf: 'opus-F1' }),
+          'opus-F3': judged('major', 'edge', 'small'),
+        },
+        { 'opus-F1': judged('minor', 'common', 'trivial', { repeatOf: 's1/r1/opus-F1' }) },
+      ],
+      override: req => {
+        if (req.label === 'review one r1 opus') return found(['P3', 'Long doc line', 'src/m.rs', 19])
+        if (req.label === 'review final review r1 opus') return found(['P3', 'Doc line too wide', 'src/m.rs', 19], ['P3', 'Long doc line again', 'src/m.rs', 19], ['P2', 'Late save', 'src/a.ts', 3])
+        if (req.label === 'review final review r2 opus') return found(['P3', 'Long doc line once more', 'src/m.rs', 19])
+        return undefined
+      },
+    })
+    const r = await runGranny(f.host, input(TWO_STAGES))
+    expect(r.finalReview).toMatchObject({ outcome: 'residual-only', rounds: 2 })
+    expect(prompt(f.calls, 'review final review r2 opus').split('\n').slice(-2)).toEqual([INTRO, '- src/m.rs:19 - Doc line too wide'])
+    expect(r.finalReview!.residual.map(x => x.title)).toEqual(['Long doc line once more'])
+  })
+
+  it('takes a stage residual off the final review list once a final round sends back a repeat that names an older finding of its chain', async () => {
+    const decline = declining('fix one r1')
+    const f = fakeHost({
+      scores: [
+        { 'opus-F1': judged('major', 'edge', 'small') },
+        { 'opus-F1': judged('none', 'rare', 'trivial', { verdict: 'refuted', evidence: 'src/p.ts:7 - parse() checks it first', repeatOf: 'r1/opus-F1' }) },
+        { 'opus-F1': judged('critical', 'edge', 'small', { repeatOf: 's1/r1/opus-F1' }) },
+      ],
+      override: req => {
+        const declined = decline(req)
+        if (declined) return declined
+        if (req.label === 'review one r1 opus') return found(['P2', 'Phantom crash', 'src/a.ts', 3])
+        if (req.label === 'review one r2 opus') return found(['P3', 'Phantom crash again', 'src/a.ts', 3])
+        if (req.label === 'review final review r1 opus') return found(['P2', 'Phantom crash loses data', 'src/a.ts', 3])
+        return undefined
+      },
+    })
+    const r = await runGranny(f.host, input(TWO_STAGES))
+    expect(r.stages[0]).toMatchObject({ outcome: 'residual-only', rounds: 2 })
+    expect(prompt(f.calls, 'review final review r1 opus').split('\n').slice(-2)).toEqual([INTRO, '- src/a.ts:3 - Phantom crash again'])
+    expect(f.calls.some(c => c.label === 'fix final review r1')).toBe(true)
+    expect(prompt(f.calls, 'review final review r2 opus')).not.toContain('Earlier review rounds')
+  })
+
+  it('takes a kept repeat off the list once a later round of the same loop sends back a repeat that names an older finding of its chain', async () => {
+    const decline = declining('fix core r1')
+    const f = fakeHost({
+      scores: [
+        { 'opus-F1': judged('major', 'edge', 'small') },
+        { 'opus-F1': judged('none', 'rare', 'trivial', { verdict: 'refuted', evidence: 'src/p.ts:7 - parse() checks it first', repeatOf: 'r1/opus-F1' }), 'opus-F2': judged('major', 'edge', 'small') },
+        { 'opus-F1': judged('critical', 'edge', 'small', { repeatOf: 'r1/opus-F1' }) },
+      ],
+      override: req => {
+        const declined = decline(req)
+        if (declined) return declined
+        if (req.label === 'review core r1 opus') return found(['P2', 'Phantom crash', 'src/a.ts', 3])
+        if (req.label === 'review core r2 opus') return found(['P3', 'Phantom crash again', 'src/a.ts', 3], ['P2', 'Late save', 'src/b.ts', 7])
+        if (req.label === 'review core r3 opus') return found(['P2', 'Phantom crash loses data', 'src/a.ts', 3])
+        return undefined
+      },
+    })
+    const r = await runGranny(f.host, input())
+    expect(r.stages[0]).toMatchObject({ outcome: 'clean', rounds: 4 })
+    expect(prompt(f.calls, 'review core r3 opus').split('\n').slice(-2)).toEqual([INTRO, '- src/a.ts:3 - Phantom crash again'])
+    expect(prompt(f.calls, 'review core r4 opus')).not.toContain('Earlier review rounds')
   })
 
   it("gives the final review the residual of a stage whose review failed in a later round", async () => {

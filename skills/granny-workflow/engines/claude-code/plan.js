@@ -2570,7 +2570,7 @@ the last repair's deviations: ${deviations}` : ""}`;
     for (let round = 1;round <= config.maxRounds; round++) {
       const reviewedSha = config.trail && subject.kind !== "plan" ? known ?? await trailHead(`head ${name} r${round}`, phase, lane.cwd) : undefined;
       known = undefined;
-      const skip = subject.kind === "diff" ? [...declinedKnown(earlier), ...[...staged.map((b) => b.finding), ...kept()].map((f) => knownOf(f))] : [];
+      const skip = subject.kind === "diff" ? [...[...staged.map((b) => b.finding), ...kept()].map((f) => knownOf(f)), ...declinedKnown(earlier)] : [];
       const results = await reviewAll(lane, reviewers, name, subject, round, skip);
       const reviewed = results.filter((r) => r.ran).flatMap((r) => r.findings);
       const roots = [lane.cwd, lane.repo, ...lane.p.others ?? []];
@@ -2719,15 +2719,14 @@ the last repair's deviations: ${deviations}` : ""}`;
         host.log(`${name} r${round}: ${f.id} dropped as a repeat of ${declinedLabel(f)}, which the fixer declined (${ruled(f)}) - kept as residual`);
       }
       const repeatsOf = (f) => new Set(unmerged.filter((u) => u.id === f.id || f.duplicates?.includes(u.id)).flatMap((u) => u.repeatOf ? [u.repeatOf] : []));
-      const aliases = (f) => {
-        const of = repeatsOf(f);
-        return [...carried, ...staged].filter((c) => c.labels.some((l) => of.has(l))).flatMap((c) => c.labels);
+      const inChains = (labels) => {
+        const roots = new Set([...labels].map(rootOf));
+        return (c) => c.labels.some((l) => roots.has(rootOf(l)));
       };
-      carried = [
-        ...carried.filter((c) => !c.labels.some((l) => repeated.has(l))),
-        ...residual.map((f) => ({ round, labels: [roundLabel(round, f), ...aliases(f)], finding: f }))
-      ];
-      staged = staged.filter((b) => !b.labels.some((l) => repeated.has(l)));
+      const aliases = (f) => [...carried, ...staged].filter(inChains(repeatsOf(f))).flatMap((c) => c.labels);
+      const gone = inChains(repeated);
+      carried = [...carried.filter((c) => !gone(c)), ...residual.map((f) => ({ round, labels: [roundLabel(round, f), ...aliases(f)], finding: f }))];
+      staged = staged.filter((b) => !gone(b));
       if (record)
         record.left.splice(0, record.left.length, ...carried.map((c) => ({ labels: c.labels.map((l) => `${record.loop.id}/${l}`), finding: c.finding })));
       if (residual.length) {
