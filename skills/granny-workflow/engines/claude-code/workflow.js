@@ -1151,6 +1151,15 @@ function secondPass(p, base) {
 var KNOWN_LIMIT = 40;
 var KNOWN_TEXT = 160;
 var short = (text) => String(text ?? "").replace(/\s+/g, " ").trim().slice(0, KNOWN_TEXT);
+var knownOf = (f, declined) => ({ file: f.file, ...Number.isInteger(f.line) ? { line: f.line } : {}, title: f.title, ...declined === undefined ? {} : { declined } });
+function declinedKnown(earlier) {
+  const within = (e, label) => e.loop ? `${e.loop.id}/${label}` : label;
+  const repeated = new Set(earlier.flatMap((e) => [...e.sent, ...e.residual ?? []].flatMap((f) => f.repeatOf === undefined ? [] : [within(e, f.repeatOf)])));
+  return earlier.flatMap((e) => (e.declined ?? []).flatMap((d) => {
+    const f = e.sent.find((s) => s.id === d.id);
+    return f && !repeated.has(roundLabel(e.round, d, e.loop)) ? [knownOf(f, d.reason || "no reason given")] : [];
+  }));
+}
 var knownLine = (k) => `${short(k.file)}${k.line === undefined ? "" : `:${k.line}`} - ${short(k.title)}${k.declined === undefined ? "" : ` (the fixer declined it: ${short(k.declined)})`}`;
 var NOT_FINDINGS = "These are not findings, also when a rule or the plan asks for them, so leave them out: code comments and doc comments (wrong, outdated, missing, too long, or there against a rule; TODO notes and commented-out code too), commit messages and the commit history, the pull request description or its PR-BODY file, and how the work was done (the order tests and code were written in). A doc file such as the README is not a comment: review it like code.";
 function notFindings(known, oneLine = false) {
@@ -2116,12 +2125,12 @@ ${note}` : ""}` : missing };
       host.log(`${failed}: ${String(e?.message ?? e)}`);
     }
   };
-  const review = async (lane, rv, name, subject, round, attempt) => {
+  const review = async (lane, rv, name, subject, round, attempt, known) => {
     const { p, cwd } = lane;
     const tag = `${name} r${round} ${rv.name}${attempt > 1 ? ` #${attempt}` : ""}`;
     const phase = phaseOf(subject);
     if (rv.engine === "agent") {
-      const prompt = subject.kind === "plan" ? agentPlanReviewPrompt(p, subject.files) : agentReviewPrompt(p, name, subject.base, subject.stage, subject.note);
+      const prompt = subject.kind === "plan" ? agentPlanReviewPrompt(p, subject.files) : agentReviewPrompt(p, name, subject.base, subject.stage, subject.note, known);
       const r = await call("reviewer", "findings", `review ${tag}`, phase, prompt, "read-only", rv, cwd);
       if (!r)
         return { ran: false, findings: [], note: "reviewer agent returned nothing" };
@@ -2133,7 +2142,7 @@ ${note}` : ""}` : missing };
 `), files, cwd) : { dirs: [], refused: [] };
     if (refused.length)
       host.log(`${tag}: opencode cannot read ${refused.join(", ")} - move ${refused.length > 1 ? "them" : "it"} under a project directory`);
-    const plan = subject.kind === "plan" ? planReviewScript(rv, config, host.name, lane.base, stem, planReviewPrompt(p, subject.files), dirs) : reviewPlan(rv, config, host.name, subject.base, stem, commandReviewPrompt(p, name, subject.base, subject.stage, subject.note, rv.engine === "opencode"), dirs);
+    const plan = subject.kind === "plan" ? planReviewScript(rv, config, host.name, lane.base, stem, planReviewPrompt(p, subject.files), dirs) : reviewPlan(rv, config, host.name, subject.base, stem, commandReviewPrompt(p, name, subject.base, subject.stage, subject.note, rv.engine === "opencode", known), dirs);
     if (!plan)
       return { ran: false, findings: [], note: "this reviewer has no command for a plan review" };
     const failed = (out) => (rv.engine === "opencode" ? opencodeAnswer(out).error : undefined) ?? out.slice(-2000);
@@ -2219,20 +2228,20 @@ ${note}` : ""}` : missing };
       note: `review reported ${parsed.markers} finding marker(s), parser read ${parsed.findings.length}; extraction recovered ${first.length}, then ${second.length} on a retry that named the count: ${output.slice(-2000)}`
     };
   };
-  const attempt = async (lane, rv, name, subject, round, n) => {
+  const attempt = async (lane, rv, name, subject, round, n, known) => {
     try {
-      return await review(lane, rv, name, subject, round, n);
+      return await review(lane, rv, name, subject, round, n, known);
     } catch (e) {
       if (isCancelled(e))
         throw e;
       return { ran: false, findings: [], note: `reviewer call failed: ${String(e?.message ?? e)}` };
     }
   };
-  const reviewAll = (lane, reviewers, name, subject, round) => Promise.all(reviewers.map(async (reviewer) => {
-    let r = await attempt(lane, reviewer, name, subject, round, 1);
+  const reviewAll = (lane, reviewers, name, subject, round, known = []) => Promise.all(reviewers.map(async (reviewer) => {
+    let r = await attempt(lane, reviewer, name, subject, round, 1, known);
     if (!r.ran) {
       host.log(`${name} r${round} ${reviewer.name}: did not run - retrying once. ${r.note ?? ""}`);
-      r = await attempt(lane, reviewer, name, subject, round, 2);
+      r = await attempt(lane, reviewer, name, subject, round, 2, known);
     }
     return { reviewer, ...r, findings: attribute(reviewer, r.findings) };
   }));
@@ -2564,7 +2573,8 @@ the last repair's deviations: ${deviations}` : ""}`;
     for (let round = 1;round <= config.maxRounds; round++) {
       const reviewedSha = config.trail && subject.kind !== "plan" ? known ?? await trailHead(`head ${name} r${round}`, phase, lane.cwd) : undefined;
       known = undefined;
-      const results = await reviewAll(lane, reviewers, name, subject, round);
+      const skip = subject.kind === "diff" ? [...declinedKnown(earlier), ...[...opts.before ?? [], ...kept()].map((f) => knownOf(f))] : [];
+      const results = await reviewAll(lane, reviewers, name, subject, round, skip);
       const reviewed = results.filter((r) => r.ran).flatMap((r) => r.findings);
       const roots = [lane.cwd, lane.repo, ...lane.p.others ?? []];
       const aside = subject.kind === "diff" ? reviewed.filter((f) => isPrBody(f.file, config.workDir, roots)) : [];
@@ -3208,7 +3218,9 @@ ${note}` : note } : result;
     const prior = [...s.ledger].sort(([a], [b]) => a - b).flatMap(([, rounds]) => rounds);
     const loop = s.lane.repo === primary ? "final" : `final-${slug(baseName(s.lane.repo))}`;
     const head = reusedHead.get(s);
-    const looped = await reviewLoop(s.lane, name, { kind: "diff", base: s.lane.base, note: WHOLE_BRANCH_NOTE }, undefined, { loop, ...head ? { head } : {}, checks, runs, notes, prior });
+    const left = (r) => [...r?.residual ?? [], ...r?.outcome === "round-cap" ? r.unresolved.filter((f) => f.decision?.action === "residual") : []];
+    const before = specs.flatMap((st, i) => repoOf(st) === s.lane.repo ? left(results[i]) : []).filter((f) => f.decision?.rule !== 4);
+    const looped = await reviewLoop(s.lane, name, { kind: "diff", base: s.lane.base, note: WHOLE_BRANCH_NOTE }, undefined, { loop, ...head ? { head } : {}, checks, runs, notes, prior, before });
     const note = [looped.note, ...notes].filter(Boolean).join(`
 `);
     const r = note ? { ...looped, note } : looped;

@@ -7,7 +7,7 @@ import { SCHEMAS } from '../src/core/schemas'
 import { trailRound } from '../src/core/trail'
 import type { AgentRequest, Finding } from '../src/core/types'
 import { trailProblem } from '../src/pr/records'
-import { fakeHost } from './fake-host'
+import { fakeHost, finding, review } from './fake-host'
 
 const OPUS = { reviewers: [{ name: 'opus', engine: 'agent' }] }
 const input = (extra: Partial<RunInput> = {}): RunInput => ({
@@ -576,5 +576,73 @@ describe('what a reviewer is told to leave out', () => {
     expect(declinedKnown([staged, { round: 1, sent: [f0('opus-F2', { repeatOf: 's1/r1/codex-F1' })] }])).toEqual([])
     const own: EarlierRound = { round: 1, sent: [f0('codex-F1', { title: 'Late save' })], declined: [{ id: 'codex-F1', reason: 'by design' }] }
     expect(declinedKnown([{ round: 2, sent: [f0('codex-F4', { repeatOf: 'r1/codex-F1' })], loop }, own])).toEqual([{ file: 'src/a.ts', line: 3, title: 'Late save', declined: 'by design' }])
+  })
+
+  const INTRO = 'Earlier review rounds raised the 1 finding(s) below, and they were left as they are on purpose. Do not report them again:'
+
+  it('gives round 2 the residual of round 1, and round 1 no list', async () => {
+    const f = fakeHost({
+      scores: [{ 'opus-F1': judged('major', 'edge', 'small'), 'opus-F2': judged('minor', 'common', 'trivial') }],
+      override: req => (req.label === 'review core r1 opus' ? found(['P2', 'Late save', 'src/a.ts', 3], ['P3', 'Long doc line', 'src/m.rs', 19]) : undefined),
+    })
+    const r = await runGranny(f.host, input())
+    expect(r.stages[0]).toMatchObject({ outcome: 'clean', rounds: 2 })
+    expect(prompt(f.calls, 'review core r1 opus')).not.toContain('Earlier review rounds')
+    expect(prompt(f.calls, 'review core r2 opus').split('\n').slice(-2)).toEqual([INTRO, '- src/m.rs:19 - Long doc line'])
+  })
+
+  it('gives a command reviewer a declined finding with the reason of the fixer', async () => {
+    const f = fakeHost({
+      reviews: [review(finding('P2', 'Phantom crash')), 'No findings.'],
+      scores: [{ 'cli-F1': judged('major', 'edge', 'small') }],
+      override: req => (req.label === 'fix core r1' ? { startSha: 's', headSha: 'h', gatesGreen: true, gates: 'g', commits: [], untested: '', declined: [{ id: 'cli-F1', reason: 'parse() checks it first' }] } : undefined),
+    })
+    const r = await runGranny(f.host, { repo: '/work/repo', branch: 'feat/x', base: 'main', stages: [{ name: 'core', task: 'Do WP-01.' }], config: { reviewers: [{ name: 'cli', engine: 'command', command: 'fake-llm {prompt}' }] } })
+    expect(r.stages[0]).toMatchObject({ outcome: 'clean', rounds: 2 })
+    expect(f.commands.find(c => c.includes('review-core-r1-cli'))).not.toContain('Earlier review rounds')
+    expect(f.commands.find(c => c.includes('review-core-r2-cli'))).toContain('Do not report them again; report one the fixer declined only when its reason is wrong: src/a.ts:3 - Phantom crash (the fixer declined it: parse() checks it first). Report each finding')
+  })
+
+  it("gives the final review the stages' residual findings, without the other-stage ones", async () => {
+    const f = fakeHost({
+      scores: [{ 'opus-F1': judged('minor', 'common', 'trivial'), 'opus-F2': judged('major', 'edge', 'small', { scope: 'other-stage' }), 'opus-F3': judged('moderate', 'edge', 'small', { scope: 'not-code' }) }],
+      override: req => (req.label === 'review one r1 opus' ? found(['P3', 'Long doc line', 'src/m.rs', 19], ['P2', 'Route missing', 'src/r.ts', 2], ['P3', 'Tests not red first', 'test/a.test.ts', 1]) : undefined),
+    })
+    const r = await runGranny(f.host, input(TWO_STAGES))
+    expect(r.stages[0]!.residual.map(x => x.decision!.rule)).toEqual([8, 4, 11])
+    expect(prompt(f.calls, 'review two r1 opus')).not.toContain('Earlier review rounds')
+    expect(prompt(f.calls, 'review final review r1 opus').split('\n').slice(-3)).toEqual([
+      'Earlier review rounds raised the 2 finding(s) below, and they were left as they are on purpose. Do not report them again:',
+      '- src/m.rs:19 - Long doc line',
+      '- test/a.test.ts:1 - Tests not red first',
+    ])
+  })
+
+  const declining = (label: string) => (req: AgentRequest) =>
+    req.label === label ? { startSha: 's', headSha: 'h', gatesGreen: true, gates: 'g', commits: [], untested: '', declined: [{ id: 'opus-F1', reason: 'parse() checks it first' }] } : undefined
+
+  it('gives the final review a decline of a stage fixer that stood, with its reason', async () => {
+    const decline = declining('fix one r1')
+    const f = fakeHost({
+      scores: [{ 'opus-F1': judged('major', 'edge', 'small') }],
+      override: req => decline(req) ?? (req.label === 'review one r1 opus' ? found(['P2', 'Phantom crash', 'src/a.ts', 3]) : undefined),
+    })
+    const r = await runGranny(f.host, input(TWO_STAGES))
+    expect(r.stages[0]).toMatchObject({ outcome: 'clean', rounds: 2 })
+    expect(prompt(f.calls, 'review one r2 opus').split('\n').at(-1)).toBe('- src/a.ts:3 - Phantom crash (the fixer declined it: parse() checks it first)')
+    expect(prompt(f.calls, 'review final review r1 opus').split('\n').at(-1)).toBe('- src/a.ts:3 - Phantom crash (the fixer declined it: parse() checks it first)')
+  })
+
+  it('does not give the final review a stage decline that the judge overruled and the fixer then fixed', async () => {
+    const decline = declining('fix one r1')
+    const f = fakeHost({
+      scores: [{ 'opus-F1': judged('major', 'edge', 'small') }, { 'opus-F1': judged('major', 'edge', 'small', { repeatOf: 'r1/opus-F1' }) }],
+      override: req => decline(req) ?? (req.label === 'review one r1 opus' || req.label === 'review one r2 opus' ? found(['P2', 'Phantom crash', 'src/a.ts', 3]) : undefined),
+    })
+    const r = await runGranny(f.host, input(TWO_STAGES))
+    expect(r.stages[0]).toMatchObject({ outcome: 'clean', rounds: 3 })
+    expect(f.calls.some(c => c.label === 'fix one r2')).toBe(true)
+    expect(prompt(f.calls, 'review one r3 opus')).not.toContain('the fixer declined it')
+    expect(prompt(f.calls, 'review final review r1 opus')).not.toContain('Earlier review rounds')
   })
 })

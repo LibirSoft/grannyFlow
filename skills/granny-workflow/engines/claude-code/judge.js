@@ -1654,12 +1654,12 @@ ${note}` : ""}` : missing };
       host.log(`${failed}: ${String(e?.message ?? e)}`);
     }
   };
-  const review = async (lane, rv, name, subject, round, attempt) => {
+  const review = async (lane, rv, name, subject, round, attempt, known) => {
     const { p, cwd } = lane;
     const tag = `${name} r${round} ${rv.name}${attempt > 1 ? ` #${attempt}` : ""}`;
     const phase = phaseOf(subject);
     if (rv.engine === "agent") {
-      const prompt = subject.kind === "plan" ? agentPlanReviewPrompt(p, subject.files) : agentReviewPrompt(p, name, subject.base, subject.stage, subject.note);
+      const prompt = subject.kind === "plan" ? agentPlanReviewPrompt(p, subject.files) : agentReviewPrompt(p, name, subject.base, subject.stage, subject.note, known);
       const r = await call("reviewer", "findings", `review ${tag}`, phase, prompt, "read-only", rv, cwd);
       if (!r)
         return { ran: false, findings: [], note: "reviewer agent returned nothing" };
@@ -1671,7 +1671,7 @@ ${note}` : ""}` : missing };
 `), files, cwd) : { dirs: [], refused: [] };
     if (refused.length)
       host.log(`${tag}: opencode cannot read ${refused.join(", ")} - move ${refused.length > 1 ? "them" : "it"} under a project directory`);
-    const plan = subject.kind === "plan" ? planReviewScript(rv, config, host.name, lane.base, stem, planReviewPrompt(p, subject.files), dirs) : reviewPlan(rv, config, host.name, subject.base, stem, commandReviewPrompt(p, name, subject.base, subject.stage, subject.note, rv.engine === "opencode"), dirs);
+    const plan = subject.kind === "plan" ? planReviewScript(rv, config, host.name, lane.base, stem, planReviewPrompt(p, subject.files), dirs) : reviewPlan(rv, config, host.name, subject.base, stem, commandReviewPrompt(p, name, subject.base, subject.stage, subject.note, rv.engine === "opencode", known), dirs);
     if (!plan)
       return { ran: false, findings: [], note: "this reviewer has no command for a plan review" };
     const failed = (out) => (rv.engine === "opencode" ? opencodeAnswer(out).error : undefined) ?? out.slice(-2000);
@@ -1757,20 +1757,20 @@ ${note}` : ""}` : missing };
       note: `review reported ${parsed.markers} finding marker(s), parser read ${parsed.findings.length}; extraction recovered ${first.length}, then ${second.length} on a retry that named the count: ${output.slice(-2000)}`
     };
   };
-  const attempt = async (lane, rv, name, subject, round, n) => {
+  const attempt = async (lane, rv, name, subject, round, n, known) => {
     try {
-      return await review(lane, rv, name, subject, round, n);
+      return await review(lane, rv, name, subject, round, n, known);
     } catch (e) {
       if (isCancelled(e))
         throw e;
       return { ran: false, findings: [], note: `reviewer call failed: ${String(e?.message ?? e)}` };
     }
   };
-  const reviewAll = (lane, reviewers, name, subject, round) => Promise.all(reviewers.map(async (reviewer) => {
-    let r = await attempt(lane, reviewer, name, subject, round, 1);
+  const reviewAll = (lane, reviewers, name, subject, round, known = []) => Promise.all(reviewers.map(async (reviewer) => {
+    let r = await attempt(lane, reviewer, name, subject, round, 1, known);
     if (!r.ran) {
       host.log(`${name} r${round} ${reviewer.name}: did not run - retrying once. ${r.note ?? ""}`);
-      r = await attempt(lane, reviewer, name, subject, round, 2);
+      r = await attempt(lane, reviewer, name, subject, round, 2, known);
     }
     return { reviewer, ...r, findings: attribute(reviewer, r.findings) };
   }));

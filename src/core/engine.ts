@@ -7,6 +7,7 @@ import {
   checkCommandPrompt,
   commandReviewPrompt,
   commitPrompt,
+  declinedKnown,
   draftPrompt,
   extractPrompt,
   finalPrompt,
@@ -16,6 +17,7 @@ import {
   judgePrompt,
   judgeRetryNote,
   judgeStepPrompt,
+  knownOf,
   mergePrompt,
   ONE_SHOT_NOTE,
   planFixPrompt,
@@ -37,6 +39,7 @@ import {
   roundLabel,
   type EarlierRound,
   type FailedCheck,
+  type Known,
   type Overruled,
   type PromptContext,
   type RunOutcomes,
@@ -441,12 +444,12 @@ function engineParts(host: Host, config: GrannyConfig) {
     }
   }
 
-  const review = async (lane: Lane, rv: ReviewerConfig, name: string, subject: Subject, round: number, attempt: number): Promise<Omit<ReviewerRound, 'reviewer'>> => {
+  const review = async (lane: Lane, rv: ReviewerConfig, name: string, subject: Subject, round: number, attempt: number, known: Known[]): Promise<Omit<ReviewerRound, 'reviewer'>> => {
     const { p, cwd } = lane
     const tag = `${name} r${round} ${rv.name}${attempt > 1 ? ` #${attempt}` : ''}`
     const phase = phaseOf(subject)
     if (rv.engine === 'agent') {
-      const prompt = subject.kind === 'plan' ? agentPlanReviewPrompt(p, subject.files) : agentReviewPrompt(p, name, subject.base, subject.stage, subject.note)
+      const prompt = subject.kind === 'plan' ? agentPlanReviewPrompt(p, subject.files) : agentReviewPrompt(p, name, subject.base, subject.stage, subject.note, known)
       const r = await call('reviewer', 'findings', `review ${tag}`, phase, prompt, 'read-only', rv, cwd)
       if (!r) return { ran: false, findings: [], note: 'reviewer agent returned nothing' }
       return { ran: true, findings: Array.isArray(r.findings) ? r.findings : [] }
@@ -464,7 +467,7 @@ function engineParts(host: Host, config: GrannyConfig) {
     const plan =
       subject.kind === 'plan'
         ? planReviewScript(rv, config, host.name, lane.base, stem, planReviewPrompt(p, subject.files), dirs)
-        : reviewPlan(rv, config, host.name, subject.base, stem, commandReviewPrompt(p, name, subject.base, subject.stage, subject.note, rv.engine === 'opencode'), dirs)
+        : reviewPlan(rv, config, host.name, subject.base, stem, commandReviewPrompt(p, name, subject.base, subject.stage, subject.note, rv.engine === 'opencode', known), dirs)
     if (!plan) return { ran: false, findings: [], note: 'this reviewer has no command for a plan review' }
     const failed = (out: string) => (rv.engine === 'opencode' ? opencodeAnswer(out).error : undefined) ?? out.slice(-2000)
     let ran: boolean
@@ -542,22 +545,22 @@ function engineParts(host: Host, config: GrannyConfig) {
     }
   }
 
-  const attempt = async (lane: Lane, rv: ReviewerConfig, name: string, subject: Subject, round: number, n: number): Promise<Omit<ReviewerRound, 'reviewer'>> => {
+  const attempt = async (lane: Lane, rv: ReviewerConfig, name: string, subject: Subject, round: number, n: number, known: Known[]): Promise<Omit<ReviewerRound, 'reviewer'>> => {
     try {
-      return await review(lane, rv, name, subject, round, n)
+      return await review(lane, rv, name, subject, round, n, known)
     } catch (e) {
       if (isCancelled(e)) throw e
       return { ran: false, findings: [], note: `reviewer call failed: ${String((e as Error)?.message ?? e)}` }
     }
   }
 
-  const reviewAll = (lane: Lane, reviewers: ReviewerConfig[], name: string, subject: Subject, round: number): Promise<ReviewerRound[]> =>
+  const reviewAll = (lane: Lane, reviewers: ReviewerConfig[], name: string, subject: Subject, round: number, known: Known[] = []): Promise<ReviewerRound[]> =>
     Promise.all(
       reviewers.map(async reviewer => {
-        let r = await attempt(lane, reviewer, name, subject, round, 1)
+        let r = await attempt(lane, reviewer, name, subject, round, 1, known)
         if (!r.ran) {
           host.log(`${name} r${round} ${reviewer.name}: did not run - retrying once. ${r.note ?? ''}`)
-          r = await attempt(lane, reviewer, name, subject, round, 2)
+          r = await attempt(lane, reviewer, name, subject, round, 2, known)
         }
         return { reviewer, ...r, findings: attribute(reviewer, r.findings) }
       }),
@@ -884,6 +887,7 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
       runs?: CheckRun[]
       notes?: string[]
       prior?: EarlierRound[]
+      before?: Finding[]
       record?: { loop: NonNullable<EarlierRound['loop']>; into: EarlierRound[] }
     },
   ): Promise<PlanResult> => {
@@ -900,7 +904,8 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
     for (let round = 1; round <= config.maxRounds; round++) {
       const reviewedSha = config.trail && subject.kind !== 'plan' ? (known ?? (await trailHead(`head ${name} r${round}`, phase, lane.cwd))) : undefined
       known = undefined
-      const results = await reviewAll(lane, reviewers, name, subject, round)
+      const skip = subject.kind === 'diff' ? [...declinedKnown(earlier), ...[...(opts.before ?? []), ...kept()].map(f => knownOf(f))] : []
+      const results = await reviewAll(lane, reviewers, name, subject, round, skip)
       const reviewed = results.filter(r => r.ran).flatMap(r => r.findings)
       const roots = [lane.cwd, lane.repo, ...(lane.p.others ?? [])]
       const aside = subject.kind === 'diff' ? reviewed.filter(f => isPrBody(f.file, config.workDir, roots)) : []
@@ -1533,7 +1538,9 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
     const prior = [...s.ledger].sort(([a], [b]) => a - b).flatMap(([, rounds]) => rounds)
     const loop = s.lane.repo === primary ? 'final' : `final-${slug(baseName(s.lane.repo))}`
     const head = reusedHead.get(s)
-    const looped = await reviewLoop(s.lane, name, { kind: 'diff', base: s.lane.base, note: WHOLE_BRANCH_NOTE }, undefined, { loop, ...(head ? { head } : {}), checks, runs, notes, prior })
+    const left = (r: StageResult | undefined): Finding[] => [...(r?.residual ?? []), ...(r?.outcome === 'round-cap' ? r.unresolved.filter(f => f.decision?.action === 'residual') : [])]
+    const before = specs.flatMap((st, i) => (repoOf(st) === s.lane.repo ? left(results[i]) : [])).filter(f => f.decision?.rule !== 4)
+    const looped = await reviewLoop(s.lane, name, { kind: 'diff', base: s.lane.base, note: WHOLE_BRANCH_NOTE }, undefined, { loop, ...(head ? { head } : {}), checks, runs, notes, prior, before })
     const note = [looped.note, ...notes].filter(Boolean).join('\n')
     const r = note ? { ...looped, note } : looped
     if (r.outcome === 'checks-failed') host.log(`${name} ended checks-failed - the final check still runs, but the branch is not PR-ready`)
