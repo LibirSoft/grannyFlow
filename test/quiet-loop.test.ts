@@ -185,3 +185,53 @@ describe('not-code findings', () => {
     expect(text).toContain("a missing part of this stage's task is in-scope and major; what the task or a rule asks of comments, commits, the pull request description or the way of working is not-code.")
   })
 })
+
+describe('a repeat of a kept finding', () => {
+  const kept = f0('reviewer-F2', { verdict: 'confirmed', impact: 'minor', likelihood: 'common', fixCost: 'trivial', scope: 'in-scope', evidence: 'src/a.ts:3 - x', priority: 50, decision: { rule: 8, action: 'residual', why: 'under the bar: minor/common/trivial -> 50' } })
+  const repeat = (entry: Record<string, unknown>, earlier: Finding = kept, severity = 'P2') => decide(f0('reviewer-F1', { severity, repeatOf: 'r3/reviewer-F2' }), entry, POLICY, () => false, () => earlier)
+
+  it('takes the kept classes when the judge rates it higher, and is not ratcheted', () => {
+    const d = repeat(judged('moderate', 'edge', 'small'))
+    expect(d).toMatchObject({ impact: 'minor', likelihood: 'common', fixCost: 'trivial', priority: 50 })
+    expect(d.decision).toEqual({ rule: 8, action: 'residual', why: 'under the bar: minor/common/trivial -> 50', held: 'repeat of r3/reviewer-F2: moderate/edge/small -> minor/common/trivial' })
+    expect(repeat(judged('major', 'edge', 'small')).decision).toMatchObject({ rule: 8, action: 'residual', held: 'repeat of r3/reviewer-F2: major/edge/small -> minor/common/trivial' })
+  })
+
+  it('takes them too when the impact is worse and the priority lower, and keeps a lower rating as judged', () => {
+    const big: Finding = { ...kept, impact: 'moderate', likelihood: 'common', fixCost: 'large', priority: 60, decision: { rule: 8, action: 'residual', why: 'x' } }
+    expect(repeat(judged('major', 'rare', 'large'), big)).toMatchObject({ impact: 'moderate', priority: 60, decision: { rule: 8, held: 'repeat of r3/reviewer-F2: major/rare/large -> moderate/common/large' } })
+    const lower = repeat(judged('minor', 'rare', 'trivial'))
+    expect([lower.impact, lower.likelihood, lower.priority, lower.decision!.held, lower.decision!.raised]).toEqual(['minor', 'rare', 30, undefined, undefined])
+  })
+
+  it('is decided by the normal rules, with no hold and no ratchet, when the judge now rates it critical', () => {
+    const critical = repeat(judged('critical', 'rare', 'small'))
+    expect(critical).toMatchObject({ impact: 'critical', likelihood: 'rare', priority: 90 })
+    expect(critical.decision).toEqual({ rule: 6, action: 'fix', why: 'impact critical is in alwaysFix (critical/rare/small -> 90)' })
+    expect(decide(f0('reviewer-F1', { repeatOf: 'r3/reviewer-F2' }), judged('critical', 'rare', 'large'), { threshold: 80, alwaysFix: [] }, () => false, () => kept).decision).toEqual({ rule: 8, action: 'residual', why: 'under the bar: critical/rare/large -> 75' })
+    const unverified = repeat(judged('critical', 'edge', 'small', { evidence: 'no place given' }))
+    expect(unverified).toMatchObject({ verdict: 'unverified', impact: 'minor', decision: { rule: 8, held: 'repeat of r3/reviewer-F2: major/edge/small -> minor/common/trivial' } })
+    const notCode = decide(f0('reviewer-F2'), judged('moderate', 'edge', 'small', { scope: 'not-code' }), POLICY)
+    expect(repeat(judged('critical', 'edge', 'small'), notCode).decision).toEqual({ rule: 6, action: 'fix', why: 'impact critical is in alwaysFix (critical/edge/small -> 95)' })
+    expect(repeat({ ...judged('critical', 'edge', 'small'), scope: 'not-code' }, notCode).decision).toMatchObject({ rule: 11, action: 'residual' })
+  })
+
+  it('gets no config tag, and a P0/P1 that skipped the judge is still fixed', () => {
+    const typo = repeat({ ...judged('minor', 'common', 'trivial'), tag: 'typo' })
+    expect([typo.priority, typo.tag, typo.decision!.rule]).toEqual([50, undefined, 8])
+    expect(repeat({ ...judged('minor', 'edge', 'trivial'), tag: 'naming' })).toMatchObject({ priority: 40, decision: { rule: 8 } })
+    expect(repeat(judged('moderate', 'edge', 'small'), kept, 'P1').decision).toMatchObject({ rule: 1, action: 'fix' })
+  })
+
+  it('stays a not-code finding when the kept one was', () => {
+    const notCode = decide(f0('reviewer-F2'), judged('moderate', 'edge', 'small', { scope: 'not-code' }), POLICY)
+    expect(repeat(judged('moderate', 'edge', 'trivial'), notCode)).toMatchObject({ scope: 'not-code', decision: { rule: 11, action: 'residual', held: 'repeat of r3/reviewer-F2: scope in-scope -> not-code, moderate/edge/trivial -> moderate/edge/small' } })
+  })
+
+  it('leaves the ratchet on a repeat of a finding that was sent', () => {
+    const sent: Finding = { ...kept, impact: 'moderate', likelihood: 'edge', fixCost: 'small', priority: 55, decision: { rule: 9, action: 'fix', why: 'x' } }
+    const d = repeat(judged('minor', 'common', 'trivial'), sent)
+    expect(d).toMatchObject({ impact: 'moderate', likelihood: 'common', decision: { raised: 'repeat of r3/reviewer-F2: impact minor -> moderate' } })
+    expect(d.decision!.held).toBeUndefined()
+  })
+})

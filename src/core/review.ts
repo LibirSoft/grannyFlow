@@ -1,5 +1,5 @@
 import { FIX_COSTS, IMPACTS, LIKELIHOODS, SCOPES, VERDICTS } from './types'
-import type { Decision, Declined, Finding, FixCost, Impact, Likelihood } from './types'
+import type { Decision, Declined, Finding, FixCost, Impact, Likelihood, Scope } from './types'
 import type { TagConfig } from './config'
 
 const MARKER = /^\s*[-*]\s*\[(P[0-3]|[A-Za-z]+)\](.*)$/
@@ -248,6 +248,24 @@ function ratchet(fields: { verdict: string; impact: Impact; likelihood: Likeliho
   return raised.length ? `repeat of ${label}: ${raised.join(', ')}` : undefined
 }
 
+export const isKept = (earlier: Finding | undefined): boolean => earlier?.decision?.rule === 8 || earlier?.decision?.rule === 11
+
+function hold(fields: { impact: Impact; likelihood: Likelihood; fixCost: FixCost; scope: Scope }, label: string, earlier: Finding): string | undefined {
+  const held: string[] = []
+  if (earlier.decision?.rule === 11 && fields.scope !== 'not-code') {
+    held.push(`scope ${fields.scope} -> not-code`)
+    fields.scope = 'not-code'
+  }
+  if (earlier.impact && earlier.likelihood && earlier.fixCost) {
+    const worse = IMPACTS.indexOf(fields.impact) < IMPACTS.indexOf(earlier.impact)
+    if (worse || priorityOf(fields.impact, fields.likelihood, fields.fixCost) > priorityOf(earlier.impact, earlier.likelihood, earlier.fixCost)) {
+      held.push(`${fields.impact}/${fields.likelihood}/${fields.fixCost} -> ${earlier.impact}/${earlier.likelihood}/${earlier.fixCost}`)
+      Object.assign(fields, { impact: earlier.impact, likelihood: earlier.likelihood, fixCost: earlier.fixCost })
+    }
+  }
+  return held.length ? `repeat of ${label}: ${held.join(', ')}` : undefined
+}
+
 export function namedTag(entry: Record<string, unknown> | undefined): string | undefined {
   if (typeof entry?.tag !== 'string') return undefined
   const name = entry.tag.trim().toLowerCase()
@@ -259,7 +277,7 @@ export const knownTag = (tags: Record<string, TagConfig> | undefined, name: stri
 /**
  * Applies the judge's entry for a finding (undefined when the judge did not judge it) and the decision table: the first
  * matching rule wins.
- * earlierOf finds the ledger entry a repeat names, for the ratchet.
+ * earlierOf finds the ledger entry a repeat names, for the ratchet and the hold.
  */
 export function decide(
   f: Finding,
@@ -273,13 +291,17 @@ export function decide(
   if (typeof entry?.reason === 'string') out.reason = entry.reason
   const c = classify(entry)
   let raised: string | undefined
+  let held: string | undefined
+  let kept = false
   const done = (rule: number, action: Decision['action'], why: string, attention?: boolean): Finding => ({
     ...out,
-    decision: { rule, action, why, ...(attention ? { attention: true as const } : {}), ...(raised ? { raised } : {}) },
+    decision: { rule, action, why, ...(attention ? { attention: true as const } : {}), ...(raised ? { raised } : {}), ...(held ? { held } : {}) },
   })
   if (c.kind === 'classified') {
     const earlier = f.repeatOf === undefined ? undefined : earlierOf(f)
-    if (earlier) raised = ratchet(c.fields, f.repeatOf!, earlier)
+    kept = isKept(earlier) && c.fields.impact !== 'critical'
+    if (earlier && kept) held = hold(c.fields, f.repeatOf!, earlier)
+    else if (earlier && !isKept(earlier)) raised = ratchet(c.fields, f.repeatOf!, earlier)
     Object.assign(out, c.fields)
     out.priority = priorityOf(c.fields.impact, c.fields.likelihood, c.fields.fixCost)
   }
@@ -295,7 +317,7 @@ export function decide(
   }
   if (scope === 'not-code') return done(11, 'residual', 'not about the code or what it does')
   const name = namedTag(entry)
-  const tagged = name !== undefined && knownTag(policy.tags, name) && verdict === 'confirmed' && impact !== 'none' && !repeatsDeclined(out) ? name : undefined
+  const tagged = name !== undefined && knownTag(policy.tags, name) && verdict === 'confirmed' && impact !== 'none' && !repeatsDeclined(out) && !kept ? name : undefined
   const tag = tagged === undefined ? undefined : policy.tags![tagged]
   const base = out.priority!
   if (tagged !== undefined) out.tag = tagged

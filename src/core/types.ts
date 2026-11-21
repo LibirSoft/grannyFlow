@@ -22,6 +22,7 @@ export interface Decision {
   attention?: true
   /** What the ratchet raised on a repeat whose classes dropped below the earlier entry's. */
   raised?: string
+  held?: string
 }
 
 export type ResultKind = 'draft' | 'implementation' | 'planFix' | 'findings' | 'judge' | 'command' | 'final'

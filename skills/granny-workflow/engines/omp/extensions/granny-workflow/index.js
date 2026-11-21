@@ -691,6 +691,22 @@ function ratchet(fields, label, earlier) {
   }
   return raised.length ? `repeat of ${label}: ${raised.join(", ")}` : undefined;
 }
+var isKept = (earlier) => earlier?.decision?.rule === 8 || earlier?.decision?.rule === 11;
+function hold(fields, label, earlier) {
+  const held = [];
+  if (earlier.decision?.rule === 11 && fields.scope !== "not-code") {
+    held.push(`scope ${fields.scope} -> not-code`);
+    fields.scope = "not-code";
+  }
+  if (earlier.impact && earlier.likelihood && earlier.fixCost) {
+    const worse = IMPACTS.indexOf(fields.impact) < IMPACTS.indexOf(earlier.impact);
+    if (worse || priorityOf(fields.impact, fields.likelihood, fields.fixCost) > priorityOf(earlier.impact, earlier.likelihood, earlier.fixCost)) {
+      held.push(`${fields.impact}/${fields.likelihood}/${fields.fixCost} -> ${earlier.impact}/${earlier.likelihood}/${earlier.fixCost}`);
+      Object.assign(fields, { impact: earlier.impact, likelihood: earlier.likelihood, fixCost: earlier.fixCost });
+    }
+  }
+  return held.length ? `repeat of ${label}: ${held.join(", ")}` : undefined;
+}
 function namedTag(entry) {
   if (typeof entry?.tag !== "string")
     return;
@@ -708,13 +724,18 @@ function decide(f, entry, policy, repeatsDeclined = () => false, earlierOf = () 
     out.reason = entry.reason;
   const c = classify(entry);
   let raised;
+  let held;
+  let kept = false;
   const done = (rule, action, why, attention) => ({
     ...out,
-    decision: { rule, action, why, ...attention ? { attention: true } : {}, ...raised ? { raised } : {} }
+    decision: { rule, action, why, ...attention ? { attention: true } : {}, ...raised ? { raised } : {}, ...held ? { held } : {} }
   });
   if (c.kind === "classified") {
     const earlier = f.repeatOf === undefined ? undefined : earlierOf(f);
-    if (earlier)
+    kept = isKept(earlier) && c.fields.impact !== "critical";
+    if (earlier && kept)
+      held = hold(c.fields, f.repeatOf, earlier);
+    else if (earlier && !isKept(earlier))
       raised = ratchet(c.fields, f.repeatOf, earlier);
     Object.assign(out, c.fields);
     out.priority = priorityOf(c.fields.impact, c.fields.likelihood, c.fields.fixCost);
@@ -736,7 +757,7 @@ function decide(f, entry, policy, repeatsDeclined = () => false, earlierOf = () 
   if (scope === "not-code")
     return done(11, "residual", "not about the code or what it does");
   const name = namedTag(entry);
-  const tagged = name !== undefined && knownTag(policy.tags, name) && verdict === "confirmed" && impact !== "none" && !repeatsDeclined(out) ? name : undefined;
+  const tagged = name !== undefined && knownTag(policy.tags, name) && verdict === "confirmed" && impact !== "none" && !repeatsDeclined(out) && !kept ? name : undefined;
   const tag = tagged === undefined ? undefined : policy.tags[tagged];
   const base = out.priority;
   if (tagged !== undefined)
