@@ -713,4 +713,18 @@ describe('skill docs', () => {
     expect(triage).toContain('do not hold a P0/P1 that rule 1 sends, or a repeat scoped `pre-existing` or `other-stage`')
     expect(readRoot('CHANGELOG.md').split('\n## ')[1]!).toContain('a P0/P1 that rule 1 sends, judged or not')
   })
+
+  it('documents what a reviewer is told to leave out, and the known findings it is given', () => {
+    const config = read('references/config.md')
+    const left = config.split('### What a reviewer is told to leave out')[1]!.split('\n### ')[0]!
+    expect(left).toContain('Do not report them again')
+    expect(left).toContain('report one the fixer declined only when its reason is wrong')
+    expect(left).toContain('At most the last 40 are listed')
+    expect(left).toContain('get no prompt from granny')
+    expect(config.split('## Final review')[1]!.split('\n## ')[0]).toContain('(#what-a-reviewer-is-told-to-leave-out)')
+    expect(read('references/cursor.md')).toContain('"Reviewer - agent engine, from round 2 on" prompt')
+    expect(read('references/prompts.md')).toContain('## Reviewer - agent engine, from round 2 on')
+    expect(readRoot('README.md')).toContain('handed to the reviewers of the next round')
+    expect(readRoot('CHANGELOG.md').split('\n## ')[1]!).toContain('Reviewers are told what to leave out')
+  })
 })
