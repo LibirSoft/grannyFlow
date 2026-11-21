@@ -1170,7 +1170,7 @@ var short = (text) => String(text ?? "").replace(/\s+/g, " ").trim().slice(0, KN
 var knownOf = (f, declined) => ({ file: f.file, ...Number.isInteger(f.line) ? { line: f.line } : {}, title: f.title, ...declined === undefined ? {} : { declined } });
 function declinedKnown(earlier) {
   const within = (e, label) => e.loop ? `${e.loop.id}/${label}` : label;
-  const repeated = new Set(earlier.flatMap((e) => [...e.sent, ...e.residual ?? []].flatMap((f) => f.repeatOf === undefined ? [] : [within(e, f.repeatOf)])));
+  const repeated = new Set(earlier.flatMap((e) => [...[...e.sent, ...e.residual ?? []].flatMap((f) => f.repeatOf === undefined ? [] : [f.repeatOf]), ...e.repeats ?? []].map((label) => within(e, label))));
   return earlier.flatMap((e) => (e.declined ?? []).flatMap((d) => {
     const f = e.sent.find((s) => s.id === d.id);
     return f && !repeated.has(roundLabel(e.round, d, e.loop)) ? [knownOf(f, d.reason || "no reason given")] : [];
@@ -2543,7 +2543,7 @@ async function runGranny(host, input) {
   const repoState = new Map(used.map((r) => {
     const cwd = cwdOf.get(r);
     const others = used.filter((o) => o !== r).map((o) => cwdOf.get(o));
-    return [r, { lane: { repo: r, base: baseOf(r), branch: input.branch, cwd, p: promptFor(r, cwd, input.branch, others), readable }, locked: false, waiters: [], setup: Promise.resolve(), merges: 0, ledger: new Map }];
+    return [r, { lane: { repo: r, base: baseOf(r), branch: input.branch, cwd, p: promptFor(r, cwd, input.branch, others), readable }, locked: false, waiters: [], setup: Promise.resolve(), merges: 0, ledger: new Map, left: new Map }];
   }));
   const primaryLane = repoState.get(primary).lane;
   const implement = async (lane, label, prompt) => {
@@ -2724,10 +2724,11 @@ the last repair's deviations: ${deviations}` : ""}`;
     let unmerged = [];
     let carried = [];
     const kept = () => carried.map((c) => c.finding);
+    let staged = opts.before ?? [];
     for (let round = 1;round <= config.maxRounds; round++) {
       const reviewedSha = config.trail && subject.kind !== "plan" ? known ?? await trailHead(`head ${name} r${round}`, phase, lane.cwd) : undefined;
       known = undefined;
-      const skip = subject.kind === "diff" ? [...declinedKnown(earlier), ...[...opts.before ?? [], ...kept()].map((f) => knownOf(f))] : [];
+      const skip = subject.kind === "diff" ? [...declinedKnown(earlier), ...[...staged.map((b) => b.finding), ...kept()].map((f) => knownOf(f))] : [];
       const results = await reviewAll(lane, reviewers, name, subject, round, skip);
       const reviewed = results.filter((r) => r.ran).flatMap((r) => r.findings);
       const roots = [lane.cwd, lane.repo, ...lane.p.others ?? []];
@@ -2858,9 +2859,10 @@ the last repair's deviations: ${deviations}` : ""}`;
       history.push({ round, findings });
       host.log(`${name} r${round}: ${findings.length} finding(s)`);
       const { accepted, residual } = triage(findings);
+      const repeated = new Set(unmerged.flatMap((f) => f.repeatOf ? [f.repeatOf] : []));
       const routed = { findings, sent: accepted, blockers: unjudgedBlockers };
       host.round?.({ subject: name, round, findings: findings.map((f) => roundFinding(f, accepted.includes(f))) });
-      const entry = { round, sent: accepted, ...residual.length ? { residual } : {} };
+      const entry = { round, sent: accepted, ...residual.length ? { residual } : {}, ...repeated.size ? { repeats: [...repeated] } : {} };
       const recorded = record ? { ...entry, loop: record.loop } : undefined;
       if (recorded)
         record.into.push(recorded);
@@ -2874,16 +2876,18 @@ the last repair's deviations: ${deviations}` : ""}`;
       for (const f of residual.filter(declinedBefore)) {
         host.log(`${name} r${round}: ${f.id} dropped as a repeat of ${declinedLabel(f)}, which the fixer declined (${ruled(f)}) - kept as residual`);
       }
-      const repeated = new Set(unmerged.flatMap((f) => f.repeatOf ? [f.repeatOf] : []));
       const repeatsOf = (f) => new Set(unmerged.filter((u) => u.id === f.id || f.duplicates?.includes(u.id)).flatMap((u) => u.repeatOf ? [u.repeatOf] : []));
       const aliases = (f) => {
         const of = repeatsOf(f);
-        return carried.filter((c) => c.labels.some((l) => of.has(l))).flatMap((c) => c.labels);
+        return [...carried, ...staged].filter((c) => c.labels.some((l) => of.has(l))).flatMap((c) => c.labels);
       };
       carried = [
         ...carried.filter((c) => !c.labels.some((l) => repeated.has(l))),
         ...residual.map((f) => ({ round, labels: [roundLabel(round, f), ...aliases(f)], finding: f }))
       ];
+      staged = staged.filter((b) => !b.labels.some((l) => repeated.has(l)));
+      if (record)
+        record.left.splice(0, record.left.length, ...carried.map((c) => ({ labels: c.labels.map((l) => `${record.loop.id}/${l}`), finding: c.finding })));
       if (residual.length) {
         host.log(`${name} r${round}: ${residual.length} finding(s) kept as residual, not sent: ${residual.map((f) => `${f.id} (${ruled(f)})`).join(", ")}`);
         for (const f of residual.filter((f) => f.decision.attention))
@@ -3004,6 +3008,12 @@ the last repair's deviations: ${deviations}` : ""}`;
     else
       s.locked = false;
   };
+  const leftOf = (st, i) => {
+    const left = repoState.get(repoOf(st)).left;
+    if (!left.has(i))
+      left.set(i, []);
+    return left.get(i);
+  };
   const ledgerOf = (st, i) => {
     const ledger = repoState.get(repoOf(st)).ledger;
     if (!ledger.has(i))
@@ -3116,7 +3126,7 @@ the last repair's deviations: ${deviations}` : ""}`;
       host.log(`${name}: review-only stage - reviewing ${lane.base}...HEAD`);
     }
     host.phase("Review");
-    const loop = st.review === false ? { outcome: "review-skipped", rounds: 0, residual: [], unresolved: [], history: [] } : await reviewLoop(lane, name, { kind: "diff", base, ...task ? { stage: task } : {} }, undefined, { loop: `s${i + 1}`, gates, checks, runs, notes, record: { loop: { id: `s${i + 1}`, name: `Stage ${i + 1} (${name})` }, into: ledgerOf(st, i) } });
+    const loop = st.review === false ? { outcome: "review-skipped", rounds: 0, residual: [], unresolved: [], history: [] } : await reviewLoop(lane, name, { kind: "diff", base, ...task ? { stage: task } : {} }, undefined, { loop: `s${i + 1}`, gates, checks, runs, notes, record: { loop: { id: `s${i + 1}`, name: `Stage ${i + 1} (${name})` }, into: ledgerOf(st, i), left: leftOf(st, i) } });
     if (gates && !gates.green && !runs.length && (loop.outcome === "clean" || loop.outcome === "residual-only")) {
       loop.outcome = "gates-red";
       loop.note = `the review found nothing to fix, but ${gates.by} left the gates red: ${gates.text}`;
@@ -3372,8 +3382,7 @@ ${note}` : note } : result;
     const prior = [...s.ledger].sort(([a], [b]) => a - b).flatMap(([, rounds]) => rounds);
     const loop = s.lane.repo === primary ? "final" : `final-${slug(baseName(s.lane.repo))}`;
     const head = reusedHead.get(s);
-    const left = (r) => [...r?.residual ?? [], ...r?.outcome === "round-cap" ? r.unresolved.filter((f) => f.decision?.action === "residual") : []];
-    const before = specs.flatMap((st, i) => repoOf(st) === s.lane.repo ? left(results[i]) : []).filter((f) => f.decision?.rule !== 4);
+    const before = [...s.left].sort(([a], [b]) => a - b).flatMap(([, left]) => left).filter((b) => b.finding.decision?.rule !== 4);
     const looped = await reviewLoop(s.lane, name, { kind: "diff", base: s.lane.base, note: WHOLE_BRANCH_NOTE }, undefined, { loop, ...head ? { head } : {}, checks, runs, notes, prior, before });
     const note = [looped.note, ...notes].filter(Boolean).join(`
 `);

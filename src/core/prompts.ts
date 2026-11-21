@@ -11,6 +11,7 @@ export interface EarlierRound {
   deviations?: string
   declined?: Declined[]
   loop?: { id: string; name: string }
+  repeats?: string[]
 }
 
 export interface Overruled {
@@ -488,7 +489,7 @@ export const knownOf = (f: Finding, declined?: string): Known => ({ file: f.file
 
 export function declinedKnown(earlier: EarlierRound[]): Known[] {
   const within = (e: EarlierRound, label: string) => (e.loop ? `${e.loop.id}/${label}` : label)
-  const repeated = new Set(earlier.flatMap(e => [...e.sent, ...(e.residual ?? [])].flatMap(f => (f.repeatOf === undefined ? [] : [within(e, f.repeatOf)]))))
+  const repeated = new Set(earlier.flatMap(e => [...[...e.sent, ...(e.residual ?? [])].flatMap(f => (f.repeatOf === undefined ? [] : [f.repeatOf])), ...(e.repeats ?? [])].map(label => within(e, label))))
   return earlier.flatMap(e =>
     (e.declined ?? []).flatMap(d => {
       const f = e.sent.find(s => s.id === d.id)

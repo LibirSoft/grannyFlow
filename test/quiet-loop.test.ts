@@ -565,6 +565,7 @@ describe('what a reviewer is told to leave out', () => {
     expect(declinedKnown(earlier)).toEqual([{ file: 'src/a.ts', line: 3, title: 'Phantom', declined: 'no' }])
     expect(declinedKnown([...earlier, { round: 2, sent: [f0('codex-F4', { repeatOf: 'r1/codex-F1' })] }])).toEqual([])
     expect(declinedKnown([...earlier, { round: 2, sent: [f0('codex-F4')], residual: [f0('codex-F5', { repeatOf: 'r1/codex-F1' })] }])).toEqual([])
+    expect(declinedKnown([...earlier, { round: 2, sent: [f0('codex-F4')], repeats: ['r1/codex-F1'] }])).toEqual([])
     expect(declinedKnown([{ round: 1, sent: [f0('codex-F1')], declined: [{ id: 'codex-F1', reason: '' }] }])[0]!.declined).toBe('no reason given')
   })
 
@@ -655,5 +656,56 @@ describe('what a reviewer is told to leave out', () => {
     expect(r.stages[0]).toMatchObject({ outcome: 'round-cap', residual: [] })
     expect(r.stages[0]!.unresolved.map(x => [x.id, x.decision?.action])).toEqual([['opus-F1', 'fix'], ['opus-F2', 'residual']])
     expect(prompt(f.calls, 'review final review r1 opus').split('\n').slice(-2)).toEqual([INTRO, '- src/m.rs:19 - Long doc line'])
+  })
+
+  it('takes a stage residual off the final review list once a final round sends its repeat back', async () => {
+    const f = fakeHost({
+      scores: [{ 'opus-F1': judged('minor', 'common', 'trivial') }, { 'opus-F1': judged('critical', 'edge', 'small', { repeatOf: 's1/r1/opus-F1' }) }],
+      override: req => {
+        if (req.label === 'review one r1 opus') return found(['P3', 'Long doc line', 'src/m.rs', 19])
+        if (req.label === 'review final review r1 opus') return found(['P2', 'Long doc line breaks the parser', 'src/m.rs', 19])
+        return undefined
+      },
+    })
+    const r = await runGranny(f.host, input(TWO_STAGES))
+    expect(r.finalReview).toMatchObject({ outcome: 'clean', rounds: 2 })
+    expect(prompt(f.calls, 'review final review r1 opus').split('\n').slice(-2)).toEqual([INTRO, '- src/m.rs:19 - Long doc line'])
+    expect(prompt(f.calls, 'review final review r2 opus')).not.toContain('Earlier review rounds')
+  })
+
+  it("gives the final review the residual of a stage whose review failed in a later round", async () => {
+    const f = fakeHost({
+      scores: [{ 'opus-F1': judged('major', 'edge', 'small'), 'opus-F2': judged('minor', 'common', 'trivial') }],
+      override: req => {
+        if (req.label === 'review one r1 opus') return found(['P2', 'Late save', 'src/a.ts', 3], ['P3', 'Long doc line', 'src/m.rs', 19])
+        if (req.label.startsWith('review one r2 opus')) return null
+        return undefined
+      },
+    })
+    const r = await runGranny(f.host, input(TWO_STAGES))
+    expect(r.stages[0]).toMatchObject({ outcome: 'review-failed', rounds: 2, residual: [] })
+    expect(prompt(f.calls, 'review final review r1 opus').split('\n').slice(-2)).toEqual([INTRO, '- src/m.rs:19 - Long doc line'])
+  })
+
+  it('counts a repeat of a declined finding that the judge merged into another finding as a repeat', async () => {
+    const decline = declining('fix core r1')
+    const f = fakeHost({
+      scores: [
+        { 'opus-F1': judged('major', 'edge', 'small') },
+        { 'opus-F1': judged('major', 'edge', 'small'), 'opus-F2': judged('major', 'edge', 'small', { repeatOf: 'r1/opus-F1', duplicateOf: 'opus-F1' }) },
+      ],
+      override: req => {
+        const declined = decline(req)
+        if (declined) return declined
+        if (req.label === 'review core r1 opus') return found(['P2', 'Phantom crash', 'src/a.ts', 3])
+        if (req.label === 'review core r2 opus') return found(['P2', 'Crash on empty input', 'src/a.ts', 3], ['P2', 'Phantom crash', 'src/a.ts', 3])
+        return undefined
+      },
+    })
+    const r = await runGranny(f.host, input())
+    expect(r.stages[0]).toMatchObject({ outcome: 'clean', rounds: 3 })
+    expect(r.stages[0]!.history[1]!.findings.map(x => [x.id, x.duplicates, x.decision?.action])).toEqual([['opus-F1', ['opus-F2'], 'fix']])
+    expect(prompt(f.calls, 'review core r2 opus')).toContain('the fixer declined it')
+    expect(prompt(f.calls, 'review core r3 opus')).not.toContain('Earlier review rounds')
   })
 })
