@@ -501,6 +501,8 @@ A repeat of an entry that was kept residual under the bar (rule 8) or as a not-c
 
 There is one exception: a repeat the judge rates `critical`. It is decided by the rules as a first report would be, with no hold and no ratchet, so a kept finding that turns out to be critical is still fixed. The engine reads the impact after the normalization, so an unverified `critical`, which is lowered to `major`, is held; and it reads the impact, not `alwaysFix`. A repeat rated `major` is held: it stays in `residual` for you to read. Two more things are not held: a P0/P1 that skips the judge (rule 1; it has no `repeatOf`), and a finding the judge does not mark as a repeat - its prompt says that a finding which reports another problem at the same place, or a problem a later commit made worse, is not a repeat.
 
+The hold also leaves alone a P0/P1 that rule 1 sends, judged or not: it goes to the implementer with the classes the judge gave, and the ledger keeps them as the floor for its next repeat. And it leaves alone a repeat the judge scopes `pre-existing` or `other-stage`: rules 5 and 4 keep it residual with the classes the judge gave, so rule 5 still flags a `critical` or `major` one ATTENTION. When a later round repeated the kept entry a repeat names, the engine reads the newest finding of that chain instead, so a repeat of a kept finding whose later repeat was sent gets the ratchet, not the hold.
+
 Residual findings still add up per loop: a final-review repeat of a stage's residual finding does not remove it from that stage's `residual`.
 
 ### The judge's model

@@ -695,4 +695,17 @@ describe('skill docs', () => {
     expect(read('references/prompts.md')).toContain('`(held: <what>)`')
     expect(readRoot('CHANGELOG.md').split('\n## ')[1]!).toContain('is held, not ratcheted')
   })
+
+  it('documents what the hold leaves alone and that a merged copy of a kept repeat is held on Cursor too', () => {
+    const ledger = read('references/config.md').split('### The decision ledger and the ratchet')[1]!.split('\n### ')[0]!
+    expect(ledger).toContain('a P0/P1 that rule 1 sends, judged or not')
+    expect(ledger).toContain('a repeat the judge scopes `pre-existing` or `other-stage`')
+    expect(ledger).toContain('the newest finding of that chain')
+    const cursor = read('references/cursor.md')
+    const judge = cursor.slice(cursor.indexOf('4. **Judge**'), cursor.indexOf('5. **Triage**'))
+    expect(judge).toContain("give every copy of its group that names no `repeatOf` that repeat's `repeatOf`")
+    const triage = cursor.slice(cursor.indexOf('5. **Triage**'), cursor.indexOf('take the first rule that matches'))
+    expect(triage).toContain('do not hold a P0/P1 that rule 1 sends, or a repeat scoped `pre-existing` or `other-stage`')
+    expect(readRoot('CHANGELOG.md').split('\n## ')[1]!).toContain('a P0/P1 that rule 1 sends, judged or not')
+  })
 })
