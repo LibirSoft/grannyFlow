@@ -7,9 +7,10 @@ import { buildClaudeCode } from '../scripts/build'
 import { GrannyCancelled } from '../src/core/cancel'
 import { judgeConfigGaps } from '../src/core/config'
 import { runGranny, runJudge, type JudgeInput } from '../src/core/engine'
+import { opencodeAgentConfig } from '../src/core/opencode'
 import { bucketOf, renderReport, utf8Length, type ReportMeta } from '../src/core/report'
 import { SCHEMAS } from '../src/core/schemas'
-import { heredocWriteScript } from '../src/core/shell'
+import { heredocWriteScript, shellQuote } from '../src/core/shell'
 import type { AgentRequest, Finding, JudgeResult } from '../src/core/types'
 import { fakeHost, finding, review, type FakeOptions } from './fake-host'
 
@@ -536,6 +537,12 @@ describe('runJudge: an opencode reviewer', () => {
       if (!direct) expect(f.requests.filter(c => c.label.startsWith('review feat/x r1 kimi')).map(c => c.label)).toEqual(['review feat/x r1 kimi', 'review feat/x r1 kimi wait 1', 'review feat/x r1 kimi read', 'review feat/x r1 kimi save'])
     })
   }
+
+  it('opens a file the context names alone and a directory it names with a trailing slash whole', async () => {
+    const f = judgeHost({ reviews: command => (isRun(command) ? stream('No findings.') : '') })
+    await runJudge(f.host, { repo: REPO, context: 'Check it against /srv/specs/api.md and the orders in /srv/orders/ too', config: { ...KIMI, roles: { judge: { model: 'j' } } } })
+    expect(f.commands.find(isRun)).toContain(`OPENCODE_CONFIG_CONTENT=${shellQuote(opencodeAgentConfig(['/srv/orders'], ['/srv/specs/api.md']))} opencode run`)
+  })
 
   it('names opencode\'s error as the failed reviewer\'s note', async () => {
     const error = JSON.stringify({ type: 'error', error: { type: 'provider.no-route', message: 'Variant unavailable for kimi-code-plan-global/k3.1-pro: max' } })

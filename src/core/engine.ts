@@ -48,7 +48,7 @@ import {
   type StageTask,
   WHOLE_BRANCH_NOTE,
 } from './prompts'
-import { opencodeAnswer, readGrant } from './opencode'
+import { opencodeAnswer, readGrant, ungranted, type ReadGrant } from './opencode'
 import { bucketOf, countsOf, isDemoted, isJudged, renderReport, severityOf, utf8Length, type ReportMeta } from './report'
 import { decide, declinedOf, holds, isBlocker, isKept, isPrBody, keeperOf, knownTag, labelledComments, mergeDuplicates, namedTag, parseCodexReview, reviewFailure, rideAlong, saysNoFindings, triage, type Policy } from './review'
 import { detachedReview, MAX_WAITS, planReviewScript, reportedBackend, reviewerModel, reviewPlan, reviewStem, WAIT_SECONDS } from './reviewer'
@@ -465,17 +465,16 @@ function engineParts(host: Host, config: GrannyConfig) {
 
     const stem = reviewStem(config, slug(name), round, rv)
     const { text, files } = lane.readable
-    const { dirs, refused } =
-      rv.engine === 'opencode'
-        ? subject.kind === 'plan'
-          ? readGrant(text, [...files, ...subject.files], cwd, p.others ?? [])
-          : readGrant([text, subject.stage?.task ?? ''].join('\n'), files, cwd)
-        : { dirs: [], refused: [] }
+    const grant: ReadGrant =
+      rv.engine !== 'opencode' ? { dirs: [], files: [], refused: [] } : subject.kind === 'plan' ? readGrant(text, [...files, ...subject.files], cwd, p.others ?? []) : readGrant(text, files, cwd)
+    const { refused } = grant
     if (refused.length) host.log(`${tag}: opencode cannot read ${refused.join(', ')} - move ${refused.length > 1 ? 'them' : 'it'} under a project directory`)
+    const taskOnly = rv.engine === 'opencode' && subject.kind === 'diff' && subject.stage ? ungranted(subject.stage.task, cwd, grant) : []
+    if (taskOnly.length) host.log(`${tag}: opencode cannot read ${taskOnly.join(', ')} - name ${taskOnly.length > 1 ? 'them' : 'it'} in the run's context`)
     const plan =
       subject.kind === 'plan'
-        ? planReviewScript(rv, config, host.name, lane.base, stem, planReviewPrompt(p, subject.files), dirs)
-        : reviewPlan(rv, config, host.name, subject.base, stem, commandReviewPrompt(p, name, subject.base, subject.stage, subject.note, rv.engine === 'opencode', known), dirs)
+        ? planReviewScript(rv, config, host.name, lane.base, stem, planReviewPrompt(p, subject.files), grant.dirs, grant.files)
+        : reviewPlan(rv, config, host.name, subject.base, stem, commandReviewPrompt(p, name, subject.base, subject.stage, subject.note, rv.engine === 'opencode', known), grant.dirs, grant.files)
     if (!plan) return { ran: false, findings: [], note: 'this reviewer has no command for a plan review' }
     const failed = (out: string) => (rv.engine === 'opencode' ? opencodeAnswer(out).error : undefined) ?? out.slice(-2000)
     let ran: boolean

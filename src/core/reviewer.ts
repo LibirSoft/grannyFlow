@@ -76,11 +76,11 @@ function wrapper(c: GrannyConfig, stem: string): { wrap: Wrap; md: string; log: 
   return { wrap, md, log }
 }
 
-/** `opencode run` as a read-only reviewer, its output the JSON event stream decoded; `dirs` are the outside directories it may read. */
-function opencodePlan(rv: ReviewerConfig, c: GrannyConfig, host: HostName, stem: string, prompt: string, dirs: string[]): ReviewPlan {
+/** `opencode run` as a read-only reviewer, its output the JSON event stream decoded; `dirs` are the outside directories it may read whole, `files` the outside files. */
+function opencodePlan(rv: ReviewerConfig, c: GrannyConfig, host: HostName, stem: string, prompt: string, dirs: string[], files: string[]): ReviewPlan {
   const { wrap, log } = wrapper(c, stem)
   const model = opencodeModel(rv, host)
-  const run = `OPENCODE_DISABLE_PROJECT_CONFIG=1 OPENCODE_CONFIG_CONTENT=${shellQuote(opencodeAgentConfig(dirs))} opencode run --standalone --archived --format json --agent ${OPENCODE_AGENT} -m ${shellQuote(model)} ${shellQuote(prompt)} </dev/null`
+  const run = `OPENCODE_DISABLE_PROJECT_CONFIG=1 OPENCODE_CONFIG_CONTENT=${shellQuote(opencodeAgentConfig(dirs, files))} opencode run --standalone --archived --format json --agent ${OPENCODE_AGENT} -m ${shellQuote(model)} ${shellQuote(prompt)} </dev/null`
   return wrap(`{ echo ${shellQuote(`${SAID}opencode ${model} (read-only agent)`)}; ${run}; } > ${log} 2>&1`, undefined, `LC_ALL=C awk ${shellQuote(OPENCODE_DECODE)} ${log} || echo "${DECODER_FAILED}(awk exit $?) - the raw answer is in "${log}`)
 }
 
@@ -112,8 +112,8 @@ function script(rv: ReviewerConfig, c: GrannyConfig, host: HostName, stem: strin
   return wrap(`${find}; if [ -z "$companion_version" ]; then ${missing}; elif ! command -v node >/dev/null 2>&1; then ${noNode}; else ${plugin}; fi`)
 }
 
-export function reviewPlan(rv: ReviewerConfig, c: GrannyConfig, host: HostName, base: string, stem: string, prompt = '', dirs: string[] = []): ReviewPlan {
-  if (rv.engine === 'opencode') return opencodePlan(rv, c, host, stem, prompt, dirs)
+export function reviewPlan(rv: ReviewerConfig, c: GrannyConfig, host: HostName, base: string, stem: string, prompt = '', dirs: string[] = [], files: string[] = []): ReviewPlan {
+  if (rv.engine === 'opencode') return opencodePlan(rv, c, host, stem, prompt, dirs, files)
   const mode = rv.mode ?? 'review'
   return script(rv, c, host, stem, {
     cli: cliCommand(rv, host, base, `${stem}.md`, prompt),
@@ -124,9 +124,9 @@ export function reviewPlan(rv: ReviewerConfig, c: GrannyConfig, host: HostName, 
   })
 }
 
-export function planReviewScript(rv: ReviewerConfig, c: GrannyConfig, host: HostName, base: string, stem: string, prompt: string, dirs: string[] = []): ReviewPlan | undefined {
+export function planReviewScript(rv: ReviewerConfig, c: GrannyConfig, host: HostName, base: string, stem: string, prompt: string, dirs: string[] = [], files: string[] = []): ReviewPlan | undefined {
   if (rv.engine === 'agent' || (rv.engine === 'command' && !rv.command?.includes('{prompt}'))) return undefined
-  if (rv.engine === 'opencode') return opencodePlan(rv, c, host, stem, prompt, dirs)
+  if (rv.engine === 'opencode') return opencodePlan(rv, c, host, stem, prompt, dirs, files)
   const m = resolveModel(rv.model, host)
   const model = m ? ` -m ${shellQuote(m)}` : ''
   const cli =
