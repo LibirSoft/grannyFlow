@@ -22,6 +22,7 @@ const FINDING_KEYS = [
   'decision',
   'duplicates',
   'repeatOf',
+  'comment',
 ] as const satisfies ReadonlyArray<keyof Finding>
 
 /** What a review loop knows when one of its rounds ends. */
@@ -33,6 +34,7 @@ export interface RoundFacts {
   reviewedSha?: string
   reviewers: TrailReviewer[]
   findings: Finding[]
+  setAside?: Finding[]
   /** The findings sent to the fixer; absent when the round was never routed. */
   sent?: Finding[]
   blockers?: ReadonlySet<string>
@@ -81,6 +83,7 @@ export function trailRound(r: RoundFacts): TrailRound {
     ...(r.reviewedSha ? { reviewedSha: r.reviewedSha } : {}),
     reviewers: r.reviewers,
     findings: r.findings.map(f => trailFinding(f, r, sent)),
+    ...(r.setAside?.length ? { setAside: r.setAside.map(f => trailFinding(f, r, undefined)) } : {}),
     ...(r.fix ? { fix: trailFix(r.fix) } : {}),
     ...(r.outcome ? { outcome: r.outcome } : {}),
     ...(r.note ? { note: r.note } : {}),

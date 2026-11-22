@@ -89,7 +89,7 @@ The report groups the findings by that rating: `critical` under P0, `major` unde
 - **Implementer** - builds one stage, commits it, and later fixes the findings sent back to it.
 - **Checks** (optional) - your test, typecheck or lint commands. Granny runs them itself, and a red one goes back to the implementer before any review.
 - **Reviewers** - all of them review every stage at the same time.
-- **Judge** - P0/P1 findings skip it and go straight back. It rates the rest by impact, likelihood and fix cost, and code turns the rating into a priority. Critical and major issues are always fixed, the others when their priority is above the threshold. A finding the judge gives one of your config tags gets the tag's points on its priority, or is fixed outright. What is not fixed is listed for you, with the reason.
+- **Judge** - P0/P1 findings skip it and go straight back. It rates the rest by impact, likelihood and fix cost, and code turns the rating into a priority. Critical and major issues are always fixed, the others when their priority is above the threshold. A finding the judge gives one of your config tags gets the tag's points on its priority, or is fixed outright. What is not fixed is listed for you, with the reason. A finding has to be about the code or what the code does: one filed on the PR body is dropped, and so is one the judge labels as about a code comment, however it rates it; one about a commit or how the work was done (the order of tests) is listed for you instead of sent back. A finding that was left unfixed is handed to the reviewers of the next round, who are asked not to report it again; when it comes back anyway it is not rated higher than before, unless it is now critical.
 - **Final review** - after the last stage, the whole branch is reviewed once more for problems between stages.
 
 Stages that do not depend on each other run at the same time, also in other repos. The full rules: [the decision table](skills/granny-workflow/references/config.md#the-decision-table).
@@ -138,7 +138,7 @@ A reviewer is one of these:
 A config tag names a kind of small finding that should not be left behind. Say `granny tag` to your agent, or run the script yourself from your repo (with `--repo <dir>` from anywhere else):
 
 ```sh
-node <skill-dir>/scripts/tags.mjs add typo --fix --description "a misspelled word in a comment, a string or a doc"
+node <skill-dir>/scripts/tags.mjs add typo --fix --description "a misspelled word in a string or a doc"
 ```
 
 In the config file, with a second tag that adds 20 points to the priority instead:
@@ -146,7 +146,7 @@ In the config file, with a second tag that adds 20 points to the priority instea
 ```json
 {
   "tags": {
-    "typo": { "description": "a misspelled word in a comment, a string or a doc", "fix": true },
+    "typo": { "description": "a misspelled word in a string or a doc", "fix": true },
     "naming": { "description": "a name that says something other than what the code does", "points": 20 }
   }
 }

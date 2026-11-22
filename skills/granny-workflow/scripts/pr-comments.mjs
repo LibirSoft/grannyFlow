@@ -30,7 +30,7 @@ var IMPACTS = ["critical", "major", "moderate", "minor", "none"];
 var VERDICTS = ["confirmed", "refuted", "unverified"];
 var LIKELIHOODS = ["common", "edge", "rare"];
 var FIX_COSTS = ["trivial", "small", "large"];
-var SCOPES = ["in-scope", "pre-existing", "other-stage"];
+var SCOPES = ["in-scope", "pre-existing", "other-stage", "not-code"];
 
 // src/core/config.ts
 var DEFAULT_CONFIG = {
@@ -618,7 +618,7 @@ ${marker}`;
 function judgeLine(f) {
   const tags = f.impact === undefined ? code("not judged") : [[f.verdict, f.impact, f.likelihood, f.fixCost, f.scope].filter(Boolean).map((t) => code(String(t))).join(" "), `priority ${f.priority ?? "?"}`, ...typeof f.tag === "string" ? [`tag ${code(f.tag)}`] : []].join(" · ");
   const d = f.decision;
-  const rule = d ? ` · rule ${d.rule} → ${d.action}: ${agentLine(d.why)}${d.raised ? ` (ratchet raised ${agentLine(d.raised)})` : ""}` : "";
+  const rule = d ? ` · rule ${d.rule} → ${d.action}: ${agentLine(d.why)}${d.raised ? ` (ratchet raised ${agentLine(d.raised)})` : ""}${d.held ? ` (held: ${agentLine(d.held)})` : ""}` : "";
   return `**Judge:** ${tags}${rule}`;
 }
 function fixRange(r) {

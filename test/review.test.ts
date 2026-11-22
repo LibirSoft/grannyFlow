@@ -455,7 +455,7 @@ describe('the ratchet', () => {
       { verdict: 'confirmed', impact: 'moderate', likelihood: 'rare', fixCost: 'small', scope: 'in-scope', evidence: 'src/a.ts:3 - save twice', ...c },
       policy,
       () => false,
-      f => (f.repeatOf === 'r1/codex-F1' ? (of ?? undefined) : undefined),
+      f => (f.repeatOf === 'r1/codex-F1' && of ? { label: f.repeatOf, finding: of } : undefined),
     )
 
   it('raises a repeat whose impact and likelihood dropped below the earlier entry back to it, before the priority', () => {
@@ -501,7 +501,7 @@ describe('the ratchet', () => {
     const unjudged: Finding = { id: 'codex-F1', severity: 'P1', file: 'src/a.ts', title: 'x', detail: '', decision: { rule: 1, action: 'fix', why: 'P0/P1' } }
     expect(repeat({}, unjudged)).toMatchObject({ impact: 'moderate', likelihood: 'rare', priority: 35, decision: { rule: 8 } })
     expect(repeat({}, null).decision!.raised).toBeUndefined()
-    const numberOnly = decide({ id: 'codex-F2', severity: 'P2', file: 'a', title: 'x', detail: '', repeatOf: 'r1/codex-F1' }, { score: 20 }, policy, () => false, () => earlier)
+    const numberOnly = decide({ id: 'codex-F2', severity: 'P2', file: 'a', title: 'x', detail: '', repeatOf: 'r1/codex-F1' }, { score: 20 }, policy, () => false, () => ({ label: 'r1/codex-F1', finding: earlier }))
     expect(numberOnly).toMatchObject({ decision: { rule: 2, action: 'fix', why: 'not judged' } })
     expect(numberOnly.decision!.raised).toBeUndefined()
     expect(numberOnly.impact).toBeUndefined()
@@ -531,6 +531,14 @@ describe('mergeDuplicates', () => {
       new Map([['b', 'a']]),
     )
     expect(findings).toEqual([expect.objectContaining({ id: 'a', title: 'a', impact: 'major', priority: 65, decision: expect.objectContaining({ action: 'fix', rule: 6 }) })])
+  })
+
+  it('lets an in-scope copy decide the group ahead of a not-code copy with a higher priority', () => {
+    const { findings } = mergeDuplicates(
+      [judged('a', { impact: 'major', scope: 'not-code' }), judged('b', { likelihood: 'edge' })],
+      new Map([['b', 'a']]),
+    )
+    expect(findings).toEqual([expect.objectContaining({ id: 'a', scope: 'in-scope', priority: 55, reason: 'reason b', decision: expect.objectContaining({ rule: 8, action: 'residual' }) })])
   })
 
   it('keeps a not-judged copy fixed and drops the stale fields of the keeper', () => {
@@ -644,7 +652,7 @@ describe('config tags', () => {
       { verdict: 'confirmed', impact: 'moderate', likelihood: 'rare', fixCost: 'small', scope: 'in-scope', evidence: 'src/a.ts:3 - x', tag: 'style' },
       tagged,
       () => false,
-      x => (x.repeatOf === 'r1/codex-F1' ? earlier : undefined),
+      x => (x.repeatOf === 'r1/codex-F1' ? { label: x.repeatOf, finding: earlier } : undefined),
     )
     expect(d).toMatchObject({
       likelihood: 'edge',

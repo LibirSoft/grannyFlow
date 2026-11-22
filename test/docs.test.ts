@@ -638,6 +638,20 @@ describe('skill docs', () => {
     expect(judge).toContain('("Judge - final review", with `tags` in the config, with the same TAGS block after its rubric)')
   })
 
+  it('documents that a finding filed on the PR body is set aside', () => {
+    const config = read('references/config.md')
+    const routing = config.split('### Judge routing')[1]!.split('\n### ')[0]!
+    expect(routing).toContain('finding(s) about the PR body set aside - not judged, not sent, not kept')
+    expect(routing).toContain('a P0 included')
+    expect(config.split('## Review trail')[1]!.split('\n## ')[0]).toContain('`setAside`')
+    expect(config.split('## Judge runs')[1]!.split('\n## ')[0]).toContain('set aside - not in the report')
+    const cursor = read('references/cursor.md')
+    expect(cursor.slice(cursor.indexOf('2. **Review**'), cursor.indexOf('3. **Route.**'))).toContain('Set aside every finding filed on the PR body')
+    expect(read('references/judge.md')).toContain('A finding filed on the PR body')
+    expect(read('SKILL.md')).toContain('a finding filed on the PR body is set aside first')
+    expect(readRoot('CHANGELOG.md').split('\n## ')[1]!).toContain('Findings on the PR body are set aside')
+  })
+
   it('points every repo reference at LibirSoft/grannyFlow', () => {
     expect(readRoot('README.md')).toContain('npx skills add LibirSoft/grannyFlow')
     const docs: Record<string, string> = {
@@ -649,5 +663,105 @@ describe('skill docs', () => {
     for (const [file, text] of Object.entries(docs)) {
       expect({ file, stale: text.match(/LibirSoft\/(?!grannyFlow(?![\w-]))\S*/gi) }).toEqual({ file, stale: null })
     }
+  })
+
+  it('documents the not-code scope and rule 11 in the config reference, the tag docs and the Cursor protocol', () => {
+    const table = read('references/config.md').split('### The decision table')[1]!.split('\n### ')[0]!
+    expect(table).toContain('| `not-code` (not about the code or what it does: a commit message or the commit history; the PR description; how the work was done')
+    expect(table).not.toContain('a code comment or doc comment that is wrong')
+    expect(table).toContain('11. (Checked after rule 5 and before rule 6; numbered last so that the rules above keep their numbers.) `scope` `not-code` → residual, `not about the code or what it does`')
+    expect(table).toContain('`refuted`, `other-stage` and `not-code` findings always stay residual')
+    const cursor = read('references/cursor.md')
+    const rules = cursor.slice(cursor.indexOf('take the first rule that matches'))
+    expect(rules.indexOf('11 `not-code` → residual')).toBeGreaterThan(rules.indexOf('5 `pre-existing` → residual'))
+    expect(rules.indexOf('11 `not-code` → residual')).toBeLessThan(rules.indexOf('6 impact in `alwaysFix`'))
+    for (const text of [readRoot('README.md'), read('references/config.md'), read('references/tags.md'), read('references/prompts.md')]) {
+      expect(text).toContain('a misspelled word in a string or a doc')
+      expect(text).not.toContain('a misspelled word in a comment')
+    }
+    expect(read('references/tags.md')).toContain('a finding the judge scopes `not-code`')
+    expect(readRoot('CHANGELOG.md').split('\n## ')[1]!).toContain('a fourth scope, `not-code`, and rule 11')
+  })
+
+  it('documents the comment label and its set-aside where the PR-body set-aside is described', () => {
+    const config = read('references/config.md')
+    const routing = config.split('### Judge routing')[1]!.split('\n### ')[0]!
+    expect(routing).toContain('`<stage> r<n>: <k> finding(s) about code comments set aside - not sent, not kept: <ids>`')
+    expect(routing).toContain('a P0/P1 that skips the judge (step 1) is never labelled and is still sent by rule 1')
+    expect(routing).toContain('A finding whose `duplicateOf` names a labelled one stands on its own, under its own title.')
+    expect(config.split('### The decision table')[1]!.split('\n### ')[0]).toContain('- `comment`: optional, and only when the prompt has a COMMENT section')
+    expect(config.split('## Review trail')[1]!.split('\n## ')[0]).toContain('which carry `comment: true`')
+    expect(config.split('## Judge runs')[1]!.split('\n## ')[0]).toContain('finding(s) about code comments set aside - not in the report')
+    const cursor = read('references/cursor.md')
+    expect(cursor.split('\n').find(line => line.startsWith('4. **Judge**'))).toContain('Set aside every finding it labels `comment: true` before anything below')
+    expect(readFileSync(join(skill, 'engines/cursor/agents/granny-judge.md'), 'utf8')).toContain('When the prompt has a COMMENT section, set `comment` to true')
+    expect(read('references/judge.md')).toContain('Nor is a finding the judge labels `comment`')
+    expect(read('references/tags.md')).toContain('A finding the judge labels `comment`, one about a code comment, is set aside before any rule')
+    expect(read('SKILL.md')).toContain('a finding the judge labels as about a code comment is set aside before that')
+    expect(readRoot('README.md')).toContain('so is one the judge labels as about a code comment')
+    expect(read('references/prompts.md')).toContain('COMMENT - set comment to true on a finding about a code comment or doc comment itself')
+    expect(readRoot('CHANGELOG.md').split('\n## ')[1]!).toContain('Findings about code comments are set aside, on a built-in `comment` label.')
+  })
+
+  it('documents that a reviewer gets no rule about comments and is not sent to read them', () => {
+    const config = read('references/config.md')
+    const leaveOut = config.split('### What a reviewer is told to leave out')[1]!.split('\n### ')[0]!
+    expect(leaveOut).toContain('Nor is a reviewer sent to look at comments.')
+    expect(leaveOut).toContain('without every rule whose text contains `comment` in any case (`/comment/i`')
+    expect(config).toContain("a reviewer does not get a rule about comments ([What a reviewer is told to leave out](#what-a-reviewer-is-told-to-leave-out))")
+    expect(read('SKILL.md')).toContain('a reviewer gets no rule whose text contains `comment`, so the no-comment rule goes only to the agents that write.')
+    expect(read('references/cursor.md')).toContain("In a reviewer's prompt, leave out every `rules` line whose text contains `comment`, in any case")
+    expect(read('references/prompts.md')).toContain("leave every rule whose text contains `comment` (any case) out of a reviewer's prompt")
+    expect(read('references/prompts.md')).not.toContain('the README, comments and test names')
+    expect(readRoot('CHANGELOG.md').split('\n## ')[1]!).toContain('Reviewers are not sent to look at comments.')
+  })
+
+  it('documents the hold on a repeat of a kept finding where the ratchet is described', () => {
+    const ledger = read('references/config.md').split('### The decision ledger and the ratchet')[1]!.split('\n### ')[0]!
+    expect(ledger).toContain('being reported again never rates a finding above what it was kept at')
+    expect(ledger).toContain('`<stage> r<n>: <id> held - repeat of <label>: <what>`')
+    expect(ledger).toContain('There is one exception: a repeat the judge rates `critical`.')
+    const cursor = read('references/cursor.md')
+    const triage = cursor.slice(cursor.indexOf('5. **Triage**'), cursor.indexOf('take the first rule that matches'))
+    expect(triage.indexOf('hold a repeat of a finding kept residual by rule 8 or 11')).toBeGreaterThan(triage.indexOf('apply [the ratchet]'))
+    expect(triage.indexOf('hold a repeat of a finding kept residual by rule 8 or 11')).toBeLessThan(triage.indexOf('compute the priority'))
+    expect(readFileSync(join(skill, 'engines/cursor/agents/granny-judge.md'), 'utf8')).toContain('is not rated above what that one was kept at')
+    expect(read('references/prompts.md')).toContain('`(held: <what>)`')
+    expect(readRoot('CHANGELOG.md').split('\n## ')[1]!).toContain('is held, not ratcheted')
+  })
+
+  it('documents what the hold leaves alone and that a merged copy of a kept repeat is held on Cursor too', () => {
+    const ledger = read('references/config.md').split('### The decision ledger and the ratchet')[1]!.split('\n### ')[0]!
+    expect(ledger).toContain('a P0/P1 that rule 1 sends, judged or not')
+    expect(ledger).toContain('a repeat the judge scopes `pre-existing` or `other-stage`')
+    expect(ledger).toContain('the newest finding of that chain')
+    expect(ledger).toContain('the engine reads the finding named instead, as for any other repeat')
+    expect(ledger).toContain('a repeat that is not a P0/P1 counts as a repeat of that declined finding')
+    expect(ledger).toContain('A P0/P1 still goes by rule 1 unless the label the judge named is itself one a fixer declined.')
+    expect(ledger).toContain('the group\'s decision still records the hold of a copy decided the same way')
+    expect(ledger).toContain('the merged finding is not a P0/P1')
+    const cursor = read('references/cursor.md')
+    const judge = cursor.slice(cursor.indexOf('4. **Judge**'), cursor.indexOf('5. **Triage**'))
+    expect(judge).toContain("give every copy of its group that names no `repeatOf` that repeat's `repeatOf`")
+    expect(judge).toContain('except a P0/P1 copy')
+    const triage = cursor.slice(cursor.indexOf('5. **Triage**'), cursor.indexOf('take the first rule that matches'))
+    expect(triage).toContain('do not hold a P0/P1 that rule 1 sends, or a repeat scoped `pre-existing` or `other-stage`')
+    expect(readRoot('CHANGELOG.md').split('\n## ')[1]!).toContain('a P0/P1 that rule 1 sends, judged or not')
+  })
+
+  it('documents what a reviewer is told to leave out, and the known findings it is given', () => {
+    const config = read('references/config.md')
+    const left = config.split('### What a reviewer is told to leave out')[1]!.split('\n### ')[0]!
+    expect(left).toContain('Do not report them again')
+    expect(left).toContain('report one the fixer declined only when its reason is wrong')
+    expect(left).toContain('At most the last 40 are listed')
+    expect(left).toContain('get no prompt from granny')
+    expect(left).toContain('In `granny judge` its reviewers are told what is not a finding and get no list')
+    expect(read('references/judge.md')).toContain('Its reviewers are told what is not a finding, as in a run')
+    expect(config.split('## Final review')[1]!.split('\n## ')[0]).toContain('(#what-a-reviewer-is-told-to-leave-out)')
+    expect(read('references/cursor.md')).toContain('"Reviewer - agent engine, from round 2 on" prompt')
+    expect(read('references/prompts.md')).toContain('## Reviewer - agent engine, from round 2 on')
+    expect(readRoot('README.md')).toContain('handed to the reviewers of the next round')
+    expect(readRoot('CHANGELOG.md').split('\n## ')[1]!).toContain('Reviewers are told what to leave out')
   })
 })

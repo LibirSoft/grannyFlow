@@ -22,7 +22,7 @@ var IMPACTS = ["critical", "major", "moderate", "minor", "none"];
 var VERDICTS = ["confirmed", "refuted", "unverified"];
 var LIKELIHOODS = ["common", "edge", "rare"];
 var FIX_COSTS = ["trivial", "small", "large"];
-var SCOPES = ["in-scope", "pre-existing", "other-stage"];
+var SCOPES = ["in-scope", "pre-existing", "other-stage", "not-code"];
 
 var DEFAULT_CONFIG = {
   roles: {
@@ -559,10 +559,24 @@ function saysNoFindings(text) {
 function reviewFailure(text) {
   return FAILED_RENDER.exec(text)?.[0];
 }
+var literal = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+function isPrBody(file, workDir, roots = []) {
+  const slashed = (text) => text.trim().replace(/\\/g, "/");
+  const path = slashed(String(file ?? "")).replace(/(?::\d+(?:-\d+)?){1,2}$/, "");
+  const dir = workDir.replace(/^(?:\.\/)+/, "").replace(/\/+$/, "");
+  const body = new RegExp(`^${literal(dir)}/PR-BODY(?:-[^/]+)?\\.md$`, "i");
+  if (!/^(?:\/|[a-z]:\/)/i.test(path))
+    return body.test(path.replace(/^(?:\.\/)+/, ""));
+  return roots.some((root) => {
+    const top = `${slashed(root).replace(/\/+$/, "")}/`;
+    return top.length > 1 && path.toLowerCase().startsWith(top.toLowerCase()) && body.test(path.slice(top.length));
+  });
+}
 var isBlocker = (f) => /^\s*(p0|p1|critical|high)\b/i.test(String(f.severity ?? ""));
 var JUDGED = ["verdict", "impact", "likelihood", "fixCost", "scope", "evidence", "priority", "tag", "reason", "decision"];
 var fixes = (f) => f.decision?.action !== "residual";
 var rank = (f) => f.priority ?? -1;
+var tier = (f) => fixes(f) ? 2 : f.decision?.rule === 11 ? 0 : 1;
 function keeperOf(duplicateOf, ids) {
   return (id) => {
     const seen = new Set([id]);
@@ -590,7 +604,7 @@ function mergeDuplicates(findings, duplicateOf) {
     const dups = findings.filter((d) => into.get(d.id) === f.id);
     if (!dups.length)
       return f;
-    const top = [f, ...dups].reduce((a, b) => fixes(b) !== fixes(a) ? fixes(b) ? b : a : rank(b) > rank(a) ? b : a);
+    const top = [f, ...dups].reduce((a, b) => tier(b) !== tier(a) ? tier(b) > tier(a) ? b : a : rank(b) > rank(a) ? b : a);
     const merged = { ...f, duplicates: dups.map((d) => d.id) };
     for (const key of JUDGED) {
       if (top[key] === undefined)
@@ -598,6 +612,9 @@ function mergeDuplicates(findings, duplicateOf) {
       else
         merged[key] = top[key];
     }
+    const held = [f, ...dups].find((d) => d.decision?.held && d.decision.action === top.decision?.action)?.decision.held;
+    if (merged.decision && held && !merged.decision.held)
+      merged.decision = { ...merged.decision, held };
     return merged;
   });
   return { findings: kept, merged: [...into].map(([id, k]) => ({ id, into: k })) };
@@ -672,6 +689,31 @@ function ratchet(fields, label, earlier) {
   }
   return raised.length ? `repeat of ${label}: ${raised.join(", ")}` : undefined;
 }
+var isKept = (earlier) => earlier?.decision?.rule === 8 || earlier?.decision?.rule === 11;
+function holds(f, entry, repeatsDeclined, earlier) {
+  const c = classify(entry);
+  if (c.kind !== "classified" || !isKept(earlier) || c.fields.impact === "critical")
+    return false;
+  return c.fields.scope !== "pre-existing" && c.fields.scope !== "other-stage" && !(isBlocker(f) && !repeatsDeclined(f));
+}
+function hold(fields, label, earlier) {
+  const held = [];
+  if (earlier.decision?.rule === 11 && fields.scope !== "not-code") {
+    held.push(`scope ${fields.scope} -> not-code`);
+    fields.scope = "not-code";
+  }
+  if (earlier.impact && earlier.likelihood && earlier.fixCost) {
+    const worse = IMPACTS.indexOf(fields.impact) < IMPACTS.indexOf(earlier.impact);
+    if (worse || priorityOf(fields.impact, fields.likelihood, fields.fixCost) > priorityOf(earlier.impact, earlier.likelihood, earlier.fixCost)) {
+      held.push(`${fields.impact}/${fields.likelihood}/${fields.fixCost} -> ${earlier.impact}/${earlier.likelihood}/${earlier.fixCost}`);
+      Object.assign(fields, { impact: earlier.impact, likelihood: earlier.likelihood, fixCost: earlier.fixCost });
+    }
+  }
+  return held.length ? `repeat of ${label}: ${held.join(", ")}` : undefined;
+}
+function labelledComments(per, ids) {
+  return new Set(per.filter((x) => ids.has(x.id) && x.comment === true).map((x) => x.id));
+}
 function namedTag(entry) {
   if (typeof entry?.tag !== "string")
     return;
@@ -689,14 +731,20 @@ function decide(f, entry, policy, repeatsDeclined = () => false, earlierOf = () 
     out.reason = entry.reason;
   const c = classify(entry);
   let raised;
+  let held;
+  let kept = false;
   const done = (rule, action, why, attention) => ({
     ...out,
-    decision: { rule, action, why, ...attention ? { attention: true } : {}, ...raised ? { raised } : {} }
+    decision: { rule, action, why, ...attention ? { attention: true } : {}, ...raised ? { raised } : {}, ...held ? { held } : {} }
   });
   if (c.kind === "classified") {
-    const earlier = f.repeatOf === undefined ? undefined : earlierOf(f);
-    if (earlier)
-      raised = ratchet(c.fields, f.repeatOf, earlier);
+    const read = f.repeatOf === undefined ? undefined : earlierOf(f);
+    const earlier = read?.finding;
+    kept = holds(out, entry, repeatsDeclined, earlier);
+    if (earlier && kept)
+      held = hold(c.fields, read.label, earlier);
+    else if (earlier && !isKept(earlier))
+      raised = ratchet(c.fields, read.label, earlier);
     Object.assign(out, c.fields);
     out.priority = priorityOf(c.fields.impact, c.fields.likelihood, c.fields.fixCost);
   }
@@ -714,8 +762,10 @@ function decide(f, entry, policy, repeatsDeclined = () => false, earlierOf = () 
     const attention = impact === "critical" || impact === "major";
     return done(5, "residual", attention ? `pre-existing - ATTENTION: impact ${impact}` : "pre-existing", attention);
   }
+  if (scope === "not-code")
+    return done(11, "residual", "not about the code or what it does");
   const name = namedTag(entry);
-  const tagged = name !== undefined && knownTag(policy.tags, name) && verdict === "confirmed" && impact !== "none" && !repeatsDeclined(out) ? name : undefined;
+  const tagged = name !== undefined && knownTag(policy.tags, name) && verdict === "confirmed" && impact !== "none" && !repeatsDeclined(out) && !kept ? name : undefined;
   const tag = tagged === undefined ? undefined : policy.tags[tagged];
   const base = out.priority;
   if (tagged !== undefined)
@@ -762,10 +812,13 @@ var rubric = (task) => `Classify every finding with exactly these fields:
   - none: not a problem.
 - likelihood: common (the normal flow) | edge (special timing or state: a race, a retry, an expired session, a boundary value, a dependency that fails) | rare (forced or malformed input, a rarely used feature). Upkeep has no trigger: use edge.
 - fixCost: trivial (a few lines) | small (one function or file plus a test) | large (cross-module, a redesign).
-- scope: in-scope | pre-existing (there before this change, and the change neither causes it nor opens a new way to reach it) | other-stage (another stage's job).
+- scope: in-scope | pre-existing (there before this change, and the change neither causes it nor opens a new way to reach it) | other-stage (another stage's job) | not-code (not about the code or what it does: a commit message or the commit history; the pull request description; how the work was done, such as the order tests and code were written in).
 - evidence: path:line plus the concrete trigger steps, e.g. \`Editor.tsx:225\` + "save -> go back -> late response arrives -> save again". Always give a path:line: without one the finding counts as unverified, which lowers its impact one class. One line: the one or two places that show it and the trigger as a chain of short steps. Do not retell the finding.
 - reason: one short sentence, at most 25 words: what decided the classification. Do not repeat the finding or the evidence.
 Example: a late save response re-binds the editor to another post's id, so the next save can overwrite the wrong post: confirmed, critical, edge, small, in-scope, though the window is narrow.`;
+var COMMENT_LABEL = `
+COMMENT - set comment to true on a finding about a code comment or doc comment itself: one that is wrong, outdated, missing or too long, a TODO note, commented-out code, or a comment added against a rule that forbids comments. The engine sets such a finding aside whatever you classify it: it is neither fixed nor kept. Leave comment out when the finding is about what the code does, even if a comment is how the reviewer saw it, and for a doc file such as the README or a markdown reference: that is not a comment. Classify every finding in full all the same.
+`;
 var SHORT_DETAIL = "at most three sentences: what is wrong, the input or state that triggers it, and the fix in a few words. Point to code as path:line; do not quote it, retell it or say how you found it";
 var repoLine = (p) => `Working repo: ${p.repo}, branch \`${p.branch}\` (verify with \`git branch --show-current\`).`;
 var cdLine = (p) => `Prefix EVERY shell command with \`cd ${shellQuote(p.repo)} &&\`.`;
@@ -777,6 +830,8 @@ function headerTail(p, writes, others) {
     lines.push("", "CONTEXT - read it before anything else and obey it:", p.context);
   return lines;
 }
+var reviewerRules = (rules) => rules.filter((rule) => !/comment/i.test(rule));
+var forReviewer = (p) => ({ ...p, config: { ...p.config, rules: reviewerRules(p.config.rules) } });
 function readOnlyHeader(p, writes, extra = []) {
   return [repoLine(p), cdLine(p), ...extra, ...headerTail(p, writes, (repos) => `This run also changes other repos: ${repos}; read them if needed.`)].join(`
 `);
@@ -823,14 +878,14 @@ ${stage.task}
 ` : "";
 var reviewAsks = (stage, base) => [
   "Review it the way a careful senior engineer would, in this order. Take the time it needs: a problem missed here ships.",
-  "1. What the change promises. Read the commit messages and every doc, comment and test name the change adds or edits. List for yourself each behaviour, rule, limit, number and worked example they state.",
+  "1. What the change promises. Read the commit messages and every doc and test name the change adds or edits. List for yourself each behaviour, rule, limit, number and worked example they state.",
   "2. Promise against code. For each item on that list, find the code that is meant to do it and follow it to the end. Where the docs give a number or an example, compute what the code actually returns for it. A promise the code does not keep is a finding; so is one it keeps only on the path the tests take.",
   ...stage ? ["Check the diff against the TASK in the same way: a missing part of the task is a finding, and so is a change outside it (scope creep, unrelated edits); work the task leaves to other stages is not a finding."] : [],
   "3. Every changed file, top to bottom. For each new or changed function ask what happens with: a missing or unknown id, a null, an empty or huge value, a boundary value, a value in another unit or scale, text with separators, quotes or line breaks, the same call or the same message arriving twice, calls arriving out of order, a failure halfway through, the end of a month or a day. Check who is allowed to call it, and whether that check is made on the right party and the right record.",
   `4. Code that was moved or rewritten. When a commit moves code or says it changes no behaviour, compare the old version (\`git show ${base}:<path>\`) with the new one line by line. A check, a branch or a default that did not come along is a finding.`,
   "5. Beyond the diff. For everything the change renames, removes or gives a new meaning (a function, a type, a column, a route, a config key, a stored value), search the repo for what still uses it. Read the untouched code the new code calls or relies on, and the untouched code that reads what the new code writes: does it still hold when the new code feeds it new values? A problem the change causes in a file it does not touch is a finding: cite that file and line.",
   "6. The tests. For each new test ask whether it could fail if the code were wrong: an expectation computed with the same formula as the code, an assertion on a side effect instead of the result, only the happy path. Name the promised behaviours that no test would catch breaking.",
-  "7. Small things last: a name that breaks the convention of its file or schema, leftovers (debug output, TODOs, commented-out code), a constant that is defined and not used, duplication, needless abstraction, a deviation from the design the plan or context lays out.",
+  "7. Small things last: a name that breaks the convention of its file or schema, leftovers (debug output), a constant that is defined and not used, duplication, needless abstraction, a deviation from the design the plan or context lays out.",
   "Before you report a finding, open the code and confirm it; when it is cheap, run it (an existing test, or a one-line command that writes no file) instead of reasoning about it. Before you say something is missing - a test, a check, a doc line - search for it. Do not report what you could not confirm. Give each problem its own finding: do not fold two into one, and do not report one twice.",
   "Severity is what happens when the problem triggers; how rarely it triggers does not lower it.",
   "- P0: data loss or corruption, money or records written wrong, a security or authorization bypass, a leaked secret. A check that guards money, access or data and no longer runs is a bypass, also when it went missing in a refactor.",
@@ -845,19 +900,32 @@ var bulletForm = (example, p1, where) => [
 var REVIEW_ASK = "Do a thorough code review: correctness bugs, regressions, security problems, data integrity, contract breaks, missing or wrong tests, and code quality. Report every problem you can confirm in the code.";
 function secondPass(p, base) {
   const places = [
-    "what the plan, the README, comments and test names promise, against what the code does, also on the paths the tests do not take",
+    "what the plan, the README and test names promise, against what the code does, also on the paths the tests do not take",
     "every new or changed function with unusual input: missing, unknown, empty, huge, at a boundary, in another unit or scale, with separators, quotes or line breaks; the same call or message twice, calls out of order, a failure halfway through",
     "who may call it, and whether that is checked on the right party and the right record",
     `code that was moved or rewritten, against its old version (\`git show ${base}:<path>\`)`,
     "untouched code that calls what the change touched, or reads what it writes",
     "tests that could not fail if the code were wrong, and promised behaviour that no test covers"
   ];
-  const rules = p.config.rules.length ? ["- the project's rules, as the author of the change was given them:", ...p.config.rules.map((rule) => `  ${rule}`)] : [];
+  const kept = reviewerRules(p.config.rules);
+  const rules = kept.length ? ["- the project's rules, as the author of the change was given them:", ...kept.map((rule) => `  ${rule}`)] : [];
   return [
     "When you have your list, you are not done: a first pass finds about half of what is there. Go through the change once more, this time place by place, looking only for problems that are not on your list yet, and add them:",
     ...places.map((place, i) => `- ${place}${i < places.length - 1 || rules.length ? ";" : "."}`),
     ...rules
   ];
+}
+var KNOWN_LIMIT = 40;
+var KNOWN_TEXT = 160;
+var short = (text) => String(text ?? "").replace(/\s+/g, " ").trim().slice(0, KNOWN_TEXT);
+var knownLine = (k) => `${short(k.file)}${k.line === undefined ? "" : `:${k.line}`} - ${short(k.title)}${k.declined === undefined ? "" : ` (the fixer declined it: ${short(k.declined)})`}`;
+var NOT_FINDINGS = "These are not findings, also when a rule or the plan asks for them, so leave them out: code comments and doc comments (wrong, outdated, missing, too long, or there against a rule; TODO notes and commented-out code too), commit messages and the commit history, the pull request description or its PR-BODY file, and how the work was done (the order tests and code were written in). A doc file such as the README is not a comment: review it like code.";
+function notFindings(known, oneLine = false) {
+  const listed = known.slice(-KNOWN_LIMIT);
+  if (!listed.length)
+    return [NOT_FINDINGS];
+  const intro = `Earlier review rounds raised the ${known.length} finding(s) below, and they were left as they are on purpose${known.length > listed.length ? ` (the last ${listed.length} are listed)` : ""}. Do not report them again${listed.some((k) => k.declined !== undefined) ? "; report one the fixer declined only when its reason is wrong" : ""}:`;
+  return oneLine ? [NOT_FINDINGS, `${intro} ${listed.map(knownLine).join("; ")}.`] : [NOT_FINDINGS, intro, ...listed.map((k) => `- ${knownLine(k)}`)];
 }
 var SEVERITY_TIERS = [
   "Severity is what happens when the problem triggers; how rarely it triggers does not lower it.",
@@ -866,7 +934,7 @@ var SEVERITY_TIERS = [
   "- P2: wrong behaviour with an easy workaround, a wrong or missing error, a missing test for changed behaviour, duplicated logic.",
   "- P3: naming, style, leftovers."
 ];
-function agentReviewPrompt(p, name, reviewBase, stage, note) {
+function agentReviewPrompt(p, name, reviewBase, stage, note, known = []) {
   return [
     `Review a pull request. The repository is ${p.repo}, on branch \`${p.branch}\`; the base is \`${reviewBase}\`.`,
     ...stage ? [`The change is stage ${stage.number}/${stage.total} "${name}" of a plan. The stage's task:
@@ -883,11 +951,12 @@ ${stage.task}`] : [],
     "",
     `Return findings with id (F1, F2, ...), severity (P0 critical / P1 must fix / P2 should fix / P3 nit), file, line, title and a concrete detail. Write them in ${p.config.language}.`,
     `Keep every finding short: a title of one line, and a detail of ${SHORT_DETAIL}.`,
-    ...SEVERITY_TIERS
+    ...SEVERITY_TIERS,
+    ...notFindings(known)
   ].join(`
 `);
 }
-function commandReviewPrompt(p, name, reviewBase, stage, note, inWorktree = false) {
+function commandReviewPrompt(p, name, reviewBase, stage, note, inWorktree = false, known = []) {
   const diff = inWorktree ? `, from the worktree you run in: \`git diff ${reviewBase}...HEAD\` plus \`git log --oneline ${reviewBase}..HEAD\`` : `: \`cd ${shellQuote(p.repo)} && git diff ${shellQuote(reviewBase)}...HEAD\` plus \`git log --oneline ${shellQuote(reviewBase)}..HEAD\``;
   return [
     "You are a code REVIEWER. Do not edit, stage or commit anything.",
@@ -896,6 +965,7 @@ function commandReviewPrompt(p, name, reviewBase, stage, note, inWorktree = fals
     p.context ? `Design context, read it first: ${p.context}` : "",
     taskSection(stage),
     ...reviewAsks(stage, reviewBase),
+    ...notFindings(known, true),
     ...bulletForm("path/to/file.ts:12", "must fix", "the path relative to the repo root and the line")
   ].filter(Boolean).join(" ").replace(/\s*\n\s*/g, " ");
 }
@@ -913,7 +983,7 @@ function planReviewPrompt(p, plans) {
   ].filter(Boolean).join(" ").replace(/\s*\n\s*/g, " ");
 }
 function agentPlanReviewPrompt(p, plans) {
-  return `${readOnlyHeader(p, "your findings")}
+  return `${readOnlyHeader(forReviewer(p), "your findings")}
 
 You are the plan REVIEWER. Do not edit, stage or commit anything.
 ${planReviewAsks(p, plans).slice(0, 2).join(`
@@ -939,7 +1009,7 @@ ${p.context ? `Design context:
 Nobody fixes anything in this run. Your classification decides under which heading of the user's report each finding goes, so classify every finding on its merits: the reviewer's severity does not bind you, in either direction.
 For each finding, open the cited code and check that it is real and correctly described. Use scope in-scope or pre-existing only. ${JUDGE_DUPES}
 ${rubric("what the change set out to do")}
-
+${COMMENT_LABEL}
 REVIEW:
 ${JSON.stringify(findings)}`;
 }
@@ -1434,7 +1504,8 @@ var SCHEMAS = {
             reason: { type: "string", description: "one short sentence, at most 25 words" },
             tag: { type: "string", description: "only when the prompt has a TAGS list: the name of the tag that fits this finding, exactly as listed; omit when none fits" },
             duplicateOf: { type: "string", description: "id of another finding in this list that reports the same problem; omit when there is none" },
-            repeatOf: { type: "string", description: "label of the earlier finding this one repeats, exactly as listed under EARLIER DECISIONS (e.g. r1/codex-F2, or s1/r2/codex-F1 from a stage review); omit when it repeats none" }
+            repeatOf: { type: "string", description: "label of the earlier finding this one repeats, exactly as listed under EARLIER DECISIONS (e.g. r1/codex-F2, or s1/r2/codex-F1 from a stage review); omit when it repeats none" },
+            comment: { type: "boolean", description: "only when the prompt has a COMMENT section: true when the finding is about a code comment or doc comment itself; omit otherwise" }
           },
           required: ["id", "verdict", "impact", "likelihood", "fixCost", "scope", "evidence", "reason"]
         }
@@ -1480,7 +1551,7 @@ var lineShaped = (output, shape) => output.split(`
 `).map((l) => l.trim()).find((l) => shape.test(l));
 var SHA = /^[0-9a-f]{7,64}$/i;
 var COUNT = /^\d+$/;
-var short = (sha) => sha.slice(0, 8);
+var short2 = (sha) => sha.slice(0, 8);
 var STATUS_LINE = /^\s*[MADRCUT?!]{1,2}\s+\S/;
 var entriesOf = (answer) => Array.isArray(answer?.perFinding) ? answer.perFinding.filter((x) => x && typeof x === "object" && typeof x.id === "string") : [];
 var phaseOf = (subject) => subject.kind === "plan" ? PLAN_PHASE : subject.note === WHOLE_BRANCH_NOTE ? FINAL_REVIEW_PHASE : REVIEW_PHASE;
@@ -1593,12 +1664,12 @@ ${note}` : ""}` : missing };
       host.log(`${failed}: ${String(e?.message ?? e)}`);
     }
   };
-  const review = async (lane, rv, name, subject, round, attempt) => {
+  const review = async (lane, rv, name, subject, round, attempt, known) => {
     const { p, cwd } = lane;
     const tag = `${name} r${round} ${rv.name}${attempt > 1 ? ` #${attempt}` : ""}`;
     const phase = phaseOf(subject);
     if (rv.engine === "agent") {
-      const prompt = subject.kind === "plan" ? agentPlanReviewPrompt(p, subject.files) : agentReviewPrompt(p, name, subject.base, subject.stage, subject.note);
+      const prompt = subject.kind === "plan" ? agentPlanReviewPrompt(p, subject.files) : agentReviewPrompt(p, name, subject.base, subject.stage, subject.note, known);
       const r = await call("reviewer", "findings", `review ${tag}`, phase, prompt, "read-only", rv, cwd);
       if (!r)
         return { ran: false, findings: [], note: "reviewer agent returned nothing" };
@@ -1610,7 +1681,7 @@ ${note}` : ""}` : missing };
 `), files, cwd) : { dirs: [], refused: [] };
     if (refused.length)
       host.log(`${tag}: opencode cannot read ${refused.join(", ")} - move ${refused.length > 1 ? "them" : "it"} under a project directory`);
-    const plan = subject.kind === "plan" ? planReviewScript(rv, config, host.name, lane.base, stem, planReviewPrompt(p, subject.files), dirs) : reviewPlan(rv, config, host.name, subject.base, stem, commandReviewPrompt(p, name, subject.base, subject.stage, subject.note, rv.engine === "opencode"), dirs);
+    const plan = subject.kind === "plan" ? planReviewScript(rv, config, host.name, lane.base, stem, planReviewPrompt(p, subject.files), dirs) : reviewPlan(rv, config, host.name, subject.base, stem, commandReviewPrompt(p, name, subject.base, subject.stage, subject.note, rv.engine === "opencode", known), dirs);
     if (!plan)
       return { ran: false, findings: [], note: "this reviewer has no command for a plan review" };
     const failed = (out) => (rv.engine === "opencode" ? opencodeAnswer(out).error : undefined) ?? out.slice(-2000);
@@ -1696,20 +1767,20 @@ ${note}` : ""}` : missing };
       note: `review reported ${parsed.markers} finding marker(s), parser read ${parsed.findings.length}; extraction recovered ${first.length}, then ${second.length} on a retry that named the count: ${output.slice(-2000)}`
     };
   };
-  const attempt = async (lane, rv, name, subject, round, n) => {
+  const attempt = async (lane, rv, name, subject, round, n, known) => {
     try {
-      return await review(lane, rv, name, subject, round, n);
+      return await review(lane, rv, name, subject, round, n, known);
     } catch (e) {
       if (isCancelled(e))
         throw e;
       return { ran: false, findings: [], note: `reviewer call failed: ${String(e?.message ?? e)}` };
     }
   };
-  const reviewAll = (lane, reviewers, name, subject, round) => Promise.all(reviewers.map(async (reviewer) => {
-    let r = await attempt(lane, reviewer, name, subject, round, 1);
+  const reviewAll = (lane, reviewers, name, subject, round, known = []) => Promise.all(reviewers.map(async (reviewer) => {
+    let r = await attempt(lane, reviewer, name, subject, round, 1, known);
     if (!r.ran) {
       host.log(`${name} r${round} ${reviewer.name}: did not run - retrying once. ${r.note ?? ""}`);
-      r = await attempt(lane, reviewer, name, subject, round, 2);
+      r = await attempt(lane, reviewer, name, subject, round, 2, known);
     }
     return { reviewer, ...r, findings: attribute(reviewer, r.findings) };
   }));
@@ -1787,7 +1858,7 @@ async function runJudge(host, input) {
   if (!read.sha)
     throw new Error(`granny judge could not read HEAD in ${repo} (exit ${read.code}): ${read.output.slice(-500)}`);
   const head = read.sha;
-  const branch = current ?? short(head);
+  const branch = current ?? short2(head);
   const count = await shell("commits", REVIEW_PHASE, `git rev-list --count ${shellQuote(base)}..HEAD`, repo);
   const commits = count.ran ? lineShaped(count.output, COUNT) : undefined;
   if (commits === undefined) {
@@ -1829,7 +1900,11 @@ ${notes}`);
   }
   for (const r of failedReviewers)
     host.log(`${r.name} did not run, also on a retry - going on without it: ${r.note}`);
-  const found = results.filter((r) => r.ran).flatMap((r) => r.findings);
+  const reviewed = results.filter((r) => r.ran).flatMap((r) => r.findings);
+  const aside = reviewed.filter((f) => isPrBody(f.file, config.workDir, [repo]));
+  if (aside.length)
+    host.log(`${aside.length} finding(s) about the PR body set aside - not in the report: ${aside.map((f) => f.id).join(", ")}`);
+  const found = reviewed.filter((f) => !aside.includes(f));
   const tag = async () => {
     host.phase(TAGGING_PHASE);
     const ids = new Set(found.map((f) => f.id));
@@ -1849,9 +1924,12 @@ ${notes}`);
           return null;
         }
       },
-      apply: (per) => found.map((f) => decide(f, per.find((x) => x.id === f.id), TAG_POLICY, () => true)),
+      apply: (per) => found.filter((f) => !labelledComments(per, ids).has(f.id)).map((f) => decide(f, per.find((x) => x.id === f.id), TAG_POLICY, () => true)),
       leftTo: "under the reviewer's severity, not judged"
     });
+    const labelled = labelledComments(per, ids);
+    if (labelled.size)
+      host.log(`${labelled.size} finding(s) about code comments set aside - not in the report: ${found.filter((f) => labelled.has(f.id)).map((f) => f.id).join(", ")}`);
     const duplicateOf = new Map(per.filter((x) => ids.has(x.id) && typeof x.duplicateOf === "string" && ids.has(x.duplicateOf)).map((x) => [x.id, x.duplicateOf]));
     const placed = decided.map((f) => ({ ...f, decision: { ...f.decision, action: isJudged(f) && bucketOf(f) !== "dismissed" ? "fix" : "residual" } }));
     const { findings, merged } = mergeDuplicates(placed, duplicateOf);
@@ -1873,7 +1951,7 @@ ${notes}`);
   const meta = {
     branch,
     base,
-    head: short(head),
+    head: short2(head),
     commits: Number(commits),
     repo,
     when: date,

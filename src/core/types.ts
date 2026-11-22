@@ -12,7 +12,7 @@ export const LIKELIHOODS = ['common', 'edge', 'rare'] as const
 export type Likelihood = (typeof LIKELIHOODS)[number]
 export const FIX_COSTS = ['trivial', 'small', 'large'] as const
 export type FixCost = (typeof FIX_COSTS)[number]
-export const SCOPES = ['in-scope', 'pre-existing', 'other-stage'] as const
+export const SCOPES = ['in-scope', 'pre-existing', 'other-stage', 'not-code'] as const
 export type Scope = (typeof SCOPES)[number]
 
 export interface Decision {
@@ -22,6 +22,7 @@ export interface Decision {
   attention?: true
   /** What the ratchet raised on a repeat whose classes dropped below the earlier entry's. */
   raised?: string
+  held?: string
 }
 
 export type ResultKind = 'draft' | 'implementation' | 'planFix' | 'findings' | 'judge' | 'command' | 'final'
@@ -116,6 +117,7 @@ export interface Finding {
   decision?: Decision
   duplicates?: string[]
   repeatOf?: string
+  comment?: true
 }
 
 export interface Declined {
@@ -265,6 +267,7 @@ export interface TrailRound {
   reviewedSha?: string
   reviewers: TrailReviewer[]
   findings: TrailFinding[]
+  setAside?: TrailFinding[]
   fix?: TrailFix
   outcome?: TrailOutcome
   note?: string

@@ -151,6 +151,49 @@ describe('runJudge and config tags', () => {
   })
 })
 
+describe('runJudge and the PR body', () => {
+  it('sets a finding filed on the PR body aside: it is not tagged and not in the report', async () => {
+    const f = judgeHost({ findings: { kimi: [raw('F1', 'P1', 'PR body is stale', '.granny/PR-BODY.md', 1), raw('F2', 'P3')] }, scores: [{ 'kimi-F2': classes('minor') }] })
+    const r = await runJudge(f.host, { repo: REPO, config: ONE })
+    expect(r.findings.map(x => x.id)).toEqual(['kimi-F2'])
+    expect(r.counts).toEqual({ P0: 0, P1: 0, P2: 0, P3: 1, dismissed: 0 })
+    expect(f.calls.find(c => c.label === 'tag feat/x')!.prompt).not.toContain('PR body is stale')
+    expect(r.report).not.toContain('PR body is stale')
+    expect(f.logs).toContain('1 finding(s) about the PR body set aside - not in the report: kimi-F1')
+  })
+
+  it("ends the reviewer's prompt with what is not a finding, and no list of earlier findings", async () => {
+    const f = judgeHost({ findings: { kimi: [raw('F1', 'P3')] }, scores: [{ 'kimi-F1': classes('minor') }] })
+    await runJudge(f.host, { repo: REPO, config: ONE })
+    const text = f.calls.find(c => c.label.startsWith('review ') && c.label.endsWith(' kimi'))!.prompt
+    expect(text.split('\n').at(-1)).toStartWith('These are not findings, also when a rule or the plan asks for them, so leave them out:')
+    expect(text).not.toContain('Earlier review rounds')
+  })
+})
+
+describe('runJudge and code comments', () => {
+  it('asks for the comment label and leaves a labelled finding out of the report: a copy merged into it stands on its own', async () => {
+    const f = judgeHost({
+      findings: { kimi: [raw('F1', 'P1', 'Doc comment is stale'), raw('F2', 'P2', 'Returns null on empty input')] },
+      scores: [{ 'kimi-F1': { ...classes('none', { scope: 'not-code' }), comment: true }, 'kimi-F2': { duplicateOf: 'kimi-F1' } }, null],
+    })
+    const r = await runJudge(f.host, { repo: REPO, config: ONE })
+    expect(f.calls.find(c => c.label === 'tag feat/x')!.prompt).toContain('COMMENT - set comment to true on a finding about a code comment or doc comment itself')
+    expect(r.findings.map(x => [x.id, x.title, x.duplicates, bucketOf(x)])).toEqual([['kimi-F2', 'Returns null on empty input', undefined, 'P2']])
+    expect(r.counts).toEqual({ P0: 0, P1: 0, P2: 1, P3: 0, dismissed: 0 })
+    expect(r.notJudged).toEqual(['kimi-F2'])
+    expect(r.report).not.toContain('Doc comment is stale')
+    expect(f.logs).toContain('1 finding(s) about code comments set aside - not in the report: kimi-F1')
+  })
+
+  it('does not retry the judge for a labelled finding it left unclassified', async () => {
+    const f = judgeHost({ findings: { kimi: [raw('F1', 'P3', 'TODO left in'), raw('F2', 'P3')] }, scores: [{ 'kimi-F1': { comment: true }, 'kimi-F2': classes('minor') }] })
+    const r = await runJudge(f.host, { repo: REPO, config: ONE })
+    expect(f.calls.some(c => c.label === 'tag feat/x retry')).toBe(false)
+    expect(r.findings.map(x => x.id)).toEqual(['kimi-F2'])
+  })
+})
+
 describe('runJudge: the headings', () => {
   it('returns the repo without the trailing slash it was given', async () => {
     const r = await runJudge(judgeHost().host, { repo: `${REPO}/`, config: ONE })
