@@ -22,7 +22,7 @@ var IMPACTS = ["critical", "major", "moderate", "minor", "none"];
 var VERDICTS = ["confirmed", "refuted", "unverified"];
 var LIKELIHOODS = ["common", "edge", "rare"];
 var FIX_COSTS = ["trivial", "small", "large"];
-var SCOPES = ["in-scope", "pre-existing", "other-stage"];
+var SCOPES = ["in-scope", "pre-existing", "other-stage", "not-code"];
 
 var DEFAULT_CONFIG = {
   roles: {
@@ -554,10 +554,24 @@ function saysNoFindings(text) {
 function reviewFailure(text) {
   return FAILED_RENDER.exec(text)?.[0];
 }
+var literal = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+function isPrBody(file, workDir, roots = []) {
+  const slashed = (text) => text.trim().replace(/\\/g, "/");
+  const path = slashed(String(file ?? "")).replace(/(?::\d+(?:-\d+)?){1,2}$/, "");
+  const dir = workDir.replace(/^(?:\.\/)+/, "").replace(/\/+$/, "");
+  const body = new RegExp(`^${literal(dir)}/PR-BODY(?:-[^/]+)?\\.md$`, "i");
+  if (!/^(?:\/|[a-z]:\/)/i.test(path))
+    return body.test(path.replace(/^(?:\.\/)+/, ""));
+  return roots.some((root) => {
+    const top = `${slashed(root).replace(/\/+$/, "")}/`;
+    return top.length > 1 && path.toLowerCase().startsWith(top.toLowerCase()) && body.test(path.slice(top.length));
+  });
+}
 var isBlocker = (f) => /^\s*(p0|p1|critical|high)\b/i.test(String(f.severity ?? ""));
 var JUDGED = ["verdict", "impact", "likelihood", "fixCost", "scope", "evidence", "priority", "tag", "reason", "decision"];
 var fixes = (f) => f.decision?.action !== "residual";
 var rank = (f) => f.priority ?? -1;
+var tier = (f) => fixes(f) ? 2 : f.decision?.rule === 11 ? 0 : 1;
 function keeperOf(duplicateOf, ids) {
   return (id) => {
     const seen = new Set([id]);
@@ -585,7 +599,7 @@ function mergeDuplicates(findings, duplicateOf) {
     const dups = findings.filter((d) => into.get(d.id) === f.id);
     if (!dups.length)
       return f;
-    const top = [f, ...dups].reduce((a, b) => fixes(b) !== fixes(a) ? fixes(b) ? b : a : rank(b) > rank(a) ? b : a);
+    const top = [f, ...dups].reduce((a, b) => tier(b) !== tier(a) ? tier(b) > tier(a) ? b : a : rank(b) > rank(a) ? b : a);
     const merged = { ...f, duplicates: dups.map((d) => d.id) };
     for (const key of JUDGED) {
       if (top[key] === undefined)
@@ -593,6 +607,9 @@ function mergeDuplicates(findings, duplicateOf) {
       else
         merged[key] = top[key];
     }
+    const held = [f, ...dups].find((d) => d.decision?.held && d.decision.action === top.decision?.action)?.decision.held;
+    if (merged.decision && held && !merged.decision.held)
+      merged.decision = { ...merged.decision, held };
     return merged;
   });
   return { findings: kept, merged: [...into].map(([id, k]) => ({ id, into: k })) };
@@ -667,6 +684,31 @@ function ratchet(fields, label, earlier) {
   }
   return raised.length ? `repeat of ${label}: ${raised.join(", ")}` : undefined;
 }
+var isKept = (earlier) => earlier?.decision?.rule === 8 || earlier?.decision?.rule === 11;
+function holds(f, entry, repeatsDeclined, earlier) {
+  const c = classify(entry);
+  if (c.kind !== "classified" || !isKept(earlier) || c.fields.impact === "critical")
+    return false;
+  return c.fields.scope !== "pre-existing" && c.fields.scope !== "other-stage" && !(isBlocker(f) && !repeatsDeclined(f));
+}
+function hold(fields, label, earlier) {
+  const held = [];
+  if (earlier.decision?.rule === 11 && fields.scope !== "not-code") {
+    held.push(`scope ${fields.scope} -> not-code`);
+    fields.scope = "not-code";
+  }
+  if (earlier.impact && earlier.likelihood && earlier.fixCost) {
+    const worse = IMPACTS.indexOf(fields.impact) < IMPACTS.indexOf(earlier.impact);
+    if (worse || priorityOf(fields.impact, fields.likelihood, fields.fixCost) > priorityOf(earlier.impact, earlier.likelihood, earlier.fixCost)) {
+      held.push(`${fields.impact}/${fields.likelihood}/${fields.fixCost} -> ${earlier.impact}/${earlier.likelihood}/${earlier.fixCost}`);
+      Object.assign(fields, { impact: earlier.impact, likelihood: earlier.likelihood, fixCost: earlier.fixCost });
+    }
+  }
+  return held.length ? `repeat of ${label}: ${held.join(", ")}` : undefined;
+}
+function labelledComments(per, ids) {
+  return new Set(per.filter((x) => ids.has(x.id) && x.comment === true).map((x) => x.id));
+}
 function namedTag(entry) {
   if (typeof entry?.tag !== "string")
     return;
@@ -684,14 +726,20 @@ function decide(f, entry, policy, repeatsDeclined = () => false, earlierOf = () 
     out.reason = entry.reason;
   const c = classify(entry);
   let raised;
+  let held;
+  let kept = false;
   const done = (rule, action, why, attention) => ({
     ...out,
-    decision: { rule, action, why, ...attention ? { attention: true } : {}, ...raised ? { raised } : {} }
+    decision: { rule, action, why, ...attention ? { attention: true } : {}, ...raised ? { raised } : {}, ...held ? { held } : {} }
   });
   if (c.kind === "classified") {
-    const earlier = f.repeatOf === undefined ? undefined : earlierOf(f);
-    if (earlier)
-      raised = ratchet(c.fields, f.repeatOf, earlier);
+    const read = f.repeatOf === undefined ? undefined : earlierOf(f);
+    const earlier = read?.finding;
+    kept = holds(out, entry, repeatsDeclined, earlier);
+    if (earlier && kept)
+      held = hold(c.fields, read.label, earlier);
+    else if (earlier && !isKept(earlier))
+      raised = ratchet(c.fields, read.label, earlier);
     Object.assign(out, c.fields);
     out.priority = priorityOf(c.fields.impact, c.fields.likelihood, c.fields.fixCost);
   }
@@ -709,8 +757,10 @@ function decide(f, entry, policy, repeatsDeclined = () => false, earlierOf = () 
     const attention = impact === "critical" || impact === "major";
     return done(5, "residual", attention ? `pre-existing - ATTENTION: impact ${impact}` : "pre-existing", attention);
   }
+  if (scope === "not-code")
+    return done(11, "residual", "not about the code or what it does");
   const name = namedTag(entry);
-  const tagged = name !== undefined && knownTag(policy.tags, name) && verdict === "confirmed" && impact !== "none" && !repeatsDeclined(out) ? name : undefined;
+  const tagged = name !== undefined && knownTag(policy.tags, name) && verdict === "confirmed" && impact !== "none" && !repeatsDeclined(out) && !kept ? name : undefined;
   const tag = tagged === undefined ? undefined : policy.tags[tagged];
   const base = out.priority;
   if (tagged !== undefined)
@@ -769,7 +819,7 @@ ${text}${end}
 }
 
 var roundLabel = (round, f, loop) => `${loop ? `${loop.id}/` : ""}r${round}/${f.id}`;
-var judgeRouting = (findings) => findings.some(isBlocker) ? "P0/P1 findings are here only because a fixer declined findings in an earlier round: classify them like the rest. A P0/P1 goes to the implementer whatever you classify, unless its repeatOf names a finding the fixer declined - then your classification decides it." : "P0/P1 findings are not in this list: they go to the implementer without you.";
+var judgeRouting = (findings, comments = true) => findings.some(isBlocker) ? `P0/P1 findings are here only because a fixer declined findings in an earlier round: classify them like the rest. A P0/P1 goes to the implementer whatever you classify, unless ${comments ? "you set comment on it (then it is set aside) or " : ""}its repeatOf names a finding the fixer declined - then your classification decides it.` : "P0/P1 findings are not in this list: they go to the implementer without you.";
 var rubric = (task) => `Classify every finding with exactly these fields:
 - verdict: confirmed (the code shows the problem) | refuted (the code shows it is absent or not a problem) | unverified (you cannot tell either way).
 - impact, how bad IF it triggers: critical | major | moderate | minor | none.
@@ -787,11 +837,14 @@ var rubric = (task) => `Classify every finding with exactly these fields:
   - none: not a problem.
 - likelihood: common (the normal flow) | edge (special timing or state: a race, a retry, an expired session, a boundary value, a dependency that fails) | rare (forced or malformed input, a rarely used feature). Upkeep has no trigger: use edge.
 - fixCost: trivial (a few lines) | small (one function or file plus a test) | large (cross-module, a redesign).
-- scope: in-scope | pre-existing (there before this change, and the change neither causes it nor opens a new way to reach it) | other-stage (another stage's job).
+- scope: in-scope | pre-existing (there before this change, and the change neither causes it nor opens a new way to reach it) | other-stage (another stage's job) | not-code (not about the code or what it does: a commit message or the commit history; the pull request description; how the work was done, such as the order tests and code were written in).
 - evidence: path:line plus the concrete trigger steps, e.g. \`Editor.tsx:225\` + "save -> go back -> late response arrives -> save again". Always give a path:line: without one the finding counts as unverified, which lowers its impact one class. One line: the one or two places that show it and the trigger as a chain of short steps. Do not retell the finding.
 - reason: one short sentence, at most 25 words: what decided the classification. Do not repeat the finding or the evidence.
 Example: a late save response re-binds the editor to another post's id, so the next save can overwrite the wrong post: confirmed, critical, edge, small, in-scope, though the window is narrow.`;
-var decided = (f) => f.decision ? `${f.decision.action} - rule ${f.decision.rule}: ${f.decision.why}${f.decision.raised ? ` (ratchet raised ${f.decision.raised})` : ""}` : undefined;
+var decided = (f) => f.decision ? `${f.decision.action} - rule ${f.decision.rule}: ${f.decision.why}${f.decision.raised ? ` (ratchet raised ${f.decision.raised})` : ""}${f.decision.held ? ` (held: ${f.decision.held})` : ""}` : undefined;
+var COMMENT_LABEL = `
+COMMENT - set comment to true on a finding about a code comment or doc comment itself: one that is wrong, outdated, missing or too long, a TODO note, commented-out code, or a comment added against a rule that forbids comments. The engine sets such a finding aside whatever you classify it: it is neither fixed nor kept. Leave comment out when the finding is about what the code does, even if a comment is how the reviewer saw it, and for a doc file such as the README or a markdown reference: that is not a comment. Classify every finding in full all the same.
+`;
 function tagsSection(tags) {
   const names = Object.entries(tags ?? {});
   if (!names.length)
@@ -848,7 +901,8 @@ When a finding below repeats an earlier one, set its repeatOf to that label, the
 - if the fixer's reason is wrong: classify the repeat on its merits and say in reason why that reason does not hold.
 - a repeat of a finding the fixer applied: check the fix in the code and classify what is still wrong.
 - a repeat of a residual finding (the fixer never saw it): classify it on its merits.
-A repeat cannot drop below the impact and likelihood of the finding it repeats: the engine raises them back, unless you classify it refuted with path:line evidence the earlier finding did not cite.
+A finding that reports another problem at the same place, or a problem that a later commit made worse, is not a repeat: leave repeatOf out and say in reason what changed.
+The engine holds a repeat to the finding it repeats. A repeat of one kept as residual under the bar, or as not-code, is not rated above what that one was kept at, unless you rate its impact critical: being reported again is no reason to rate it higher. A repeat of any other one cannot drop below its impact and likelihood: the engine raises them back, unless you classify it refuted with path:line evidence the earlier finding did not cite.
 `;
 }
 function overruledSection(overruled) {
@@ -898,6 +952,8 @@ function common(p) {
   ].join(`
 `);
 }
+var reviewerRules = (rules) => rules.filter((rule) => !/comment/i.test(rule));
+var forReviewer = (p) => ({ ...p, config: { ...p.config, rules: reviewerRules(p.config.rules) } });
 function readOnlyHeader(p, writes, extra = []) {
   return [repoLine(p), cdLine(p), ...extra, ...headerTail(p, writes, (repos) => `This run also changes other repos: ${repos}; read them if needed.`)].join(`
 `);
@@ -1066,14 +1122,14 @@ ${stage.task}
 ` : "";
 var reviewAsks = (stage, base) => [
   "Review it the way a careful senior engineer would, in this order. Take the time it needs: a problem missed here ships.",
-  "1. What the change promises. Read the commit messages and every doc, comment and test name the change adds or edits. List for yourself each behaviour, rule, limit, number and worked example they state.",
+  "1. What the change promises. Read the commit messages and every doc and test name the change adds or edits. List for yourself each behaviour, rule, limit, number and worked example they state.",
   "2. Promise against code. For each item on that list, find the code that is meant to do it and follow it to the end. Where the docs give a number or an example, compute what the code actually returns for it. A promise the code does not keep is a finding; so is one it keeps only on the path the tests take.",
   ...stage ? ["Check the diff against the TASK in the same way: a missing part of the task is a finding, and so is a change outside it (scope creep, unrelated edits); work the task leaves to other stages is not a finding."] : [],
   "3. Every changed file, top to bottom. For each new or changed function ask what happens with: a missing or unknown id, a null, an empty or huge value, a boundary value, a value in another unit or scale, text with separators, quotes or line breaks, the same call or the same message arriving twice, calls arriving out of order, a failure halfway through, the end of a month or a day. Check who is allowed to call it, and whether that check is made on the right party and the right record.",
   `4. Code that was moved or rewritten. When a commit moves code or says it changes no behaviour, compare the old version (\`git show ${base}:<path>\`) with the new one line by line. A check, a branch or a default that did not come along is a finding.`,
   "5. Beyond the diff. For everything the change renames, removes or gives a new meaning (a function, a type, a column, a route, a config key, a stored value), search the repo for what still uses it. Read the untouched code the new code calls or relies on, and the untouched code that reads what the new code writes: does it still hold when the new code feeds it new values? A problem the change causes in a file it does not touch is a finding: cite that file and line.",
   "6. The tests. For each new test ask whether it could fail if the code were wrong: an expectation computed with the same formula as the code, an assertion on a side effect instead of the result, only the happy path. Name the promised behaviours that no test would catch breaking.",
-  "7. Small things last: a name that breaks the convention of its file or schema, leftovers (debug output, TODOs, commented-out code), a constant that is defined and not used, duplication, needless abstraction, a deviation from the design the plan or context lays out.",
+  "7. Small things last: a name that breaks the convention of its file or schema, leftovers (debug output), a constant that is defined and not used, duplication, needless abstraction, a deviation from the design the plan or context lays out.",
   "Before you report a finding, open the code and confirm it; when it is cheap, run it (an existing test, or a one-line command that writes no file) instead of reasoning about it. Before you say something is missing - a test, a check, a doc line - search for it. Do not report what you could not confirm. Give each problem its own finding: do not fold two into one, and do not report one twice.",
   "Severity is what happens when the problem triggers; how rarely it triggers does not lower it.",
   "- P0: data loss or corruption, money or records written wrong, a security or authorization bypass, a leaked secret. A check that guards money, access or data and no longer runs is a bypass, also when it went missing in a refactor.",
@@ -1088,19 +1144,72 @@ var bulletForm = (example, p1, where) => [
 var REVIEW_ASK = "Do a thorough code review: correctness bugs, regressions, security problems, data integrity, contract breaks, missing or wrong tests, and code quality. Report every problem you can confirm in the code.";
 function secondPass(p, base) {
   const places = [
-    "what the plan, the README, comments and test names promise, against what the code does, also on the paths the tests do not take",
+    "what the plan, the README and test names promise, against what the code does, also on the paths the tests do not take",
     "every new or changed function with unusual input: missing, unknown, empty, huge, at a boundary, in another unit or scale, with separators, quotes or line breaks; the same call or message twice, calls out of order, a failure halfway through",
     "who may call it, and whether that is checked on the right party and the right record",
     `code that was moved or rewritten, against its old version (\`git show ${base}:<path>\`)`,
     "untouched code that calls what the change touched, or reads what it writes",
     "tests that could not fail if the code were wrong, and promised behaviour that no test covers"
   ];
-  const rules = p.config.rules.length ? ["- the project's rules, as the author of the change was given them:", ...p.config.rules.map((rule) => `  ${rule}`)] : [];
+  const kept = reviewerRules(p.config.rules);
+  const rules = kept.length ? ["- the project's rules, as the author of the change was given them:", ...kept.map((rule) => `  ${rule}`)] : [];
   return [
     "When you have your list, you are not done: a first pass finds about half of what is there. Go through the change once more, this time place by place, looking only for problems that are not on your list yet, and add them:",
     ...places.map((place, i) => `- ${place}${i < places.length - 1 || rules.length ? ";" : "."}`),
     ...rules
   ];
+}
+var KNOWN_LIMIT = 40;
+var KNOWN_TEXT = 160;
+var short = (text) => String(text ?? "").replace(/\s+/g, " ").trim().slice(0, KNOWN_TEXT);
+var knownOf = (f, declined) => ({ file: f.file, ...Number.isInteger(f.line) ? { line: f.line } : {}, title: f.title, ...declined === undefined ? {} : { declined } });
+var within = (e, label) => e.loop ? `${e.loop.id}/${label}` : label;
+function lineOf(earlier) {
+  const parent = new Map(earlier.flatMap((e) => [...e.sent, ...e.residual ?? []].map((f) => [roundLabel(e.round, f, e.loop), f.repeatOf === undefined ? undefined : within(e, f.repeatOf)])));
+  return (label) => {
+    const line = [label];
+    for (let up = parent.get(label);up !== undefined && parent.has(up) && !line.includes(up); up = parent.get(up))
+      line.push(up);
+    return line;
+  };
+}
+function repeatedBy(line, entries, named) {
+  const hit = new Set;
+  for (const r of named) {
+    const up = line(r);
+    const below = [];
+    for (const e of entries) {
+      if (up.includes(e.labels[0]))
+        hit.add(e);
+      else if (e.labels.some((l) => line(l).includes(r)))
+        below.push(e);
+    }
+    if (below.length === 1)
+      hit.add(below[0]);
+  }
+  return hit;
+}
+function declinedKnown(earlier) {
+  const line = lineOf(earlier);
+  const repeatsIn = (e) => [...[...e.sent, ...e.residual ?? []].flatMap((f) => f.repeatOf === undefined ? [] : [f.repeatOf]), ...e.repeats ?? []].map((label) => within(e, label));
+  const declines = earlier.flatMap((e, at) => (e.declined ?? []).flatMap((d) => {
+    const f = e.sent.find((s) => s.id === d.id);
+    return f ? [{ at, labels: [roundLabel(e.round, d, e.loop)], known: knownOf(f, d.reason || "no reason given") }] : [];
+  }));
+  const left = earlier.reduce((live, e, at) => {
+    const gone = repeatedBy(line, live, repeatsIn(e));
+    return [...live.filter((d) => !gone.has(d)), ...declines.filter((d) => d.at === at)];
+  }, []);
+  return left.map((d) => d.known);
+}
+var knownLine = (k) => `${short(k.file)}${k.line === undefined ? "" : `:${k.line}`} - ${short(k.title)}${k.declined === undefined ? "" : ` (the fixer declined it: ${short(k.declined)})`}`;
+var NOT_FINDINGS = "These are not findings, also when a rule or the plan asks for them, so leave them out: code comments and doc comments (wrong, outdated, missing, too long, or there against a rule; TODO notes and commented-out code too), commit messages and the commit history, the pull request description or its PR-BODY file, and how the work was done (the order tests and code were written in). A doc file such as the README is not a comment: review it like code.";
+function notFindings(known, oneLine = false) {
+  const listed = known.slice(-KNOWN_LIMIT);
+  if (!listed.length)
+    return [NOT_FINDINGS];
+  const intro = `Earlier review rounds raised the ${known.length} finding(s) below, and they were left as they are on purpose${known.length > listed.length ? ` (the last ${listed.length} are listed)` : ""}. Do not report them again${listed.some((k) => k.declined !== undefined) ? "; report one the fixer declined only when its reason is wrong" : ""}:`;
+  return oneLine ? [NOT_FINDINGS, `${intro} ${listed.map(knownLine).join("; ")}.`] : [NOT_FINDINGS, intro, ...listed.map((k) => `- ${knownLine(k)}`)];
 }
 var SEVERITY_TIERS = [
   "Severity is what happens when the problem triggers; how rarely it triggers does not lower it.",
@@ -1109,7 +1218,7 @@ var SEVERITY_TIERS = [
   "- P2: wrong behaviour with an easy workaround, a wrong or missing error, a missing test for changed behaviour, duplicated logic.",
   "- P3: naming, style, leftovers."
 ];
-function agentReviewPrompt(p, name, reviewBase, stage, note) {
+function agentReviewPrompt(p, name, reviewBase, stage, note, known = []) {
   return [
     `Review a pull request. The repository is ${p.repo}, on branch \`${p.branch}\`; the base is \`${reviewBase}\`.`,
     ...stage ? [`The change is stage ${stage.number}/${stage.total} "${name}" of a plan. The stage's task:
@@ -1126,11 +1235,12 @@ ${stage.task}`] : [],
     "",
     `Return findings with id (F1, F2, ...), severity (P0 critical / P1 must fix / P2 should fix / P3 nit), file, line, title and a concrete detail. Write them in ${p.config.language}.`,
     `Keep every finding short: a title of one line, and a detail of ${SHORT_DETAIL}.`,
-    ...SEVERITY_TIERS
+    ...SEVERITY_TIERS,
+    ...notFindings(known)
   ].join(`
 `);
 }
-function commandReviewPrompt(p, name, reviewBase, stage, note, inWorktree = false) {
+function commandReviewPrompt(p, name, reviewBase, stage, note, inWorktree = false, known = []) {
   const diff = inWorktree ? `, from the worktree you run in: \`git diff ${reviewBase}...HEAD\` plus \`git log --oneline ${reviewBase}..HEAD\`` : `: \`cd ${shellQuote(p.repo)} && git diff ${shellQuote(reviewBase)}...HEAD\` plus \`git log --oneline ${shellQuote(reviewBase)}..HEAD\``;
   return [
     "You are a code REVIEWER. Do not edit, stage or commit anything.",
@@ -1139,6 +1249,7 @@ function commandReviewPrompt(p, name, reviewBase, stage, note, inWorktree = fals
     p.context ? `Design context, read it first: ${p.context}` : "",
     taskSection(stage),
     ...reviewAsks(stage, reviewBase),
+    ...notFindings(known, true),
     ...bulletForm("path/to/file.ts:12", "must fix", "the path relative to the repo root and the line")
   ].filter(Boolean).join(" ").replace(/\s*\n\s*/g, " ");
 }
@@ -1156,7 +1267,7 @@ function planReviewPrompt(p, plans) {
   ].filter(Boolean).join(" ").replace(/\s*\n\s*/g, " ");
 }
 function agentPlanReviewPrompt(p, plans) {
-  return `${readOnlyHeader(p, "your findings")}
+  return `${readOnlyHeader(forReviewer(p), "your findings")}
 
 You are the plan REVIEWER. Do not edit, stage or commit anything.
 ${planReviewAsks(p, plans).slice(0, 2).join(`
@@ -1181,9 +1292,9 @@ ${note ? note + `
 ` + p.context + `
 ` : ""}${taskSection(stage)}
 ${judgeRouting(findings)}
-For each finding, open the cited code and check that it is real and correctly described.${stage ? " Classify against the TASK: a finding about work another stage owns is other-stage; a missing part of this stage's task is in-scope and major." : ""} ${JUDGE_DUPES}
+For each finding, open the cited code and check that it is real and correctly described.${stage ? " Classify against the TASK: a finding about work another stage owns is other-stage; a missing part of this stage's task is in-scope and major; what the task or a rule asks of commits, the pull request description or the way of working is not-code." : ""} ${JUDGE_DUPES}
 ${rubric(stage ? "the stage's TASK" : "what the change set out to do")}
-${tagsSection(p.config.tags)}${judgeHistory(earlier)}
+${COMMENT_LABEL}${tagsSection(p.config.tags)}${judgeHistory(earlier)}
 REVIEW:
 ${JSON.stringify(findings)}`;
 }
@@ -1198,7 +1309,7 @@ function planJudgePrompt(p, plans, findings, earlier = []) {
 ${p.context ? `Design context:
 ` + p.context + `
 ` : ""}
-${judgeRouting(findings)}
+${judgeRouting(findings, false)}
 For each finding, open the cited plan line and the code, config or dependency it names, and check that it is real and correctly described. Classify impact by what the plan would cause if implemented as written; evidence is the plan's path:line plus the repo path:line that shows the problem. ${JUDGE_DUPES}
 ${rubric("the goal of the plan")}
 ${judgeHistory(earlier)}
@@ -1639,7 +1750,8 @@ var SCHEMAS = {
             reason: { type: "string", description: "one short sentence, at most 25 words" },
             tag: { type: "string", description: "only when the prompt has a TAGS list: the name of the tag that fits this finding, exactly as listed; omit when none fits" },
             duplicateOf: { type: "string", description: "id of another finding in this list that reports the same problem; omit when there is none" },
-            repeatOf: { type: "string", description: "label of the earlier finding this one repeats, exactly as listed under EARLIER DECISIONS (e.g. r1/codex-F2, or s1/r2/codex-F1 from a stage review); omit when it repeats none" }
+            repeatOf: { type: "string", description: "label of the earlier finding this one repeats, exactly as listed under EARLIER DECISIONS (e.g. r1/codex-F2, or s1/r2/codex-F1 from a stage review); omit when it repeats none" },
+            comment: { type: "boolean", description: "only when the prompt has a COMMENT section: true when the finding is about a code comment or doc comment itself; omit otherwise" }
           },
           required: ["id", "verdict", "impact", "likelihood", "fixCost", "scope", "evidence", "reason"]
         }
@@ -1680,7 +1792,8 @@ var FINDING_KEYS = [
   "reason",
   "decision",
   "duplicates",
-  "repeatOf"
+  "repeatOf",
+  "comment"
 ];
 var trailDir = (config, cwd) => `${trimSlashes(cwd)}/${workOf(config)}/trail`;
 var trailId = (loop, round) => `${loop}-r${round}`;
@@ -1721,6 +1834,7 @@ function trailRound(r) {
     ...r.reviewedSha ? { reviewedSha: r.reviewedSha } : {},
     reviewers: r.reviewers,
     findings: r.findings.map((f) => trailFinding(f, r, sent)),
+    ...r.setAside?.length ? { setAside: r.setAside.map((f) => trailFinding(f, r, undefined)) } : {},
     ...r.fix ? { fix: trailFix(r.fix) } : {},
     ...r.outcome ? { outcome: r.outcome } : {},
     ...r.note ? { note: r.note } : {}
@@ -1897,7 +2011,7 @@ var lineShaped = (output, shape) => output.split(`
 `).map((l) => l.trim()).find((l) => shape.test(l));
 var SHA = /^[0-9a-f]{7,64}$/i;
 var COUNT = /^\d+$/;
-var short = (sha) => sha.slice(0, 8);
+var short2 = (sha) => sha.slice(0, 8);
 var STATUS_LINE = /^\s*[MADRCUT?!]{1,2}\s+\S/;
 var listed = (status) => status.map((l) => l.trim()).join(", ");
 var entriesOf = (answer) => Array.isArray(answer?.perFinding) ? answer.perFinding.filter((x) => x && typeof x === "object" && typeof x.id === "string") : [];
@@ -2142,12 +2256,12 @@ ${note}` : ""}` : missing };
       host.log(`${failed}: ${String(e?.message ?? e)}`);
     }
   };
-  const review = async (lane, rv, name, subject, round, attempt) => {
+  const review = async (lane, rv, name, subject, round, attempt, known) => {
     const { p, cwd } = lane;
     const tag = `${name} r${round} ${rv.name}${attempt > 1 ? ` #${attempt}` : ""}`;
     const phase = phaseOf(subject);
     if (rv.engine === "agent") {
-      const prompt = subject.kind === "plan" ? agentPlanReviewPrompt(p, subject.files) : agentReviewPrompt(p, name, subject.base, subject.stage, subject.note);
+      const prompt = subject.kind === "plan" ? agentPlanReviewPrompt(p, subject.files) : agentReviewPrompt(p, name, subject.base, subject.stage, subject.note, known);
       const r = await call("reviewer", "findings", `review ${tag}`, phase, prompt, "read-only", rv, cwd);
       if (!r)
         return { ran: false, findings: [], note: "reviewer agent returned nothing" };
@@ -2159,7 +2273,7 @@ ${note}` : ""}` : missing };
 `), files, cwd) : { dirs: [], refused: [] };
     if (refused.length)
       host.log(`${tag}: opencode cannot read ${refused.join(", ")} - move ${refused.length > 1 ? "them" : "it"} under a project directory`);
-    const plan = subject.kind === "plan" ? planReviewScript(rv, config, host.name, lane.base, stem, planReviewPrompt(p, subject.files), dirs) : reviewPlan(rv, config, host.name, subject.base, stem, commandReviewPrompt(p, name, subject.base, subject.stage, subject.note, rv.engine === "opencode"), dirs);
+    const plan = subject.kind === "plan" ? planReviewScript(rv, config, host.name, lane.base, stem, planReviewPrompt(p, subject.files), dirs) : reviewPlan(rv, config, host.name, subject.base, stem, commandReviewPrompt(p, name, subject.base, subject.stage, subject.note, rv.engine === "opencode", known), dirs);
     if (!plan)
       return { ran: false, findings: [], note: "this reviewer has no command for a plan review" };
     const failed = (out) => (rv.engine === "opencode" ? opencodeAnswer(out).error : undefined) ?? out.slice(-2000);
@@ -2245,20 +2359,20 @@ ${note}` : ""}` : missing };
       note: `review reported ${parsed.markers} finding marker(s), parser read ${parsed.findings.length}; extraction recovered ${first.length}, then ${second.length} on a retry that named the count: ${output.slice(-2000)}`
     };
   };
-  const attempt = async (lane, rv, name, subject, round, n) => {
+  const attempt = async (lane, rv, name, subject, round, n, known) => {
     try {
-      return await review(lane, rv, name, subject, round, n);
+      return await review(lane, rv, name, subject, round, n, known);
     } catch (e) {
       if (isCancelled(e))
         throw e;
       return { ran: false, findings: [], note: `reviewer call failed: ${String(e?.message ?? e)}` };
     }
   };
-  const reviewAll = (lane, reviewers, name, subject, round) => Promise.all(reviewers.map(async (reviewer) => {
-    let r = await attempt(lane, reviewer, name, subject, round, 1);
+  const reviewAll = (lane, reviewers, name, subject, round, known = []) => Promise.all(reviewers.map(async (reviewer) => {
+    let r = await attempt(lane, reviewer, name, subject, round, 1, known);
     if (!r.ran) {
       host.log(`${name} r${round} ${reviewer.name}: did not run - retrying once. ${r.note ?? ""}`);
-      r = await attempt(lane, reviewer, name, subject, round, 2);
+      r = await attempt(lane, reviewer, name, subject, round, 2, known);
     }
     return { reviewer, ...r, findings: attribute(reviewer, r.findings) };
   }));
@@ -2414,7 +2528,7 @@ async function runGranny(host, input) {
   const repoState = new Map(used.map((r) => {
     const cwd = cwdOf.get(r);
     const others = used.filter((o) => o !== r).map((o) => cwdOf.get(o));
-    return [r, { lane: { repo: r, base: baseOf(r), branch: input.branch, cwd, p: promptFor(r, cwd, input.branch, others), readable }, locked: false, waiters: [], setup: Promise.resolve(), merges: 0, left: [], ledger: new Map }];
+    return [r, { lane: { repo: r, base: baseOf(r), branch: input.branch, cwd, p: promptFor(r, cwd, input.branch, others), readable }, locked: false, waiters: [], setup: Promise.resolve(), merges: 0, leftLanes: [], ledger: new Map, left: new Map }];
   }));
   const primaryLane = repoState.get(primary).lane;
   const implement = async (lane, label, prompt) => {
@@ -2603,10 +2717,17 @@ the last repair's deviations: ${deviations}` : ""}`;
     let unmerged = [];
     let carried = [];
     const kept = () => carried.map((c) => c.finding);
+    let staged = opts.before ?? [];
     for (let round = 1;round <= config.maxRounds; round++) {
       const reviewedSha = config.trail && subject.kind !== "plan" ? known ?? await trailHead(`head ${name} r${round}`, phase, lane.cwd) : undefined;
       known = undefined;
-      const results = await reviewAll(lane, reviewers, name, subject, round);
+      const skip = subject.kind === "diff" ? [...[...staged.map((b) => b.finding), ...kept()].map((f) => knownOf(f)), ...declinedKnown(earlier)] : [];
+      const results = await reviewAll(lane, reviewers, name, subject, round, skip);
+      const reviewed = results.filter((r) => r.ran).flatMap((r) => r.findings);
+      const roots = [lane.cwd, lane.repo, ...lane.p.others ?? []];
+      const aside = subject.kind === "diff" ? reviewed.filter((f) => isPrBody(f.file, config.workDir, roots)) : [];
+      if (aside.length)
+        host.log(`${name} r${round}: ${aside.length} finding(s) about the PR body set aside - not judged, not sent, not kept: ${aside.map((f) => f.id).join(", ")}`);
       const facts = {
         loop: opts.loop,
         name,
@@ -2614,14 +2735,21 @@ the last repair's deviations: ${deviations}` : ""}`;
         base: subject.kind === "diff" ? subject.base : lane.base,
         ...reviewedSha ? { reviewedSha } : {},
         reviewers: results.filter((r) => r.ran).map((r) => reviewerMeta(r.reviewer, host)),
-        findings: []
+        findings: [],
+        ...aside.length ? { setAside: aside } : {}
       };
       const keep = async (more) => {
         if (config.trail)
           await saveTrail(trailCwd, trailRound({ ...facts, ...more }), `${name} r${round}`, phase);
       };
+      const clean = async () => {
+        host.log(`${name} r${round}: clean`);
+        host.round?.({ subject: name, round, findings: [] });
+        await keep({ outcome: "clean" });
+        return { outcome: "clean", rounds: round, residual: kept(), unresolved: [], history };
+      };
       const failed = results.filter((r) => !r.ran);
-      const found = results.filter((r) => r.ran).flatMap((r) => r.findings);
+      const found = reviewed.filter((f) => !aside.includes(f));
       if (failed.length) {
         const names = new Set(failed.map((r) => r.reviewer.name));
         const byFailed = (f) => f.reviewer !== undefined && names.has(f.reviewer);
@@ -2632,15 +2760,36 @@ the last repair's deviations: ${deviations}` : ""}`;
         await keep({ findings: found, outcome: "review-failed", note });
         return { outcome: "review-failed", rounds: round, residual: [], unresolved: [...found, ...earlier], history, note };
       }
-      if (!found.length) {
-        host.log(`${name} r${round}: clean`);
-        host.round?.({ subject: name, round, findings: [] });
-        await keep({ outcome: "clean" });
-        return { outcome: "clean", rounds: round, residual: kept(), unresolved: [], history };
-      }
+      if (!found.length)
+        return clean();
       const declined = new Map(earlier.flatMap((e) => (e.declined ?? []).map((d) => [roundLabel(e.round, d, e.loop), d.reason])));
-      const ledger = new Map(earlier.flatMap((e) => [...e.sent, ...e.residual ?? []].map((f) => [roundLabel(e.round, f, e.loop), f])));
-      const earlierOf = (f) => f.repeatOf === undefined ? undefined : ledger.get(f.repeatOf);
+      const entries = earlier.flatMap((e, at) => [...e.sent.map((f) => ({ f, sent: true })), ...(e.residual ?? []).map((f) => ({ f, sent: false }))].map(({ f, sent }) => ({
+        label: roundLabel(e.round, f, e.loop),
+        parent: f.repeatOf === undefined ? undefined : e.loop ? `${e.loop.id}/${f.repeatOf}` : f.repeatOf,
+        finding: f,
+        sent,
+        at
+      })));
+      const node = new Map(entries.map((x) => [x.label, x]));
+      const line = lineOf(earlier);
+      const rootOf = (label) => line(label).at(-1);
+      const chainOf = (f) => {
+        const named = f.repeatOf === undefined ? undefined : node.get(f.repeatOf);
+        if (!named)
+          return;
+        const root = rootOf(named.label);
+        const chain = entries.filter((x) => (x.sent || isKept(x.finding)) && rootOf(x.label) === root);
+        const newest = chain.some((x) => isKept(x.finding)) ? chain.reduce((a, b) => b.at > a.at || b.at === a.at && b.sent && !a.sent ? b : a) : named;
+        return { named, newest };
+      };
+      const earlierOf = (f) => {
+        const read = chainOf(f);
+        if (!read)
+          return;
+        const { named, newest } = read;
+        const entry = newest.sent && !named.sent && !isKept(named.finding) && named.at >= newest.at ? named : newest;
+        return { label: entry.label, finding: entry.finding };
+      };
       const blockers = found.filter(isBlocker);
       const judged = declined.size ? found : found.filter((f) => !isBlocker(f));
       const unjudgedBlockers = new Set(declined.size ? [] : blockers.map((f) => f.id));
@@ -2649,7 +2798,13 @@ the last repair's deviations: ${deviations}` : ""}`;
       } else if (blockers.length) {
         host.log(`${name} r${round}: ${blockers.length} P0/P1 finding(s) go to the implementer without the judge: ${blockers.map((f) => f.id).join(", ")}`);
       }
-      const declinedBefore = (f) => f.repeatOf !== undefined && declined.has(f.repeatOf);
+      const declinedLabel = (f) => {
+        if (f.repeatOf === undefined || declined.has(f.repeatOf))
+          return f.repeatOf;
+        const read = chainOf(f)?.newest.label;
+        return read !== undefined && declined.has(read) ? read : undefined;
+      };
+      const declinedBefore = (f) => isBlocker(f) ? f.repeatOf !== undefined && declined.has(f.repeatOf) : declinedLabel(f) !== undefined;
       const untagged = { threshold: config.threshold, alwaysFix: config.alwaysFix, rideAlong: config.rideAlong };
       const policy = subject.kind === "diff" && Object.keys(config.tags).length ? { ...untagged, tags: config.tags } : untagged;
       let findings = found.map((f) => decide(f, undefined, policy, declinedBefore));
@@ -2658,17 +2813,21 @@ the last repair's deviations: ${deviations}` : ""}`;
         const prompt = subject.kind === "plan" ? planJudgePrompt(p, subject.files, judged, earlier) : judgePrompt(p, subject.base, judged, earlier, subject.stage, subject.note);
         const label = `judge ${name} r${round}`;
         const judgedIds = new Set(judged.map((f) => f.id));
+        const commentsOf = (per) => subject.kind === "diff" ? labelledComments(per, judgedIds) : new Set;
         const blockerIds = new Set(blockers.map((f) => f.id));
         const duplicatesOf = (per) => new Map(per.filter((x) => judgedIds.has(x.id) && typeof x.duplicateOf === "string" && judgedIds.has(x.duplicateOf)).filter((x) => !blockerIds.has(x.id) || blockerIds.has(x.duplicateOf)).map((x) => [x.id, x.duplicateOf]));
         const decideAll = (per) => {
-          const entries = found.map((f) => {
+          const labelled = commentsOf(per);
+          const entries = found.filter((f) => !labelled.has(f.id)).map((f) => {
             const s = judgedIds.has(f.id) ? per.find((x) => x.id === f.id) : undefined;
-            const repeat = typeof s?.repeatOf === "string" && ledger.has(s.repeatOf) ? { repeatOf: s.repeatOf } : {};
+            const repeat = typeof s?.repeatOf === "string" && node.has(s.repeatOf) ? { repeatOf: s.repeatOf } : {};
             return { f: { ...f, ...repeat }, s };
           });
-          const keeper = keeperOf(duplicatesOf(per), new Set(found.map((f) => f.id)));
+          const keeper = keeperOf(duplicatesOf(per), new Set(entries.map((e) => e.f.id)));
           const declinedGroups = new Set(entries.filter((e) => declinedBefore(e.f)).map((e) => keeper(e.f.id)));
-          return entries.map(({ f, s }) => decide(f, s, declinedGroups.has(keeper(f.id)) ? untagged : policy, declinedBefore, earlierOf));
+          const keptGroups = new Map(entries.flatMap((e) => e.f.repeatOf !== undefined && holds(e.f, e.s, declinedBefore, earlierOf(e.f)?.finding) ? [[keeper(e.f.id), e.f.repeatOf]] : []));
+          const repeating = (f) => f.repeatOf === undefined && !isBlocker(f) && keptGroups.has(keeper(f.id)) ? { ...f, repeatOf: keptGroups.get(keeper(f.id)) } : f;
+          return entries.map(({ f, s }) => decide(repeating(f), s, declinedGroups.has(keeper(f.id)) ? untagged : policy, declinedBefore, earlierOf));
         };
         const { per, decided: withScores } = await judgeAnswers({
           at: `${name} r${round}`,
@@ -2679,9 +2838,15 @@ the last repair's deviations: ${deviations}` : ""}`;
           apply: decideAll,
           leftTo: "to the implementer unjudged (rule 2)"
         });
+        const labelled = commentsOf(per);
+        const comments = found.filter((f) => labelled.has(f.id));
+        if (comments.length) {
+          host.log(`${name} r${round}: ${comments.length} finding(s) about code comments set aside - not sent, not kept: ${comments.map((f) => f.id).join(", ")}`);
+          facts.setAside = [...facts.setAside ?? [], ...comments.map((f) => ({ ...f, comment: true }))];
+        }
         const unknownTags = policy.tags ? per.flatMap((x) => {
           const tagName = namedTag(x);
-          return judgedIds.has(x.id) && tagName !== undefined && !knownTag(policy.tags, tagName) ? [`${x.id} ${JSON.stringify(tagName.length > 40 ? `${tagName.slice(0, 40)}...` : tagName)}`] : [];
+          return judgedIds.has(x.id) && !labelled.has(x.id) && tagName !== undefined && !knownTag(policy.tags, tagName) ? [`${x.id} ${JSON.stringify(tagName.length > 40 ? `${tagName.slice(0, 40)}...` : tagName)}`] : [];
         }) : [];
         if (unknownTags.length)
           host.log(`${name} r${round}: the judge named tag(s) the config does not have - ignored: ${unknownTags.join(", ")}`);
@@ -2691,34 +2856,36 @@ the last repair's deviations: ${deviations}` : ""}`;
         unmerged = withScores;
         const declinedIds = new Set(withScores.filter(declinedBefore).map((f) => f.id));
         findings = rideAlong(merge.findings, policy, (f) => declinedBefore(f) || (f.duplicates ?? []).some((id) => declinedIds.has(id)));
+        if (!findings.length)
+          return clean();
       }
       history.push({ round, findings });
       host.log(`${name} r${round}: ${findings.length} finding(s)`);
       const { accepted, residual } = triage(findings);
+      const repeated = new Set(unmerged.flatMap((f) => f.repeatOf ? [f.repeatOf] : []));
       const routed = { findings, sent: accepted, blockers: unjudgedBlockers };
       host.round?.({ subject: name, round, findings: findings.map((f) => roundFinding(f, accepted.includes(f))) });
-      const entry = { round, sent: accepted, ...residual.length ? { residual } : {} };
+      const entry = { round, sent: accepted, ...residual.length ? { residual } : {}, ...repeated.size ? { repeats: [...repeated] } : {} };
       const recorded = record ? { ...entry, loop: record.loop } : undefined;
       if (recorded)
         record.into.push(recorded);
       const ruled = (f) => `rule ${f.decision.rule}: ${f.decision.why}`;
       for (const f of findings.filter((f) => f.decision.raised))
         host.log(`${name} r${round}: the ratchet raised ${f.id} - ${f.decision.raised}`);
+      for (const f of findings.filter((f) => f.decision.held))
+        host.log(`${name} r${round}: ${f.id} held - ${f.decision.held}`);
       if (accepted.length)
         host.log(`${name} r${round}: to the implementer: ${accepted.map((f) => `${f.id} (${ruled(f)})`).join(", ")}`);
       for (const f of residual.filter(declinedBefore)) {
-        host.log(`${name} r${round}: ${f.id} dropped as a repeat of ${f.repeatOf}, which the fixer declined (${ruled(f)}) - kept as residual`);
+        host.log(`${name} r${round}: ${f.id} dropped as a repeat of ${declinedLabel(f)}, which the fixer declined (${ruled(f)}) - kept as residual`);
       }
-      const repeated = new Set(unmerged.flatMap((f) => f.repeatOf ? [f.repeatOf] : []));
       const repeatsOf = (f) => new Set(unmerged.filter((u) => u.id === f.id || f.duplicates?.includes(u.id)).flatMap((u) => u.repeatOf ? [u.repeatOf] : []));
-      const aliases = (f) => {
-        const of = repeatsOf(f);
-        return carried.filter((c) => c.labels.some((l) => of.has(l))).flatMap((c) => c.labels);
-      };
-      carried = [
-        ...carried.filter((c) => !c.labels.some((l) => repeated.has(l))),
-        ...residual.map((f) => ({ round, labels: [roundLabel(round, f), ...aliases(f)], finding: f }))
-      ];
+      const aliases = (f) => [...repeatedBy(line, [...carried, ...staged], repeatsOf(f))].flatMap((c) => c.labels);
+      const gone = repeatedBy(line, [...carried, ...staged], repeated);
+      carried = [...carried.filter((c) => !gone.has(c)), ...residual.map((f) => ({ round, labels: [roundLabel(round, f), ...aliases(f)], finding: f }))];
+      staged = staged.filter((b) => !gone.has(b));
+      if (record)
+        record.left.splice(0, record.left.length, ...carried.map((c) => ({ labels: c.labels.map((l) => `${record.loop.id}/${l}`), finding: c.finding })));
       if (residual.length) {
         host.log(`${name} r${round}: ${residual.length} finding(s) kept as residual, not sent: ${residual.map((f) => `${f.id} (${ruled(f)})`).join(", ")}`);
         for (const f of residual.filter((f) => f.decision.attention))
@@ -2729,7 +2896,7 @@ the last repair's deviations: ${deviations}` : ""}`;
         await keep({ ...routed, outcome: "residual-only" });
         return { outcome: "residual-only", rounds: round, residual: kept(), unresolved: [], history };
       }
-      const overruled = accepted.filter(declinedBefore).map((f) => ({ id: f.id, repeatOf: f.repeatOf, reason: f.reason, said: declined.get(f.repeatOf) }));
+      const overruled = accepted.filter(declinedBefore).map((f) => ({ id: f.id, repeatOf: declinedLabel(f), reason: f.reason, said: declined.get(declinedLabel(f)) }));
       for (const o of overruled) {
         host.log(`${name} r${round}: the judge overruled the fixer on ${o.id} (repeat of ${o.repeatOf}, ${ruled(accepted.find((f) => f.id === o.id))})`);
       }
@@ -2838,6 +3005,12 @@ the last repair's deviations: ${deviations}` : ""}`;
       next();
     else
       s.locked = false;
+  };
+  const leftOf = (st, i) => {
+    const left = repoState.get(repoOf(st)).left;
+    if (!left.has(i))
+      left.set(i, []);
+    return left.get(i);
   };
   const ledgerOf = (st, i) => {
     const ledger = repoState.get(repoOf(st)).ledger;
@@ -2951,7 +3124,7 @@ the last repair's deviations: ${deviations}` : ""}`;
       host.log(`${name}: review-only stage - reviewing ${lane.base}...HEAD`);
     }
     host.phase("Review");
-    const loop = st.review === false ? { outcome: "review-skipped", rounds: 0, residual: [], unresolved: [], history: [] } : await reviewLoop(lane, name, { kind: "diff", base, ...task ? { stage: task } : {} }, undefined, { loop: `s${i + 1}`, gates, checks, runs, notes, record: { loop: { id: `s${i + 1}`, name: `Stage ${i + 1} (${name})` }, into: ledgerOf(st, i) } });
+    const loop = st.review === false ? { outcome: "review-skipped", rounds: 0, residual: [], unresolved: [], history: [] } : await reviewLoop(lane, name, { kind: "diff", base, ...task ? { stage: task } : {} }, undefined, { loop: `s${i + 1}`, gates, checks, runs, notes, record: { loop: { id: `s${i + 1}`, name: `Stage ${i + 1} (${name})` }, into: ledgerOf(st, i), left: leftOf(st, i) } });
     if (gates && !gates.green && !runs.length && (loop.outcome === "clean" || loop.outcome === "residual-only")) {
       loop.outcome = "gates-red";
       loop.note = `the review found nothing to fix, but ${gates.by} left the gates red: ${gates.text}`;
@@ -3002,7 +3175,7 @@ the last repair's deviations: ${deviations}` : ""}`;
       return done;
     const reached = (marker) => printed(cleaned.output, marker);
     if (!reached("lane worktree removed"))
-      state.left.push(lane.cwd);
+      state.leftLanes.push(lane.cwd);
     const left = reached("lane worktree removed") ? `its worktree ${lane.cwd} was removed, but its branch ${lane.branch} was left in place` : `its worktree ${lane.cwd} and branch ${lane.branch} were left in place (${reached("lane worktree clean") ? "git worktree remove failed" : reached("lane merged") ? "uncommitted changes in the worktree" : "the cleanup could not confirm the merge"})`;
     host.log(`${label}: left ${reached("lane worktree removed") ? lane.branch : `${lane.cwd} (${lane.branch})`} in place - remove it yourself once you have checked it: ${cleaned.output.slice(-500)}`);
     return `${done}; ${left}`;
@@ -3172,15 +3345,15 @@ ${note}` : note } : result;
       reusedHead.set(s, now);
       const failed = last.results.filter((r) => !r.passed);
       if (!failed.length)
-        host.log(`${name}: final checks not rerun - ${nameOf(single)} ran them green last on ${short(now)}, HEAD unchanged`);
+        host.log(`${name}: final checks not rerun - ${nameOf(single)} ran them green last on ${short2(now)}, HEAD unchanged`);
       else {
-        const note = `checks failed at final: ${nameOf(single)} ended with ${failed.map((r) => r.name).join(", ")} red on ${short(now)}, HEAD unchanged`;
+        const note = `checks failed at final: ${nameOf(single)} ended with ${failed.map((r) => r.name).join(", ")} red on ${short2(now)}, HEAD unchanged`;
         host.log(`${name} not run - ${note}; the branch is not PR-ready, the final check still runs`);
         return { outcome: "checks-failed", rounds: 0, residual: [], unresolved: [], history: [], note };
       }
     } else if (checks.length) {
       if (same) {
-        const why = !last.head ? `could not read the HEAD ${nameOf(single)} last ran them on` : !now ? "could not read HEAD" : `${nameOf(single)} ran them last on ${short(last.head)}, but HEAD is now ${short(now)}`;
+        const why = !last.head ? `could not read the HEAD ${nameOf(single)} last ran them on` : !now ? "could not read HEAD" : `${nameOf(single)} ran them last on ${short2(last.head)}, but HEAD is now ${short2(now)}`;
         host.log(`${name}: running the final checks - ${why}${now && last.head ? "" : ", so their result is not reused"}`);
       }
       finalRuns.set(s, runs);
@@ -3209,7 +3382,8 @@ ${note}` : note } : result;
     const prior = [...s.ledger].sort(([a], [b]) => a - b).flatMap(([, rounds]) => rounds);
     const loop = s.lane.repo === primary ? "final" : `final-${slug(baseName(s.lane.repo))}`;
     const head = reusedHead.get(s);
-    const looped = await reviewLoop(s.lane, name, { kind: "diff", base: s.lane.base, note: WHOLE_BRANCH_NOTE }, undefined, { loop, ...head ? { head } : {}, checks, runs, notes, prior });
+    const before = [...s.left].sort(([a], [b]) => a - b).flatMap(([, left]) => left).filter((b) => b.finding.decision?.rule !== 4);
+    const looped = await reviewLoop(s.lane, name, { kind: "diff", base: s.lane.base, note: WHOLE_BRANCH_NOTE }, undefined, { loop, ...head ? { head } : {}, checks, runs, notes, prior, before });
     const note = [looped.note, ...notes].filter(Boolean).join(`
 `);
     const r = note ? { ...looped, note } : looped;
@@ -3235,7 +3409,7 @@ ${note}` : note } : result;
     const now = (await readHead(`head ${label}`, "PR ready", s.lane.cwd)).sha;
     if (gated && now === gated)
       return;
-    host.log(`${label}: ${gated && now ? `HEAD moved from ${short(gated)} to ${short(now)} after the final checks` : "could not read HEAD after the pr-ready check or at the final checks"} - running them once more, without repairs`);
+    host.log(`${label}: ${gated && now ? `HEAD moved from ${short2(gated)} to ${short2(now)} after the final checks` : "could not read HEAD after the pr-ready check or at the final checks"} - running them once more, without repairs`);
     const gate = await checkGate(s.lane, label, "pr-ready", checks.map((c) => ({ ...c, maxRepairs: 0 })), runs);
     if (!gate.passed) {
       host.log(`${label}: the checks are red after the pr-ready check - the branch is not PR-ready`);
@@ -3309,8 +3483,8 @@ ${note}` : note } : result;
       return keep(kept);
     if (blocked)
       return keep(blocked);
-    if (s.left.length)
-      return keep(`a lane worktree was left in place (${s.left.join(", ")}), and the removal could not be confirmed`);
+    if (s.leftLanes.length)
+      return keep(`a lane worktree was left in place (${s.leftLanes.join(", ")}), and the removal could not be confirmed`);
     if (trimPath(cwd) === repo)
       return keep("the run was started in this worktree");
     const saved = savedDir(config, repo, input.branch);

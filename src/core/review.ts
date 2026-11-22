@@ -1,5 +1,5 @@
 import { FIX_COSTS, IMPACTS, LIKELIHOODS, SCOPES, VERDICTS } from './types'
-import type { Decision, Declined, Finding, FixCost, Impact, Likelihood } from './types'
+import type { Decision, Declined, Finding, FixCost, Impact, Likelihood, Scope } from './types'
 import type { TagConfig } from './config'
 
 const MARKER = /^\s*[-*]\s*\[(P[0-3]|[A-Za-z]+)\](.*)$/
@@ -104,6 +104,20 @@ export function reviewFailure(text: string): string | undefined {
   return FAILED_RENDER.exec(text)?.[0]
 }
 
+const literal = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+
+export function isPrBody(file: unknown, workDir: string, roots: string[] = []): boolean {
+  const slashed = (text: string) => text.trim().replace(/\\/g, '/')
+  const path = slashed(String(file ?? '')).replace(/(?::\d+(?:-\d+)?){1,2}$/, '')
+  const dir = workDir.replace(/^(?:\.\/)+/, '').replace(/\/+$/, '')
+  const body = new RegExp(`^${literal(dir)}/PR-BODY(?:-[^/]+)?\\.md$`, 'i')
+  if (!/^(?:\/|[a-z]:\/)/i.test(path)) return body.test(path.replace(/^(?:\.\/)+/, ''))
+  return roots.some(root => {
+    const top = `${slashed(root).replace(/\/+$/, '')}/`
+    return top.length > 1 && path.toLowerCase().startsWith(top.toLowerCase()) && body.test(path.slice(top.length))
+  })
+}
+
 export const isBlocker =(f: Pick<Finding, 'severity'>): boolean =>
   /^\s*(p0|p1|critical|high)\b/i.test(String(f.severity ?? ''))
 
@@ -111,6 +125,7 @@ const JUDGED = ['verdict', 'impact', 'likelihood', 'fixCost', 'scope', 'evidence
 
 const fixes = (f: Finding) => f.decision?.action !== 'residual'
 const rank = (f: Finding) => f.priority ?? -1
+const tier = (f: Finding) => (fixes(f) ? 2 : f.decision?.rule === 11 ? 0 : 1)
 
 export function keeperOf(duplicateOf: Map<string, string>, ids: Set<string>): (id: string) => string {
   return (id: string): string => {
@@ -125,7 +140,7 @@ export function keeperOf(duplicateOf: Map<string, string>, ids: Set<string>): (i
   }
 }
 
-/** Of merged copies the strongest one's judgement wins: a fix one first, then the higher priority. */
+/** Of merged copies the strongest one's judgement wins: a fix one first, then one not kept as not-code, then the higher priority. */
 export function mergeDuplicates(findings: Finding[], duplicateOf: Map<string, string>): { findings: Finding[]; merged: Array<{ id: string; into: string }> } {
   const ids = new Set(findings.map(f => f.id))
   const keeper = keeperOf(duplicateOf, ids)
@@ -139,12 +154,14 @@ export function mergeDuplicates(findings: Finding[], duplicateOf: Map<string, st
     .map(f => {
       const dups = findings.filter(d => into.get(d.id) === f.id)
       if (!dups.length) return f
-      const top = [f, ...dups].reduce((a, b) => (fixes(b) !== fixes(a) ? (fixes(b) ? b : a) : rank(b) > rank(a) ? b : a))
+      const top = [f, ...dups].reduce((a, b) => (tier(b) !== tier(a) ? (tier(b) > tier(a) ? b : a) : rank(b) > rank(a) ? b : a))
       const merged: Finding = { ...f, duplicates: dups.map(d => d.id) }
       for (const key of JUDGED) {
         if (top[key] === undefined) delete merged[key]
         else (merged as unknown as Record<string, unknown>)[key] = top[key]
       }
+      const held = [f, ...dups].find(d => d.decision?.held && d.decision.action === top.decision?.action)?.decision!.held
+      if (merged.decision && held && !merged.decision.held) merged.decision = { ...merged.decision, held }
       return merged
     })
   return { findings: kept, merged: [...into].map(([id, k]) => ({ id, into: k })) }
@@ -233,6 +250,34 @@ function ratchet(fields: { verdict: string; impact: Impact; likelihood: Likeliho
   return raised.length ? `repeat of ${label}: ${raised.join(', ')}` : undefined
 }
 
+export const isKept = (earlier: Finding | undefined): boolean => earlier?.decision?.rule === 8 || earlier?.decision?.rule === 11
+
+export function holds(f: Finding, entry: Record<string, unknown> | undefined, repeatsDeclined: (f: Finding) => boolean, earlier: Finding | undefined): boolean {
+  const c = classify(entry)
+  if (c.kind !== 'classified' || !isKept(earlier) || c.fields.impact === 'critical') return false
+  return c.fields.scope !== 'pre-existing' && c.fields.scope !== 'other-stage' && !(isBlocker(f) && !repeatsDeclined(f))
+}
+
+function hold(fields: { impact: Impact; likelihood: Likelihood; fixCost: FixCost; scope: Scope }, label: string, earlier: Finding): string | undefined {
+  const held: string[] = []
+  if (earlier.decision?.rule === 11 && fields.scope !== 'not-code') {
+    held.push(`scope ${fields.scope} -> not-code`)
+    fields.scope = 'not-code'
+  }
+  if (earlier.impact && earlier.likelihood && earlier.fixCost) {
+    const worse = IMPACTS.indexOf(fields.impact) < IMPACTS.indexOf(earlier.impact)
+    if (worse || priorityOf(fields.impact, fields.likelihood, fields.fixCost) > priorityOf(earlier.impact, earlier.likelihood, earlier.fixCost)) {
+      held.push(`${fields.impact}/${fields.likelihood}/${fields.fixCost} -> ${earlier.impact}/${earlier.likelihood}/${earlier.fixCost}`)
+      Object.assign(fields, { impact: earlier.impact, likelihood: earlier.likelihood, fixCost: earlier.fixCost })
+    }
+  }
+  return held.length ? `repeat of ${label}: ${held.join(', ')}` : undefined
+}
+
+export function labelledComments(per: ReadonlyArray<Record<string, unknown> & { id: string }>, ids: ReadonlySet<string>): Set<string> {
+  return new Set(per.filter(x => ids.has(x.id) && x.comment === true).map(x => x.id))
+}
+
 export function namedTag(entry: Record<string, unknown> | undefined): string | undefined {
   if (typeof entry?.tag !== 'string') return undefined
   const name = entry.tag.trim().toLowerCase()
@@ -244,27 +289,32 @@ export const knownTag = (tags: Record<string, TagConfig> | undefined, name: stri
 /**
  * Applies the judge's entry for a finding (undefined when the judge did not judge it) and the decision table: the first
  * matching rule wins.
- * earlierOf finds the ledger entry a repeat names, for the ratchet.
+ * earlierOf finds the ledger entry a repeat is held or ratcheted to, with its label.
  */
 export function decide(
   f: Finding,
   entry: Record<string, unknown> | undefined,
   policy: Policy,
   repeatsDeclined: (f: Finding) => boolean = () => false,
-  earlierOf: (f: Finding) => Finding | undefined = () => undefined,
+  earlierOf: (f: Finding) => { label: string; finding: Finding } | undefined = () => undefined,
 ): Finding {
   const out: Finding = { ...f }
   for (const key of JUDGED) delete out[key]
   if (typeof entry?.reason === 'string') out.reason = entry.reason
   const c = classify(entry)
   let raised: string | undefined
+  let held: string | undefined
+  let kept = false
   const done = (rule: number, action: Decision['action'], why: string, attention?: boolean): Finding => ({
     ...out,
-    decision: { rule, action, why, ...(attention ? { attention: true as const } : {}), ...(raised ? { raised } : {}) },
+    decision: { rule, action, why, ...(attention ? { attention: true as const } : {}), ...(raised ? { raised } : {}), ...(held ? { held } : {}) },
   })
   if (c.kind === 'classified') {
-    const earlier = f.repeatOf === undefined ? undefined : earlierOf(f)
-    if (earlier) raised = ratchet(c.fields, f.repeatOf!, earlier)
+    const read = f.repeatOf === undefined ? undefined : earlierOf(f)
+    const earlier = read?.finding
+    kept = holds(out, entry, repeatsDeclined, earlier)
+    if (earlier && kept) held = hold(c.fields, read!.label, earlier)
+    else if (earlier && !isKept(earlier)) raised = ratchet(c.fields, read!.label, earlier)
     Object.assign(out, c.fields)
     out.priority = priorityOf(c.fields.impact, c.fields.likelihood, c.fields.fixCost)
   }
@@ -278,8 +328,9 @@ export function decide(
     const attention = impact === 'critical' || impact === 'major'
     return done(5, 'residual', attention ? `pre-existing - ATTENTION: impact ${impact}` : 'pre-existing', attention)
   }
+  if (scope === 'not-code') return done(11, 'residual', 'not about the code or what it does')
   const name = namedTag(entry)
-  const tagged = name !== undefined && knownTag(policy.tags, name) && verdict === 'confirmed' && impact !== 'none' && !repeatsDeclined(out) ? name : undefined
+  const tagged = name !== undefined && knownTag(policy.tags, name) && verdict === 'confirmed' && impact !== 'none' && !repeatsDeclined(out) && !kept ? name : undefined
   const tag = tagged === undefined ? undefined : policy.tags![tagged]
   const base = out.priority!
   if (tagged !== undefined) out.tag = tagged

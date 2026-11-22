@@ -37,9 +37,12 @@ for each stage - independent stages at the same time (config parallel, default o
      ├─ still red ─► stage checks-failed, not reviewed; the stages that build on it are skipped, and so are the later ones
      │   in its repo when it ran on the run's branch (a red parallel lane is not merged, so it blocks only its dependents)
   every reviewer reviews it, in parallel (base = the HEAD granny read)
+     (a finding filed on the PR body is set aside first: never judged, sent or kept)
+     (from round 2 on the reviewers are told which findings were left as they are, and asked not to report them again)
      ├─ a reviewer fails, then fails its one retry ─► stage review-failed
      ├─ no reviewer reports a finding ─────────────► stage clean (without checks: gates-red when the last implementer or fix left gates red)
      └─ P0/P1 findings go straight to the implementer; the judge classifies the rest and merges duplicates,
+        (a finding the judge labels as about a code comment is set aside before that, whatever its impact)
         and a rule table decides: impact in alwaysFix, or priority > threshold, is fixed;
         the ones just under the bar (priority >= rideAlong) go along when the round has a fix
         a finding the judge gave a config tag gets the tag's points, or is fixed outright (config tags)
@@ -170,4 +173,4 @@ The run wrote one record per review round to `trail.dir` (none with config `trai
 
 ## Rules baked into the engine
 
-Never push, never open a PR, never rebase or force-push, never `git stash`, never `git remote add` · stage with explicit paths only · `cd <worktree> &&` before every command (`cd <repo> &&` with `worktree: false`) · gates green before every commit · red-green tests for behaviour changes · no AI attribution in commits or the PR body (config `aiAttribution`) · artefacts in English (config `language`) · extra house rules from config `rules`. The agents that write (implementer, fixer, repair, commit, merge, final check) get all of them; the planner and the `agent` reviewers get only the repo, the `cd` prefix, the language, `rules` and the context (the planner also the gates, to write into the plan).
+Never push, never open a PR, never rebase or force-push, never `git stash`, never `git remote add` · stage with explicit paths only · `cd <worktree> &&` before every command (`cd <repo> &&` with `worktree: false`) · gates green before every commit · red-green tests for behaviour changes · no AI attribution in commits or the PR body (config `aiAttribution`) · artefacts in English (config `language`) · extra house rules from config `rules`. The agents that write (implementer, fixer, repair, commit, merge, final check) get all of them; the planner and the `agent` reviewers get only the repo, the `cd` prefix, the language, `rules` and the context (the planner also the gates, to write into the plan); a reviewer gets no rule whose text contains `comment`, so the no-comment rule goes only to the agents that write.

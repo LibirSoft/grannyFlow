@@ -1281,7 +1281,7 @@ describe('several reviewers', () => {
       'Look at the changes with `cd /work/repo && git diff deadbee1...HEAD` and `git log --oneline deadbee1..HEAD`',
       'Do a thorough code review: correctness bugs, regressions, security problems, data integrity, contract breaks, missing or wrong tests, and code quality. Report every problem you can confirm in the code.',
       'When you have your list, you are not done: a first pass finds about half of what is there.',
-      '- what the plan, the README, comments and test names promise, against what the code does',
+      '- what the plan, the README and test names promise, against what the code does',
       '- code that was moved or rewritten, against its old version (`git show deadbee1:<path>`);',
       '- tests that could not fail if the code were wrong, and promised behaviour that no test covers;',
       "- the project's rules, as the author of the change was given them:\n  Use tabs.\n  No default exports.",

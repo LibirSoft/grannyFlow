@@ -11,6 +11,7 @@ export interface EarlierRound {
   deviations?: string
   declined?: Declined[]
   loop?: { id: string; name: string }
+  repeats?: string[]
 }
 
 export interface Overruled {
@@ -22,9 +23,9 @@ export interface Overruled {
 
 export const roundLabel = (round: number, f: Pick<Finding, 'id'>, loop?: EarlierRound['loop']) => `${loop ? `${loop.id}/` : ''}r${round}/${f.id}`
 
-const judgeRouting = (findings: Finding[]): string =>
+const judgeRouting = (findings: Finding[], comments = true): string =>
   findings.some(isBlocker)
-    ? 'P0/P1 findings are here only because a fixer declined findings in an earlier round: classify them like the rest. A P0/P1 goes to the implementer whatever you classify, unless its repeatOf names a finding the fixer declined - then your classification decides it.'
+    ? `P0/P1 findings are here only because a fixer declined findings in an earlier round: classify them like the rest. A P0/P1 goes to the implementer whatever you classify, unless ${comments ? 'you set comment on it (then it is set aside) or ' : ''}its repeatOf names a finding the fixer declined - then your classification decides it.`
     : 'P0/P1 findings are not in this list: they go to the implementer without you.'
 
 const rubric = (task: string) => `Classify every finding with exactly these fields:
@@ -44,12 +45,16 @@ const rubric = (task: string) => `Classify every finding with exactly these fiel
   - none: not a problem.
 - likelihood: common (the normal flow) | edge (special timing or state: a race, a retry, an expired session, a boundary value, a dependency that fails) | rare (forced or malformed input, a rarely used feature). Upkeep has no trigger: use edge.
 - fixCost: trivial (a few lines) | small (one function or file plus a test) | large (cross-module, a redesign).
-- scope: in-scope | pre-existing (there before this change, and the change neither causes it nor opens a new way to reach it) | other-stage (another stage's job).
+- scope: in-scope | pre-existing (there before this change, and the change neither causes it nor opens a new way to reach it) | other-stage (another stage's job) | not-code (not about the code or what it does: a commit message or the commit history; the pull request description; how the work was done, such as the order tests and code were written in).
 - evidence: path:line plus the concrete trigger steps, e.g. \`Editor.tsx:225\` + "save -> go back -> late response arrives -> save again". Always give a path:line: without one the finding counts as unverified, which lowers its impact one class. One line: the one or two places that show it and the trigger as a chain of short steps. Do not retell the finding.
 - reason: one short sentence, at most 25 words: what decided the classification. Do not repeat the finding or the evidence.
 Example: a late save response re-binds the editor to another post's id, so the next save can overwrite the wrong post: confirmed, critical, edge, small, in-scope, though the window is narrow.`
 
-const decided = (f: Finding) => (f.decision ? `${f.decision.action} - rule ${f.decision.rule}: ${f.decision.why}${f.decision.raised ? ` (ratchet raised ${f.decision.raised})` : ''}` : undefined)
+const decided = (f: Finding) => (f.decision ? `${f.decision.action} - rule ${f.decision.rule}: ${f.decision.why}${f.decision.raised ? ` (ratchet raised ${f.decision.raised})` : ''}${f.decision.held ? ` (held: ${f.decision.held})` : ''}` : undefined)
+
+const COMMENT_LABEL = `
+COMMENT - set comment to true on a finding about a code comment or doc comment itself: one that is wrong, outdated, missing or too long, a TODO note, commented-out code, or a comment added against a rule that forbids comments. The engine sets such a finding aside whatever you classify it: it is neither fixed nor kept. Leave comment out when the finding is about what the code does, even if a comment is how the reviewer saw it, and for a doc file such as the README or a markdown reference: that is not a comment. Classify every finding in full all the same.
+`
 
 function tagsSection(tags: GrannyConfig['tags'] | undefined): string {
   const names = Object.entries(tags ?? {})
@@ -101,7 +106,8 @@ When a finding below repeats an earlier one, set its repeatOf to that label, the
 - if the fixer's reason is wrong: classify the repeat on its merits and say in reason why that reason does not hold.
 - a repeat of a finding the fixer applied: check the fix in the code and classify what is still wrong.
 - a repeat of a residual finding (the fixer never saw it): classify it on its merits.
-A repeat cannot drop below the impact and likelihood of the finding it repeats: the engine raises them back, unless you classify it refuted with path:line evidence the earlier finding did not cite.
+A finding that reports another problem at the same place, or a problem that a later commit made worse, is not a repeat: leave repeatOf out and say in reason what changed.
+The engine holds a repeat to the finding it repeats. A repeat of one kept as residual under the bar, or as not-code, is not rated above what that one was kept at, unless you rate its impact critical: being reported again is no reason to rate it higher. A repeat of any other one cannot drop below its impact and likelihood: the engine raises them back, unless you classify it refuted with path:line evidence the earlier finding did not cite.
 `
 }
 
@@ -166,6 +172,10 @@ export function common(p: PromptContext): string {
     ...headerTail(p, 'code, commit messages and the PR body', repos => `This run also changes other repos: ${repos}; other granny agents may be working there. Read them if needed, but NEVER edit, stage or commit anything there.`),
   ].join('\n')
 }
+
+export const reviewerRules = (rules: string[]): string[] => rules.filter(rule => !/comment/i.test(rule))
+
+const forReviewer = (p: PromptContext): PromptContext => ({ ...p, config: { ...p.config, rules: reviewerRules(p.config.rules) } })
 
 /** The header of an agent that commits nothing (the agent reviewers and the planner): the workspace without the git, commit and gate rules. */
 export function readOnlyHeader(p: PromptContext, writes: string, extra: string[] = []): string {
@@ -431,7 +441,7 @@ const taskSection = (stage?: StageTask, unit = 'Stage'): string =>
 
 const reviewAsks = (stage: StageTask | undefined, base: string): string[] => [
   'Review it the way a careful senior engineer would, in this order. Take the time it needs: a problem missed here ships.',
-  '1. What the change promises. Read the commit messages and every doc, comment and test name the change adds or edits. List for yourself each behaviour, rule, limit, number and worked example they state.',
+  '1. What the change promises. Read the commit messages and every doc and test name the change adds or edits. List for yourself each behaviour, rule, limit, number and worked example they state.',
   '2. Promise against code. For each item on that list, find the code that is meant to do it and follow it to the end. Where the docs give a number or an example, compute what the code actually returns for it. A promise the code does not keep is a finding; so is one it keeps only on the path the tests take.',
   ...(stage
     ? ['Check the diff against the TASK in the same way: a missing part of the task is a finding, and so is a change outside it (scope creep, unrelated edits); work the task leaves to other stages is not a finding.']
@@ -440,7 +450,7 @@ const reviewAsks = (stage: StageTask | undefined, base: string): string[] => [
   `4. Code that was moved or rewritten. When a commit moves code or says it changes no behaviour, compare the old version (\`git show ${base}:<path>\`) with the new one line by line. A check, a branch or a default that did not come along is a finding.`,
   '5. Beyond the diff. For everything the change renames, removes or gives a new meaning (a function, a type, a column, a route, a config key, a stored value), search the repo for what still uses it. Read the untouched code the new code calls or relies on, and the untouched code that reads what the new code writes: does it still hold when the new code feeds it new values? A problem the change causes in a file it does not touch is a finding: cite that file and line.',
   '6. The tests. For each new test ask whether it could fail if the code were wrong: an expectation computed with the same formula as the code, an assertion on a side effect instead of the result, only the happy path. Name the promised behaviours that no test would catch breaking.',
-  '7. Small things last: a name that breaks the convention of its file or schema, leftovers (debug output, TODOs, commented-out code), a constant that is defined and not used, duplication, needless abstraction, a deviation from the design the plan or context lays out.',
+  '7. Small things last: a name that breaks the convention of its file or schema, leftovers (debug output), a constant that is defined and not used, duplication, needless abstraction, a deviation from the design the plan or context lays out.',
   'Before you report a finding, open the code and confirm it; when it is cheap, run it (an existing test, or a one-line command that writes no file) instead of reasoning about it. Before you say something is missing - a test, a check, a doc line - search for it. Do not report what you could not confirm. Give each problem its own finding: do not fold two into one, and do not report one twice.',
   'Severity is what happens when the problem triggers; how rarely it triggers does not lower it.',
   '- P0: data loss or corruption, money or records written wrong, a security or authorization bypass, a leaked secret. A check that guards money, access or data and no longer runs is a bypass, also when it went missing in a refactor.',
@@ -461,19 +471,86 @@ const REVIEW_ASK =
 /** The places an agent reviewer goes back to once its first list is written; the project's rules come last, so they do not steer the first pass. */
 function secondPass(p: PromptContext, base: string): string[] {
   const places = [
-    'what the plan, the README, comments and test names promise, against what the code does, also on the paths the tests do not take',
+    'what the plan, the README and test names promise, against what the code does, also on the paths the tests do not take',
     'every new or changed function with unusual input: missing, unknown, empty, huge, at a boundary, in another unit or scale, with separators, quotes or line breaks; the same call or message twice, calls out of order, a failure halfway through',
     'who may call it, and whether that is checked on the right party and the right record',
     `code that was moved or rewritten, against its old version (\`git show ${base}:<path>\`)`,
     'untouched code that calls what the change touched, or reads what it writes',
     'tests that could not fail if the code were wrong, and promised behaviour that no test covers',
   ]
-  const rules = p.config.rules.length ? ["- the project's rules, as the author of the change was given them:", ...p.config.rules.map(rule => `  ${rule}`)] : []
+  const kept = reviewerRules(p.config.rules)
+  const rules = kept.length ? ["- the project's rules, as the author of the change was given them:", ...kept.map(rule => `  ${rule}`)] : []
   return [
     'When you have your list, you are not done: a first pass finds about half of what is there. Go through the change once more, this time place by place, looking only for problems that are not on your list yet, and add them:',
     ...places.map((place, i) => `- ${place}${i < places.length - 1 || rules.length ? ';' : '.'}`),
     ...rules,
   ]
+}
+
+export interface Known {
+  file: string
+  line?: number
+  title: string
+  declined?: string
+}
+
+const KNOWN_LIMIT = 40
+const KNOWN_TEXT = 160
+const short = (text: unknown) => String(text ?? '').replace(/\s+/g, ' ').trim().slice(0, KNOWN_TEXT)
+
+export const knownOf = (f: Finding, declined?: string): Known => ({ file: f.file, ...(Number.isInteger(f.line) ? { line: f.line } : {}), title: f.title, ...(declined === undefined ? {} : { declined }) })
+
+const within = (e: EarlierRound, label: string) => (e.loop ? `${e.loop.id}/${label}` : label)
+
+export function lineOf(earlier: EarlierRound[]): (label: string) => string[] {
+  const parent = new Map(earlier.flatMap(e => [...e.sent, ...(e.residual ?? [])].map(f => [roundLabel(e.round, f, e.loop), f.repeatOf === undefined ? undefined : within(e, f.repeatOf)] as const)))
+  return label => {
+    const line = [label]
+    for (let up = parent.get(label); up !== undefined && parent.has(up) && !line.includes(up); up = parent.get(up)) line.push(up)
+    return line
+  }
+}
+
+export function repeatedBy<T extends { labels: string[] }>(line: (label: string) => string[], entries: T[], named: Iterable<string>): Set<T> {
+  const hit = new Set<T>()
+  for (const r of named) {
+    const up = line(r)
+    const below: T[] = []
+    for (const e of entries) {
+      if (up.includes(e.labels[0]!)) hit.add(e)
+      else if (e.labels.some(l => line(l).includes(r))) below.push(e)
+    }
+    if (below.length === 1) hit.add(below[0]!)
+  }
+  return hit
+}
+
+export function declinedKnown(earlier: EarlierRound[]): Known[] {
+  const line = lineOf(earlier)
+  const repeatsIn = (e: EarlierRound) => [...[...e.sent, ...(e.residual ?? [])].flatMap(f => (f.repeatOf === undefined ? [] : [f.repeatOf])), ...(e.repeats ?? [])].map(label => within(e, label))
+  const declines = earlier.flatMap((e, at) =>
+    (e.declined ?? []).flatMap(d => {
+      const f = e.sent.find(s => s.id === d.id)
+      return f ? [{ at, labels: [roundLabel(e.round, d, e.loop)], known: knownOf(f, d.reason || 'no reason given') }] : []
+    }),
+  )
+  const left = earlier.reduce((live, e, at) => {
+    const gone = repeatedBy(line, live, repeatsIn(e))
+    return [...live.filter(d => !gone.has(d)), ...declines.filter(d => d.at === at)]
+  }, [] as typeof declines)
+  return left.map(d => d.known)
+}
+
+const knownLine = (k: Known) => `${short(k.file)}${k.line === undefined ? '' : `:${k.line}`} - ${short(k.title)}${k.declined === undefined ? '' : ` (the fixer declined it: ${short(k.declined)})`}`
+
+const NOT_FINDINGS =
+  'These are not findings, also when a rule or the plan asks for them, so leave them out: code comments and doc comments (wrong, outdated, missing, too long, or there against a rule; TODO notes and commented-out code too), commit messages and the commit history, the pull request description or its PR-BODY file, and how the work was done (the order tests and code were written in). A doc file such as the README is not a comment: review it like code.'
+
+function notFindings(known: Known[], oneLine = false): string[] {
+  const listed = known.slice(-KNOWN_LIMIT)
+  if (!listed.length) return [NOT_FINDINGS]
+  const intro = `Earlier review rounds raised the ${known.length} finding(s) below, and they were left as they are on purpose${known.length > listed.length ? ` (the last ${listed.length} are listed)` : ''}. Do not report them again${listed.some(k => k.declined !== undefined) ? '; report one the fixer declined only when its reason is wrong' : ''}:`
+  return oneLine ? [NOT_FINDINGS, `${intro} ${listed.map(knownLine).join('; ')}.`] : [NOT_FINDINGS, intro, ...listed.map(k => `- ${knownLine(k)}`)]
 }
 
 /** What P0 to P3 mean for an agent reviewer; it follows the return line, so it labels the findings without steering the search for them. */
@@ -489,8 +566,9 @@ const SEVERITY_TIERS = [
  * The agent reviewer gets a short, open review request and then a second pass. Measured on frozen first versions of one plan
  * (Sonnet reviewer, known defects, blind scoring): a step list, the rules or a clean-stage sentence in front of the open request
  * each cost it known defects (21% raised with the step list, 47% with the open request alone); this form raised 48%.
+ * The lines after the severity tiers (what is not a finding, and the findings earlier rounds left as they are) were added later and are not in that measurement.
  */
-export function agentReviewPrompt(p: PromptContext, name: string, reviewBase: string, stage?: StageTask, note?: string): string {
+export function agentReviewPrompt(p: PromptContext, name: string, reviewBase: string, stage?: StageTask, note?: string, known: Known[] = []): string {
   return [
     `Review a pull request. The repository is ${p.repo}, on branch \`${p.branch}\`; the base is \`${reviewBase}\`.`,
     ...(stage ? [`The change is stage ${stage.number}/${stage.total} "${name}" of a plan. The stage's task:\n${stage.task}`] : []),
@@ -507,11 +585,12 @@ export function agentReviewPrompt(p: PromptContext, name: string, reviewBase: st
     `Return findings with id (F1, F2, ...), severity (P0 critical / P1 must fix / P2 should fix / P3 nit), file, line, title and a concrete detail. Write them in ${p.config.language}.`,
     `Keep every finding short: a title of one line, and a detail of ${SHORT_DETAIL}.`,
     ...SEVERITY_TIERS,
+    ...notFindings(known),
   ].join('\n')
 }
 
 /** `inWorktree`: the reviewer already runs in the worktree and its bash rules refuse `cd` and quoted arguments (the opencode engine). */
-export function commandReviewPrompt(p: PromptContext, name: string, reviewBase: string, stage?: StageTask, note?: string, inWorktree = false): string {
+export function commandReviewPrompt(p: PromptContext, name: string, reviewBase: string, stage?: StageTask, note?: string, inWorktree = false, known: Known[] = []): string {
   const diff = inWorktree
     ? `, from the worktree you run in: \`git diff ${reviewBase}...HEAD\` plus \`git log --oneline ${reviewBase}..HEAD\``
     : `: \`cd ${shellQuote(p.repo)} && git diff ${shellQuote(reviewBase)}...HEAD\` plus \`git log --oneline ${shellQuote(reviewBase)}..HEAD\``
@@ -522,6 +601,7 @@ export function commandReviewPrompt(p: PromptContext, name: string, reviewBase: 
     p.context ? `Design context, read it first: ${p.context}` : '',
     taskSection(stage),
     ...reviewAsks(stage, reviewBase),
+    ...notFindings(known, true),
     ...bulletForm('path/to/file.ts:12', 'must fix', 'the path relative to the repo root and the line'),
   ]
     .filter(Boolean)
@@ -548,7 +628,7 @@ export function planReviewPrompt(p: PromptContext, plans: string[]): string {
 }
 
 export function agentPlanReviewPrompt(p: PromptContext, plans: string[]): string {
-  return `${readOnlyHeader(p, 'your findings')}
+  return `${readOnlyHeader(forReviewer(p), 'your findings')}
 
 You are the plan REVIEWER. Do not edit, stage or commit anything.
 ${planReviewAsks(p, plans).slice(0, 2).join('\n')}
@@ -577,9 +657,9 @@ export function judgePrompt(p: PromptContext, reviewBase: string, findings: Find
   return `You are the JUDGE classifying the findings of a code review. Repo ${p.repo}, branch ${p.branch}, ${note === WHOLE_BRANCH_NOTE ? 'branch' : 'stage'} diff \`${shellQuote(reviewBase)}...HEAD\`. Do not edit anything.
 ${note ? note + '\n' : ''}${p.context ? 'Design context:\n' + p.context + '\n' : ''}${taskSection(stage)}
 ${judgeRouting(findings)}
-For each finding, open the cited code and check that it is real and correctly described.${stage ? " Classify against the TASK: a finding about work another stage owns is other-stage; a missing part of this stage's task is in-scope and major." : ''} ${JUDGE_DUPES}
+For each finding, open the cited code and check that it is real and correctly described.${stage ? " Classify against the TASK: a finding about work another stage owns is other-stage; a missing part of this stage's task is in-scope and major; what the task or a rule asks of commits, the pull request description or the way of working is not-code." : ''} ${JUDGE_DUPES}
 ${rubric(stage ? "the stage's TASK" : 'what the change set out to do')}
-${tagsSection(p.config.tags)}${judgeHistory(earlier)}
+${COMMENT_LABEL}${tagsSection(p.config.tags)}${judgeHistory(earlier)}
 REVIEW:
 ${JSON.stringify(findings)}`
 }
@@ -591,7 +671,7 @@ ${p.context ? 'Design context:\n' + p.context + '\n' : ''}
 Nobody fixes anything in this run. Your classification decides under which heading of the user's report each finding goes, so classify every finding on its merits: the reviewer's severity does not bind you, in either direction.
 For each finding, open the cited code and check that it is real and correctly described. Use scope in-scope or pre-existing only. ${JUDGE_DUPES}
 ${rubric('what the change set out to do')}
-
+${COMMENT_LABEL}
 REVIEW:
 ${JSON.stringify(findings)}`
 }
@@ -608,7 +688,7 @@ export function judgeRetryNote(problems: Array<{ id: string; why: string }> | nu
 export function planJudgePrompt(p: PromptContext, plans: string[], findings: Finding[], earlier: EarlierRound[] = []): string {
   return `You are the JUDGE classifying the findings of a plan review. Repo ${p.repo}, branch ${p.branch}, plan ${plans.join(', ')}. Implementation has not started. Do not edit anything.
 ${p.context ? 'Design context:\n' + p.context + '\n' : ''}
-${judgeRouting(findings)}
+${judgeRouting(findings, false)}
 For each finding, open the cited plan line and the code, config or dependency it names, and check that it is real and correctly described. Classify impact by what the plan would cause if implemented as written; evidence is the plan's path:line plus the repo path:line that shows the problem. ${JUDGE_DUPES}
 ${rubric('the goal of the plan')}
 ${judgeHistory(earlier)}

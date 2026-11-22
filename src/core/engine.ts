@@ -7,6 +7,7 @@ import {
   checkCommandPrompt,
   commandReviewPrompt,
   commitPrompt,
+  declinedKnown,
   draftPrompt,
   extractPrompt,
   finalPrompt,
@@ -16,12 +17,15 @@ import {
   judgePrompt,
   judgeRetryNote,
   judgeStepPrompt,
+  knownOf,
+  lineOf,
   mergePrompt,
   ONE_SHOT_NOTE,
   planFixPrompt,
   planJudgePrompt,
   planReviewPrompt,
   repairPrompt,
+  repeatedBy,
   reportWritePrompt,
   reviewReadPrompt,
   reviewSavePrompt,
@@ -38,6 +42,7 @@ import {
   roundLabel,
   type EarlierRound,
   type FailedCheck,
+  type Known,
   type Overruled,
   type PromptContext,
   type RunOutcomes,
@@ -46,7 +51,7 @@ import {
 } from './prompts'
 import { opencodeAnswer, readGrant } from './opencode'
 import { bucketOf, countsOf, isDemoted, isJudged, renderReport, severityOf, utf8Length, type ReportMeta } from './report'
-import { decide, declinedOf, isBlocker, keeperOf, knownTag, mergeDuplicates, namedTag, parseCodexReview, reviewFailure, rideAlong, saysNoFindings, triage, type Policy } from './review'
+import { decide, declinedOf, holds, isBlocker, isKept, isPrBody, keeperOf, knownTag, labelledComments, mergeDuplicates, namedTag, parseCodexReview, reviewFailure, rideAlong, saysNoFindings, triage, type Policy } from './review'
 import { detachedReview, MAX_WAITS, planReviewScript, reportedBackend, reviewerModel, reviewPlan, reviewStem, WAIT_SECONDS } from './reviewer'
 import { SCHEMAS } from './schemas'
 import { heredocWriteScript, shellQuote } from './shell'
@@ -154,11 +159,17 @@ interface RepoState {
   waiters: Array<() => void>
   setup: Promise<unknown>
   merges: number
-  left: string[]
+  leftLanes: string[]
   red?: number
   started?: Promise<string | undefined>
   /** Each stage's review decisions, by stage index, for the final review's judge. */
   ledger: Map<number, EarlierRound[]>
+  left: Map<number, Left[]>
+}
+
+interface Left {
+  labels: string[]
+  finding: Finding
 }
 
 const saidSomething = (d: unknown): string | undefined =>
@@ -444,12 +455,12 @@ function engineParts(host: Host, config: GrannyConfig) {
     }
   }
 
-  const review = async (lane: Lane, rv: ReviewerConfig, name: string, subject: Subject, round: number, attempt: number): Promise<Omit<ReviewerRound, 'reviewer'>> => {
+  const review = async (lane: Lane, rv: ReviewerConfig, name: string, subject: Subject, round: number, attempt: number, known: Known[]): Promise<Omit<ReviewerRound, 'reviewer'>> => {
     const { p, cwd } = lane
     const tag = `${name} r${round} ${rv.name}${attempt > 1 ? ` #${attempt}` : ''}`
     const phase = phaseOf(subject)
     if (rv.engine === 'agent') {
-      const prompt = subject.kind === 'plan' ? agentPlanReviewPrompt(p, subject.files) : agentReviewPrompt(p, name, subject.base, subject.stage, subject.note)
+      const prompt = subject.kind === 'plan' ? agentPlanReviewPrompt(p, subject.files) : agentReviewPrompt(p, name, subject.base, subject.stage, subject.note, known)
       const r = await call('reviewer', 'findings', `review ${tag}`, phase, prompt, 'read-only', rv, cwd)
       if (!r) return { ran: false, findings: [], note: 'reviewer agent returned nothing' }
       return { ran: true, findings: Array.isArray(r.findings) ? r.findings : [] }
@@ -467,7 +478,7 @@ function engineParts(host: Host, config: GrannyConfig) {
     const plan =
       subject.kind === 'plan'
         ? planReviewScript(rv, config, host.name, lane.base, stem, planReviewPrompt(p, subject.files), dirs)
-        : reviewPlan(rv, config, host.name, subject.base, stem, commandReviewPrompt(p, name, subject.base, subject.stage, subject.note, rv.engine === 'opencode'), dirs)
+        : reviewPlan(rv, config, host.name, subject.base, stem, commandReviewPrompt(p, name, subject.base, subject.stage, subject.note, rv.engine === 'opencode', known), dirs)
     if (!plan) return { ran: false, findings: [], note: 'this reviewer has no command for a plan review' }
     const failed = (out: string) => (rv.engine === 'opencode' ? opencodeAnswer(out).error : undefined) ?? out.slice(-2000)
     let ran: boolean
@@ -545,22 +556,22 @@ function engineParts(host: Host, config: GrannyConfig) {
     }
   }
 
-  const attempt = async (lane: Lane, rv: ReviewerConfig, name: string, subject: Subject, round: number, n: number): Promise<Omit<ReviewerRound, 'reviewer'>> => {
+  const attempt = async (lane: Lane, rv: ReviewerConfig, name: string, subject: Subject, round: number, n: number, known: Known[]): Promise<Omit<ReviewerRound, 'reviewer'>> => {
     try {
-      return await review(lane, rv, name, subject, round, n)
+      return await review(lane, rv, name, subject, round, n, known)
     } catch (e) {
       if (isCancelled(e)) throw e
       return { ran: false, findings: [], note: `reviewer call failed: ${String((e as Error)?.message ?? e)}` }
     }
   }
 
-  const reviewAll = (lane: Lane, reviewers: ReviewerConfig[], name: string, subject: Subject, round: number): Promise<ReviewerRound[]> =>
+  const reviewAll = (lane: Lane, reviewers: ReviewerConfig[], name: string, subject: Subject, round: number, known: Known[] = []): Promise<ReviewerRound[]> =>
     Promise.all(
       reviewers.map(async reviewer => {
-        let r = await attempt(lane, reviewer, name, subject, round, 1)
+        let r = await attempt(lane, reviewer, name, subject, round, 1, known)
         if (!r.ran) {
           host.log(`${name} r${round} ${reviewer.name}: did not run - retrying once. ${r.note ?? ''}`)
-          r = await attempt(lane, reviewer, name, subject, round, 2)
+          r = await attempt(lane, reviewer, name, subject, round, 2, known)
         }
         return { reviewer, ...r, findings: attribute(reviewer, r.findings) }
       }),
@@ -709,7 +720,7 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
     used.map(r => {
       const cwd = cwdOf.get(r)!
       const others = used.filter(o => o !== r).map(o => cwdOf.get(o)!)
-      return [r, { lane: { repo: r, base: baseOf(r), branch: input.branch, cwd, p: promptFor(r, cwd, input.branch, others), readable }, locked: false, waiters: [], setup: Promise.resolve(), merges: 0, left: [], ledger: new Map() }]
+      return [r, { lane: { repo: r, base: baseOf(r), branch: input.branch, cwd, p: promptFor(r, cwd, input.branch, others), readable }, locked: false, waiters: [], setup: Promise.resolve(), merges: 0, leftLanes: [], ledger: new Map(), left: new Map() }]
     }),
   )
   const primaryLane = repoState.get(primary)!.lane
@@ -900,7 +911,8 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
       runs?: CheckRun[]
       notes?: string[]
       prior?: EarlierRound[]
-      record?: { loop: NonNullable<EarlierRound['loop']>; into: EarlierRound[] }
+      before?: Left[]
+      record?: { loop: NonNullable<EarlierRound['loop']>; into: EarlierRound[]; left: Left[] }
     },
   ): Promise<PlanResult> => {
     const { gates, checks = [], runs = [], notes = [], prior = [], record } = opts
@@ -913,10 +925,16 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
     let unmerged: Finding[] = []
     let carried: Array<{ round: number; labels: string[]; finding: Finding }> = []
     const kept = () => carried.map(c => c.finding)
+    let staged = opts.before ?? []
     for (let round = 1; round <= config.maxRounds; round++) {
       const reviewedSha = config.trail && subject.kind !== 'plan' ? (known ?? (await trailHead(`head ${name} r${round}`, phase, lane.cwd))) : undefined
       known = undefined
-      const results = await reviewAll(lane, reviewers, name, subject, round)
+      const skip = subject.kind === 'diff' ? [...[...staged.map(b => b.finding), ...kept()].map(f => knownOf(f)), ...declinedKnown(earlier)] : []
+      const results = await reviewAll(lane, reviewers, name, subject, round, skip)
+      const reviewed = results.filter(r => r.ran).flatMap(r => r.findings)
+      const roots = [lane.cwd, lane.repo, ...(lane.p.others ?? [])]
+      const aside = subject.kind === 'diff' ? reviewed.filter(f => isPrBody(f.file, config.workDir, roots)) : []
+      if (aside.length) host.log(`${name} r${round}: ${aside.length} finding(s) about the PR body set aside - not judged, not sent, not kept: ${aside.map(f => f.id).join(', ')}`)
       const facts: RoundFacts = {
         loop: opts.loop,
         name,
@@ -925,12 +943,19 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
         ...(reviewedSha ? { reviewedSha } : {}),
         reviewers: results.filter(r => r.ran).map(r => reviewerMeta(r.reviewer, host)),
         findings: [],
+        ...(aside.length ? { setAside: aside } : {}),
       }
       const keep = async (more: Partial<RoundFacts>) => {
         if (config.trail) await saveTrail(trailCwd, trailRound({ ...facts, ...more }), `${name} r${round}`, phase)
       }
+      const clean = async (): Promise<PlanResult> => {
+        host.log(`${name} r${round}: clean`)
+        host.round?.({ subject: name, round, findings: [] })
+        await keep({ outcome: 'clean' })
+        return { outcome: 'clean', rounds: round, residual: kept(), unresolved: [], history }
+      }
       const failed = results.filter(r => !r.ran)
-      const found = results.filter(r => r.ran).flatMap(r => r.findings)
+      const found = reviewed.filter(f => !aside.includes(f))
       if (failed.length) {
         const names = new Set(failed.map(r => r.reviewer.name))
         const byFailed = (f: Finding) => f.reviewer !== undefined && names.has(f.reviewer)
@@ -942,16 +967,36 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
         await keep({ findings: found, outcome: 'review-failed', note })
         return { outcome: 'review-failed', rounds: round, residual: [], unresolved: [...found, ...earlier], history, note }
       }
-      if (!found.length) {
-        host.log(`${name} r${round}: clean`)
-        host.round?.({ subject: name, round, findings: [] })
-        await keep({ outcome: 'clean' })
-        return { outcome: 'clean', rounds: round, residual: kept(), unresolved: [], history }
-      }
+      if (!found.length) return clean()
 
       const declined = new Map(earlier.flatMap(e => (e.declined ?? []).map(d => [roundLabel(e.round, d, e.loop), d.reason] as const)))
-      const ledger = new Map(earlier.flatMap(e => [...e.sent, ...(e.residual ?? [])].map(f => [roundLabel(e.round, f, e.loop), f] as const)))
-      const earlierOf = (f: Finding) => (f.repeatOf === undefined ? undefined : ledger.get(f.repeatOf))
+      const entries = earlier.flatMap((e, at) =>
+        [...e.sent.map(f => ({ f, sent: true })), ...(e.residual ?? []).map(f => ({ f, sent: false }))].map(({ f, sent }) => ({
+          label: roundLabel(e.round, f, e.loop),
+          parent: f.repeatOf === undefined ? undefined : e.loop ? `${e.loop.id}/${f.repeatOf}` : f.repeatOf,
+          finding: f,
+          sent,
+          at,
+        })),
+      )
+      const node = new Map(entries.map(x => [x.label, x] as const))
+      const line = lineOf(earlier)
+      const rootOf = (label: string) => line(label).at(-1)!
+      const chainOf = (f: Finding) => {
+        const named = f.repeatOf === undefined ? undefined : node.get(f.repeatOf)
+        if (!named) return undefined
+        const root = rootOf(named.label)
+        const chain = entries.filter(x => (x.sent || isKept(x.finding)) && rootOf(x.label) === root)
+        const newest = chain.some(x => isKept(x.finding)) ? chain.reduce((a, b) => (b.at > a.at || (b.at === a.at && b.sent && !a.sent) ? b : a)) : named
+        return { named, newest }
+      }
+      const earlierOf = (f: Finding) => {
+        const read = chainOf(f)
+        if (!read) return undefined
+        const { named, newest } = read
+        const entry = newest.sent && !named.sent && !isKept(named.finding) && named.at >= newest.at ? named : newest
+        return { label: entry.label, finding: entry.finding }
+      }
       const blockers = found.filter(isBlocker)
       const judged = declined.size ? found : found.filter(f => !isBlocker(f))
       const unjudgedBlockers = new Set(declined.size ? [] : blockers.map(f => f.id))
@@ -960,7 +1005,12 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
       } else if (blockers.length) {
         host.log(`${name} r${round}: ${blockers.length} P0/P1 finding(s) go to the implementer without the judge: ${blockers.map(f => f.id).join(', ')}`)
       }
-      const declinedBefore = (f: Finding) => f.repeatOf !== undefined && declined.has(f.repeatOf)
+      const declinedLabel = (f: Finding) => {
+        if (f.repeatOf === undefined || declined.has(f.repeatOf)) return f.repeatOf
+        const read = chainOf(f)?.newest.label
+        return read !== undefined && declined.has(read) ? read : undefined
+      }
+      const declinedBefore = (f: Finding) => (isBlocker(f) ? f.repeatOf !== undefined && declined.has(f.repeatOf) : declinedLabel(f) !== undefined)
       const untagged: Policy = { threshold: config.threshold, alwaysFix: config.alwaysFix, rideAlong: config.rideAlong }
       const policy: Policy = subject.kind === 'diff' && Object.keys(config.tags).length ? { ...untagged, tags: config.tags } : untagged
       let findings = found.map(f => decide(f, undefined, policy, declinedBefore))
@@ -969,6 +1019,7 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
         const prompt = subject.kind === 'plan' ? planJudgePrompt(p, subject.files, judged, earlier) : judgePrompt(p, subject.base, judged, earlier, subject.stage, subject.note)
         const label = `judge ${name} r${round}`
         const judgedIds = new Set(judged.map(f => f.id))
+        const commentsOf = (per: JudgeEntry[]) => (subject.kind === 'diff' ? labelledComments(per, judgedIds) : new Set<string>())
         const blockerIds = new Set(blockers.map(f => f.id))
         const duplicatesOf = (per: JudgeEntry[]) =>
           new Map(
@@ -978,14 +1029,17 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
               .map(x => [x.id, x.duplicateOf as string]),
           )
         const decideAll = (per: JudgeEntry[]) => {
-          const entries = found.map(f => {
+          const labelled = commentsOf(per)
+          const entries = found.filter(f => !labelled.has(f.id)).map(f => {
             const s = judgedIds.has(f.id) ? per.find(x => x.id === f.id) : undefined
-            const repeat = typeof s?.repeatOf === 'string' && ledger.has(s.repeatOf) ? { repeatOf: s.repeatOf } : {}
+            const repeat = typeof s?.repeatOf === 'string' && node.has(s.repeatOf) ? { repeatOf: s.repeatOf } : {}
             return { f: { ...f, ...repeat }, s }
           })
-          const keeper = keeperOf(duplicatesOf(per), new Set(found.map(f => f.id)))
+          const keeper = keeperOf(duplicatesOf(per), new Set(entries.map(e => e.f.id)))
           const declinedGroups = new Set(entries.filter(e => declinedBefore(e.f)).map(e => keeper(e.f.id)))
-          return entries.map(({ f, s }) => decide(f, s, declinedGroups.has(keeper(f.id)) ? untagged : policy, declinedBefore, earlierOf))
+          const keptGroups = new Map(entries.flatMap(e => (e.f.repeatOf !== undefined && holds(e.f, e.s, declinedBefore, earlierOf(e.f)?.finding) ? [[keeper(e.f.id), e.f.repeatOf] as const] : [])))
+          const repeating = (f: Finding): Finding => (f.repeatOf === undefined && !isBlocker(f) && keptGroups.has(keeper(f.id)) ? { ...f, repeatOf: keptGroups.get(keeper(f.id))! } : f)
+          return entries.map(({ f, s }) => decide(repeating(f), s, declinedGroups.has(keeper(f.id)) ? untagged : policy, declinedBefore, earlierOf))
         }
         const { per, decided: withScores } = await judgeAnswers({
           at: `${name} r${round}`,
@@ -996,10 +1050,16 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
           apply: decideAll,
           leftTo: 'to the implementer unjudged (rule 2)',
         })
+        const labelled = commentsOf(per)
+        const comments = found.filter(f => labelled.has(f.id))
+        if (comments.length) {
+          host.log(`${name} r${round}: ${comments.length} finding(s) about code comments set aside - not sent, not kept: ${comments.map(f => f.id).join(', ')}`)
+          facts.setAside = [...(facts.setAside ?? []), ...comments.map(f => ({ ...f, comment: true as const }))]
+        }
         const unknownTags = policy.tags
           ? per.flatMap(x => {
               const tagName = namedTag(x)
-              return judgedIds.has(x.id) && tagName !== undefined && !knownTag(policy.tags, tagName) ? [`${x.id} ${JSON.stringify(tagName.length > 40 ? `${tagName.slice(0, 40)}...` : tagName)}`] : []
+              return judgedIds.has(x.id) && !labelled.has(x.id) && tagName !== undefined && !knownTag(policy.tags, tagName) ? [`${x.id} ${JSON.stringify(tagName.length > 40 ? `${tagName.slice(0, 40)}...` : tagName)}`] : []
             })
           : []
         if (unknownTags.length) host.log(`${name} r${round}: the judge named tag(s) the config does not have - ignored: ${unknownTags.join(', ')}`)
@@ -1008,32 +1068,31 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
         unmerged = withScores
         const declinedIds = new Set(withScores.filter(declinedBefore).map(f => f.id))
         findings = rideAlong(merge.findings, policy, f => declinedBefore(f) || (f.duplicates ?? []).some(id => declinedIds.has(id)))
+        if (!findings.length) return clean()
       }
       history.push({ round, findings })
       host.log(`${name} r${round}: ${findings.length} finding(s)`)
 
       const { accepted, residual } = triage(findings)
+      const repeated = new Set(unmerged.flatMap(f => (f.repeatOf ? [f.repeatOf] : [])))
       const routed: Partial<RoundFacts> = { findings, sent: accepted, blockers: unjudgedBlockers }
       host.round?.({ subject: name, round, findings: findings.map(f => roundFinding(f, accepted.includes(f))) })
-      const entry: EarlierRound = { round, sent: accepted, ...(residual.length ? { residual } : {}) }
+      const entry: EarlierRound = { round, sent: accepted, ...(residual.length ? { residual } : {}), ...(repeated.size ? { repeats: [...repeated] } : {}) }
       const recorded = record ? { ...entry, loop: record.loop } : undefined
       if (recorded) record!.into.push(recorded)
       const ruled = (f: Finding) => `rule ${f.decision!.rule}: ${f.decision!.why}`
       for (const f of findings.filter(f => f.decision!.raised)) host.log(`${name} r${round}: the ratchet raised ${f.id} - ${f.decision!.raised}`)
+      for (const f of findings.filter(f => f.decision!.held)) host.log(`${name} r${round}: ${f.id} held - ${f.decision!.held}`)
       if (accepted.length) host.log(`${name} r${round}: to the implementer: ${accepted.map(f => `${f.id} (${ruled(f)})`).join(', ')}`)
       for (const f of residual.filter(declinedBefore)) {
-        host.log(`${name} r${round}: ${f.id} dropped as a repeat of ${f.repeatOf}, which the fixer declined (${ruled(f)}) - kept as residual`)
+        host.log(`${name} r${round}: ${f.id} dropped as a repeat of ${declinedLabel(f)}, which the fixer declined (${ruled(f)}) - kept as residual`)
       }
-      const repeated = new Set(unmerged.flatMap(f => (f.repeatOf ? [f.repeatOf] : [])))
       const repeatsOf = (f: Finding) => new Set(unmerged.filter(u => u.id === f.id || f.duplicates?.includes(u.id)).flatMap(u => (u.repeatOf ? [u.repeatOf] : [])))
-      const aliases = (f: Finding) => {
-        const of = repeatsOf(f)
-        return carried.filter(c => c.labels.some(l => of.has(l))).flatMap(c => c.labels)
-      }
-      carried = [
-        ...carried.filter(c => !c.labels.some(l => repeated.has(l))),
-        ...residual.map(f => ({ round, labels: [roundLabel(round, f), ...aliases(f)], finding: f })),
-      ]
+      const aliases = (f: Finding) => [...repeatedBy(line, [...carried, ...staged], repeatsOf(f))].flatMap(c => c.labels)
+      const gone = repeatedBy(line, [...carried, ...staged], repeated)
+      carried = [...carried.filter(c => !gone.has(c)), ...residual.map(f => ({ round, labels: [roundLabel(round, f), ...aliases(f)], finding: f }))]
+      staged = staged.filter(b => !gone.has(b))
+      if (record) record.left.splice(0, record.left.length, ...carried.map(c => ({ labels: c.labels.map(l => `${record.loop.id}/${l}`), finding: c.finding })))
       if (residual.length) {
         host.log(`${name} r${round}: ${residual.length} finding(s) kept as residual, not sent: ${residual.map(f => `${f.id} (${ruled(f)})`).join(', ')}`)
         for (const f of residual.filter(f => f.decision!.attention)) host.log(`${name} r${round}: ATTENTION ${f.id} is pre-existing with impact ${f.impact} - left for the user`)
@@ -1044,7 +1103,7 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
         return { outcome: 'residual-only', rounds: round, residual: kept(), unresolved: [], history }
       }
 
-      const overruled: Overruled[] = accepted.filter(declinedBefore).map(f => ({ id: f.id, repeatOf: f.repeatOf!, reason: f.reason, said: declined.get(f.repeatOf!)! }))
+      const overruled: Overruled[] = accepted.filter(declinedBefore).map(f => ({ id: f.id, repeatOf: declinedLabel(f)!, reason: f.reason, said: declined.get(declinedLabel(f)!)! }))
       for (const o of overruled) {
         host.log(`${name} r${round}: the judge overruled the fixer on ${o.id} (repeat of ${o.repeatOf}, ${ruled(accepted.find(f => f.id === o.id)!)})`)
       }
@@ -1144,6 +1203,11 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
     else s.locked = false
   }
 
+  const leftOf = (st: StageSpec, i: number): Left[] => {
+    const left = repoState.get(repoOf(st))!.left
+    if (!left.has(i)) left.set(i, [])
+    return left.get(i)!
+  }
   const ledgerOf = (st: StageSpec, i: number): EarlierRound[] => {
     const ledger = repoState.get(repoOf(st))!.ledger
     if (!ledger.has(i)) ledger.set(i, [])
@@ -1260,7 +1324,7 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
           name,
           { kind: 'diff', base, ...(task ? { stage: task } : {}) },
           undefined,
-          { loop: `s${i + 1}`, gates, checks, runs, notes, record: { loop: { id: `s${i + 1}`, name: `Stage ${i + 1} (${name})` }, into: ledgerOf(st, i) } },
+          { loop: `s${i + 1}`, gates, checks, runs, notes, record: { loop: { id: `s${i + 1}`, name: `Stage ${i + 1} (${name})` }, into: ledgerOf(st, i), left: leftOf(st, i) } },
         )
     if (gates && !gates.green && !runs.length && (loop.outcome === 'clean' || loop.outcome === 'residual-only')) {
       loop.outcome = 'gates-red'
@@ -1308,7 +1372,7 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
     const cleaned = await shell(`cleanup ${name}`, 'Implement', cleanup, main.cwd)
     if (cleaned.ran) return done
     const reached = (marker: string) => printed(cleaned.output, marker)
-    if (!reached('lane worktree removed')) state.left.push(lane.cwd)
+    if (!reached('lane worktree removed')) state.leftLanes.push(lane.cwd)
     const left = reached('lane worktree removed')
       ? `its worktree ${lane.cwd} was removed, but its branch ${lane.branch} was left in place`
       : `its worktree ${lane.cwd} and branch ${lane.branch} were left in place (${reached('lane worktree clean') ? 'git worktree remove failed' : reached('lane merged') ? 'uncommitted changes in the worktree' : 'the cleanup could not confirm the merge'})`
@@ -1510,7 +1574,8 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
     const prior = [...s.ledger].sort(([a], [b]) => a - b).flatMap(([, rounds]) => rounds)
     const loop = s.lane.repo === primary ? 'final' : `final-${slug(baseName(s.lane.repo))}`
     const head = reusedHead.get(s)
-    const looped = await reviewLoop(s.lane, name, { kind: 'diff', base: s.lane.base, note: WHOLE_BRANCH_NOTE }, undefined, { loop, ...(head ? { head } : {}), checks, runs, notes, prior })
+    const before = [...s.left].sort(([a], [b]) => a - b).flatMap(([, left]) => left).filter(b => b.finding.decision?.rule !== 4)
+    const looped = await reviewLoop(s.lane, name, { kind: 'diff', base: s.lane.base, note: WHOLE_BRANCH_NOTE }, undefined, { loop, ...(head ? { head } : {}), checks, runs, notes, prior, before })
     const note = [looped.note, ...notes].filter(Boolean).join('\n')
     const r = note ? { ...looped, note } : looped
     if (r.outcome === 'checks-failed') host.log(`${name} ended checks-failed - the final check still runs, but the branch is not PR-ready`)
@@ -1596,7 +1661,7 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
     const kept = ownerReason(repo)
     if (kept) return keep(kept)
     if (blocked) return keep(blocked)
-    if (s.left.length) return keep(`a lane worktree was left in place (${s.left.join(', ')}), and the removal could not be confirmed`)
+    if (s.leftLanes.length) return keep(`a lane worktree was left in place (${s.leftLanes.join(', ')}), and the removal could not be confirmed`)
     if (trimPath(cwd) === repo) return keep('the run was started in this worktree')
     const saved = savedDir(config, repo, input.branch)
     try {
@@ -1735,7 +1800,10 @@ export async function runJudge(host: Host, input: JudgeInput): Promise<JudgeResu
     return finish('review-failed', { failedReviewers, note: notes })
   }
   for (const r of failedReviewers) host.log(`${r.name} did not run, also on a retry - going on without it: ${r.note}`)
-  const found = results.filter(r => r.ran).flatMap(r => r.findings)
+  const reviewed = results.filter(r => r.ran).flatMap(r => r.findings)
+  const aside = reviewed.filter(f => isPrBody(f.file, config.workDir, [repo]))
+  if (aside.length) host.log(`${aside.length} finding(s) about the PR body set aside - not in the report: ${aside.map(f => f.id).join(', ')}`)
+  const found = reviewed.filter(f => !aside.includes(f))
 
   const tag = async (): Promise<Finding[]> => {
     host.phase(TAGGING_PHASE)
@@ -1756,9 +1824,11 @@ export async function runJudge(host: Host, input: JudgeInput): Promise<JudgeResu
         }
       },
       // Treating every finding as a declined repeat keeps P0/P1 out of decide's rule 1, which would hide that the judge left one unclassified.
-      apply: per => found.map(f => decide(f, per.find(x => x.id === f.id), TAG_POLICY, () => true)),
+      apply: per => found.filter(f => !labelledComments(per, ids).has(f.id)).map(f => decide(f, per.find(x => x.id === f.id), TAG_POLICY, () => true)),
       leftTo: "under the reviewer's severity, not judged",
     })
+    const labelled = labelledComments(per, ids)
+    if (labelled.size) host.log(`${labelled.size} finding(s) about code comments set aside - not in the report: ${found.filter(f => labelled.has(f.id)).map(f => f.id).join(', ')}`)
     const duplicateOf = new Map(per.filter(x => ids.has(x.id) && typeof x.duplicateOf === 'string' && ids.has(x.duplicateOf)).map(x => [x.id, x.duplicateOf as string]))
     // mergeDuplicates prefers a copy to fix: here that is one the report keeps under a P heading on the judge's word.
     const placed = decided.map(f => ({ ...f, decision: { ...f.decision!, action: isJudged(f) && bucketOf(f) !== 'dismissed' ? ('fix' as const) : ('residual' as const) } }))
