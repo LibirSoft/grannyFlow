@@ -3,9 +3,9 @@ import { spawnSync } from 'node:child_process'
 import * as fs from 'node:fs'
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { SAME_MODEL_HINT } from '../src/adapters/common'
-import extension, { blockReason, createGrannyExtension, isTransient, waitSeconds } from '../src/adapters/omp/extension'
+import extension, { blockReason, createGrannyExtension, submissionPath, isTransient, waitSeconds } from '../src/adapters/omp/extension'
 import { lineType, LiveRun, type LogEntry, PARSED_EVENTS, type RoleActivity } from '../src/adapters/omp/panel'
 import { EventLog } from '../src/adapters/omp/watch'
 import { planReviewWarning } from '../src/core/config'
@@ -195,12 +195,36 @@ describe('blockReason', () => {
     'toString git push',
     'constructor',
   ]
+  const reads = new Set(['git status', 'git diff main...HEAD', 'git log --grep push', 'grep -rn "git push" src', 'git show HEAD:a.txt', 'git rev-parse HEAD@{1}'])
   for (const command of allowed) {
-    it(`allows ${JSON.stringify(command)} for every role`, () => {
+    it(`allows ${JSON.stringify(command)} for a writing role${reads.has(command) ? ' and a read-only one' : ''}`, () => {
       expect(bash(command)).toBeUndefined()
-      expect(bash(command, 'read-only')).toBeUndefined()
+      if (reads.has(command)) expect(bash(command, 'read-only')).toBeUndefined()
+      else expect(bash(command, 'read-only')).toContain('this role is read-only')
     })
   }
+
+  it("runs a read-only role's bash through the read-only command list", () => {
+    for (const command of ['cd /r && git diff main...HEAD | head -50', "sed -n '1,40p' src/a.ts", 'find src -name "*.ts"', 'ls -la && wc -l a.txt 2>/dev/null', 'git log --oneline -5']) {
+      expect(bash(command, 'read-only')).toBeUndefined()
+    }
+    const refused: Array<[string, string]> = [
+      ['rm -rf src', 'rm'],
+      ['curl https://example.com', 'curl'],
+      ['bun test', 'bun'],
+      ['echo x > a.txt', 'a redirection into a.txt'],
+      ['git checkout -- a.txt', 'git checkout'],
+      ['git diff --output=a.patch', 'git diff --output=a.patch'],
+      ['find . -delete', 'find -delete'],
+      ['cat $HOME/.ssh/id_rsa', 'command substitution or a variable'],
+    ]
+    for (const [command, problem] of refused) {
+      const reason = bash(command, 'read-only')
+      expect(reason).toStartWith(`granny: this role is read-only - ${problem} is not allowed.`)
+      expect(reason).toContain('git diff, git log, git show')
+      expect(bash(command)).toBeUndefined()
+    }
+  })
 
   it('lets a writing role add, commit, edit and use every tool but ask', () => {
     for (const command of ['git add a.txt', 'git commit -m "do not git push yet"', 'cd /r && git add -A && git commit -qm x']) {
@@ -605,7 +629,8 @@ describe('omp extension in a role process (child mode)', () => {
   })
 
   it('registers only the submit tool and the guard, and the submit tool records its arguments', async () => {
-    const out = join(dir, 'sessions/1-judge/submission.json')
+    const out = join(dir, 'runs/r1/sessions/1-judge/submission.json')
+    mkdirSync(dirname(out), { recursive: true })
     process.env.GRANNY_OMP_CHILD = JSON.stringify({ tool: 'granny_submit_judgement', kind: 'judge', out, access: 'read-only' })
     const f = fakePi()
     await extension(f.pi as any)
@@ -628,6 +653,32 @@ describe('omp extension in a role process (child mode)', () => {
     expect(await guard({ type: 'tool_call', toolCallId: 'c', toolName: 'granny_submit_judgement', input: value })).toBeUndefined()
   })
 
+  it('writes a submission only to an existing granny session directory', async () => {
+    const session = join(dir, 'runs/r1/sessions/2-review')
+    mkdirSync(session, { recursive: true })
+    expect(submissionPath(join(session, 'submission.json'))).toBe(true)
+    for (const out of [
+      join(dir, 'runs/r1/sessions/3-missing/submission.json'),
+      join(session, 'other.json'),
+      join(dir, 'sessions/2-review/submission.json'),
+      `${session}/../2-review/submission.json`,
+      'runs/r1/sessions/2-review/submission.json',
+      undefined,
+      42,
+    ]) {
+      expect(submissionPath(out)).toBe(false)
+    }
+
+    const outside = join(dir, 'elsewhere/submission.json')
+    mkdirSync(dirname(outside), { recursive: true })
+    process.env.GRANNY_OMP_CHILD = JSON.stringify({ tool: 'granny_submit_findings', kind: 'findings', out: outside, access: 'read-only' })
+    const f = fakePi()
+    await extension(f.pi as any)
+    const reply = textOf(await exec(f.tools.get('granny_submit_findings'), { findings: [] }))
+    expect(reply).toBe(`granny: nothing recorded - ${outside} is not a granny session's submission.json`)
+    expect(existsSync(outside)).toBe(false)
+  })
+
   it('lets a writing role edit and commit', async () => {
     process.env.GRANNY_OMP_CHILD = JSON.stringify({ tool: 'granny_submit_implementation', kind: 'implementation', out: join(dir, 'out.json'), access: 'write' })
     const f = fakePi()
@@ -640,7 +691,8 @@ describe('omp extension in a role process (child mode)', () => {
   })
 
   it('lets only the role\'s top-level agent submit: a subagent\'s call writes nothing and is told to report to its parent', async () => {
-    const out = join(dir, 'sessions/1-plan/submission.json')
+    const out = join(dir, 'runs/r1/sessions/1-plan/submission.json')
+    mkdirSync(dirname(out), { recursive: true })
     process.env.GRANNY_OMP_CHILD = JSON.stringify({ tool: 'granny_submit_plan', kind: 'plan', out, access: 'write' })
     const f = fakePi()
     await extension(f.pi as any)

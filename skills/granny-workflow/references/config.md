@@ -668,8 +668,8 @@ opencode must be installed and logged in to the model's provider where the revie
 `agent` reviewers (the default reviewer is one), the judge and the extraction agent are read-only roles: they must not edit, create, stage or commit a file, and their prompts carry no commit, stash, attribution or gate rules. How that holds depends on the host:
 
 - On Claude Code, by default, it is only prompt text. granny puts `READ-ONLY ROLE: do not edit, create, stage or commit any file.` at the top of the role's prompt, and the subagent still has its write tools and can ignore that line. With `readOnlyAgent` on, it is enforced - see below.
-- On opencode the role's child session gets permission rules that deny edits, `git add` and `git commit` ([opencode.md](opencode.md#models-and-permissions)).
-- On omp the role's process gets a guard that lets it call only omp's reading tools, `bash` and its submit tool, and blocks `git add` and `git commit` in its `bash` ([omp.md](omp.md#models-and-permissions) lists the tools).
+- On opencode the role's child session gets permission rules that deny edits and `task` subagents and allow in its shell only the read-only git commands of the `opencode` reviewer ([opencode.md](opencode.md#models-and-permissions)).
+- On omp the role's process gets a guard that lets it call only omp's reading tools, `bash` and its submit tool, and lets its `bash` run only the read-only commands of Claude Code's read-only agent ([omp.md](omp.md#models-and-permissions) lists the tools and the commands).
 
 **`readOnlyAgent` (Claude Code).** With `"readOnlyAgent": true` granny passes `agentType: "granny-readonly"` to the Workflow `agent()` call of every `agent` reviewer, the judge (the plan judge too) and the extraction agent, and lists the commands they may run after the `READ-ONLY ROLE` line ("Claude Code - the lines before the prompt ..." in [prompts.md](prompts.md)). Two files enforce it, both shipped in the skill:
 

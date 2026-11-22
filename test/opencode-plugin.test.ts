@@ -7,6 +7,7 @@ import { SAME_MODEL_HINT } from '../src/adapters/common'
 import plugin, { createGrannyPlugin, isTransient, modelRef, pause, permissions, preflight, providerError, summarize } from '../src/adapters/opencode/plugin'
 import { brokerCompanion, records, sessionEndHook } from './fake-companion'
 import { planReviewWarning } from '../src/core/config'
+import { opencodeAgentConfig, READ_ONLY_SHELL } from '../src/core/opencode'
 
 const git = (cwd: string, ...args: string[]) => {
   const r = spawnSync('git', args, { cwd, encoding: 'utf8' })
@@ -280,6 +281,22 @@ describe('opencode plugin helpers', () => {
     expect(write).not.toContainEqual({ action: 'edit', resource: '*', effect: 'deny' })
     expect(ro).toContainEqual({ action: 'edit', resource: '*', effect: 'deny' })
     expect(ro).toContainEqual({ action: 'shell', resource: 'git commit *', effect: 'deny' })
+  })
+
+  it("keeps a read-only role's shell to the read-only git commands and denies it subagents", () => {
+    const ro = permissions('read-only')
+    const shell = ro.filter(r => r.action === 'shell')
+    const tail = shell.slice(shell.findIndex(r => r.resource === '*'))
+    expect(tail).toEqual(READ_ONLY_SHELL.map(([resource, effect]) => ({ action: 'shell', resource, effect })))
+    expect(tail[0]).toEqual({ action: 'shell', resource: '*', effect: 'deny' })
+    expect(tail).toContainEqual({ action: 'shell', resource: 'git diff*', effect: 'allow' })
+    expect(tail.at(-1)!.effect).toBe('deny')
+    expect(ro).toContainEqual({ action: 'task', resource: '*', effect: 'deny' })
+    expect(ro.at(0)).toEqual({ action: '*', resource: '*', effect: 'allow' })
+    const write = permissions('write')
+    expect(write.some(r => r.action === 'shell' && r.resource === '*')).toBe(false)
+    expect(write.some(r => r.action === 'task')).toBe(false)
+    expect(JSON.parse(opencodeAgentConfig([])).agent['granny-reviewer'].permission.bash).toEqual(Object.fromEntries(READ_ONLY_SHELL))
   })
 
   it('reads the provider error of the latest turn only', () => {
