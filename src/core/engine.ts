@@ -18,6 +18,8 @@ import {
   judgeRetryNote,
   judgeStepPrompt,
   knownOf,
+  lineOf,
+  onLine,
   mergePrompt,
   ONE_SHOT_NOTE,
   planFixPrompt,
@@ -961,17 +963,8 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
         })),
       )
       const node = new Map(entries.map(x => [x.label, x] as const))
-      const rootOf = (label: string) => {
-        const seen = new Set<string>()
-        let at = label
-        while (!seen.has(at)) {
-          seen.add(at)
-          const parent = node.get(at)?.parent
-          if (parent === undefined || !node.has(parent)) break
-          at = parent
-        }
-        return at
-      }
+      const line = lineOf(earlier)
+      const rootOf = (label: string) => line(label).at(-1)!
       const earlierOf = (f: Finding) => {
         const named = f.repeatOf === undefined ? undefined : node.get(f.repeatOf)
         if (!named) return undefined
@@ -1062,12 +1055,12 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
         host.log(`${name} r${round}: ${f.id} dropped as a repeat of ${declinedLabel(f)}, which the fixer declined (${ruled(f)}) - kept as residual`)
       }
       const repeatsOf = (f: Finding) => new Set(unmerged.filter(u => u.id === f.id || f.duplicates?.includes(u.id)).flatMap(u => (u.repeatOf ? [u.repeatOf] : [])))
-      const inChains = (labels: Iterable<string>) => {
-        const roots = new Set([...labels].map(rootOf))
-        return (c: { labels: string[] }) => c.labels.some(l => roots.has(rootOf(l)))
+      const onPath = (labels: Iterable<string>) => {
+        const named = [...labels]
+        return (c: { labels: string[] }) => c.labels.some(l => named.some(r => onLine(line, l, r)))
       }
-      const aliases = (f: Finding) => [...carried, ...staged].filter(inChains(repeatsOf(f))).flatMap(c => c.labels)
-      const gone = inChains(repeated)
+      const aliases = (f: Finding) => [...carried, ...staged].filter(onPath(repeatsOf(f))).flatMap(c => c.labels)
+      const gone = onPath(repeated)
       carried = [...carried.filter(c => !gone(c)), ...residual.map(f => ({ round, labels: [roundLabel(round, f), ...aliases(f)], finding: f }))]
       staged = staged.filter(b => !gone(b))
       if (record) record.left.splice(0, record.left.length, ...carried.map(c => ({ labels: c.labels.map(l => `${record.loop.id}/${l}`), finding: c.finding })))

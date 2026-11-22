@@ -1148,13 +1148,30 @@ var KNOWN_LIMIT = 40;
 var KNOWN_TEXT = 160;
 var short = (text) => String(text ?? "").replace(/\s+/g, " ").trim().slice(0, KNOWN_TEXT);
 var knownOf = (f, declined) => ({ file: f.file, ...Number.isInteger(f.line) ? { line: f.line } : {}, title: f.title, ...declined === undefined ? {} : { declined } });
+var within = (e, label) => e.loop ? `${e.loop.id}/${label}` : label;
+function lineOf(earlier) {
+  const parent = new Map(earlier.flatMap((e) => [...e.sent, ...e.residual ?? []].map((f) => [roundLabel(e.round, f, e.loop), f.repeatOf === undefined ? undefined : within(e, f.repeatOf)])));
+  return (label) => {
+    const line = [label];
+    for (let up = parent.get(label);up !== undefined && parent.has(up) && !line.includes(up); up = parent.get(up))
+      line.push(up);
+    return line;
+  };
+}
+function onLine(line, a, b) {
+  return line(a).includes(b) || line(b).includes(a);
+}
 function declinedKnown(earlier) {
-  const within = (e, label) => e.loop ? `${e.loop.id}/${label}` : label;
-  const repeated = new Set(earlier.flatMap((e) => [...[...e.sent, ...e.residual ?? []].flatMap((f) => f.repeatOf === undefined ? [] : [f.repeatOf]), ...e.repeats ?? []].map((label) => within(e, label))));
-  return earlier.flatMap((e) => (e.declined ?? []).flatMap((d) => {
-    const f = e.sent.find((s) => s.id === d.id);
-    return f && !repeated.has(roundLabel(e.round, d, e.loop)) ? [knownOf(f, d.reason || "no reason given")] : [];
-  }));
+  const line = lineOf(earlier);
+  const repeatsIn = (e) => [...[...e.sent, ...e.residual ?? []].flatMap((f) => f.repeatOf === undefined ? [] : [f.repeatOf]), ...e.repeats ?? []].map((label) => within(e, label));
+  return earlier.flatMap((e, at) => {
+    const later = earlier.slice(at + 1).flatMap(repeatsIn);
+    return (e.declined ?? []).flatMap((d) => {
+      const f = e.sent.find((s) => s.id === d.id);
+      const label = roundLabel(e.round, d, e.loop);
+      return f && !later.some((r) => onLine(line, r, label)) ? [knownOf(f, d.reason || "no reason given")] : [];
+    });
+  });
 }
 var knownLine = (k) => `${short(k.file)}${k.line === undefined ? "" : `:${k.line}`} - ${short(k.title)}${k.declined === undefined ? "" : ` (the fixer declined it: ${short(k.declined)})`}`;
 var NOT_FINDINGS = "These are not findings, also when a rule or the plan asks for them, so leave them out: code comments and doc comments (wrong, outdated, missing, too long, or there against a rule; TODO notes and commented-out code too), commit messages and the commit history, the pull request description or its PR-BODY file, and how the work was done (the order tests and code were written in). A doc file such as the README is not a comment: review it like code.";
@@ -2618,18 +2635,8 @@ the last repair's deviations: ${deviations}` : ""}`;
         at
       })));
       const node = new Map(entries.map((x) => [x.label, x]));
-      const rootOf = (label) => {
-        const seen = new Set;
-        let at = label;
-        while (!seen.has(at)) {
-          seen.add(at);
-          const parent = node.get(at)?.parent;
-          if (parent === undefined || !node.has(parent))
-            break;
-          at = parent;
-        }
-        return at;
-      };
+      const line = lineOf(earlier);
+      const rootOf = (label) => line(label).at(-1);
       const earlierOf = (f) => {
         const named = f.repeatOf === undefined ? undefined : node.get(f.repeatOf);
         if (!named)
@@ -2719,12 +2726,12 @@ the last repair's deviations: ${deviations}` : ""}`;
         host.log(`${name} r${round}: ${f.id} dropped as a repeat of ${declinedLabel(f)}, which the fixer declined (${ruled(f)}) - kept as residual`);
       }
       const repeatsOf = (f) => new Set(unmerged.filter((u) => u.id === f.id || f.duplicates?.includes(u.id)).flatMap((u) => u.repeatOf ? [u.repeatOf] : []));
-      const inChains = (labels) => {
-        const roots = new Set([...labels].map(rootOf));
-        return (c) => c.labels.some((l) => roots.has(rootOf(l)));
+      const onPath = (labels) => {
+        const named = [...labels];
+        return (c) => c.labels.some((l) => named.some((r) => onLine(line, l, r)));
       };
-      const aliases = (f) => [...carried, ...staged].filter(inChains(repeatsOf(f))).flatMap((c) => c.labels);
-      const gone = inChains(repeated);
+      const aliases = (f) => [...carried, ...staged].filter(onPath(repeatsOf(f))).flatMap((c) => c.labels);
+      const gone = onPath(repeated);
       carried = [...carried.filter((c) => !gone(c)), ...residual.map((f) => ({ round, labels: [roundLabel(round, f), ...aliases(f)], finding: f }))];
       staged = staged.filter((b) => !gone(b));
       if (record)

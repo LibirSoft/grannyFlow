@@ -797,6 +797,39 @@ describe('what a reviewer is told to leave out', () => {
     expect(prompt(f.calls, 'review final review r1 opus').split('\n').slice(-2)).toEqual([INTRO, '- src/m.rs:19 - Long doc line'])
   })
 
+  it('keeps a residual that repeats the same earlier finding as another residual when a later round repeats only the other', async () => {
+    const old = { scope: 'pre-existing', repeatOf: 'r1/opus-F1' }
+    const f = fakeHost({
+      scores: [
+        { 'opus-F1': judged('major', 'edge', 'small') },
+        { 'opus-F1': judged('major', 'edge', 'small', old), 'opus-F2': judged('major', 'edge', 'small', old), 'opus-F3': judged('major', 'edge', 'small') },
+        { 'opus-F1': judged('major', 'edge', 'small', { scope: 'pre-existing', repeatOf: 'r2/opus-F1' }) },
+      ],
+      override: req => {
+        if (req.label === 'review core r1 opus') return found(['P2', 'Late save', 'src/a.ts', 3])
+        if (req.label === 'review core r2 opus') return found(['P2', 'Old A', 'src/b.ts', 9], ['P2', 'Old B', 'src/b.ts', 9], ['P2', 'Lost write', 'src/c.ts', 4])
+        if (req.label === 'review core r3 opus') return found(['P2', 'Old A again', 'src/b.ts', 9])
+        return undefined
+      },
+    })
+    const r = await runGranny(f.host, input())
+    expect(r.stages[0]).toMatchObject({ outcome: 'residual-only', rounds: 3 })
+    expect(r.stages[0]!.residual.map(x => x.title)).toEqual(['Old B', 'Old A again'])
+  })
+
+  it('drops a decline from the list once a later round sends back a repeat that names an older finding of its chain', () => {
+    const earlier: EarlierRound[] = [
+      { round: 1, sent: [f0('opus-F1', { title: 'Phantom' })], declined: [{ id: 'opus-F1', reason: 'no' }] },
+      { round: 2, sent: [f0('opus-F4', { title: 'Phantom again', repeatOf: 'r1/opus-F1' })], declined: [{ id: 'opus-F4', reason: 'still no' }] },
+    ]
+    expect(declinedKnown(earlier)).toEqual([{ file: 'src/a.ts', line: 3, title: 'Phantom again', declined: 'still no' }])
+    expect(declinedKnown([...earlier, { round: 3, sent: [f0('opus-F1', { repeatOf: 'r1/opus-F1' })] }])).toEqual([])
+    const sibling: EarlierRound = { round: 2, sent: [f0('opus-F5', { title: 'Phantom elsewhere', repeatOf: 'r1/opus-F1' })], declined: [{ id: 'opus-F5', reason: 'by design' }] }
+    expect(declinedKnown([earlier[0]!, { ...earlier[1]!, sent: [...earlier[1]!.sent, ...sibling.sent], declined: [...earlier[1]!.declined!, ...sibling.declined!] }, { round: 3, sent: [f0('opus-F1', { repeatOf: 'r2/opus-F4' })] }])).toEqual([
+      { file: 'src/a.ts', line: 3, title: 'Phantom elsewhere', declined: 'by design' },
+    ])
+  })
+
   it('counts a repeat of a declined finding that the judge merged into another finding as a repeat', async () => {
     const decline = declining('fix core r1')
     const f = fakeHost({

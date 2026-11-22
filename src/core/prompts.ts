@@ -487,15 +487,32 @@ const short = (text: unknown) => String(text ?? '').replace(/\s+/g, ' ').trim().
 
 export const knownOf = (f: Finding, declined?: string): Known => ({ file: f.file, ...(Number.isInteger(f.line) ? { line: f.line } : {}), title: f.title, ...(declined === undefined ? {} : { declined }) })
 
+const within = (e: EarlierRound, label: string) => (e.loop ? `${e.loop.id}/${label}` : label)
+
+export function lineOf(earlier: EarlierRound[]): (label: string) => string[] {
+  const parent = new Map(earlier.flatMap(e => [...e.sent, ...(e.residual ?? [])].map(f => [roundLabel(e.round, f, e.loop), f.repeatOf === undefined ? undefined : within(e, f.repeatOf)] as const)))
+  return label => {
+    const line = [label]
+    for (let up = parent.get(label); up !== undefined && parent.has(up) && !line.includes(up); up = parent.get(up)) line.push(up)
+    return line
+  }
+}
+
+export function onLine(line: (label: string) => string[], a: string, b: string): boolean {
+  return line(a).includes(b) || line(b).includes(a)
+}
+
 export function declinedKnown(earlier: EarlierRound[]): Known[] {
-  const within = (e: EarlierRound, label: string) => (e.loop ? `${e.loop.id}/${label}` : label)
-  const repeated = new Set(earlier.flatMap(e => [...[...e.sent, ...(e.residual ?? [])].flatMap(f => (f.repeatOf === undefined ? [] : [f.repeatOf])), ...(e.repeats ?? [])].map(label => within(e, label))))
-  return earlier.flatMap(e =>
-    (e.declined ?? []).flatMap(d => {
+  const line = lineOf(earlier)
+  const repeatsIn = (e: EarlierRound) => [...[...e.sent, ...(e.residual ?? [])].flatMap(f => (f.repeatOf === undefined ? [] : [f.repeatOf])), ...(e.repeats ?? [])].map(label => within(e, label))
+  return earlier.flatMap((e, at) => {
+    const later = earlier.slice(at + 1).flatMap(repeatsIn)
+    return (e.declined ?? []).flatMap(d => {
       const f = e.sent.find(s => s.id === d.id)
-      return f && !repeated.has(roundLabel(e.round, d, e.loop)) ? [knownOf(f, d.reason || 'no reason given')] : []
-    }),
-  )
+      const label = roundLabel(e.round, d, e.loop)
+      return f && !later.some(r => onLine(line, r, label)) ? [knownOf(f, d.reason || 'no reason given')] : []
+    })
+  })
 }
 
 const knownLine = (k: Known) => `${short(k.file)}${k.line === undefined ? '' : `:${k.line}`} - ${short(k.title)}${k.declined === undefined ? '' : ` (the fixer declined it: ${short(k.declined)})`}`
