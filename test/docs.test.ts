@@ -186,6 +186,66 @@ describe('skill docs', () => {
     expect(read('references/cursor.md')).toContain('`git -C <repo> worktree list --porcelain`')
   })
 
+  it('documents the worktree removal in the config reference, SKILL.md, the host references, the Cursor protocol and the README', () => {
+    const config = read('references/config.md')
+    expect(config).toMatch(/^\| `keepWorktree` \| `false` \|.*\[When the run ends\]\(#when-the-run-ends\)/m)
+    for (const topic of ['### When the run ends', '<repo>/<workDir>/branches/<branch-key>/', '[granny] worktree made by granny', 'It runs without `--force`', '**A later run on the branch.**', 'worktree-paths']) expect({ topic, has: config.includes(topic) }).toEqual({ topic, has: true })
+    const md = read('SKILL.md')
+    for (const topic of ['from `worktreeEnd`', '`removed: true`', 'config keepWorktree, default off', 'in the checkout that has the branch']) expect({ topic, has: md.includes(topic) }).toEqual({ topic, has: true })
+    expect(md).not.toContain('granny never removes it')
+    for (const host of ['claude-code', 'opencode', 'omp']) {
+      const reference = read(`references/${host}.md`)
+      for (const topic of ['config.md#when-the-run-ends', 'in the checkout that has the branch']) expect({ host, topic, has: reference.includes(topic) }).toEqual({ host, topic, has: true })
+    }
+    expect(read('references/claude-code.md')).toContain('label `remove worktree`')
+    expect(read('references/cursor.md')).toContain('`keepWorktree` has no effect here')
+    expect(readRoot('README.md')).toMatch(/^\| `keepWorktree` \| `false` \|/m)
+    expect(read('references/prompts.md')).toMatch(/^## Granny - worktree removal/m)
+  })
+  it('tells a Cursor agent what the setup command does beyond the four steps, and defines <branch-key>', () => {
+    const cursor = read('references/cursor.md')
+    for (const text of ['`<branch-key>` is the branch name', '`feat%2Flogin`', '`granny-worktree`', '[granny] worktree made by granny', '[granny] work dir restored', '[granny] work dir not restored', '[granny] earlier work dir files moved aside: ', '[granny] earlier work dir files not moved aside: ']) expect({ text, has: cursor.includes(text) }).toEqual({ text, has: true })
+  })
+  it('says in config.md that the main checkout keeps its own trail, which makes the default run stop after a removal', () => {
+    const config = read('references/config.md')
+    for (const text of ['The checkout\'s own `<workDir>/trail` is written by a `worktree: false` run', 'when neither holds every record of the other, the script stops there without `--trail`']) expect({ text, has: config.includes(text) }).toEqual({ text, has: true })
+  })
+  it('names the hash of a long branch key in config.md, and has a Cursor run set up such a branch without the saved dir', () => {
+    const config = read('references/config.md')
+    for (const text of ['FNV-1a 32-bit hash of the whole key', '`811c9dc5`', 'multiply by `01000193`', 'The FNV-1a of `a` is `e40c292c`']) expect({ text, has: config.includes(text) }).toEqual({ text, has: true })
+    const cursor = read('references/cursor.md')
+    for (const text of ['A Cursor agent cannot compute that hash by hand', 'the "Granny - worktree setup without a saved dir" prompt', 'neither restored nor moved aside']) expect({ text, has: cursor.includes(text) }).toEqual({ text, has: true })
+  })
+  it('gives the setup without a saved dir the marks of the setup, and neither a restore nor a move-aside', () => {
+    const prompts = read('references/prompts.md')
+    const start = prompts.indexOf('## Granny - worktree setup without a saved dir,')
+    expect(start).toBeGreaterThan(-1)
+    const section = prompts.slice(start, prompts.indexOf('\n## ', start + 1))
+    for (const text of ['granny-worktree', '[granny] worktree made by granny', 'git worktree add -b']) expect({ text, has: section.includes(text) }).toEqual({ text, has: true })
+    for (const text of ['branches/', 'work dir restored', 'moved aside']) expect({ text, has: section.includes(text) }).toEqual({ text, has: false })
+  })
+  it('lists in config.md every reason a worktree stays, with the started-in check among the conditions', () => {
+    const config = read('references/config.md')
+    for (const reason of [
+      'the run was started in this worktree',
+      'the worktree folder is gone, but git still lists it - git worktree prune removes the entry',
+      'git could not compare the worktree with the checkout the run starts in',
+      'the removal did not run: its runner returned no exit code',
+      'a lane worktree was left in place (<paths>), and the removal could not be confirmed',
+      'a planning run keeps its worktree for the implement run',
+      'the plan review ended <outcome>, so the run stopped before stage 1',
+      'Steps 5 to 9 are one shell script',
+      'a file `granny-worktree` in the worktree',
+    ]) expect({ reason, has: config.includes(reason) }).toEqual({ reason, has: true })
+    expect(config).not.toContain('an empty file `granny-worktree`')
+  })
+  it('says a worktree granny did not create always stays, in SKILL.md, omp.md and the CHANGELOG entry', () => {
+    expect(read('SKILL.md')).toContain('a worktree granny did not create always stays')
+    expect(read('SKILL.md')).not.toContain('a reused one always stays')
+    expect(read('references/omp.md')).toContain('After the worktree is removed they are in `<repo>/.granny/branches/<branch-key>/`.')
+    const changelog = readRoot('CHANGELOG.md')
+    for (const phrase of ['when the run was started in that worktree', 'when git still lists a worktree whose folder is gone', 'when git cannot compare it with the checkout the run starts in', 'the removal did not run because its runner returned no exit code']) expect({ phrase, has: changelog.includes(phrase) }).toEqual({ phrase, has: true })
+  })
   it('documents the review trail and its poster in the config keys, SKILL.md, the host references and the README', () => {
     expect(readFileSync(join(skill, 'scripts/pr-comments.mjs'), 'utf8')).toContain('granny-trail')
     const config = read('references/config.md')
@@ -197,10 +257,14 @@ describe('skill docs', () => {
     expect(md).toContain('a GitLab MR')
     expect(md).toContain('`--out <file>`')
     expect(md).toContain('### When the PR is opened')
-    expect(md).toContain('run `node <skill-dir>/scripts/pr-comments.mjs` in the worktree')
+    expect(md).toContain('run `node <skill-dir>/scripts/pr-comments.mjs` in the checkout that has the branch')
     expect(md).toContain('Never write, edit or post review comments yourself. Only the script posts them.')
     expect(md).toContain('No push, no `git remote add`, no PR, no tag - the user decides.')
     expect(md).toContain('`trail.failed`')
+    expect(md).toContain('If it stops with `more than one trail exists`, it has posted nothing: run it again with `--trail` set to the run\'s `trail.dir` from the result - after a removal the saved `branches/<branch-key>/trail` of this branch, which holds this run\'s records, not the checkout\'s own `<workDir>/trail`, which can hold another branch\'s records')
+    expect(config).toContain('none holds every record of the others')
+    expect(config).toContain('pass `--trail <dir>` with the run\'s `trail.dir` from the result - after a removal the saved `branches/<branch-key>/trail` of the branch, which holds this run\'s records, not the checkout\'s own `<workDir>/trail`, which can hold another branch\'s records')
+    expect(readRoot('CHANGELOG.md')).toContain('and stops, naming them, when none holds every record of the others')
     for (const host of ['claude-code', 'opencode', 'omp', 'cursor']) {
       const ref = read(`references/${host}.md`)
       expect({ host, has: ref.includes('## When the PR is opened') && ref.includes('<skill-dir>/scripts/pr-comments.mjs') }).toEqual({ host, has: true })

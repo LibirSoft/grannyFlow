@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'bun:test'
 import { spawnSync } from 'node:child_process'
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { TrailFinding, TrailRound } from '../src/core/types'
@@ -160,6 +160,11 @@ function fake(opts: {
   home?: string
   tmp?: string[]
   commonDir?: string
+  at?: string
+  also?: string[]
+  worktrees?: string[]
+  top?: string
+  trails?: Record<string, Record<string, unknown>>
 }): Fake {
   const out: string[] = []
   const calls: Fake['calls'] = []
@@ -168,12 +173,13 @@ function fake(opts: {
   const gl: GitlabState = { drafts: [...(opts.gitlab?.drafts ?? [])], published: [], notes: [], deleted: [], next: 200 }
   const ok = (stdout = ''): ExecResult => ({ code: 0, stdout, stderr: '' })
   const records = opts.records === undefined ? undefined : Object.fromEntries(Object.entries(opts.records).map(([k, v]) => [k, typeof v === 'string' ? v : JSON.stringify(v)]))
+  const stored = Object.fromEntries(Object.entries(opts.trails ?? {}).map(([dir, recs]) => [dir, Object.fromEntries(Object.entries(recs).map(([k, v]) => [k, typeof v === 'string' ? v : JSON.stringify(v)]))]))
   const ancestors = new Set(opts.ancestors ?? [SHA1, SHA2, SHA3])
   const io: PosterIo = {
     exec(cmd, args, input) {
       calls.push({ cmd, args, ...(input === undefined ? {} : { input }) })
       const line = args.join(' ')
-      if (cmd === 'git' && line === 'rev-parse --show-toplevel') return ok(`${TOP}\n`)
+      if (cmd === 'git' && line === 'rev-parse --show-toplevel') return ok(`${opts.top ?? TOP}\n`)
       if (cmd === 'git' && line === 'rev-parse --path-format=absolute --git-common-dir') return ok(`${opts.commonDir ?? `${TOP}/.git`}\n`)
       if (cmd === 'git' && args[0] === 'rev-parse' && args[1] === '--verify') {
         const sha = (opts.refs ?? { 'HEAD^{commit}': HEAD, [`${HEAD}^{commit}`]: HEAD, [`${BASE}^{commit}`]: BASE })[args[3]!]
@@ -200,8 +206,13 @@ function fake(opts: {
       }
       throw new Error(`unexpected ${cmd} ${line}`)
     },
-    list: dir => (dir === DIR && records ? Object.keys(records) : undefined),
-    read: path => records![path.slice(DIR.length + 1)]!,
+    list: dir => (dir === (opts.at ?? DIR) && records ? Object.keys(records) : stored[dir] ? Object.keys(stored[dir]) : opts.also?.includes(dir) ? [] : undefined),
+    read: path => {
+      const dir = path.slice(0, path.lastIndexOf('/'))
+      const name = path.slice(dir.length + 1)
+      return dir === (opts.at ?? DIR) && records ? records[name]! : stored[dir]![name]!
+    },
+    ...(opts.worktrees === undefined ? {} : { worktrees: dir => (dir === (opts.at ?? DIR) ? opts.worktrees! : []) }),
     workDir: opts.workDir ?? (() => '.granny'),
     ...(opts.home === undefined ? {} : { home: () => opts.home! }),
     ...(opts.tmp === undefined ? {} : { tmp: () => opts.tmp! }),
@@ -1298,6 +1309,80 @@ describe('local paths', () => {
   })
 })
 
+describe('the trail of a removed worktree', () => {
+  const SAVED = `${TOP}/.granny/branches/feat%2Fx/trail`
+  const one = { 's1-r1.json': round({ findings: [finding('codex-F1')] }) }
+
+  it('reads the saved trail of the checked-out branch before the checkout\'s own', () => {
+    const f = fake({ records: one, at: SAVED, diffs: { [SHA1]: A_DIFF } })
+    expect(postTrail([], f.io)).toBe(0)
+    expect(f.posted).toHaveLength(1)
+    expect(f.out[0]).toBe('s1 r1: posted 1 line comment, 0 in body')
+  })
+
+  it('reads the saved trail when it holds every record of the checkout\'s own trail, and says so', () => {
+    const f = fake({ trails: { [SAVED]: { ...one, 's2-r1.json': round({ loop: 's2', findings: [finding('codex-F2')] }) }, [DIR]: one }, diffs: { [SHA1]: A_DIFF } })
+    expect(postTrail([], f.io)).toBe(0)
+    expect(f.out[0]).toBe(`note: reading the trail in ${SAVED}; it holds every record of ${DIR}`)
+    expect(f.posted).toHaveLength(2)
+  })
+
+  it('reads the checkout\'s own trail in a linked worktree that holds every record of the saved one, and says so', () => {
+    const wt = `${TOP}-worktrees/feat-x`
+    const f = fake({ top: wt, trails: { [`${wt}/.granny/trail`]: { ...one, 's2-r1.json': round({ loop: 's2', findings: [finding('codex-F2')] }) }, [SAVED]: one }, diffs: { [SHA1]: A_DIFF } })
+    expect(postTrail([], f.io)).toBe(0)
+    expect(f.out[0]).toBe(`note: reading the trail in ${wt}/.granny/trail; it holds every record of ${SAVED}`)
+    expect(f.posted).toHaveLength(2)
+  })
+
+  it('reads the checkout\'s own trail when the saved one holds the same records, and says so', () => {
+    const f = fake({ trails: { [SAVED]: one, [DIR]: one }, diffs: { [SHA1]: A_DIFF } })
+    expect(postTrail([], f.io)).toBe(0)
+    expect(f.out[0]).toBe(`note: reading the trail in ${DIR}; it holds every record of ${SAVED}`)
+    expect(f.posted).toHaveLength(1)
+  })
+
+  it('stops, and posts nothing, when a linked worktree and the saved trail hold different records under one name', () => {
+    const wt = `${TOP}-worktrees/feat-x`
+    const f = fake({ top: wt, trails: { [`${wt}/.granny/trail`]: { 's1-r1.json': round({ findings: [finding('codex-F9')] }) }, [SAVED]: one }, diffs: { [SHA1]: A_DIFF } })
+    expect(postTrail([], f.io)).toBe(1)
+    expect(f.out).toEqual([`more than one trail exists, and none holds every record of the others: ${wt}/.granny/trail and ${SAVED}\npass the trail directory with --trail <dir>`])
+    expect(f.posted).toHaveLength(0)
+  })
+
+  it('posts the trail that --trail names when the checkout has one of its own too', () => {
+    const f = fake({ records: one, at: SAVED, also: [DIR], diffs: { [SHA1]: A_DIFF } })
+    expect(postTrail(['--trail', SAVED], f.io)).toBe(0)
+    expect(f.out[0]).toBe('s1 r1: posted 1 line comment, 0 in body')
+    expect(f.posted).toHaveLength(1)
+  })
+
+  it('finds the saved trail in the main checkout from a linked worktree', () => {
+    const f = fake({ records: one, at: '/w/main/.granny/branches/feat%2Fx/trail', commonDir: '/w/main/.git', diffs: { [SHA1]: A_DIFF } })
+    expect(postTrail([], f.io)).toBe(0)
+    expect(f.posted).toHaveLength(1)
+  })
+
+  it('looks only in the checkout\'s own work dir on a detached HEAD, and names it when there is no trail', () => {
+    const f = fake({ records: one, at: `${TOP}/.granny/branches//trail`, branch: '' })
+    expect(postTrail([], f.io)).toBe(1)
+    expect(f.out).toEqual([`no trail at ${DIR} - a granny run writes it there (config trail: true)`])
+  })
+
+  it('reads a path under the removed worktree from the repo root', () => {
+    const wt = '/w/repo-worktrees/feat-x'
+    const f = fake({
+      records: { 's1-r1.json': round({ findings: [finding('codex-F1', { file: `${wt}/src/a.ts`, evidence: `${wt}/src/a.ts:12 - x is null` })] }) },
+      at: SAVED,
+      worktrees: [wt, 'not absolute'],
+      diffs: { [SHA1]: A_DIFF },
+    })
+    expect(postTrail([], f.io)).toBe(0)
+    expect(f.posted[0]!.comments.map(c => c.path)).toEqual(['src/a.ts'])
+    expect(JSON.stringify(f.posted).includes('repo-worktrees')).toBe(false)
+  })
+})
+
 describe('postTrail in a real checkout', () => {
   const env = { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t', GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' }
 
@@ -1377,5 +1462,61 @@ describe('postTrail in a real checkout', () => {
 
   it('anchors a finding outside the directory it runs in under diff.relative', () => {
     expect(anchorUnder(() => [['diff.relative', 'true']], 'sub')).toEqual([['b/x.ts', 2]])
+  })
+
+  it('reads the trail of a worktree that a later run added again, which holds the saved trail too', () => {
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), 'granny-again-')))
+    try {
+      const repo = join(dir, 'repo')
+      const wt = join(dir, 'repo-worktrees', 'feat-x')
+      mkdirSync(repo)
+      const git = (cwd: string, ...args: string[]) => {
+        const r = spawnSync('git', ['-C', cwd, '-c', 'commit.gpgsign=false', ...args], { encoding: 'utf8', env })
+        expect(r.status).toBe(0)
+        return r.stdout.trim()
+      }
+      git(repo, 'init', '-q', '-b', 'main')
+      git(repo, 'config', 'remote.origin.url', 'https://github.com/o/r.git')
+      writeFileSync(join(repo, 'a.txt'), 'one\n')
+      git(repo, 'add', '.')
+      git(repo, 'commit', '-q', '-m', 'base')
+      const base = git(repo, 'rev-parse', 'HEAD')
+      git(repo, 'worktree', 'add', '-q', '-b', 'feat/x', wt, 'main')
+      writeFileSync(join(wt, 'a.txt'), 'one\ntwo\n')
+      git(wt, 'commit', '-q', '-am', 'two')
+      const head = git(wt, 'rev-parse', 'HEAD')
+      const first = `${JSON.stringify(round({ base, reviewedSha: head, findings: [finding('codex-F1', { file: 'a.txt', line: 2 })] }), null, 2)}\n`
+      const second = `${JSON.stringify(round({ loop: 's2', base, reviewedSha: head, findings: [finding('codex-F2', { file: 'a.txt', line: 2 })] }), null, 2)}\n`
+      mkdirSync(join(repo, '.granny/branches/feat%2Fx/trail'), { recursive: true })
+      writeFileSync(join(repo, '.granny/branches/feat%2Fx/trail/s1-r1.json'), first)
+      mkdirSync(join(wt, '.granny/trail'), { recursive: true })
+      writeFileSync(join(wt, '.granny/trail/s1-r1.json'), first)
+      writeFileSync(join(wt, '.granny/trail/s2-r1.json'), second)
+      const posted: ReviewPayload[] = []
+      const out: string[] = []
+      const io: PosterIo = {
+        exec(cmd, args, input) {
+          if (cmd === 'gh' && args[0] === 'pr') return { code: 0, stdout: JSON.stringify({ ...PR, headRefOid: head, baseRefOid: base }), stderr: '' }
+          if (cmd === 'gh' && args[1] === '--paginate') return { code: 0, stdout: '', stderr: '' }
+          if (cmd === 'gh') {
+            posted.push(JSON.parse(input!) as ReviewPayload)
+            return { code: 0, stdout: '{}', stderr: '' }
+          }
+          const r = spawnSync(cmd, args, { cwd: wt, encoding: 'utf8', input, env })
+          return { code: r.status ?? 1, stdout: r.stdout, stderr: r.stderr }
+        },
+        list: d => (existsSync(d) ? readdirSync(d).filter(n => n.endsWith('.json')) : undefined),
+        read: path => readFileSync(path, 'utf8'),
+        workDir: () => '.granny',
+        write: () => {},
+        print: line => out.push(line),
+      }
+      expect(postTrail([], io)).toBe(0)
+      expect(out[0]).toBe(`note: reading the trail in ${wt}/.granny/trail; it holds every record of ${repo}/.granny/branches/feat%2Fx/trail`)
+      expect(posted).toHaveLength(2)
+      expect(JSON.stringify(posted).includes(dir)).toBe(false)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 })

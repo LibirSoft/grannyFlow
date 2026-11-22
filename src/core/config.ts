@@ -54,6 +54,7 @@ export interface GrannyConfig {
   workDir: string
   worktree: boolean
   worktreeDir?: string
+  keepWorktree: boolean
   planReview: boolean
   finalReview: boolean
   trail: boolean
@@ -87,6 +88,7 @@ export const DEFAULT_CONFIG: GrannyConfig = {
   gates: 'auto',
   workDir: '.granny',
   worktree: true,
+  keepWorktree: false,
   planReview: false,
   finalReview: true,
   trail: true,
@@ -332,6 +334,7 @@ function validate(c: GrannyConfig, effortLayer: Partial<Record<ConfigRole, strin
     if (typeof c.worktreeDir !== 'string' || !c.worktreeDir.trim()) errors.push('worktreeDir must be a non-empty path')
     else if (c.worktreeDir.startsWith('~')) errors.push('worktreeDir is not expanded by a shell - write the absolute path instead of ~')
   }
+  if (typeof c.keepWorktree !== 'boolean') errors.push('keepWorktree must be a boolean')
   if (typeof c.planReview !== 'boolean') errors.push('planReview must be a boolean')
   if (typeof c.finalReview !== 'boolean') errors.push('finalReview must be a boolean')
   if (typeof c.trail !== 'boolean') errors.push('trail must be a boolean')

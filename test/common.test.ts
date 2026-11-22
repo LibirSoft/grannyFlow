@@ -383,3 +383,33 @@ describe('summarizeJudge', () => {
     expect(failed.split('\n').at(-1)).toBe('Nothing was fixed or committed. Tell the user; do not fix anything unless they ask.')
   })
 })
+
+describe('summarize of the worktree', () => {
+  const final = { gatesGreen: true, gates: 'ok', commits: [], prBodyPath: '/r/.granny/branches/b/PR-BODY.md', issues: '' }
+  const run = { repo: '/r', branch: 'b', base: 'main', worktree: '/w', stages: [], final }
+
+  it('says the worktree is gone, where the branch is and where the files are', () => {
+    expect(summarize({ ...run, worktreeEnd: { removed: true, saved: '/r/.granny/branches/b' } } as any, true)).toContain(
+      '- worktree: removed (/w) - only the branch b is left; check it out in /r to review and push. The PR body, the review outputs and the trail are in /r/.granny/branches/b',
+    )
+    expect(summarize({ ...run, worktreeEnd: { removed: true } } as any, true).split('\n').at(-1)).toBe('- worktree: removed (/w) - only the branch b is left; check it out in /r to review and push')
+  })
+
+  it('says why a worktree was left in place', () => {
+    expect(summarize({ ...run, worktreeEnd: { removed: false, kept: 'keepWorktree is on' } } as any, true).split('\n').at(-1)).toBe('- worktree: /w - review and push from there; granny left it in place: keepWorktree is on')
+    expect(summarize(run as any, true).split('\n').at(-1)).toBe('- worktree: /w - review and push from there')
+    expect(summarize(run as any, false)).not.toContain('worktree')
+  })
+
+  it('has one line per repo', () => {
+    const repos = [
+      { repo: '/r', base: 'main', worktree: '/w', final, worktreeEnd: { removed: true, saved: '/r/.granny/branches/b' } },
+      { repo: '/s', base: 'main', worktree: '/v', final, worktreeEnd: { removed: false, kept: 'it is not on b' } },
+    ]
+    const lines = summarize({ ...run, worktreeEnd: repos[0]!.worktreeEnd, repos } as any, true).split('\n').filter(l => l.startsWith('- worktree: '))
+    expect(lines).toEqual([
+      '- worktree: removed (/w) - only the branch b is left; check it out in /r to review and push. The PR body, the review outputs and the trail are in /r/.granny/branches/b',
+      '- worktree: /v - review and push from there; granny left it in place: it is not on b',
+    ])
+  })
+})

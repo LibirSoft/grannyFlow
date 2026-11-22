@@ -328,6 +328,10 @@ export function gitCommandPrompt(repo: string, step: string, script: string): st
   return oneCommand(`git command for the "${step}" step`, `Repo ${repo}.`, 'Run exactly this:', script)
 }
 
+export function worktreeRemovalPrompt(repo: string, step: string, script: string): string {
+  return oneCommand(`shell command for the "${step}" step, which copies the run's work dir files into the repo and then removes the worktree granny created for the run,`, `Repo ${repo}.`, 'Run exactly this:', script)
+}
+
 export const ONE_SHOT_NOTE = 'This is a one-shot review: nobody fixes anything in this run, so report every problem you can confirm in the code.'
 
 export function judgeStepPrompt(repo: string, step: string, script: string): string {

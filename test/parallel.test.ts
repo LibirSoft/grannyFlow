@@ -259,7 +259,7 @@ describe('parallel stages in a real git repo', () => {
         branch: 'feat/x',
         base: 'main',
         stages: [{ name: 'one', task: 'WP-01' }, { name: 'two', task: 'WP-02', after: [] }],
-        config: { reviewers: [{ name: 'a', engine: 'agent' }] },
+        config: { reviewers: [{ name: 'a', engine: 'agent' }], keepWorktree: true },
       },
     )
 
@@ -379,6 +379,15 @@ describe('lane merge verification', () => {
     const r = await runGranny(f.host, laneInput)
     expect(r.stages[1]!.note).toBe(
       'ran in parallel on feat/x--s2-two, merged; its worktree /work/a-worktrees/feat-x--s2-two and branch feat/x--s2-two were left in place (uncommitted changes in the worktree)',
+    )
+    expect(f.logs).toContainEqual(expect.stringContaining('merge two: left /work/a-worktrees/feat-x--s2-two (feat/x--s2-two) in place'))
+  })
+
+  it('does not call the lane worktree removed when the cleanup only quotes its marker', async () => {
+    const f = laneHost(command => (command.includes('git worktree remove') ? { code: 1, output: "echo '[granny] lane worktree removed'\n" } : undefined))
+    const r = await runGranny(f.host, laneInput)
+    expect(r.stages[1]!.note).toBe(
+      'ran in parallel on feat/x--s2-two, merged; its worktree /work/a-worktrees/feat-x--s2-two and branch feat/x--s2-two were left in place (the cleanup could not confirm the merge)',
     )
     expect(f.logs).toContainEqual(expect.stringContaining('merge two: left /work/a-worktrees/feat-x--s2-two (feat/x--s2-two) in place'))
   })

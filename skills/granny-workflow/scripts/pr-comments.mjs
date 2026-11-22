@@ -51,6 +51,7 @@ var DEFAULT_CONFIG = {
   gates: "auto",
   workDir: ".granny",
   worktree: true,
+  keepWorktree: false,
   planReview: false,
   finalReview: true,
   trail: true,
@@ -301,6 +302,8 @@ function validate(c, effortLayer) {
     else if (c.worktreeDir.startsWith("~"))
       errors.push("worktreeDir is not expanded by a shell - write the absolute path instead of ~");
   }
+  if (typeof c.keepWorktree !== "boolean")
+    errors.push("keepWorktree must be a boolean");
   if (typeof c.planReview !== "boolean")
     errors.push("planReview must be a boolean");
   if (typeof c.finalReview !== "boolean")
@@ -439,6 +442,22 @@ function tagErrors(tags) {
 
 // src/core/paths.ts
 var trimSlashes = (path) => path.replace(/\/+$/, "");
+
+// src/core/worktree.ts
+var OWNER_FILE = "granny-worktree";
+var ownerFile = `"$gd"/${OWNER_FILE}`;
+var KEY_MAX = 200;
+var hashOf = (text) => {
+  let h = 2166136261;
+  for (let i = 0;i < text.length; i++) {
+    h = Math.imul(h ^ text.charCodeAt(i), 16777619);
+  }
+  return (h >>> 0).toString(16).padStart(8, "0");
+};
+var savedKey = (branch) => {
+  const key = encodeURIComponent(branch).replace(/[!'().*~]/g, (ch) => `%${ch.charCodeAt(0).toString(16).toUpperCase()}`);
+  return key.length <= KEY_MAX ? key : `${key.slice(0, KEY_MAX - 9)}-${hashOf(key)}`;
+};
 
 // src/pr/io.ts
 var failure = (r) => (r.stderr || r.stdout).trim().split(`
@@ -1263,12 +1282,34 @@ function readRecords(io, dir) {
   }
   return records.sort(byTrailOrder);
 }
-function localRoots(io, toplevel) {
+function mainCheckout(io) {
   const common = io.exec("git", ["rev-parse", "--path-format=absolute", "--git-common-dir"]);
-  const main = common.code === 0 && /\/\.git\/?$/.test(common.stdout.trim()) ? common.stdout.trim().replace(/\/\.git\/?$/, "") : undefined;
+  return common.code === 0 && /\/\.git\/?$/.test(common.stdout.trim()) ? common.stdout.trim().replace(/\/\.git\/?$/, "") : undefined;
+}
+function localRoots(io, toplevel, main, dir) {
   const home = io.home?.();
-  const tmp = (io.tmp?.() ?? []).map((dir) => [dir, "$TMPDIR", true]);
-  return [[toplevel, ""], ...main ? [[main, ""]] : [], ...home ? [[home, "~"]] : [], ...tmp];
+  const tmp = (io.tmp?.() ?? []).map((d) => [d, "$TMPDIR", true]);
+  const written = (io.worktrees?.(dir) ?? []).filter((path) => path.startsWith("/")).map((path) => [path, ""]);
+  return [[toplevel, ""], ...main ? [[main, ""]] : [], ...written, ...home ? [[home, "~"]] : [], ...tmp];
+}
+function holdsEvery(io, holder, part) {
+  const held = io.list(holder) ?? [];
+  return (io.list(part) ?? []).every((name) => held.includes(name) && io.read(`${holder}/${name}`) === io.read(`${part}/${name}`));
+}
+function findTrail(io, toplevel, main, work) {
+  const branch = currentBranch(io);
+  const saved = (root) => `${root}/${work}/branches/${savedKey(branch)}/trail`;
+  const own = `${toplevel}/${work}/trail`;
+  const candidates = [...branch ? [saved(toplevel)] : [], own, ...branch && main && main !== toplevel ? [saved(main)] : []];
+  const found = candidates.filter((dir) => io.list(dir) !== undefined);
+  if (found.length <= 1)
+    return found[0] ?? own;
+  const holding = found.filter((dir) => found.every((other) => holdsEvery(io, dir, other)));
+  if (!holding.length)
+    throw new Error(`more than one trail exists, and none holds every record of the others: ${found.join(" and ")}`);
+  const chosen = holding.includes(own) ? own : holding[0];
+  io.print(`note: reading the trail in ${chosen}; it holds every record of ${found.filter((dir) => dir !== chosen).join(" and ")}`);
+  return chosen;
 }
 var commitOf = (io, ref) => {
   const r = io.exec("git", ["rev-parse", "--verify", "--quiet", `${ref}^{commit}`]);
@@ -1336,10 +1377,11 @@ ${USAGE}`);
     return 1;
   }
   const toplevel = top.stdout.trim();
+  const main = mainCheckout(io);
   let dir = options.trail;
   if (dir === undefined) {
     try {
-      dir = `${toplevel}/${trimSlashes(io.workDir(toplevel))}/trail`;
+      dir = findTrail(io, toplevel, main, trimSlashes(io.workDir(toplevel)));
     } catch (e) {
       io.print(`${e.message}
 pass the trail directory with --trail <dir>`);
@@ -1347,11 +1389,18 @@ pass the trail directory with --trail <dir>`);
     }
   }
   const read = readRecords(io, dir);
-  const records = read && withoutLocalPaths(read, localRoots(io, toplevel));
-  if (records === undefined) {
+  if (read === undefined) {
     io.print(`no trail at ${dir} - a granny run writes it there (config trail: true)`);
     return 1;
   }
+  let roots;
+  try {
+    roots = localRoots(io, toplevel, main, dir);
+  } catch (e) {
+    io.print(`could not read ${dir}/worktree-paths: ${e.message} - nothing is posted or written`);
+    return 1;
+  }
+  const records = withoutLocalPaths(read, roots);
   if (options.out !== undefined)
     return writeOut(io, { ...options, out: options.out }, records, toplevel);
   const platform = options.platform ?? detectPlatform(io);
@@ -1378,6 +1427,8 @@ var io = {
   workDir: (toplevel) => resolveConfig([readJson(globalConfigPath()), readJson(join2(toplevel, "granny.config.json"))]).workDir,
   home: homedir2,
   tmp: () => [...new Set([tmpdir(), "/tmp"])],
+  worktrees: (dir) => existsSync2(join2(dir, "worktree-paths")) ? readFileSync2(join2(dir, "worktree-paths"), "utf8").split(`
+`).filter(Boolean) : [],
   write: (path, text) => writeFileSync(path, text),
   print: (line) => console.log(line)
 };

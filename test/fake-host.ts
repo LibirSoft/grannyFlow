@@ -34,6 +34,7 @@ export interface FakeOptions {
   override?: (req: AgentRequest) => unknown
   shell?: { env?: Record<string, string> }
   worktree?: string | CommandResult | 'git' | ((command: string, cwd: string) => string)
+  made?: boolean
   /** Commits the engine's base..HEAD probe sees after an implementer ran (default 1); 'git' runs the probes in a real shell, and a function may return a failed result for one read. */
   commits?: number | 'git' | ((base: string) => number | CommandResult)
   /** Answers a command before the reviews do; undefined passes it on. */
@@ -167,9 +168,10 @@ export function fakeHost(opts: FakeOptions = {}) {
   const setUp = async (command: string, cwd: string, repo: string): Promise<CommandResult> => {
     const w = opts.worktree
     if (w === 'git') return bash(command, cwd, opts.shell?.env)
-    if (typeof w === 'function') return { code: 0, output: `[granny] worktree: ${w(command, cwd)}\n` }
+    const mark = opts.made ? '[granny] worktree made by granny\n' : ''
+    if (typeof w === 'function') return { code: 0, output: `${mark}[granny] worktree: ${w(command, cwd)}\n` }
     if (typeof w === 'object') return w
-    return { code: 0, output: `[granny] worktree: ${w ?? repo}\n` }
+    return { code: 0, output: `${mark}[granny] worktree: ${w ?? repo}\n` }
   }
   const nextReview = async (command: string, cwd: string): Promise<CommandResult> => {
     const checked = opts.checks?.(command)

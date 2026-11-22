@@ -16,6 +16,7 @@ export interface PosterIo {
   home?(): string
   /** The directories temporary files go to. */
   tmp?(): string[]
+  worktrees?(dir: string): string[]
   write(path: string, text: string): void
   print(line: string): void
 }

@@ -68,7 +68,7 @@ describe('the worktree setup in a real git repo', () => {
   const excludes = () => readFileSync(join(repo, '.git/info/exclude'), 'utf8').split('\n').filter(l => l === '/.granny/').length
   const run = (host: 'opencode' | 'claude-code', extra: Partial<RunInput> = {}, opts: FakeOptions = {}) => {
     const f = fakeHost({ name: host, direct: host === 'opencode', worktree: 'git', ...opts })
-    const result = runGranny(f.host, withCodex({ repo, branch: 'feat/x', base: 'main', stages: [{ name: 'core', task: 'Do WP-01.' }], ...extra }))
+    const result = runGranny(f.host, withCodex({ repo, branch: 'feat/x', base: 'main', stages: [{ name: 'core', task: 'Do WP-01.' }], ...extra, config: [{ keepWorktree: true }, ...(extra.config === undefined ? [] : [extra.config])] }))
     return { f, result }
   }
   const workedIn = (f: ReturnType<typeof fakeHost>, wt: string) => {

@@ -32,6 +32,7 @@ var DEFAULT_CONFIG = {
   gates: "auto",
   workDir: ".granny",
   worktree: true,
+  keepWorktree: false,
   planReview: false,
   finalReview: true,
   trail: true,

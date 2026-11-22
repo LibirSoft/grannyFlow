@@ -857,9 +857,29 @@ describe('opencode plugin', () => {
     await waitFor(() => readRun(dir, 'status.json').includes('"status": "cancelled"'))
   })
 
-  it('works in a worktree of its own when repo is on another branch, and keeps the run files in repo', async () => {
+  it('removes the worktree it created when the run ends PR-ready, and says where the branch and the files are', async () => {
     git(repo, 'checkout', '-q', 'main')
     writeFileSync(join(repo, 'granny.config.json'), JSON.stringify({ reviewers: [{ name: 'codex', engine: 'command', command: REVIEW_ONCE }] }))
+    const f = fakeContext()
+    await plugin.setup(f.ctx)
+    const started = await f.tools.get('granny_run').execute({ repo, branch: 'feat/x', stages: [{ name: 'one', task: 'Do it.' }] }, { sessionID: 'parent' })
+    const dir = join(repo, '.granny/runs', /granny run (\S+) started/.exec(started.content)![1]!)
+    const result = await finished(dir)
+    const wt = `${repo}-worktrees/feat-x`
+    const saved = join(repo, '.granny/branches/feat%2Fx')
+
+    expect(result).toMatchObject({ repo, worktree: wt, worktreeEnd: { removed: true, saved } })
+    expect(existsSync(wt)).toBe(false)
+    expect(existsSync(join(saved, 'reviewed'))).toBe(true)
+    expect(git(repo, 'branch', '--list', 'feat/x')).toContain('feat/x')
+    expect(git(repo, 'worktree', 'list').split('\n')).toHaveLength(1)
+    await waitFor(() => f.prompts.some(p => p.sessionID === 'parent'))
+    expect(f.prompts.find(p => p.sessionID === 'parent')!.text).toContain(`- worktree: removed (${wt}) - only the branch feat/x is left; check it out in ${repo} to review and push. The PR body, the review outputs and the trail are in ${saved}`)
+  })
+
+  it('works in a worktree of its own when repo is on another branch, and keeps the run files in repo', async () => {
+    git(repo, 'checkout', '-q', 'main')
+    writeFileSync(join(repo, 'granny.config.json'), JSON.stringify({ reviewers: [{ name: 'codex', engine: 'command', command: REVIEW_ONCE }], keepWorktree: true }))
     const f = fakeContext()
     await plugin.setup(f.ctx)
     const started = await f.tools.get('granny_run').execute({ repo, branch: 'feat/x', stages: [{ name: 'one', task: 'Do it.' }] }, { sessionID: 'parent' })

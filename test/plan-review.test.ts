@@ -127,7 +127,7 @@ describe('the plan review', () => {
 
   it('stops before stage 1 when it hits the round cap, and reports the plan result', async () => {
     const bad = review(planFinding('P2', 'Still missing a migration step'))
-    const f = fakeHost({ reviews: [bad, bad], scores: [{ 'codex-F1': 90 }, { 'codex-F1': 90 }] })
+    const f = fakeHost({ worktree: '/work/repo-worktrees/feat-x', made: true, reviews: [bad, bad], scores: [{ 'codex-F1': 90 }, { 'codex-F1': 90 }] })
     const r = await runGranny(f.host, input({ plan: PLAN, config: { planReview: true, maxRounds: 2 } }))
     expect(r.plan).toMatchObject({ outcome: 'round-cap', rounds: 2 })
     expect(r.plan!.unresolved.map(x => x.title)).toEqual(['Still missing a migration step'])
@@ -136,18 +136,18 @@ describe('the plan review', () => {
     expect(r.final).toBeNull()
     expect(f.calls.map(c => c.label)).toEqual(['judge plan review r1', 'fix plan review r1', 'judge plan review r2', 'fix plan review r2'])
     expect(f.phases).toEqual(['Worktree', 'Plan review'])
-    expect(f.logs.at(-1)).toBe('plan review ended round-cap - stopping before stage 1; nothing was implemented')
+    expect(f.logs.slice(-2)).toEqual(['plan review ended round-cap - stopping before stage 1; nothing was implemented', `worktree left in place: ${r.worktree} - the plan review ended round-cap, so the run stopped before stage 1`])
   })
 
   it('stops before stage 1 when a reviewer fails twice', async () => {
-    const f = fakeHost({ reviews: [{ code: 1, output: 'codex: not logged in' }, { code: 1, output: 'codex: still not logged in' }] })
+    const f = fakeHost({ worktree: '/work/repo-worktrees/feat-x', made: true, reviews: [{ code: 1, output: 'codex: not logged in' }, { code: 1, output: 'codex: still not logged in' }] })
     const r = await runGranny(f.host, input({ plan: PLAN, config: { planReview: true } }))
     expect(r.plan).toMatchObject({ outcome: 'review-failed', rounds: 1 })
     expect(r.plan!.note).toContain('still not logged in')
     expect(r.stages).toEqual([])
     expect(r.final).toBeNull()
     expect(f.calls).toHaveLength(0)
-    expect(f.logs.at(-1)).toBe('plan review ended review-failed - stopping before stage 1; nothing was implemented')
+    expect(f.logs.slice(-2)).toEqual(['plan review ended review-failed - stopping before stage 1; nothing was implemented', `worktree left in place: ${r.worktree} - the plan review ended review-failed, so the run stopped before stage 1`])
   })
 
   it('keeps a residual plan finding of an earlier round when a later round is clean', async () => {

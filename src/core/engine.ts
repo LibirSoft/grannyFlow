@@ -38,6 +38,7 @@ import {
   timeoutProbePrompt,
   trailWritePrompt,
   worktreeCommandPrompt,
+  worktreeRemovalPrompt,
   roundLabel,
   type EarlierRound,
   type FailedCheck,
@@ -55,7 +56,7 @@ import { detachedReview, MAX_WAITS, planReviewScript, reportedBackend, reviewerM
 import { SCHEMAS } from './schemas'
 import { heredocWriteScript, shellQuote } from './shell'
 import { trailDir, trailId, trailPath, trailRound, trailText, type RoundFacts } from './trail'
-import { branchSlug, excludeScript, reportedWorktree, worktreePath, worktreeScript } from './worktree'
+import { branchSlug, excludeScript, madeByGranny, printed, removalOf, removeWorktreeScript, reportedWorktree, savedDir, savedNotes, worktreePath, worktreeScript } from './worktree'
 import type {
   AgentRequest,
   CheckResult,
@@ -84,6 +85,7 @@ import type {
   TrailReviewer,
   TrailRound,
   TrailSummary,
+  WorktreeEnd,
 } from './types'
 
 type Subject = { kind: 'diff'; base: string; stage?: StageTask; note?: string } | { kind: 'plan'; files: string[] }
@@ -157,6 +159,7 @@ interface RepoState {
   waiters: Array<() => void>
   setup: Promise<unknown>
   merges: number
+  leftLanes: string[]
   red?: number
   started?: Promise<string | undefined>
   /** Each stage's review decisions, by stage index, for the final review's judge. */
@@ -630,12 +633,17 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
     return config.checks.filter(c => theirs.some(list => list.includes(c)))
   }
 
-  const setUpWorktree = async (repo: string, branch: string, from: string, label: string, shared: boolean): Promise<string> => {
-    const script = worktreeScript(config, branch, from, worktreePath(repo, branch, config.worktreeDir, shared))
+  const made = new Set<string>()
+  const setUpWorktree = async (repo: string, branch: string, from: string, label: string, shared: boolean, ofRun = false): Promise<string> => {
+    const saved = ofRun ? savedDir(config, repo, branch) : undefined
+    const script = worktreeScript(config, branch, from, worktreePath(repo, branch, config.worktreeDir, shared), saved)
     const r = await shell(label, 'Worktree', script, repo, (_cwd, _step, command) => worktreeCommandPrompt(repo, branch, command))
     const path = r.ran ? reportedWorktree(r.output) : undefined
     if (!path) throw new Error(`worktree setup failed${repo === primary && branch === input.branch ? '' : ` for ${repo} ${branch}`} (exit ${r.code}): ${r.output.slice(-2000)}`)
-    host.log(`worktree${repo === primary && branch === input.branch ? '' : ` ${baseName(repo)} ${branch}`}: ${path}`)
+    const named = `worktree${repo === primary && branch === input.branch ? '' : ` ${baseName(repo)} ${branch}`}`
+    host.log(`${named}: ${path}`)
+    if (ofRun && madeByGranny(r.output)) made.add(repo)
+    if (saved) for (const line of savedNotes(r.output, saved)) host.log(`${named}: ${line}`)
     return path
   }
 
@@ -663,7 +671,7 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
   const cwdOf = new Map<string, string>(used.map(r => [r, r]))
   if (config.worktree) {
     host.phase('Worktree')
-    for (const r of used) cwdOf.set(r, await setUpWorktree(r, input.branch, baseOf(r), r === primary ? 'worktree' : `worktree ${baseName(r)}`, r !== primary))
+    for (const r of used) cwdOf.set(r, await setUpWorktree(r, input.branch, baseOf(r), r === primary ? 'worktree' : `worktree ${baseName(r)}`, r !== primary, true))
   }
   const worktree = cwdOf.get(primary)!
 
@@ -711,7 +719,7 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
     used.map(r => {
       const cwd = cwdOf.get(r)!
       const others = used.filter(o => o !== r).map(o => cwdOf.get(o)!)
-      return [r, { lane: { repo: r, base: baseOf(r), branch: input.branch, cwd, p: promptFor(r, cwd, input.branch, others), readable }, locked: false, waiters: [], setup: Promise.resolve(), merges: 0, ledger: new Map(), left: new Map() }]
+      return [r, { lane: { repo: r, base: baseOf(r), branch: input.branch, cwd, p: promptFor(r, cwd, input.branch, others), readable }, locked: false, waiters: [], setup: Promise.resolve(), merges: 0, leftLanes: [], ledger: new Map(), left: new Map() }]
     }),
   )
   const primaryLane = repoState.get(primary)!.lane
@@ -879,7 +887,15 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
       return undefined
     }
   }
-  const trailOf = (): { trail?: TrailSummary } => (config.trail ? { trail: { dir: trailDir(config, worktree), written: trailed.written, failed: [...trailed.failed] } } : {})
+  const trailOf = (end?: WorktreeEnd): { trail?: TrailSummary } =>
+    config.trail ? { trail: { dir: end?.saved ? `${end.saved}/trail` : trailDir(config, worktree), written: trailed.written, failed: [...trailed.failed] } } : {}
+  const ownerReason = (repo: string): string | undefined => (config.keepWorktree ? 'keepWorktree is on' : made.has(repo) ? undefined : 'granny did not create it')
+  const keptAll = (why: string): { worktreeEnd?: WorktreeEnd } => {
+    if (!config.worktree) return {}
+    const kept = ownerReason(primary) ?? (trimPath(worktree) === primary ? 'the run was started in this worktree' : why)
+    host.log(`worktree left in place: ${worktree} - ${kept}`)
+    return { worktreeEnd: { removed: false, kept } }
+  }
 
   const reviewLoop = async (
     lane: Lane,
@@ -1171,11 +1187,11 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
   const planResult = await reviewThePlan()
   if (draft) {
     host.log(`plan written - the run stops here; launch again with plan and the approved stages to implement it`)
-    return { repo: input.repo, branch: input.branch, base, worktree, draft, ...(planResult ? { plan: planResult } : {}), stages: [], final: null, ...trailOf() }
+    return { repo: input.repo, branch: input.branch, base, worktree, ...keptAll('a planning run keeps its worktree for the implement run'), draft, ...(planResult ? { plan: planResult } : {}), stages: [], final: null, ...trailOf() }
   }
   if (planResult && (planResult.outcome === 'round-cap' || planResult.outcome === 'review-failed')) {
     host.log(`plan review ended ${planResult.outcome} - stopping before stage 1; nothing was implemented`)
-    return { repo: input.repo, branch: input.branch, base, worktree, plan: planResult, stages: [], final: null, ...trailOf() }
+    return { repo: input.repo, branch: input.branch, base, worktree, ...keptAll(`the plan review ended ${planResult.outcome}, so the run stopped before stage 1`), plan: planResult, stages: [], final: null, ...trailOf() }
   }
 
   const tryLock = (s: RepoState) => (s.locked ? false : (s.locked = true))
@@ -1354,7 +1370,8 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
     ].join(' && ')
     const cleaned = await shell(`cleanup ${name}`, 'Implement', cleanup, main.cwd)
     if (cleaned.ran) return done
-    const reached = (marker: string) => cleaned.output.includes(`[granny] ${marker}`)
+    const reached = (marker: string) => printed(cleaned.output, marker)
+    if (!reached('lane worktree removed')) state.leftLanes.push(lane.cwd)
     const left = reached('lane worktree removed')
       ? `its worktree ${lane.cwd} was removed, but its branch ${lane.branch} was left in place`
       : `its worktree ${lane.cwd} and branch ${lane.branch} were left in place (${reached('lane worktree clean') ? 'git worktree remove failed' : reached('lane merged') ? 'uncommitted changes in the worktree' : 'the cleanup could not confirm the merge'})`
@@ -1620,15 +1637,65 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
   if (config.parallel) finals.push(...(await Promise.all(states.map(check))))
   else for (const s of states) finals.push(await check(s))
 
+  const READY_STAGE: StageOutcome[] = ['clean', 'residual-only', 'review-skipped']
+  const READY_REVIEW: StageOutcome[] = [...READY_STAGE, 'skipped']
+  const notReady = (): string | undefined => {
+    for (let i = fromStage - 1; i < specs.length; i++) if (!READY_STAGE.includes(results[i]!.outcome)) return `stage ${nameOf(i)} ended ${results[i]!.outcome}`
+    for (const r of finals) {
+      const of = r.repo === primary ? '' : ` in ${baseName(r.repo)}`
+      if (r.finalReview && !READY_REVIEW.includes(r.finalReview.outcome)) return `the final review${of} ended ${r.finalReview.outcome}`
+      if (!r.final) return `the final check${of} returned nothing`
+      if (!r.final.gatesGreen) return `the final check${of} left the gates red`
+      if (r.recheck && !r.recheck.passed) return `the checks after the final check${of} are red`
+    }
+    return undefined
+  }
+  const endWorktree = async (s: RepoState, blocked: string | undefined): Promise<WorktreeEnd> => {
+    const { repo, cwd } = s.lane
+    const named = `worktree${repo === primary ? '' : ` ${baseName(repo)}`}`
+    const keep = (kept: string, more = ''): WorktreeEnd => {
+      host.log(`${named} left in place: ${cwd} - ${kept}${more}`)
+      return { removed: false, kept }
+    }
+    const kept = ownerReason(repo)
+    if (kept) return keep(kept)
+    if (blocked) return keep(blocked)
+    if (s.leftLanes.length) return keep(`a lane worktree was left in place (${s.leftLanes.join(', ')}), and the removal could not be confirmed`)
+    if (trimPath(cwd) === repo) return keep('the run was started in this worktree')
+    const saved = savedDir(config, repo, input.branch)
+    try {
+      const r = await shell(repo === primary ? 'remove worktree' : `remove worktree ${baseName(repo)}`, 'PR ready', removeWorktreeScript(config, input.branch, cwd, saved), repo, worktreeRemovalPrompt)
+      const end = removalOf(r.output, input.branch, saved, r.code)
+      if (!end.removed) return keep(end.kept, `: ${r.output.trim().slice(-500)}`)
+      host.log(`${named} removed: ${cwd} - the branch ${input.branch} is left${end.saved ? `, and its work dir files are in ${end.saved}` : ''}`)
+      return end
+    } catch (e) {
+      if (isCancelled(e)) throw e
+      return keep(`the removal step failed: ${String((e as Error)?.message ?? e)}`)
+    }
+  }
+  if (config.worktree) {
+    const why = notReady()
+    const blocked = why ? `the run did not end PR-ready: ${why}` : undefined
+    for (const [i, s] of states.entries()) {
+      const end = await endWorktree(s, blocked)
+      const r = finals[i]!
+      const from = [`${trimPath(s.lane.cwd)}/${work}/`, `${work}/`]
+      const moved = end.saved && r.final ? from.find(prefix => r.final!.prBodyPath.startsWith(prefix)) : undefined
+      finals[i] = { ...r, worktreeEnd: end, ...(moved !== undefined ? { final: { ...r.final!, prBodyPath: `${end.saved}/${r.final!.prBodyPath.slice(moved.length)}` } } : {}) }
+    }
+  }
   const final = finals[0]!.final
   const primaryReview = finals[0]!.finalReview
   const primaryChecks = finals[0]!.checks
   const primaryRecheck = finals[0]!.recheck
+  const primaryEnd = finals[0]!.worktreeEnd
   return {
     repo: input.repo,
     branch: input.branch,
     base,
     worktree,
+    ...(primaryEnd ? { worktreeEnd: primaryEnd } : {}),
     ...(planResult ? { plan: planResult } : {}),
     stages: results,
     ...(primaryReview ? { finalReview: primaryReview } : {}),
@@ -1636,7 +1703,7 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
     ...(primaryRecheck ? { recheck: primaryRecheck } : {}),
     final,
     ...(finals.length > 1 ? { repos: finals } : {}),
-    ...trailOf(),
+    ...trailOf(primaryEnd),
   }
 }
 
