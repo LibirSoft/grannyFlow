@@ -1,12 +1,13 @@
 import { spawn, type ChildProcess } from 'node:child_process'
 import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
-import { basename, dirname, join } from 'node:path'
+import { basename, dirname, isAbsolute, join, normalize } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { resolveConfig, type WatchMode } from '../../core/config'
 import { GrannyCancelled, isCancelled } from '../../core/cancel'
 import { checkInput, type JudgeInput, runGranny, runJudge, stageCheckErrors, type RunInput } from '../../core/engine'
 import { checkShape, SCHEMAS } from '../../core/schemas'
 import type { AgentRequest, Host, ResultKind } from '../../core/types'
+import { commandProblem, READ_ONLY_COMMANDS } from '../claude-code/readonly'
 import { DEFAULT_DELAYS, dropPlaceholders, globalConfigPath, HEARTBEAT_MS, hostModelErrors, type HostOptions, JUDGE_INPUT_SCHEMA, JUDGE_TOOL_DESCRIPTION, judgeStartLine, KILL_GRACE_MS, layerSources, type Launch, overridesNotice, pause, planReviewNotice, preflight, prepareJudge, readJson, RUN_INPUT_SCHEMA, RUN_TOOL_DESCRIPTION, runCommand, runDir, runId, runStatus, sameModelNotice, signalGroup, stageRepos, stamp, statusError, SUBMIT, summarize, summarizeJudge, withHeartbeat } from '../common'
 import { lineType, LiveRun, type LiveOptions, PARSED_EVENTS, type RoleActivity, type RoleOutcome } from './panel'
 import { Navigator } from './navigator'
@@ -261,8 +262,21 @@ export function blockReason(toolName: string, input: any, access: Access, submit
     return `granny: this role is read-only - the ${toolName} tool is not allowed`
   }
   if (toolName !== 'bash') return undefined
-  const reason = bashBlock(String(input?.command ?? ''), access)
-  return reason ? `granny: ${reason}` : undefined
+  const command = String(input?.command ?? '')
+  const reason = bashBlock(command, access)
+  if (reason) return `granny: ${reason}`
+  if (access !== 'read-only' || !command.trim()) return undefined
+  const problem = commandProblem(command)
+  return problem ? `granny: this role is read-only - ${problem} is not allowed. ${READ_ONLY_COMMANDS}` : undefined
+}
+
+const SUBMISSION = 'submission.json'
+
+export function submissionPath(out: unknown): out is string {
+  if (typeof out !== 'string' || !isAbsolute(out) || normalize(out) !== out || basename(out) !== SUBMISSION) return false
+  const session = dirname(out)
+  const sessions = dirname(session)
+  return basename(sessions) === 'sessions' && basename(dirname(dirname(sessions))) === 'runs' && existsSync(session)
 }
 
 const CLAUDE_ALIAS = /^(default|sonnet|opus|haiku|opusplan)(\[1m\])?$/i
@@ -356,7 +370,7 @@ function registerChild(pi: OmpApi, spec: ChildSpec) {
     loadMode: 'essential',
     async execute(_id, params, _signal, _onUpdate, ctx) {
       if (ctx?.agent?.kind === 'sub') return text(SUBAGENT_SUBMIT)
-      mkdirSync(dirname(spec.out), { recursive: true })
+      if (!submissionPath(spec.out)) return text(`granny: nothing recorded - ${String(spec.out)} is not a granny session's ${SUBMISSION}`)
       writeFileSync(spec.out, JSON.stringify(params))
       return text('Recorded. You are done - stop now.')
     },
@@ -498,7 +512,7 @@ export const createGrannyExtension =
           const model = req.model ?? parentModel
           const session = join(dir, 'sessions', `${++run.agents}-${slug(req.label)}`)
           mkdirSync(session, { recursive: true })
-          const spec: ChildSpec = { tool, kind: req.kind, out: join(session, 'submission.json'), access: req.access }
+          const spec: ChildSpec = { tool, kind: req.kind, out: join(session, SUBMISSION), access: req.access }
           const args = [
             '--mode', 'json', '--no-title', '--no-extensions',
             '-e', extensionFile,

@@ -1396,6 +1396,11 @@ var OPENCODE_AGENT = "granny-reviewer";
 var READ_ONLY_GIT = ["git diff*", "git log*", "git show*", "git status*", "git blame*", "git rev-parse*", "git merge-base*", "git ls-files*"];
 var REDIRECT = ["*>*", "*<*"];
 var OUTSIDE_PATH = ["*--no-index*", "* /*", "*'/*", '*"/*', "*=/*", "* ~*", "*'~*", '*"~*', "*=~*", "*../*", "* ..", "* .. *", "*'..*", '*"..*', "*$*", "*`*", "*{*", "*.?/*", "*.[*", "* -?/*", "*\t*"];
+var READ_ONLY_SHELL = [
+  ["*", "deny"],
+  ...READ_ONLY_GIT.map((p) => [p, "allow"]),
+  ...["git * --output*", ...REDIRECT, ...OUTSIDE_PATH].map((p) => [p, "deny"])
+];
 var ABSOLUTE_PATH = /(?<=^|[\s,;(\[{"'`])\/[^\s,;)\]}"'`]*/g;
 var isObject2 = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
 var FRAME = "[granny] opencode: ";
@@ -1563,7 +1568,7 @@ function opencodeAgentConfig(dirs, files = []) {
     grep: "allow",
     glob: "allow",
     list: "allow",
-    bash: { "*": "deny", ...Object.fromEntries(READ_ONLY_GIT.map((p) => [p, "allow"])), ...Object.fromEntries(["git * --output*", ...REDIRECT, ...OUTSIDE_PATH].map((p) => [p, "deny"])) },
+    bash: Object.fromEntries(READ_ONLY_SHELL),
     ...external.length ? { external_directory: Object.fromEntries(external.map((d) => [`${d}/*`, "allow"])) } : {}
   };
   return JSON.stringify({ agent: { [OPENCODE_AGENT]: { mode: "primary", permission } } });
@@ -4487,7 +4492,7 @@ function permissions(access) {
     }))
   ];
   if (access === "read-only") {
-    rules.push({ action: "edit", resource: "*", effect: "deny" }, { action: "shell", resource: "git add *", effect: "deny" }, { action: "shell", resource: "git commit *", effect: "deny" });
+    rules.push({ action: "edit", resource: "*", effect: "deny" }, { action: "shell", resource: "git add *", effect: "deny" }, { action: "shell", resource: "git commit *", effect: "deny" }, { action: "task", resource: "*", effect: "deny" }, ...READ_ONLY_SHELL.map(([resource, effect]) => ({ action: "shell", resource, effect })));
   }
   return rules;
 }

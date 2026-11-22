@@ -3,7 +3,7 @@
 // src/adapters/omp/extension.ts
 import { spawn as spawn2 } from "child_process";
 import { appendFileSync as appendFileSync3, existsSync as existsSync3, mkdirSync as mkdirSync2, readFileSync as readFileSync4, rmSync, writeFileSync } from "fs";
-import { basename, dirname, join as join5 } from "path";
+import { basename, dirname, isAbsolute as isAbsolute2, join as join5, normalize as normalize3 } from "path";
 import { fileURLToPath } from "url";
 
 // src/core/types.ts
@@ -1398,6 +1398,11 @@ var OPENCODE_AGENT = "granny-reviewer";
 var READ_ONLY_GIT = ["git diff*", "git log*", "git show*", "git status*", "git blame*", "git rev-parse*", "git merge-base*", "git ls-files*"];
 var REDIRECT = ["*>*", "*<*"];
 var OUTSIDE_PATH = ["*--no-index*", "* /*", "*'/*", '*"/*', "*=/*", "* ~*", "*'~*", '*"~*', "*=~*", "*../*", "* ..", "* .. *", "*'..*", '*"..*', "*$*", "*`*", "*{*", "*.?/*", "*.[*", "* -?/*", "*\t*"];
+var READ_ONLY_SHELL = [
+  ["*", "deny"],
+  ...READ_ONLY_GIT.map((p) => [p, "allow"]),
+  ...["git * --output*", ...REDIRECT, ...OUTSIDE_PATH].map((p) => [p, "deny"])
+];
 var ABSOLUTE_PATH = /(?<=^|[\s,;(\[{"'`])\/[^\s,;)\]}"'`]*/g;
 var isObject2 = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
 var FRAME = "[granny] opencode: ";
@@ -1565,7 +1570,7 @@ function opencodeAgentConfig(dirs, files = []) {
     grep: "allow",
     glob: "allow",
     list: "allow",
-    bash: { "*": "deny", ...Object.fromEntries(READ_ONLY_GIT.map((p) => [p, "allow"])), ...Object.fromEntries(["git * --output*", ...REDIRECT, ...OUTSIDE_PATH].map((p) => [p, "deny"])) },
+    bash: Object.fromEntries(READ_ONLY_SHELL),
     ...external.length ? { external_directory: Object.fromEntries(external.map((d) => [`${d}/*`, "allow"])) } : {}
   };
   return JSON.stringify({ agent: { [OPENCODE_AGENT]: { mode: "primary", permission } } });
@@ -3893,6 +3898,216 @@ ${notes}`);
     report,
     ...written ? {} : { note: `the report could not be written to ${reportPath}; it is in this result` }
   });
+}
+
+// src/adapters/claude-code/readonly.ts
+var GIT_READS = ["diff", "log", "show", "blame", "status", "rev-parse", "merge-base", "ls-files"];
+var BRANCH_READS = new Set(["--show-current", "--list", "-a", "--all", "-r", "--remotes", "-v", "-vv"]);
+var PLAIN_READS = new Set(["cat", "grep", "ls", "head", "tail", "wc", "pwd", "cd"]);
+var WRITE_TOOLS = new Set(["Edit", "Write", "MultiEdit", "NotebookEdit"]);
+var FIND_ACTIONS = /^-(exec|execdir|ok|okdir|delete|fprint|fprint0|fprintf|fls)$/;
+var SED_FLAGS = /^-[nEr]+$/;
+var SED_PRINT = /^\s*(\d+|\$)(\s*,\s*(\d+|\$))?\s*p\s*(;\s*(\d+|\$)(\s*,\s*(\d+|\$))?\s*p\s*)*;?\s*$/;
+var READ_ONLY_COMMANDS = "Besides Read (and Grep and Glob where you have them), your Bash runs only: git diff, git log, git show, git blame, git status, git rev-parse, git merge-base, git ls-files, git branch --show-current, cat, sed -n '<from>,<to>p', grep, find (without -exec, -delete or -fprint), ls, head, tail, wc, pwd. Plain commands only: a `cd <dir> && ` prefix, `|` between them and `2>/dev/null` are fine; a hook blocks `$(...)`, backticks, `$VARIABLES`, redirection into a file and any other command.";
+function lex(command) {
+  const tokens = [];
+  let word = "";
+  let quoted = false;
+  let i = 0;
+  const flush = () => {
+    if (word || quoted)
+      tokens.push({ word });
+    word = "";
+    quoted = false;
+  };
+  const readTarget = () => {
+    while (command[i] === " " || command[i] === "\t")
+      i++;
+    const start = i;
+    while (i < command.length && !/[\s;&|<>()$`'"\\]/.test(command[i]))
+      i++;
+    if (i === start || /['"\\]/.test(command[i] ?? ""))
+      return;
+    return command.slice(start, i);
+  };
+  while (i < command.length) {
+    const c = command[i];
+    if (c === " " || c === "\t") {
+      flush();
+      i++;
+    } else if (c === "'") {
+      const end = command.indexOf("'", i + 1);
+      if (end < 0)
+        return "an unterminated quote";
+      word += command.slice(i + 1, end);
+      quoted = true;
+      i = end + 1;
+    } else if (c === '"') {
+      i++;
+      while (i < command.length && command[i] !== '"') {
+        if (command[i] === "$" || command[i] === "`")
+          return "`$` or a backtick inside double quotes";
+        if (command[i] === "\\" && i + 1 < command.length)
+          i++;
+        word += command[i];
+        i++;
+      }
+      if (i >= command.length)
+        return "an unterminated quote";
+      quoted = true;
+      i++;
+    } else if (c === "\\") {
+      if (i + 1 < command.length && command[i + 1] !== `
+`)
+        word += command[i + 1];
+      i += 2;
+    } else if (c === "$" || c === "`") {
+      return "command substitution or a variable";
+    } else if (c === "(" || c === ")") {
+      return "a subshell or process substitution";
+    } else if (c === `
+` || c === ";") {
+      flush();
+      tokens.push({ sep: ";" });
+      i++;
+    } else if (c === "|" || c === "&") {
+      const two = command.slice(i, i + 2);
+      if (c === "&" && command[i + 1] === ">") {
+        flush();
+        i += command[i + 2] === ">" ? 3 : 2;
+        const target = readTarget();
+        if (target === undefined)
+          return "a redirection without a plain target";
+        tokens.push({ op: "&>", target });
+      } else if (two === "&&" || two === "||" || two === "|&") {
+        flush();
+        tokens.push({ sep: two });
+        i += 2;
+      } else if (c === "|") {
+        flush();
+        tokens.push({ sep: "|" });
+        i++;
+      } else
+        return "a background `&`";
+    } else if (c === ">" || c === "<") {
+      const fd = /^\d*$/.test(word) && !quoted ? word : undefined;
+      if (fd === undefined)
+        flush();
+      word = "";
+      quoted = false;
+      let op = c;
+      i++;
+      if (c === "<" && (command[i] === "<" || command[i] === ">"))
+        return c === "<" && command[i] === "<" ? "a here-document" : "a read-write redirection";
+      if (c === ">" && (command[i] === ">" || command[i] === "|"))
+        i++;
+      if (command[i] === "&") {
+        op += "&";
+        i++;
+      }
+      const target = readTarget();
+      if (target === undefined)
+        return "a redirection without a plain target";
+      tokens.push({ op: `${fd ?? ""}${op}`, target });
+    } else {
+      word += c;
+      i++;
+    }
+  }
+  flush();
+  return tokens;
+}
+function redirectProblem(r) {
+  if (r.op.endsWith("&"))
+    return /^(\d|-)$/.test(r.target) ? undefined : `a redirection to ${r.target}`;
+  if (r.op.endsWith("<"))
+    return;
+  return r.target === "/dev/null" ? undefined : `a redirection into ${r.target}`;
+}
+function sedProblem(args) {
+  let quiet = false;
+  const scripts = [];
+  for (let k = 0;k < args.length; k++) {
+    const a = args[k];
+    if (a === "--quiet" || a === "--silent")
+      quiet = true;
+    else if (a === "-e")
+      scripts.push(args[++k] ?? "");
+    else if (SED_FLAGS.test(a))
+      quiet ||= a.includes("n");
+    else if (a.startsWith("-"))
+      return `sed option ${a}`;
+    else if (!scripts.length)
+      scripts.push(a);
+  }
+  if (!quiet)
+    return "sed without -n";
+  if (!scripts.length || !scripts.every((s) => SED_PRINT.test(s)))
+    return "a sed script other than '<from>,<to>p'";
+  return;
+}
+function gitProblem(args) {
+  let k = 0;
+  while (k < args.length && args[k].startsWith("-")) {
+    if (args[k] === "-C")
+      k += 2;
+    else if (args[k] === "--no-pager" || args[k] === "-P")
+      k++;
+    else
+      return `git option ${args[k]}`;
+  }
+  const sub = args[k];
+  const rest = args.slice(k + 1);
+  if (sub === "branch")
+    return rest.every((a) => BRANCH_READS.has(a)) ? undefined : `git branch ${rest.join(" ")}`;
+  if (sub === undefined || !GIT_READS.includes(sub))
+    return `git ${sub ?? ""}`.trim();
+  const output = rest.find((a) => a.startsWith("--output"));
+  return output ? `git ${sub} ${output}` : undefined;
+}
+function segmentProblem(words) {
+  const [name, ...args] = words;
+  if (/^[A-Za-z_]\w*=/.test(name))
+    return `a variable assignment (${name})`;
+  if (name === "git")
+    return gitProblem(args);
+  if (name === "sed")
+    return sedProblem(args);
+  if (name === "find") {
+    const action = args.find((a) => FIND_ACTIONS.test(a));
+    return action ? `find ${action}` : undefined;
+  }
+  if (PLAIN_READS.has(name))
+    return;
+  return name;
+}
+function commandProblem(command) {
+  const tokens = lex(command);
+  if (typeof tokens === "string")
+    return tokens;
+  let words = [];
+  const segments = [];
+  for (const t of tokens) {
+    if ("sep" in t) {
+      segments.push(words);
+      words = [];
+    } else if ("op" in t) {
+      const problem = redirectProblem(t);
+      if (problem)
+        return problem;
+    } else
+      words.push(t.word);
+  }
+  segments.push(words);
+  const commands = segments.filter((s) => s.length);
+  if (!commands.length)
+    return "an empty command";
+  for (const s of commands) {
+    const problem = segmentProblem(s);
+    if (problem)
+      return problem;
+  }
+  return;
 }
 
 // src/adapters/common.ts
@@ -7873,8 +8088,22 @@ function blockReason(toolName, input, access, submitTool) {
   }
   if (toolName !== "bash")
     return;
-  const reason = bashBlock(String(input?.command ?? ""), access);
-  return reason ? `granny: ${reason}` : undefined;
+  const command = String(input?.command ?? "");
+  const reason = bashBlock(command, access);
+  if (reason)
+    return `granny: ${reason}`;
+  if (access !== "read-only" || !command.trim())
+    return;
+  const problem = commandProblem(command);
+  return problem ? `granny: this role is read-only - ${problem} is not allowed. ${READ_ONLY_COMMANDS}` : undefined;
+}
+var SUBMISSION = "submission.json";
+function submissionPath(out) {
+  if (typeof out !== "string" || !isAbsolute2(out) || normalize3(out) !== out || basename(out) !== SUBMISSION)
+    return false;
+  const session = dirname(out);
+  const sessions = dirname(session);
+  return basename(sessions) === "sessions" && basename(dirname(dirname(sessions))) === "runs" && existsSync3(session);
 }
 var CLAUDE_ALIAS = /^(default|sonnet|opus|haiku|opusplan)(\[1m\])?$/i;
 var ompModelProblem = (model, keyed) => !keyed && CLAUDE_ALIAS.test(model) ? `"${model}" is a Claude Code model alias, not an omp model` : undefined;
@@ -7942,7 +8171,8 @@ function registerChild(pi, spec) {
     async execute(_id, params, _signal, _onUpdate, ctx) {
       if (ctx?.agent?.kind === "sub")
         return text3(SUBAGENT_SUBMIT);
-      mkdirSync2(dirname(spec.out), { recursive: true });
+      if (!submissionPath(spec.out))
+        return text3(`granny: nothing recorded - ${String(spec.out)} is not a granny session's ${SUBMISSION}`);
       writeFileSync(spec.out, JSON.stringify(params));
       return text3("Recorded. You are done - stop now.");
     }
@@ -8089,7 +8319,7 @@ When done, call the \`${tool}\` tool exactly once with your result. That call is
         const model = req.model ?? parentModel;
         const session = join5(dir, "sessions", `${++run.agents}-${slug2(req.label)}`);
         mkdirSync2(session, { recursive: true });
-        const spec = { tool, kind: req.kind, out: join5(session, "submission.json"), access: req.access };
+        const spec = { tool, kind: req.kind, out: join5(session, SUBMISSION), access: req.access };
         const args = [
           "--mode",
           "json",
@@ -8451,5 +8681,6 @@ export {
   createGrannyExtension,
   extension_default as default,
   isTransient,
+  submissionPath,
   waitSeconds
 };

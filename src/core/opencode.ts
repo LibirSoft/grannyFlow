@@ -7,6 +7,11 @@ const READ_ONLY_GIT = ['git diff*', 'git log*', 'git show*', 'git status*', 'git
 // git reads any path outside the repo it is given (no-index mode), which external_directory does not cover.
 const REDIRECT = ['*>*', '*<*']
 const OUTSIDE_PATH = ['*--no-index*', '* /*', "*'/*", '*"/*', '*=/*', '* ~*', "*'~*", '*"~*', '*=~*', '*../*', '* ..', '* .. *', "*'..*", '*"..*', '*$*', '*`*', '*{*', '*.?/*', '*.[*', '* -?/*', '*\t*']
+export const READ_ONLY_SHELL: Array<[string, 'allow' | 'deny']> = [
+  ['*', 'deny'],
+  ...READ_ONLY_GIT.map((p): [string, 'allow'] => [p, 'allow']),
+  ...['git * --output*', ...REDIRECT, ...OUTSIDE_PATH].map((p): [string, 'deny'] => [p, 'deny']),
+]
 const ABSOLUTE_PATH = /(?<=^|[\s,;(\[{"'`])\/[^\s,;)\]}"'`]*/g
 
 const isObject = (v: unknown): v is Record<string, any> => typeof v === 'object' && v !== null && !Array.isArray(v)
@@ -205,7 +210,7 @@ export function opencodeAgentConfig(dirs: string[], files: string[] = []): strin
     grep: 'allow',
     glob: 'allow',
     list: 'allow',
-    bash: { '*': 'deny', ...Object.fromEntries(READ_ONLY_GIT.map(p => [p, 'allow'])), ...Object.fromEntries(['git * --output*', ...REDIRECT, ...OUTSIDE_PATH].map(p => [p, 'deny'])) },
+    bash: Object.fromEntries(READ_ONLY_SHELL),
     ...(external.length ? { external_directory: Object.fromEntries(external.map(d => [`${d}/*`, 'allow'])) } : {}),
   }
   return JSON.stringify({ agent: { [OPENCODE_AGENT]: { mode: 'primary', permission } } })

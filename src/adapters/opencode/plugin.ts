@@ -4,6 +4,7 @@ import { resolveConfig } from '../../core/config'
 import { GrannyCancelled, isCancelled } from '../../core/cancel'
 import { checkInput, type JudgeInput, runGranny, runJudge, stageCheckErrors, type RunInput } from '../../core/engine'
 import { checkShape, SCHEMAS } from '../../core/schemas'
+import { READ_ONLY_SHELL } from '../../core/opencode'
 import type { AgentRequest, Host, ResultKind } from '../../core/types'
 import { DEFAULT_DELAYS, dropPlaceholders, globalConfigPath, HEARTBEAT_MS, hostModelErrors, type HostOptions, JUDGE_INPUT_SCHEMA, JUDGE_TOOL_DESCRIPTION, judgeStartLine, KILL_GRACE_MS, layerSources, type Launch, overridesNotice, pause, planReviewNotice, preflight, prepareJudge, readJson, RUN_INPUT_SCHEMA, RUN_TOOL_DESCRIPTION, runCommand, runDir, runId, runStatus, sameModelNotice, stageRepos, stamp, statusError, SUBMIT, summarize, summarizeJudge, withHeartbeat } from '../common'
 import { duration } from '../runview/format'
@@ -85,6 +86,8 @@ export function permissions(access: AgentRequest['access']) {
       { action: 'edit', resource: '*', effect: 'deny' },
       { action: 'shell', resource: 'git add *', effect: 'deny' },
       { action: 'shell', resource: 'git commit *', effect: 'deny' },
+      { action: 'task', resource: '*', effect: 'deny' },
+      ...READ_ONLY_SHELL.map(([resource, effect]) => ({ action: 'shell', resource, effect })),
     )
   }
   return rules
