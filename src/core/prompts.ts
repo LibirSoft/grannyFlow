@@ -521,8 +521,11 @@ export function declinedKnown(earlier: EarlierRound[]): Known[] {
       return f ? [{ at, labels: [roundLabel(e.round, d, e.loop)], known: knownOf(f, d.reason || 'no reason given') }] : []
     }),
   )
-  const gone = new Set(earlier.flatMap((e, at) => [...repeatedBy(line, declines.filter(d => d.at < at), repeatsIn(e))]))
-  return declines.filter(d => !gone.has(d)).map(d => d.known)
+  const left = earlier.reduce((live, e, at) => {
+    const gone = repeatedBy(line, live, repeatsIn(e))
+    return [...live.filter(d => !gone.has(d)), ...declines.filter(d => d.at === at)]
+  }, [] as typeof declines)
+  return left.map(d => d.known)
 }
 
 const knownLine = (k: Known) => `${short(k.file)}${k.line === undefined ? '' : `:${k.line}`} - ${short(k.title)}${k.declined === undefined ? '' : ` (the fixer declined it: ${short(k.declined)})`}`

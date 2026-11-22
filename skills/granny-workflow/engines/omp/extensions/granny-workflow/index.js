@@ -1203,8 +1203,11 @@ function declinedKnown(earlier) {
     const f = e.sent.find((s) => s.id === d.id);
     return f ? [{ at, labels: [roundLabel(e.round, d, e.loop)], known: knownOf(f, d.reason || "no reason given") }] : [];
   }));
-  const gone = new Set(earlier.flatMap((e, at) => [...repeatedBy(line, declines.filter((d) => d.at < at), repeatsIn(e))]));
-  return declines.filter((d) => !gone.has(d)).map((d) => d.known);
+  const left = earlier.reduce((live, e, at) => {
+    const gone = repeatedBy(line, live, repeatsIn(e));
+    return [...live.filter((d) => !gone.has(d)), ...declines.filter((d) => d.at === at)];
+  }, []);
+  return left.map((d) => d.known);
 }
 var knownLine = (k) => `${short(k.file)}${k.line === undefined ? "" : `:${k.line}`} - ${short(k.title)}${k.declined === undefined ? "" : ` (the fixer declined it: ${short(k.declined)})`}`;
 var NOT_FINDINGS = "These are not findings, also when a rule or the plan asks for them, so leave them out: code comments and doc comments (wrong, outdated, missing, too long, or there against a rule; TODO notes and commented-out code too), commit messages and the commit history, the pull request description or its PR-BODY file, and how the work was done (the order tests and code were written in). A doc file such as the README is not a comment: review it like code.";

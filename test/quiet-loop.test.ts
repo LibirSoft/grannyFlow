@@ -897,6 +897,16 @@ describe('what a reviewer is told to leave out', () => {
     ])
   })
 
+  it('drops each decline of one chain whose repeats all name its first finding', () => {
+    const chain: EarlierRound[] = [
+      { round: 1, sent: [f0('opus-F1', { title: 'Phantom' })], declined: [{ id: 'opus-F1', reason: 'no' }] },
+      { round: 2, sent: [f0('opus-F1', { title: 'Phantom again', repeatOf: 'r1/opus-F1' })], declined: [{ id: 'opus-F1', reason: 'still no' }] },
+      { round: 3, sent: [f0('opus-F1', { title: 'Phantom once more', repeatOf: 'r1/opus-F1' })], declined: [{ id: 'opus-F1', reason: 'by design' }] },
+    ]
+    expect(declinedKnown(chain)).toEqual([{ file: 'src/a.ts', line: 3, title: 'Phantom once more', declined: 'by design' }])
+    expect(declinedKnown([...chain, { round: 4, sent: [f0('opus-F1', { repeatOf: 'r1/opus-F1' })] }])).toEqual([])
+  })
+
   it('counts a repeat of a declined finding that the judge merged into another finding as a repeat', async () => {
     const decline = declining('fix core r1')
     const f = fakeHost({
