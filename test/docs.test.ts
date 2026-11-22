@@ -703,6 +703,19 @@ describe('skill docs', () => {
     expect(readRoot('CHANGELOG.md').split('\n## ')[1]!).toContain('Findings about code comments are set aside, on a built-in `comment` label.')
   })
 
+  it('documents that a reviewer gets no rule about comments and is not sent to read them', () => {
+    const config = read('references/config.md')
+    const leaveOut = config.split('### What a reviewer is told to leave out')[1]!.split('\n### ')[0]!
+    expect(leaveOut).toContain('Nor is a reviewer sent to look at comments.')
+    expect(leaveOut).toContain('without every rule whose text contains `comment` in any case (`/comment/i`')
+    expect(config).toContain("a reviewer does not get a rule about comments ([What a reviewer is told to leave out](#what-a-reviewer-is-told-to-leave-out))")
+    expect(read('SKILL.md')).toContain('a reviewer gets no rule whose text contains `comment`, so the no-comment rule goes only to the agents that write.')
+    expect(read('references/cursor.md')).toContain("In a reviewer's prompt, leave out every `rules` line whose text contains `comment`, in any case")
+    expect(read('references/prompts.md')).toContain("leave every rule whose text contains `comment` (any case) out of a reviewer's prompt")
+    expect(read('references/prompts.md')).not.toContain('the README, comments and test names')
+    expect(readRoot('CHANGELOG.md').split('\n## ')[1]!).toContain('Reviewers are not sent to look at comments.')
+  })
+
   it('documents the hold on a repeat of a kept finding where the ratchet is described', () => {
     const ledger = read('references/config.md').split('### The decision ledger and the ratchet')[1]!.split('\n### ')[0]!
     expect(ledger).toContain('being reported again never rates a finding above what it was kept at')

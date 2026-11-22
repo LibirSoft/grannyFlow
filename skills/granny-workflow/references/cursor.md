@@ -50,7 +50,7 @@ The plan review is optional and off by default; enable it with `"planReview": tr
 
 ## The loop
 
-Prompts: [prompts.md](prompts.md). Each subagent ends its answer with a JSON block; read that block, not the prose.
+Prompts: [prompts.md](prompts.md). In a reviewer's prompt, leave out every `rules` line whose text contains `comment`, in any case; the agents that write and the planner get every rule. Each subagent ends its answer with a JSON block; read that block, not the prose.
 
 For each stage, from `fromStage` on:
 
