@@ -1180,20 +1180,31 @@ function lineOf(earlier) {
     return line;
   };
 }
-function onLine(line, a, b) {
-  return line(a).includes(b) || line(b).includes(a);
+function repeatedBy(line, entries, named) {
+  const hit = new Set;
+  for (const r of named) {
+    const up = line(r);
+    const below = [];
+    for (const e of entries) {
+      if (e.labels.some((l) => up.includes(l)))
+        hit.add(e);
+      else if (e.labels.some((l) => line(l).includes(r)))
+        below.push(e);
+    }
+    if (below.length === 1)
+      hit.add(below[0]);
+  }
+  return hit;
 }
 function declinedKnown(earlier) {
   const line = lineOf(earlier);
   const repeatsIn = (e) => [...[...e.sent, ...e.residual ?? []].flatMap((f) => f.repeatOf === undefined ? [] : [f.repeatOf]), ...e.repeats ?? []].map((label) => within(e, label));
-  return earlier.flatMap((e, at) => {
-    const later = earlier.slice(at + 1).flatMap(repeatsIn);
-    return (e.declined ?? []).flatMap((d) => {
-      const f = e.sent.find((s) => s.id === d.id);
-      const label = roundLabel(e.round, d, e.loop);
-      return f && !later.some((r) => onLine(line, r, label)) ? [knownOf(f, d.reason || "no reason given")] : [];
-    });
-  });
+  const declines = earlier.flatMap((e, at) => (e.declined ?? []).flatMap((d) => {
+    const f = e.sent.find((s) => s.id === d.id);
+    return f ? [{ at, labels: [roundLabel(e.round, d, e.loop)], known: knownOf(f, d.reason || "no reason given") }] : [];
+  }));
+  const gone = new Set(earlier.flatMap((e, at) => [...repeatedBy(line, declines.filter((d) => d.at < at), repeatsIn(e))]));
+  return declines.filter((d) => !gone.has(d)).map((d) => d.known);
 }
 var knownLine = (k) => `${short(k.file)}${k.line === undefined ? "" : `:${k.line}`} - ${short(k.title)}${k.declined === undefined ? "" : ` (the fixer declined it: ${short(k.declined)})`}`;
 var NOT_FINDINGS = "These are not findings, also when a rule or the plan asks for them, so leave them out: code comments and doc comments (wrong, outdated, missing, too long, or there against a rule; TODO notes and commented-out code too), commit messages and the commit history, the pull request description or its PR-BODY file, and how the work was done (the order tests and code were written in). A doc file such as the README is not a comment: review it like code.";
@@ -2886,14 +2897,10 @@ the last repair's deviations: ${deviations}` : ""}`;
         host.log(`${name} r${round}: ${f.id} dropped as a repeat of ${declinedLabel(f)}, which the fixer declined (${ruled(f)}) - kept as residual`);
       }
       const repeatsOf = (f) => new Set(unmerged.filter((u) => u.id === f.id || f.duplicates?.includes(u.id)).flatMap((u) => u.repeatOf ? [u.repeatOf] : []));
-      const onPath = (labels) => {
-        const named = [...labels];
-        return (c) => c.labels.some((l) => named.some((r) => onLine(line, l, r)));
-      };
-      const aliases = (f) => [...carried, ...staged].filter(onPath(repeatsOf(f))).flatMap((c) => c.labels);
-      const gone = onPath(repeated);
-      carried = [...carried.filter((c) => !gone(c)), ...residual.map((f) => ({ round, labels: [roundLabel(round, f), ...aliases(f)], finding: f }))];
-      staged = staged.filter((b) => !gone(b));
+      const aliases = (f) => [...repeatedBy(line, [...carried, ...staged], repeatsOf(f))].flatMap((c) => c.labels);
+      const gone = repeatedBy(line, [...carried, ...staged], repeated);
+      carried = [...carried.filter((c) => !gone.has(c)), ...residual.map((f) => ({ round, labels: [roundLabel(round, f), ...aliases(f)], finding: f }))];
+      staged = staged.filter((b) => !gone.has(b));
       if (record)
         record.left.splice(0, record.left.length, ...carried.map((c) => ({ labels: c.labels.map((l) => `${record.loop.id}/${l}`), finding: c.finding })));
       if (residual.length) {

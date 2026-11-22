@@ -19,13 +19,13 @@ import {
   judgeStepPrompt,
   knownOf,
   lineOf,
-  onLine,
   mergePrompt,
   ONE_SHOT_NOTE,
   planFixPrompt,
   planJudgePrompt,
   planReviewPrompt,
   repairPrompt,
+  repeatedBy,
   reportWritePrompt,
   reviewReadPrompt,
   reviewSavePrompt,
@@ -1055,14 +1055,10 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
         host.log(`${name} r${round}: ${f.id} dropped as a repeat of ${declinedLabel(f)}, which the fixer declined (${ruled(f)}) - kept as residual`)
       }
       const repeatsOf = (f: Finding) => new Set(unmerged.filter(u => u.id === f.id || f.duplicates?.includes(u.id)).flatMap(u => (u.repeatOf ? [u.repeatOf] : [])))
-      const onPath = (labels: Iterable<string>) => {
-        const named = [...labels]
-        return (c: { labels: string[] }) => c.labels.some(l => named.some(r => onLine(line, l, r)))
-      }
-      const aliases = (f: Finding) => [...carried, ...staged].filter(onPath(repeatsOf(f))).flatMap(c => c.labels)
-      const gone = onPath(repeated)
-      carried = [...carried.filter(c => !gone(c)), ...residual.map(f => ({ round, labels: [roundLabel(round, f), ...aliases(f)], finding: f }))]
-      staged = staged.filter(b => !gone(b))
+      const aliases = (f: Finding) => [...repeatedBy(line, [...carried, ...staged], repeatsOf(f))].flatMap(c => c.labels)
+      const gone = repeatedBy(line, [...carried, ...staged], repeated)
+      carried = [...carried.filter(c => !gone.has(c)), ...residual.map(f => ({ round, labels: [roundLabel(round, f), ...aliases(f)], finding: f }))]
+      staged = staged.filter(b => !gone.has(b))
       if (record) record.left.splice(0, record.left.length, ...carried.map(c => ({ labels: c.labels.map(l => `${record.loop.id}/${l}`), finding: c.finding })))
       if (residual.length) {
         host.log(`${name} r${round}: ${residual.length} finding(s) kept as residual, not sent: ${residual.map(f => `${f.id} (${ruled(f)})`).join(', ')}`)

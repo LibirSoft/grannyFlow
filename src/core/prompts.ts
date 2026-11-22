@@ -498,21 +498,31 @@ export function lineOf(earlier: EarlierRound[]): (label: string) => string[] {
   }
 }
 
-export function onLine(line: (label: string) => string[], a: string, b: string): boolean {
-  return line(a).includes(b) || line(b).includes(a)
+export function repeatedBy<T extends { labels: string[] }>(line: (label: string) => string[], entries: T[], named: Iterable<string>): Set<T> {
+  const hit = new Set<T>()
+  for (const r of named) {
+    const up = line(r)
+    const below: T[] = []
+    for (const e of entries) {
+      if (e.labels.some(l => up.includes(l))) hit.add(e)
+      else if (e.labels.some(l => line(l).includes(r))) below.push(e)
+    }
+    if (below.length === 1) hit.add(below[0]!)
+  }
+  return hit
 }
 
 export function declinedKnown(earlier: EarlierRound[]): Known[] {
   const line = lineOf(earlier)
   const repeatsIn = (e: EarlierRound) => [...[...e.sent, ...(e.residual ?? [])].flatMap(f => (f.repeatOf === undefined ? [] : [f.repeatOf])), ...(e.repeats ?? [])].map(label => within(e, label))
-  return earlier.flatMap((e, at) => {
-    const later = earlier.slice(at + 1).flatMap(repeatsIn)
-    return (e.declined ?? []).flatMap(d => {
+  const declines = earlier.flatMap((e, at) =>
+    (e.declined ?? []).flatMap(d => {
       const f = e.sent.find(s => s.id === d.id)
-      const label = roundLabel(e.round, d, e.loop)
-      return f && !later.some(r => onLine(line, r, label)) ? [knownOf(f, d.reason || 'no reason given')] : []
-    })
-  })
+      return f ? [{ at, labels: [roundLabel(e.round, d, e.loop)], known: knownOf(f, d.reason || 'no reason given') }] : []
+    }),
+  )
+  const gone = new Set(earlier.flatMap((e, at) => [...repeatedBy(line, declines.filter(d => d.at < at), repeatsIn(e))]))
+  return declines.filter(d => !gone.has(d)).map(d => d.known)
 }
 
 const knownLine = (k: Known) => `${short(k.file)}${k.line === undefined ? '' : `:${k.line}`} - ${short(k.title)}${k.declined === undefined ? '' : ` (the fixer declined it: ${short(k.declined)})`}`

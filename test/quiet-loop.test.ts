@@ -817,6 +817,68 @@ describe('what a reviewer is told to leave out', () => {
     expect(r.stages[0]!.residual.map(x => x.title)).toEqual(['Old B', 'Old A again'])
   })
 
+  it('keeps two residuals that repeat the same earlier finding when a later kept repeat names that finding', async () => {
+    const old = { scope: 'pre-existing', repeatOf: 'r1/opus-F1' }
+    const f = fakeHost({
+      scores: [
+        { 'opus-F1': judged('major', 'edge', 'small') },
+        { 'opus-F1': judged('major', 'edge', 'small', old), 'opus-F2': judged('major', 'edge', 'small', old), 'opus-F3': judged('major', 'edge', 'small') },
+        { 'opus-F1': judged('major', 'edge', 'small', old) },
+      ],
+      override: req => {
+        if (req.label === 'review core r1 opus') return found(['P2', 'Late save', 'src/a.ts', 3])
+        if (req.label === 'review core r2 opus') return found(['P2', 'Old A', 'src/b.ts', 9], ['P2', 'Old B', 'src/b.ts', 9], ['P2', 'Lost write', 'src/c.ts', 4])
+        if (req.label === 'review core r3 opus') return found(['P2', 'Late save again', 'src/a.ts', 3])
+        return undefined
+      },
+    })
+    const r = await runGranny(f.host, input())
+    expect(r.stages[0]).toMatchObject({ outcome: 'residual-only', rounds: 3 })
+    expect(r.stages[0]!.residual.map(x => x.title)).toEqual(['Old A', 'Old B', 'Late save again'])
+  })
+
+  it('keeps two residuals that repeat the same earlier finding when a later round sends back a repeat of that finding', async () => {
+    const old = { scope: 'pre-existing', repeatOf: 'r1/opus-F1' }
+    const f = fakeHost({
+      scores: [
+        { 'opus-F1': judged('major', 'edge', 'small') },
+        { 'opus-F1': judged('major', 'edge', 'small', old), 'opus-F2': judged('major', 'edge', 'small', old), 'opus-F3': judged('major', 'edge', 'small') },
+        { 'opus-F1': judged('critical', 'edge', 'small', { repeatOf: 'r1/opus-F1' }) },
+      ],
+      override: req => {
+        if (req.label === 'review core r1 opus') return found(['P2', 'Late save', 'src/a.ts', 3])
+        if (req.label === 'review core r2 opus') return found(['P2', 'Old A', 'src/b.ts', 9], ['P2', 'Old B', 'src/b.ts', 9], ['P2', 'Lost write', 'src/c.ts', 4])
+        if (req.label === 'review core r3 opus') return found(['P2', 'Late save loses data', 'src/a.ts', 3])
+        return undefined
+      },
+    })
+    const r = await runGranny(f.host, input())
+    expect(r.stages[0]).toMatchObject({ outcome: 'clean', rounds: 4 })
+    expect(r.stages[0]!.residual.map(x => x.title)).toEqual(['Old A', 'Old B'])
+    expect(prompt(f.calls, 'review core r4 opus').split('\n').slice(-2)).toEqual(['- src/b.ts:9 - Old A', '- src/b.ts:9 - Old B'])
+  })
+
+  it('keeps on the final review list two stage residuals that repeat the same stage finding when a final round sends back a repeat of it', async () => {
+    const old = { scope: 'pre-existing', repeatOf: 'r1/opus-F1' }
+    const f = fakeHost({
+      scores: [
+        { 'opus-F1': judged('major', 'edge', 'small') },
+        { 'opus-F1': judged('major', 'edge', 'small', old), 'opus-F2': judged('major', 'edge', 'small', old) },
+        { 'opus-F1': judged('critical', 'edge', 'small', { repeatOf: 's1/r1/opus-F1' }) },
+      ],
+      override: req => {
+        if (req.label === 'review one r1 opus') return found(['P2', 'Late save', 'src/a.ts', 3])
+        if (req.label === 'review one r2 opus') return found(['P2', 'Old A', 'src/b.ts', 9], ['P2', 'Old B', 'src/b.ts', 9])
+        if (req.label === 'review final review r1 opus') return found(['P2', 'Late save loses data', 'src/a.ts', 3])
+        return undefined
+      },
+    })
+    const r = await runGranny(f.host, input(TWO_STAGES))
+    expect(r.stages[0]).toMatchObject({ outcome: 'residual-only', rounds: 2 })
+    expect(f.calls.some(c => c.label === 'fix final review r1')).toBe(true)
+    expect(prompt(f.calls, 'review final review r2 opus').split('\n').slice(-2)).toEqual(['- src/b.ts:9 - Old A', '- src/b.ts:9 - Old B'])
+  })
+
   it('drops a decline from the list once a later round sends back a repeat that names an older finding of its chain', () => {
     const earlier: EarlierRound[] = [
       { round: 1, sent: [f0('opus-F1', { title: 'Phantom' })], declined: [{ id: 'opus-F1', reason: 'no' }] },
@@ -826,6 +888,11 @@ describe('what a reviewer is told to leave out', () => {
     expect(declinedKnown([...earlier, { round: 3, sent: [f0('opus-F1', { repeatOf: 'r1/opus-F1' })] }])).toEqual([])
     const sibling: EarlierRound = { round: 2, sent: [f0('opus-F5', { title: 'Phantom elsewhere', repeatOf: 'r1/opus-F1' })], declined: [{ id: 'opus-F5', reason: 'by design' }] }
     expect(declinedKnown([earlier[0]!, { ...earlier[1]!, sent: [...earlier[1]!.sent, ...sibling.sent], declined: [...earlier[1]!.declined!, ...sibling.declined!] }, { round: 3, sent: [f0('opus-F1', { repeatOf: 'r2/opus-F4' })] }])).toEqual([
+      { file: 'src/a.ts', line: 3, title: 'Phantom elsewhere', declined: 'by design' },
+    ])
+    const siblings: EarlierRound[] = [earlier[0]!, { ...earlier[1]!, sent: [...earlier[1]!.sent, ...sibling.sent], declined: [...earlier[1]!.declined!, ...sibling.declined!] }]
+    expect(declinedKnown([...siblings, { round: 3, sent: [f0('opus-F1', { repeatOf: 'r1/opus-F1' })] }])).toEqual([
+      { file: 'src/a.ts', line: 3, title: 'Phantom again', declined: 'still no' },
       { file: 'src/a.ts', line: 3, title: 'Phantom elsewhere', declined: 'by design' },
     ])
   })
