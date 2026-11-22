@@ -173,6 +173,10 @@ export function common(p: PromptContext): string {
   ].join('\n')
 }
 
+export const reviewerRules = (rules: string[]): string[] => rules.filter(rule => !/comment/i.test(rule))
+
+const forReviewer = (p: PromptContext): PromptContext => ({ ...p, config: { ...p.config, rules: reviewerRules(p.config.rules) } })
+
 /** The header of an agent that commits nothing (the agent reviewers and the planner): the workspace without the git, commit and gate rules. */
 export function readOnlyHeader(p: PromptContext, writes: string, extra: string[] = []): string {
   return [repoLine(p), cdLine(p), ...extra, ...headerTail(p, writes, repos => `This run also changes other repos: ${repos}; read them if needed.`)].join('\n')
@@ -433,7 +437,7 @@ const taskSection = (stage?: StageTask, unit = 'Stage'): string =>
 
 const reviewAsks = (stage: StageTask | undefined, base: string): string[] => [
   'Review it the way a careful senior engineer would, in this order. Take the time it needs: a problem missed here ships.',
-  '1. What the change promises. Read the commit messages and every doc, comment and test name the change adds or edits. List for yourself each behaviour, rule, limit, number and worked example they state.',
+  '1. What the change promises. Read the commit messages and every doc and test name the change adds or edits. List for yourself each behaviour, rule, limit, number and worked example they state.',
   '2. Promise against code. For each item on that list, find the code that is meant to do it and follow it to the end. Where the docs give a number or an example, compute what the code actually returns for it. A promise the code does not keep is a finding; so is one it keeps only on the path the tests take.',
   ...(stage
     ? ['Check the diff against the TASK in the same way: a missing part of the task is a finding, and so is a change outside it (scope creep, unrelated edits); work the task leaves to other stages is not a finding.']
@@ -463,14 +467,15 @@ const REVIEW_ASK =
 /** The places an agent reviewer goes back to once its first list is written; the project's rules come last, so they do not steer the first pass. */
 function secondPass(p: PromptContext, base: string): string[] {
   const places = [
-    'what the plan, the README, comments and test names promise, against what the code does, also on the paths the tests do not take',
+    'what the plan, the README and test names promise, against what the code does, also on the paths the tests do not take',
     'every new or changed function with unusual input: missing, unknown, empty, huge, at a boundary, in another unit or scale, with separators, quotes or line breaks; the same call or message twice, calls out of order, a failure halfway through',
     'who may call it, and whether that is checked on the right party and the right record',
     `code that was moved or rewritten, against its old version (\`git show ${base}:<path>\`)`,
     'untouched code that calls what the change touched, or reads what it writes',
     'tests that could not fail if the code were wrong, and promised behaviour that no test covers',
   ]
-  const rules = p.config.rules.length ? ["- the project's rules, as the author of the change was given them:", ...p.config.rules.map(rule => `  ${rule}`)] : []
+  const kept = reviewerRules(p.config.rules)
+  const rules = kept.length ? ["- the project's rules, as the author of the change was given them:", ...kept.map(rule => `  ${rule}`)] : []
   return [
     'When you have your list, you are not done: a first pass finds about half of what is there. Go through the change once more, this time place by place, looking only for problems that are not on your list yet, and add them:',
     ...places.map((place, i) => `- ${place}${i < places.length - 1 || rules.length ? ';' : '.'}`),
@@ -619,7 +624,7 @@ export function planReviewPrompt(p: PromptContext, plans: string[]): string {
 }
 
 export function agentPlanReviewPrompt(p: PromptContext, plans: string[]): string {
-  return `${readOnlyHeader(p, 'your findings')}
+  return `${readOnlyHeader(forReviewer(p), 'your findings')}
 
 You are the plan REVIEWER. Do not edit, stage or commit anything.
 ${planReviewAsks(p, plans).slice(0, 2).join('\n')}

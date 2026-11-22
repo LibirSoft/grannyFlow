@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'bun:test'
 import { resolveConfig } from '../src/core/config'
 import { runGranny, type RunInput } from '../src/core/engine'
-import { agentReviewPrompt, commandReviewPrompt, declinedKnown, judgePrompt, knownOf, planJudgePrompt, tagPrompt, type EarlierRound } from '../src/core/prompts'
+import { agentPlanReviewPrompt, agentReviewPrompt, commandReviewPrompt, commitPrompt, declinedKnown, draftPrompt, finalPrompt, fixPrompt, implementPrompt, judgePrompt, knownOf, mergePrompt, planFixPrompt, planJudgePrompt, repairPrompt, tagPrompt, type EarlierRound } from '../src/core/prompts'
 import { decide, isPrBody, keeperOf, mergeDuplicates, type Policy } from '../src/core/review'
 import { SCHEMAS } from '../src/core/schemas'
 import { trailRound } from '../src/core/trail'
@@ -1163,5 +1163,56 @@ describe('what a reviewer is told to leave out', () => {
     const r = await runGranny(f.host, input())
     expect(r.stages[0]).toMatchObject({ outcome: 'clean', rounds: 4 })
     expect(r.stages[0]!.residual.map(x => x.title)).toEqual(['Old B', 'Old C', 'Old D'])
+  })
+})
+
+describe('what a reviewer is not sent to look at', () => {
+  const DEFAULT_COMMENT_RULE = 'Write no code comments: no line, block or doc comment in the code you add or change.'
+  const RED_FIRST = 'Every behaviour change gets a test that fails without the change - write the red half first.'
+  const USER_RULES = ['Use tabs.', 'Keep COMMENTS to one line.', 'No commented-out code.', 'No default exports.']
+  const user = { ...P, config: resolveConfig([{ rules: USER_RULES }]) }
+  const reviewers = (q: typeof P) => [agentReviewPrompt(q, 'core', 'abc'), agentPlanReviewPrompt(q, ['/p.md'])]
+
+  it('gives no reviewer a default rule about comments, and every other default rule', () => {
+    for (const text of reviewers(P)) {
+      expect(text).toContain(RED_FIRST)
+      expect(text).not.toContain(DEFAULT_COMMENT_RULE)
+    }
+  })
+
+  it('leaves out every user rule that names comments, in any case, and keeps the rest in order', () => {
+    for (const text of reviewers(user)) {
+      expect(text).not.toContain('Keep COMMENTS to one line.')
+      expect(text).not.toContain('No commented-out code.')
+      expect(text.indexOf('Use tabs.')).toBeGreaterThan(-1)
+      expect(text.indexOf('No default exports.')).toBeGreaterThan(text.indexOf('Use tabs.'))
+    }
+    const only = agentReviewPrompt({ ...P, config: resolveConfig([{ rules: ['No comments.'] }]) }, 'core', 'abc')
+    expect(only).not.toContain("the project's rules")
+    expect(only).toContain('- tests that could not fail if the code were wrong, and promised behaviour that no test covers.\n\nReturn findings')
+  })
+
+  it('does not send a reviewer to read comments', () => {
+    const agent = agentReviewPrompt(P, 'core', 'abc')
+    expect(agent).toContain('- what the plan, the README and test names promise, against what the code does, also on the paths the tests do not take;')
+    expect(agent).not.toContain('comments and test names')
+    const command = commandReviewPrompt(P, 'core', 'abc')
+    expect(command).toContain('1. What the change promises. Read the commit messages and every doc and test name the change adds or edits.')
+    expect(command).not.toContain('doc, comment and test name')
+  })
+
+  it('gives every agent that writes code or a plan every rule, unchanged', () => {
+    const writers = [
+      implementPrompt(user, { task: 'WP-01' }, 0, 1, 'core'),
+      fixPrompt(user, 'core', 1, []),
+      repairPrompt(user, 'core', 'fix r1', 1, []),
+      commitPrompt(user, 'core', 'fix r1', ' M a.ts', []),
+      mergePrompt(user, 'core', 's2-two', 'CONFLICT'),
+      finalPrompt(user, [], { stages: [], reviewOnly: false }),
+      planFixPrompt(user, ['/p.md'], 1, []),
+      draftPrompt(user, 'goal', ['/p.md']),
+    ]
+    for (const text of writers) expect(text).toContain(USER_RULES.join('\n'))
+    expect(implementPrompt(P, { task: 'WP-01' }, 0, 1, 'core')).toContain(`${RED_FIRST}\n${DEFAULT_COMMENT_RULE}`)
   })
 })

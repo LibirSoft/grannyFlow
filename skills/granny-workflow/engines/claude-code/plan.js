@@ -949,6 +949,8 @@ function common(p) {
   ].join(`
 `);
 }
+var reviewerRules = (rules) => rules.filter((rule) => !/comment/i.test(rule));
+var forReviewer = (p) => ({ ...p, config: { ...p.config, rules: reviewerRules(p.config.rules) } });
 function readOnlyHeader(p, writes, extra = []) {
   return [repoLine(p), cdLine(p), ...extra, ...headerTail(p, writes, (repos) => `This run also changes other repos: ${repos}; read them if needed.`)].join(`
 `);
@@ -1114,7 +1116,7 @@ ${stage.task}
 ` : "";
 var reviewAsks = (stage, base) => [
   "Review it the way a careful senior engineer would, in this order. Take the time it needs: a problem missed here ships.",
-  "1. What the change promises. Read the commit messages and every doc, comment and test name the change adds or edits. List for yourself each behaviour, rule, limit, number and worked example they state.",
+  "1. What the change promises. Read the commit messages and every doc and test name the change adds or edits. List for yourself each behaviour, rule, limit, number and worked example they state.",
   "2. Promise against code. For each item on that list, find the code that is meant to do it and follow it to the end. Where the docs give a number or an example, compute what the code actually returns for it. A promise the code does not keep is a finding; so is one it keeps only on the path the tests take.",
   ...stage ? ["Check the diff against the TASK in the same way: a missing part of the task is a finding, and so is a change outside it (scope creep, unrelated edits); work the task leaves to other stages is not a finding."] : [],
   "3. Every changed file, top to bottom. For each new or changed function ask what happens with: a missing or unknown id, a null, an empty or huge value, a boundary value, a value in another unit or scale, text with separators, quotes or line breaks, the same call or the same message arriving twice, calls arriving out of order, a failure halfway through, the end of a month or a day. Check who is allowed to call it, and whether that check is made on the right party and the right record.",
@@ -1136,14 +1138,15 @@ var bulletForm = (example, p1, where) => [
 var REVIEW_ASK = "Do a thorough code review: correctness bugs, regressions, security problems, data integrity, contract breaks, missing or wrong tests, and code quality. Report every problem you can confirm in the code.";
 function secondPass(p, base) {
   const places = [
-    "what the plan, the README, comments and test names promise, against what the code does, also on the paths the tests do not take",
+    "what the plan, the README and test names promise, against what the code does, also on the paths the tests do not take",
     "every new or changed function with unusual input: missing, unknown, empty, huge, at a boundary, in another unit or scale, with separators, quotes or line breaks; the same call or message twice, calls out of order, a failure halfway through",
     "who may call it, and whether that is checked on the right party and the right record",
     `code that was moved or rewritten, against its old version (\`git show ${base}:<path>\`)`,
     "untouched code that calls what the change touched, or reads what it writes",
     "tests that could not fail if the code were wrong, and promised behaviour that no test covers"
   ];
-  const rules = p.config.rules.length ? ["- the project's rules, as the author of the change was given them:", ...p.config.rules.map((rule) => `  ${rule}`)] : [];
+  const kept = reviewerRules(p.config.rules);
+  const rules = kept.length ? ["- the project's rules, as the author of the change was given them:", ...kept.map((rule) => `  ${rule}`)] : [];
   return [
     "When you have your list, you are not done: a first pass finds about half of what is there. Go through the change once more, this time place by place, looking only for problems that are not on your list yet, and add them:",
     ...places.map((place, i) => `- ${place}${i < places.length - 1 || rules.length ? ";" : "."}`),
@@ -1258,7 +1261,7 @@ function planReviewPrompt(p, plans) {
   ].filter(Boolean).join(" ").replace(/\s*\n\s*/g, " ");
 }
 function agentPlanReviewPrompt(p, plans) {
-  return `${readOnlyHeader(p, "your findings")}
+  return `${readOnlyHeader(forReviewer(p), "your findings")}
 
 You are the plan REVIEWER. Do not edit, stage or commit anything.
 ${planReviewAsks(p, plans).slice(0, 2).join(`
