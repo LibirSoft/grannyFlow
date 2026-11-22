@@ -117,6 +117,7 @@ export interface Finding {
   decision?: Decision
   duplicates?: string[]
   repeatOf?: string
+  comment?: true
 }
 
 export interface Declined {

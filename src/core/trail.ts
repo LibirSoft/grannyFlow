@@ -22,6 +22,7 @@ const FINDING_KEYS = [
   'decision',
   'duplicates',
   'repeatOf',
+  'comment',
 ] as const satisfies ReadonlyArray<keyof Finding>
 
 /** What a review loop knows when one of its rounds ends. */

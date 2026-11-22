@@ -711,6 +711,9 @@ function hold(fields, label, earlier) {
   }
   return held.length ? `repeat of ${label}: ${held.join(", ")}` : undefined;
 }
+function labelledComments(per, ids) {
+  return new Set(per.filter((x) => ids.has(x.id) && x.comment === true).map((x) => x.id));
+}
 function namedTag(entry) {
   if (typeof entry?.tag !== "string")
     return;
@@ -809,10 +812,13 @@ var rubric = (task) => `Classify every finding with exactly these fields:
   - none: not a problem.
 - likelihood: common (the normal flow) | edge (special timing or state: a race, a retry, an expired session, a boundary value, a dependency that fails) | rare (forced or malformed input, a rarely used feature). Upkeep has no trigger: use edge.
 - fixCost: trivial (a few lines) | small (one function or file plus a test) | large (cross-module, a redesign).
-- scope: in-scope | pre-existing (there before this change, and the change neither causes it nor opens a new way to reach it) | other-stage (another stage's job) | not-code (not about the code or what it does: a code comment or doc comment that is wrong, outdated, missing, too long or there against a rule, a TODO note or commented-out code included; a commit message or the commit history; the pull request description; how the work was done, such as the order tests and code were written in. A doc file such as the README is not a comment and stays in scope).
+- scope: in-scope | pre-existing (there before this change, and the change neither causes it nor opens a new way to reach it) | other-stage (another stage's job) | not-code (not about the code or what it does: a commit message or the commit history; the pull request description; how the work was done, such as the order tests and code were written in).
 - evidence: path:line plus the concrete trigger steps, e.g. \`Editor.tsx:225\` + "save -> go back -> late response arrives -> save again". Always give a path:line: without one the finding counts as unverified, which lowers its impact one class. One line: the one or two places that show it and the trigger as a chain of short steps. Do not retell the finding.
 - reason: one short sentence, at most 25 words: what decided the classification. Do not repeat the finding or the evidence.
 Example: a late save response re-binds the editor to another post's id, so the next save can overwrite the wrong post: confirmed, critical, edge, small, in-scope, though the window is narrow.`;
+var COMMENT_LABEL = `
+COMMENT - set comment to true on a finding about a code comment or doc comment itself: one that is wrong, outdated, missing or too long, a TODO note, commented-out code, or a comment added against a rule that forbids comments. The engine sets such a finding aside whatever you classify it: it is neither fixed nor kept. Leave comment out when the finding is about what the code does, even if a comment is how the reviewer saw it, and for a doc file such as the README or a markdown reference: that is not a comment. Classify every finding in full all the same.
+`;
 var SHORT_DETAIL = "at most three sentences: what is wrong, the input or state that triggers it, and the fix in a few words. Point to code as path:line; do not quote it, retell it or say how you found it";
 var repoLine = (p) => `Working repo: ${p.repo}, branch \`${p.branch}\` (verify with \`git branch --show-current\`).`;
 var cdLine = (p) => `Prefix EVERY shell command with \`cd ${shellQuote(p.repo)} &&\`.`;
@@ -1000,7 +1006,7 @@ ${p.context ? `Design context:
 Nobody fixes anything in this run. Your classification decides under which heading of the user's report each finding goes, so classify every finding on its merits: the reviewer's severity does not bind you, in either direction.
 For each finding, open the cited code and check that it is real and correctly described. Use scope in-scope or pre-existing only. ${JUDGE_DUPES}
 ${rubric("what the change set out to do")}
-
+${COMMENT_LABEL}
 REVIEW:
 ${JSON.stringify(findings)}`;
 }
@@ -1495,7 +1501,8 @@ var SCHEMAS = {
             reason: { type: "string", description: "one short sentence, at most 25 words" },
             tag: { type: "string", description: "only when the prompt has a TAGS list: the name of the tag that fits this finding, exactly as listed; omit when none fits" },
             duplicateOf: { type: "string", description: "id of another finding in this list that reports the same problem; omit when there is none" },
-            repeatOf: { type: "string", description: "label of the earlier finding this one repeats, exactly as listed under EARLIER DECISIONS (e.g. r1/codex-F2, or s1/r2/codex-F1 from a stage review); omit when it repeats none" }
+            repeatOf: { type: "string", description: "label of the earlier finding this one repeats, exactly as listed under EARLIER DECISIONS (e.g. r1/codex-F2, or s1/r2/codex-F1 from a stage review); omit when it repeats none" },
+            comment: { type: "boolean", description: "only when the prompt has a COMMENT section: true when the finding is about a code comment or doc comment itself; omit otherwise" }
           },
           required: ["id", "verdict", "impact", "likelihood", "fixCost", "scope", "evidence", "reason"]
         }
@@ -1914,9 +1921,12 @@ ${notes}`);
           return null;
         }
       },
-      apply: (per) => found.map((f) => decide(f, per.find((x) => x.id === f.id), TAG_POLICY, () => true)),
+      apply: (per) => found.filter((f) => !labelledComments(per, ids).has(f.id)).map((f) => decide(f, per.find((x) => x.id === f.id), TAG_POLICY, () => true)),
       leftTo: "under the reviewer's severity, not judged"
     });
+    const labelled = labelledComments(per, ids);
+    if (labelled.size)
+      host.log(`${labelled.size} finding(s) about code comments set aside - not in the report: ${found.filter((f) => labelled.has(f.id)).map((f) => f.id).join(", ")}`);
     const duplicateOf = new Map(per.filter((x) => ids.has(x.id) && typeof x.duplicateOf === "string" && ids.has(x.duplicateOf)).map((x) => [x.id, x.duplicateOf]));
     const placed = decided.map((f) => ({ ...f, decision: { ...f.decision, action: isJudged(f) && bucketOf(f) !== "dismissed" ? "fix" : "residual" } }));
     const { findings, merged } = mergeDuplicates(placed, duplicateOf);

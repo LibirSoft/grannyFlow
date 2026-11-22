@@ -2,7 +2,7 @@ import { describe, expect, it } from 'bun:test'
 import { resolveConfig } from '../src/core/config'
 import { runGranny, type RunInput } from '../src/core/engine'
 import { agentReviewPrompt, commandReviewPrompt, declinedKnown, judgePrompt, knownOf, planJudgePrompt, tagPrompt, type EarlierRound } from '../src/core/prompts'
-import { decide, isPrBody, type Policy } from '../src/core/review'
+import { decide, isPrBody, keeperOf, mergeDuplicates, type Policy } from '../src/core/review'
 import { SCHEMAS } from '../src/core/schemas'
 import { trailRound } from '../src/core/trail'
 import type { AgentRequest, Finding } from '../src/core/types'
@@ -151,8 +151,8 @@ describe('not-code findings', () => {
 
   it('names the not-code scope in every judge prompt, the schema and the trail check', () => {
     for (const text of [judgePrompt(P, 'abc', []), planJudgePrompt(P, ['/p.md'], []), tagPrompt(P, 'abc', [])]) {
-      expect(text).toContain("| other-stage (another stage's job) | not-code (not about the code or what it does: a code comment or doc comment that is wrong, outdated, missing, too long or there against a rule, a TODO note or commented-out code included; a commit message or the commit history; the pull request description; how the work was done,")
-      expect(text).toContain('A doc file such as the README is not a comment and stays in scope).')
+      expect(text).toContain("| other-stage (another stage's job) | not-code (not about the code or what it does: a commit message or the commit history; the pull request description; how the work was done, such as the order tests and code were written in).")
+      expect(text).not.toContain('a code comment or doc comment that is wrong')
     }
     expect((SCHEMAS.judge.properties.perFinding as { items: { properties: { scope: { enum: string[] } } } }).items.properties.scope.enum).toEqual(['in-scope', 'pre-existing', 'other-stage', 'not-code'])
     const record = trailRound({ loop: 's1', name: 'core', round: 1, base: 'main', reviewers: [], findings: [f0('a-F1', { scope: 'not-code' })] })
@@ -177,7 +177,7 @@ describe('not-code findings', () => {
   it('lets a code copy merged into a not-code copy ride along with a fix round', async () => {
     const f = fakeHost({
       scores: [{ 'opus-F1': judged('major', 'edge', 'small'), 'opus-F2': judged('major', 'common', 'small', { scope: 'not-code' }), 'opus-F3': { ...judged('moderate', 'edge', 'small'), duplicateOf: 'opus-F2' } }],
-      override: req => (req.label === 'review core r1 opus' ? found(['P2', 'Late save', 'src/a.ts', 3], ['P2', 'Doc says it returns null', 'src/b.ts', 7], ['P2', 'Throws instead of returning null', 'src/b.ts', 9]) : undefined),
+      override: req => (req.label === 'review core r1 opus' ? found(['P2', 'Late save', 'src/a.ts', 3], ['P2', 'Commit message says it returns null', 'src/b.ts', 7], ['P2', 'Throws instead of returning null', 'src/b.ts', 9]) : undefined),
     })
     const r = await runGranny(f.host, input())
     const round = r.stages[0]!.history[0]!.findings
@@ -185,12 +185,151 @@ describe('not-code findings', () => {
       ['opus-F1', 'in-scope', 80, 6, 'fix'],
       ['opus-F2', 'in-scope', 55, 9, 'fix'],
     ])
-    expect(prompt(f.calls, 'fix core r1')).toContain('Doc says it returns null')
+    expect(prompt(f.calls, 'fix core r1')).toContain('Commit message says it returns null')
   })
 
   it('tells the stage judge that what the task asks of comments, commits and the PR description is not-code', () => {
     const text = judgePrompt(P, 'abc', [], [], { number: 1, total: 1, name: 'core', task: 'WP-01' })
-    expect(text).toContain("a missing part of this stage's task is in-scope and major; what the task or a rule asks of comments, commits, the pull request description or the way of working is not-code.")
+    expect(text).toContain("a missing part of this stage's task is in-scope and major; what the task or a rule asks of commits, the pull request description or the way of working is not-code.")
+  })
+})
+
+describe('findings about code comments', () => {
+  const ASK = 'COMMENT - set comment to true on a finding about a code comment or doc comment itself'
+  const STAGE = { number: 1, total: 1, name: 'core', task: 'WP-01' }
+  const trailOf = (f: ReturnType<typeof fakeHost>, at = 0) => JSON.parse([...f.trail.values()][at]!)
+
+  it('asks the stage, final and granny judge for the comment label with no config tags, and not the plan judge', () => {
+    expect(P.config.tags).toEqual({})
+    for (const text of [judgePrompt(P, 'abc', [], [], STAGE), judgePrompt(P, 'abc', []), tagPrompt(P, 'abc', [])]) {
+      expect(text).toContain(ASK)
+      expect(text).toContain('Leave comment out when the finding is about what the code does, even if a comment is how the reviewer saw it, and for a doc file such as the README or a markdown reference: that is not a comment.')
+    }
+    expect(planJudgePrompt(P, ['/p.md'], [])).not.toContain('COMMENT - ')
+    expect((SCHEMAS.judge.properties.perFinding as { items: { properties: Record<string, { type: string }> } }).items.properties.comment).toMatchObject({ type: 'boolean' })
+  })
+
+  it('lets a finding whose duplicateOf names an id no longer in the set stand on its own', () => {
+    const keeper = keeperOf(new Map([['b', 'c'], ['d', 'b']]), new Set(['a', 'b', 'd']))
+    expect(['a', 'b', 'd'].map(keeper)).toEqual(['a', 'b', 'b'])
+    const { findings, merged } = mergeDuplicates([f0('b', { title: 'code' }), f0('e', { title: 'other' })], new Map([['b', 'c'], ['e', 'c']]))
+    expect(findings.map(x => [x.id, x.title, x.duplicates])).toEqual([['b', 'code', undefined], ['e', 'other', undefined]])
+    expect(merged).toEqual([])
+  })
+
+  it('sets aside a comment copy a code copy names as its duplicate: the fixer gets the code finding under its own title', async () => {
+    const f = fakeHost({
+      scores: [{ 'opus-F1': judged('major', 'edge', 'small'), 'opus-F2': judged('minor', 'common', 'trivial', { comment: true }), 'opus-F3': { ...judged('major', 'common', 'small'), duplicateOf: 'opus-F2' } }],
+      override: req => (req.label === 'review core r1 opus' ? found(['P2', 'Late save', 'src/a.ts', 3], ['P2', 'Doc says it returns null', 'src/b.ts', 7], ['P2', 'Throws instead of returning null', 'src/b.ts', 9]) : undefined),
+    })
+    const r = await runGranny(f.host, input())
+    expect(r.stages[0]!.history[0]!.findings.map(x => [x.id, x.title, x.duplicates, x.decision?.action])).toEqual([
+      ['opus-F1', 'Late save', undefined, 'fix'],
+      ['opus-F3', 'Throws instead of returning null', undefined, 'fix'],
+    ])
+    expect(prompt(f.calls, 'fix core r1')).toContain('Throws instead of returning null')
+    expect(prompt(f.calls, 'fix core r1')).not.toContain('Doc says it returns null')
+    expect(f.logs).toContain('core r1: 1 finding(s) about code comments set aside - not sent, not kept: opus-F2')
+    expect(f.logs.some(l => l.includes('merged'))).toBe(false)
+    const record = trailOf(f)
+    expect(record.findings.map((x: Finding) => x.id)).toEqual(['opus-F1', 'opus-F3'])
+    expect(record.setAside).toEqual([expect.objectContaining({ id: 'opus-F2', title: 'Doc says it returns null', comment: true })])
+  })
+
+  it('sets aside a comment copy that names a code finding as its duplicate, leaving the code finding alone', async () => {
+    const f = fakeHost({
+      scores: [{ 'opus-F1': judged('major', 'edge', 'small'), 'opus-F2': judged('critical', 'common', 'small', { comment: true, duplicateOf: 'opus-F1' }) }],
+      override: req => (req.label === 'review core r1 opus' ? found(['P2', 'Throws on empty input', 'src/b.ts', 9], ['P2', 'Doc comment hides the throw', 'src/b.ts', 7]) : undefined),
+    })
+    const r = await runGranny(f.host, input())
+    expect(r.stages[0]!.history[0]!.findings.map(x => [x.id, x.duplicates, x.priority])).toEqual([['opus-F1', undefined, 80]])
+    expect(prompt(f.calls, 'fix core r1')).not.toContain('Doc comment hides the throw')
+  })
+
+  it('ends a round clean when every finding is a comment, even a critical one with a fix tag', async () => {
+    const f = fakeHost({
+      scores: [{ 'opus-F1': judged('critical', 'common', 'trivial', { comment: true, tag: 'typo' }), 'opus-F2': judged('minor', 'common', 'trivial', { comment: true, scope: 'not-code' }) }],
+      override: req => (req.label === 'review core r1 opus' ? found(['P2', 'Stale doc comment', 'src/a.ts', 3], ['P3', 'TODO left in', 'src/b.ts', 1]) : undefined),
+    })
+    const r = await runGranny(f.host, input({ config: { tags: { typo: { description: 'd', fix: true } } } }))
+    expect(r.stages[0]).toMatchObject({ outcome: 'clean', rounds: 1, residual: [], unresolved: [], history: [] })
+    expect(f.calls.some(c => c.label.startsWith('fix '))).toBe(false)
+    expect(f.logs).toContain('core r1: 2 finding(s) about code comments set aside - not sent, not kept: opus-F1, opus-F2')
+    expect(f.logs).toContain('core r1: clean')
+    expect(trailOf(f)).toMatchObject({ outcome: 'clean', findings: [], setAside: [{ id: 'opus-F1', comment: true }, { id: 'opus-F2', comment: true }] })
+  })
+
+  it('sets aside a labelled finding the judge left unclassified, with no retry', async () => {
+    const f = fakeHost({
+      scores: [{ 'opus-F1': { comment: true }, 'opus-F2': judged('minor', 'common', 'trivial') }],
+      override: req => (req.label === 'review core r1 opus' ? found(['P2', 'Comment is too long', 'src/a.ts', 3], ['P3', 'Odd name', 'src/b.ts', 1]) : undefined),
+    })
+    const r = await runGranny(f.host, input())
+    expect(f.calls.some(c => c.label === 'judge core r1 retry')).toBe(false)
+    expect(r.stages[0]).toMatchObject({ outcome: 'residual-only', rounds: 1 })
+    expect(r.stages[0]!.residual.map(x => x.id)).toEqual(['opus-F2'])
+    expect(f.logs).toContain('core r1: 1 finding(s) about code comments set aside - not sent, not kept: opus-F1')
+  })
+
+  it('sets aside a critical repeat of a kept finding, which stays kept', async () => {
+    const f = fakeHost({
+      scores: [{ 'opus-F1': judged('major', 'edge', 'small'), 'opus-F2': judged('minor', 'common', 'trivial') }, { 'opus-F1': judged('critical', 'common', 'small', { repeatOf: 'r1/opus-F2', comment: true }) }],
+      override: req => {
+        if (req.label === 'review core r1 opus') return found(['P2', 'Late save', 'src/a.ts', 3], ['P3', 'Long doc line', 'src/m.rs', 19])
+        if (req.label === 'review core r2 opus') return found(['P2', 'Doc line on parse is wrong', 'src/m.rs', 19])
+        return undefined
+      },
+    })
+    const r = await runGranny(f.host, input())
+    expect(r.stages[0]).toMatchObject({ outcome: 'clean', rounds: 2 })
+    expect(f.calls.some(c => c.label === 'fix core r2')).toBe(false)
+    expect(r.stages[0]!.residual.map(x => [x.id, x.decision?.rule])).toEqual([['opus-F2', 8]])
+    expect(f.logs).toContain('core r2: 1 finding(s) about code comments set aside - not sent, not kept: opus-F1')
+  })
+
+  it('still sends a P0/P1 that skips the judge by rule 1', async () => {
+    const f = fakeHost({
+      scores: [{ 'opus-F1': judged('minor', 'common', 'trivial', { comment: true }) }],
+      override: req => (req.label === 'review core r1 opus' ? found(['P1', 'Comment lies about the lock', 'src/a.ts', 3]) : undefined),
+    })
+    const r = await runGranny(f.host, input())
+    expect(r.stages[0]!.history[0]!.findings.map(x => [x.id, x.decision])).toEqual([['opus-F1', { rule: 1, action: 'fix', why: 'P0/P1' }]])
+    expect(prompt(f.calls, 'fix core r1')).toContain('Comment lies about the lock')
+    expect(f.logs.some(l => l.includes('about code comments'))).toBe(false)
+  })
+
+  it('sets aside a P0/P1 the judge saw because the fixer declined before', async () => {
+    const f = fakeHost({
+      scores: [{ 'opus-F1': judged('major', 'edge', 'small') }, { 'opus-F1': judged('major', 'common', 'small', { comment: true }) }],
+      override: req => {
+        if (req.label === 'review core r1 opus') return found(['P2', 'Late save', 'src/a.ts', 3])
+        if (req.label === 'review core r2 opus') return found(['P1', 'Comment lies about the lock', 'src/a.ts', 9])
+        if (req.label === 'fix core r1') return { startSha: 's', headSha: 'h', gatesGreen: true, gates: 'all green', commits: [], untested: '', declined: [{ id: 'opus-F1', reason: 'not a bug' }] }
+        return undefined
+      },
+    })
+    const r = await runGranny(f.host, input())
+    expect(prompt(f.calls, 'judge core r2')).toContain('Comment lies about the lock')
+    expect(r.stages[0]).toMatchObject({ outcome: 'clean', rounds: 2 })
+    expect(f.calls.some(c => c.label === 'fix core r2')).toBe(false)
+    expect(f.logs).toContain('core r2: 1 finding(s) about code comments set aside - not sent, not kept: opus-F1')
+  })
+
+  it('ignores the label in the plan review, whose judge is not asked for it', async () => {
+    const f = fakeHost({
+      scores: [{ 'opus-F1': judged('minor', 'edge', 'small', { comment: true }) }],
+      override: req => (req.label === 'review plan review r1 opus' ? found(['P3', 'Plan asks for a doc comment', '/plans/v1.md', 4]) : req.label.startsWith('review core') ? { findings: [] } : undefined),
+    })
+    const r = await runGranny(f.host, input({ plan: '/plans/v1.md', config: { planReview: true } }))
+    expect(f.logs.some(l => l.includes('about code comments'))).toBe(false)
+    expect(r.plan!.history[0]!.findings.map(x => x.id)).toEqual(['opus-F1'])
+  })
+
+  it('keeps the comment label of a set-aside finding in the trail record, which the poster accepts', () => {
+    const aside = f0('opus-F1', { comment: true })
+    const record = trailRound({ loop: 's1', name: 'core', round: 1, base: 'main', reviewers: [], findings: [], setAside: [aside], outcome: 'clean' })
+    expect(record.setAside).toEqual([aside])
+    expect(trailProblem(JSON.parse(JSON.stringify(record)))).toBeUndefined()
   })
 })
 

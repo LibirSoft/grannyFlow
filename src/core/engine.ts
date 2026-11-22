@@ -50,7 +50,7 @@ import {
 } from './prompts'
 import { opencodeAnswer, readGrant } from './opencode'
 import { bucketOf, countsOf, isDemoted, isJudged, renderReport, severityOf, utf8Length, type ReportMeta } from './report'
-import { decide, declinedOf, holds, isBlocker, isKept, isPrBody, keeperOf, knownTag, mergeDuplicates, namedTag, parseCodexReview, reviewFailure, rideAlong, saysNoFindings, triage, type Policy } from './review'
+import { decide, declinedOf, holds, isBlocker, isKept, isPrBody, keeperOf, knownTag, labelledComments, mergeDuplicates, namedTag, parseCodexReview, reviewFailure, rideAlong, saysNoFindings, triage, type Policy } from './review'
 import { detachedReview, MAX_WAITS, planReviewScript, reportedBackend, reviewerModel, reviewPlan, reviewStem, WAIT_SECONDS } from './reviewer'
 import { SCHEMAS } from './schemas'
 import { heredocWriteScript, shellQuote } from './shell'
@@ -932,6 +932,12 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
       const keep = async (more: Partial<RoundFacts>) => {
         if (config.trail) await saveTrail(trailCwd, trailRound({ ...facts, ...more }), `${name} r${round}`, phase)
       }
+      const clean = async (): Promise<PlanResult> => {
+        host.log(`${name} r${round}: clean`)
+        host.round?.({ subject: name, round, findings: [] })
+        await keep({ outcome: 'clean' })
+        return { outcome: 'clean', rounds: round, residual: kept(), unresolved: [], history }
+      }
       const failed = results.filter(r => !r.ran)
       const found = reviewed.filter(f => !aside.includes(f))
       if (failed.length) {
@@ -945,12 +951,7 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
         await keep({ findings: found, outcome: 'review-failed', note })
         return { outcome: 'review-failed', rounds: round, residual: [], unresolved: [...found, ...earlier], history, note }
       }
-      if (!found.length) {
-        host.log(`${name} r${round}: clean`)
-        host.round?.({ subject: name, round, findings: [] })
-        await keep({ outcome: 'clean' })
-        return { outcome: 'clean', rounds: round, residual: kept(), unresolved: [], history }
-      }
+      if (!found.length) return clean()
 
       const declined = new Map(earlier.flatMap(e => (e.declined ?? []).map(d => [roundLabel(e.round, d, e.loop), d.reason] as const)))
       const entries = earlier.flatMap((e, at) =>
@@ -1002,6 +1003,7 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
         const prompt = subject.kind === 'plan' ? planJudgePrompt(p, subject.files, judged, earlier) : judgePrompt(p, subject.base, judged, earlier, subject.stage, subject.note)
         const label = `judge ${name} r${round}`
         const judgedIds = new Set(judged.map(f => f.id))
+        const commentsOf = (per: JudgeEntry[]) => (subject.kind === 'diff' ? labelledComments(per, judgedIds) : new Set<string>())
         const blockerIds = new Set(blockers.map(f => f.id))
         const duplicatesOf = (per: JudgeEntry[]) =>
           new Map(
@@ -1011,12 +1013,13 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
               .map(x => [x.id, x.duplicateOf as string]),
           )
         const decideAll = (per: JudgeEntry[]) => {
-          const entries = found.map(f => {
+          const labelled = commentsOf(per)
+          const entries = found.filter(f => !labelled.has(f.id)).map(f => {
             const s = judgedIds.has(f.id) ? per.find(x => x.id === f.id) : undefined
             const repeat = typeof s?.repeatOf === 'string' && node.has(s.repeatOf) ? { repeatOf: s.repeatOf } : {}
             return { f: { ...f, ...repeat }, s }
           })
-          const keeper = keeperOf(duplicatesOf(per), new Set(found.map(f => f.id)))
+          const keeper = keeperOf(duplicatesOf(per), new Set(entries.map(e => e.f.id)))
           const declinedGroups = new Set(entries.filter(e => declinedBefore(e.f)).map(e => keeper(e.f.id)))
           const keptGroups = new Map(entries.flatMap(e => (e.f.repeatOf !== undefined && holds(e.f, e.s, declinedBefore, earlierOf(e.f)?.finding) ? [[keeper(e.f.id), e.f.repeatOf] as const] : [])))
           const repeating = (f: Finding): Finding => (f.repeatOf === undefined && !isBlocker(f) && keptGroups.has(keeper(f.id)) ? { ...f, repeatOf: keptGroups.get(keeper(f.id))! } : f)
@@ -1031,10 +1034,16 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
           apply: decideAll,
           leftTo: 'to the implementer unjudged (rule 2)',
         })
+        const labelled = commentsOf(per)
+        const comments = found.filter(f => labelled.has(f.id))
+        if (comments.length) {
+          host.log(`${name} r${round}: ${comments.length} finding(s) about code comments set aside - not sent, not kept: ${comments.map(f => f.id).join(', ')}`)
+          facts.setAside = [...(facts.setAside ?? []), ...comments.map(f => ({ ...f, comment: true as const }))]
+        }
         const unknownTags = policy.tags
           ? per.flatMap(x => {
               const tagName = namedTag(x)
-              return judgedIds.has(x.id) && tagName !== undefined && !knownTag(policy.tags, tagName) ? [`${x.id} ${JSON.stringify(tagName.length > 40 ? `${tagName.slice(0, 40)}...` : tagName)}`] : []
+              return judgedIds.has(x.id) && !labelled.has(x.id) && tagName !== undefined && !knownTag(policy.tags, tagName) ? [`${x.id} ${JSON.stringify(tagName.length > 40 ? `${tagName.slice(0, 40)}...` : tagName)}`] : []
             })
           : []
         if (unknownTags.length) host.log(`${name} r${round}: the judge named tag(s) the config does not have - ignored: ${unknownTags.join(', ')}`)
@@ -1043,6 +1052,7 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
         unmerged = withScores
         const declinedIds = new Set(withScores.filter(declinedBefore).map(f => f.id))
         findings = rideAlong(merge.findings, policy, f => declinedBefore(f) || (f.duplicates ?? []).some(id => declinedIds.has(id)))
+        if (!findings.length) return clean()
       }
       history.push({ round, findings })
       host.log(`${name} r${round}: ${findings.length} finding(s)`)
@@ -1747,9 +1757,11 @@ export async function runJudge(host: Host, input: JudgeInput): Promise<JudgeResu
         }
       },
       // Treating every finding as a declined repeat keeps P0/P1 out of decide's rule 1, which would hide that the judge left one unclassified.
-      apply: per => found.map(f => decide(f, per.find(x => x.id === f.id), TAG_POLICY, () => true)),
+      apply: per => found.filter(f => !labelledComments(per, ids).has(f.id)).map(f => decide(f, per.find(x => x.id === f.id), TAG_POLICY, () => true)),
       leftTo: "under the reviewer's severity, not judged",
     })
+    const labelled = labelledComments(per, ids)
+    if (labelled.size) host.log(`${labelled.size} finding(s) about code comments set aside - not in the report: ${found.filter(f => labelled.has(f.id)).map(f => f.id).join(', ')}`)
     const duplicateOf = new Map(per.filter(x => ids.has(x.id) && typeof x.duplicateOf === 'string' && ids.has(x.duplicateOf)).map(x => [x.id, x.duplicateOf as string]))
     // mergeDuplicates prefers a copy to fix: here that is one the report keeps under a P heading on the judge's word.
     const placed = decided.map(f => ({ ...f, decision: { ...f.decision!, action: isJudged(f) && bucketOf(f) !== 'dismissed' ? ('fix' as const) : ('residual' as const) } }))

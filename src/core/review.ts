@@ -274,6 +274,10 @@ function hold(fields: { impact: Impact; likelihood: Likelihood; fixCost: FixCost
   return held.length ? `repeat of ${label}: ${held.join(', ')}` : undefined
 }
 
+export function labelledComments(per: ReadonlyArray<Record<string, unknown> & { id: string }>, ids: ReadonlySet<string>): Set<string> {
+  return new Set(per.filter(x => ids.has(x.id) && x.comment === true).map(x => x.id))
+}
+
 export function namedTag(entry: Record<string, unknown> | undefined): string | undefined {
   if (typeof entry?.tag !== 'string') return undefined
   const name = entry.tag.trim().toLowerCase()

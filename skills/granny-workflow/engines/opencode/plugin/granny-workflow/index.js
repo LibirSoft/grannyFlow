@@ -714,6 +714,9 @@ function hold(fields, label, earlier) {
   }
   return held.length ? `repeat of ${label}: ${held.join(", ")}` : undefined;
 }
+function labelledComments(per, ids) {
+  return new Set(per.filter((x) => ids.has(x.id) && x.comment === true).map((x) => x.id));
+}
 function namedTag(entry) {
   if (typeof entry?.tag !== "string")
     return;
@@ -844,11 +847,14 @@ var rubric = (task) => `Classify every finding with exactly these fields:
   - none: not a problem.
 - likelihood: common (the normal flow) | edge (special timing or state: a race, a retry, an expired session, a boundary value, a dependency that fails) | rare (forced or malformed input, a rarely used feature). Upkeep has no trigger: use edge.
 - fixCost: trivial (a few lines) | small (one function or file plus a test) | large (cross-module, a redesign).
-- scope: in-scope | pre-existing (there before this change, and the change neither causes it nor opens a new way to reach it) | other-stage (another stage's job) | not-code (not about the code or what it does: a code comment or doc comment that is wrong, outdated, missing, too long or there against a rule, a TODO note or commented-out code included; a commit message or the commit history; the pull request description; how the work was done, such as the order tests and code were written in. A doc file such as the README is not a comment and stays in scope).
+- scope: in-scope | pre-existing (there before this change, and the change neither causes it nor opens a new way to reach it) | other-stage (another stage's job) | not-code (not about the code or what it does: a commit message or the commit history; the pull request description; how the work was done, such as the order tests and code were written in).
 - evidence: path:line plus the concrete trigger steps, e.g. \`Editor.tsx:225\` + "save -> go back -> late response arrives -> save again". Always give a path:line: without one the finding counts as unverified, which lowers its impact one class. One line: the one or two places that show it and the trigger as a chain of short steps. Do not retell the finding.
 - reason: one short sentence, at most 25 words: what decided the classification. Do not repeat the finding or the evidence.
 Example: a late save response re-binds the editor to another post's id, so the next save can overwrite the wrong post: confirmed, critical, edge, small, in-scope, though the window is narrow.`;
 var decided = (f) => f.decision ? `${f.decision.action} - rule ${f.decision.rule}: ${f.decision.why}${f.decision.raised ? ` (ratchet raised ${f.decision.raised})` : ""}${f.decision.held ? ` (held: ${f.decision.held})` : ""}` : undefined;
+var COMMENT_LABEL = `
+COMMENT - set comment to true on a finding about a code comment or doc comment itself: one that is wrong, outdated, missing or too long, a TODO note, commented-out code, or a comment added against a rule that forbids comments. The engine sets such a finding aside whatever you classify it: it is neither fixed nor kept. Leave comment out when the finding is about what the code does, even if a comment is how the reviewer saw it, and for a doc file such as the README or a markdown reference: that is not a comment. Classify every finding in full all the same.
+`;
 function tagsSection(tags) {
   const names = Object.entries(tags ?? {});
   if (!names.length)
@@ -1297,9 +1303,9 @@ ${note ? note + `
 ` + p.context + `
 ` : ""}${taskSection(stage)}
 ${judgeRouting(findings)}
-For each finding, open the cited code and check that it is real and correctly described.${stage ? " Classify against the TASK: a finding about work another stage owns is other-stage; a missing part of this stage's task is in-scope and major; what the task or a rule asks of comments, commits, the pull request description or the way of working is not-code." : ""} ${JUDGE_DUPES}
+For each finding, open the cited code and check that it is real and correctly described.${stage ? " Classify against the TASK: a finding about work another stage owns is other-stage; a missing part of this stage's task is in-scope and major; what the task or a rule asks of commits, the pull request description or the way of working is not-code." : ""} ${JUDGE_DUPES}
 ${rubric(stage ? "the stage's TASK" : "what the change set out to do")}
-${tagsSection(p.config.tags)}${judgeHistory(earlier)}
+${COMMENT_LABEL}${tagsSection(p.config.tags)}${judgeHistory(earlier)}
 REVIEW:
 ${JSON.stringify(findings)}`;
 }
@@ -1311,7 +1317,7 @@ ${p.context ? `Design context:
 Nobody fixes anything in this run. Your classification decides under which heading of the user's report each finding goes, so classify every finding on its merits: the reviewer's severity does not bind you, in either direction.
 For each finding, open the cited code and check that it is real and correctly described. Use scope in-scope or pre-existing only. ${JUDGE_DUPES}
 ${rubric("what the change set out to do")}
-
+${COMMENT_LABEL}
 REVIEW:
 ${JSON.stringify(findings)}`;
 }
@@ -1864,7 +1870,8 @@ var SCHEMAS = {
             reason: { type: "string", description: "one short sentence, at most 25 words" },
             tag: { type: "string", description: "only when the prompt has a TAGS list: the name of the tag that fits this finding, exactly as listed; omit when none fits" },
             duplicateOf: { type: "string", description: "id of another finding in this list that reports the same problem; omit when there is none" },
-            repeatOf: { type: "string", description: "label of the earlier finding this one repeats, exactly as listed under EARLIER DECISIONS (e.g. r1/codex-F2, or s1/r2/codex-F1 from a stage review); omit when it repeats none" }
+            repeatOf: { type: "string", description: "label of the earlier finding this one repeats, exactly as listed under EARLIER DECISIONS (e.g. r1/codex-F2, or s1/r2/codex-F1 from a stage review); omit when it repeats none" },
+            comment: { type: "boolean", description: "only when the prompt has a COMMENT section: true when the finding is about a code comment or doc comment itself; omit otherwise" }
           },
           required: ["id", "verdict", "impact", "likelihood", "fixCost", "scope", "evidence", "reason"]
         }
@@ -1930,7 +1937,8 @@ var FINDING_KEYS = [
   "reason",
   "decision",
   "duplicates",
-  "repeatOf"
+  "repeatOf",
+  "comment"
 ];
 var trailDir = (config, cwd) => `${trimSlashes(cwd)}/${workOf(config)}/trail`;
 var trailId = (loop, round) => `${loop}-r${round}`;
@@ -2780,6 +2788,12 @@ the last repair's deviations: ${deviations}` : ""}`;
         if (config.trail)
           await saveTrail(trailCwd, trailRound({ ...facts, ...more }), `${name} r${round}`, phase);
       };
+      const clean = async () => {
+        host.log(`${name} r${round}: clean`);
+        host.round?.({ subject: name, round, findings: [] });
+        await keep({ outcome: "clean" });
+        return { outcome: "clean", rounds: round, residual: kept(), unresolved: [], history };
+      };
       const failed = results.filter((r) => !r.ran);
       const found = reviewed.filter((f) => !aside.includes(f));
       if (failed.length) {
@@ -2792,12 +2806,8 @@ the last repair's deviations: ${deviations}` : ""}`;
         await keep({ findings: found, outcome: "review-failed", note });
         return { outcome: "review-failed", rounds: round, residual: [], unresolved: [...found, ...earlier], history, note };
       }
-      if (!found.length) {
-        host.log(`${name} r${round}: clean`);
-        host.round?.({ subject: name, round, findings: [] });
-        await keep({ outcome: "clean" });
-        return { outcome: "clean", rounds: round, residual: kept(), unresolved: [], history };
-      }
+      if (!found.length)
+        return clean();
       const declined = new Map(earlier.flatMap((e) => (e.declined ?? []).map((d) => [roundLabel(e.round, d, e.loop), d.reason])));
       const entries = earlier.flatMap((e, at) => [...e.sent.map((f) => ({ f, sent: true })), ...(e.residual ?? []).map((f) => ({ f, sent: false }))].map(({ f, sent }) => ({
         label: roundLabel(e.round, f, e.loop),
@@ -2849,15 +2859,17 @@ the last repair's deviations: ${deviations}` : ""}`;
         const prompt = subject.kind === "plan" ? planJudgePrompt(p, subject.files, judged, earlier) : judgePrompt(p, subject.base, judged, earlier, subject.stage, subject.note);
         const label = `judge ${name} r${round}`;
         const judgedIds = new Set(judged.map((f) => f.id));
+        const commentsOf = (per) => subject.kind === "diff" ? labelledComments(per, judgedIds) : new Set;
         const blockerIds = new Set(blockers.map((f) => f.id));
         const duplicatesOf = (per) => new Map(per.filter((x) => judgedIds.has(x.id) && typeof x.duplicateOf === "string" && judgedIds.has(x.duplicateOf)).filter((x) => !blockerIds.has(x.id) || blockerIds.has(x.duplicateOf)).map((x) => [x.id, x.duplicateOf]));
         const decideAll = (per) => {
-          const entries = found.map((f) => {
+          const labelled = commentsOf(per);
+          const entries = found.filter((f) => !labelled.has(f.id)).map((f) => {
             const s = judgedIds.has(f.id) ? per.find((x) => x.id === f.id) : undefined;
             const repeat = typeof s?.repeatOf === "string" && node.has(s.repeatOf) ? { repeatOf: s.repeatOf } : {};
             return { f: { ...f, ...repeat }, s };
           });
-          const keeper = keeperOf(duplicatesOf(per), new Set(found.map((f) => f.id)));
+          const keeper = keeperOf(duplicatesOf(per), new Set(entries.map((e) => e.f.id)));
           const declinedGroups = new Set(entries.filter((e) => declinedBefore(e.f)).map((e) => keeper(e.f.id)));
           const keptGroups = new Map(entries.flatMap((e) => e.f.repeatOf !== undefined && holds(e.f, e.s, declinedBefore, earlierOf(e.f)?.finding) ? [[keeper(e.f.id), e.f.repeatOf]] : []));
           const repeating = (f) => f.repeatOf === undefined && !isBlocker(f) && keptGroups.has(keeper(f.id)) ? { ...f, repeatOf: keptGroups.get(keeper(f.id)) } : f;
@@ -2872,9 +2884,15 @@ the last repair's deviations: ${deviations}` : ""}`;
           apply: decideAll,
           leftTo: "to the implementer unjudged (rule 2)"
         });
+        const labelled = commentsOf(per);
+        const comments = found.filter((f) => labelled.has(f.id));
+        if (comments.length) {
+          host.log(`${name} r${round}: ${comments.length} finding(s) about code comments set aside - not sent, not kept: ${comments.map((f) => f.id).join(", ")}`);
+          facts.setAside = [...facts.setAside ?? [], ...comments.map((f) => ({ ...f, comment: true }))];
+        }
         const unknownTags = policy.tags ? per.flatMap((x) => {
           const tagName = namedTag(x);
-          return judgedIds.has(x.id) && tagName !== undefined && !knownTag(policy.tags, tagName) ? [`${x.id} ${JSON.stringify(tagName.length > 40 ? `${tagName.slice(0, 40)}...` : tagName)}`] : [];
+          return judgedIds.has(x.id) && !labelled.has(x.id) && tagName !== undefined && !knownTag(policy.tags, tagName) ? [`${x.id} ${JSON.stringify(tagName.length > 40 ? `${tagName.slice(0, 40)}...` : tagName)}`] : [];
         }) : [];
         if (unknownTags.length)
           host.log(`${name} r${round}: the judge named tag(s) the config does not have - ignored: ${unknownTags.join(", ")}`);
@@ -2884,6 +2902,8 @@ the last repair's deviations: ${deviations}` : ""}`;
         unmerged = withScores;
         const declinedIds = new Set(withScores.filter(declinedBefore).map((f) => f.id));
         findings = rideAlong(merge.findings, policy, (f) => declinedBefore(f) || (f.duplicates ?? []).some((id) => declinedIds.has(id)));
+        if (!findings.length)
+          return clean();
       }
       history.push({ round, findings });
       host.log(`${name} r${round}: ${findings.length} finding(s)`);
@@ -3608,9 +3628,12 @@ ${notes}`);
           return null;
         }
       },
-      apply: (per) => found.map((f) => decide(f, per.find((x) => x.id === f.id), TAG_POLICY, () => true)),
+      apply: (per) => found.filter((f) => !labelledComments(per, ids).has(f.id)).map((f) => decide(f, per.find((x) => x.id === f.id), TAG_POLICY, () => true)),
       leftTo: "under the reviewer's severity, not judged"
     });
+    const labelled = labelledComments(per, ids);
+    if (labelled.size)
+      host.log(`${labelled.size} finding(s) about code comments set aside - not in the report: ${found.filter((f) => labelled.has(f.id)).map((f) => f.id).join(", ")}`);
     const duplicateOf = new Map(per.filter((x) => ids.has(x.id) && typeof x.duplicateOf === "string" && ids.has(x.duplicateOf)).map((x) => [x.id, x.duplicateOf]));
     const placed = decided.map((f) => ({ ...f, decision: { ...f.decision, action: isJudged(f) && bucketOf(f) !== "dismissed" ? "fix" : "residual" } }));
     const { findings, merged } = mergeDuplicates(placed, duplicateOf);
