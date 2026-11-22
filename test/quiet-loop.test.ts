@@ -40,6 +40,13 @@ describe('isPrBody', () => {
     expect(isPrBody('/w/repo/.granny/PR-BODY.md', '.granny')).toBe(false)
   })
 
+  it('reads the worktree root without regard to letter case', () => {
+    expect(isPrBody('c:/repo/.granny/PR-BODY.md', '.granny', ['C:/repo'])).toBe(true)
+    expect(isPrBody('C:\\Repo\\.granny\\PR-BODY.md:4', '.granny', ['c:\\repo\\'])).toBe(true)
+    expect(isPrBody('/WORK/repo/.granny/PR-BODY.md', '.granny', ['/work/repo'])).toBe(true)
+    expect(isPrBody('/WORK/repo-x/.granny/PR-BODY.md', '.granny', ['/work/repo'])).toBe(false)
+  })
+
   it('is false for any other file, a file of that name elsewhere, and a value that is no path', () => {
     for (const file of ['PR-BODY.md', 'docs/PR-BODY.md', '.granny/PR-BODY.md.bak', '.granny/plans/PR-BODY.md', '.granny/PR-BODY', 'x.granny/PR-BODY.md', '.granny/trail/s1-r1.json', 'src/a.ts', '', undefined, 7]) {
       expect([file, isPrBody(file, '.granny')]).toEqual([file, false])
@@ -514,6 +521,30 @@ describe('a repeat of a kept finding', () => {
     expect(last.decision).toMatchObject({ rule: 6, action: 'fix', raised: 'repeat of s1/r2/opus-F1: impact major -> critical' })
     expect(last.decision!.held).toBeUndefined()
   })
+
+  it('ratchets a repeat of a refuted repeat to that refuted finding when the newest sent finding of its kept chain is older', async () => {
+    const f = fakeHost({
+      scores: [
+        { 'opus-F1': judged('minor', 'common', 'trivial'), 'opus-F2': judged('major', 'edge', 'small') },
+        { 'opus-F1': judged('critical', 'edge', 'small', { repeatOf: 'r1/opus-F1' }) },
+        { 'opus-F1': judged('minor', 'common', 'trivial', { verdict: 'refuted', evidence: 'src/k.ts:9 - guarded', repeatOf: 'r2/opus-F1' }), 'opus-F2': judged('major', 'edge', 'small') },
+        { 'opus-F1': judged('minor', 'common', 'trivial', { repeatOf: 'r3/opus-F1' }) },
+      ],
+      override: req => {
+        if (req.label === 'review core r1 opus') return found(['P3', 'Kept K', 'src/k.ts', 5], ['P2', 'Late save', 'src/a.ts', 3])
+        if (req.label === 'review core r2 opus') return found(['P2', 'K breaks the parser', 'src/k.ts', 5])
+        if (req.label === 'review core r3 opus') return found(['P3', 'K again', 'src/k.ts', 5], ['P2', 'Lost write', 'src/b.ts', 7])
+        if (req.label === 'review core r4 opus') return found(['P3', 'K once more', 'src/k.ts', 5])
+        return undefined
+      },
+    })
+    const r = await runGranny(f.host, input())
+    expect(r.stages[0]).toMatchObject({ outcome: 'residual-only', rounds: 4 })
+    const last = r.stages[0]!.history[3]!.findings[0]!
+    expect(last).toMatchObject({ impact: 'minor', decision: { rule: 8, action: 'residual' } })
+    expect(last.decision!.raised).toBeUndefined()
+    expect(last.decision!.held).toBeUndefined()
+  })
 })
 
 describe('what a reviewer is told to leave out', () => {
@@ -927,5 +958,35 @@ describe('what a reviewer is told to leave out', () => {
     expect(r.stages[0]!.history[1]!.findings.map(x => [x.id, x.duplicates, x.decision?.action])).toEqual([['opus-F1', ['opus-F2'], 'fix']])
     expect(prompt(f.calls, 'review core r2 opus')).toContain('the fixer declined it')
     expect(prompt(f.calls, 'review core r3 opus')).not.toContain('Earlier review rounds')
+  })
+
+  const keptSiblings = (third: string) =>
+    fakeHost({
+      scores: [
+        { 'opus-F1': judged('minor', 'common', 'trivial'), 'opus-F2': judged('major', 'edge', 'small') },
+        { 'opus-F1': judged('minor', 'common', 'trivial', { repeatOf: 'r1/opus-F1' }), 'opus-F2': judged('minor', 'common', 'trivial', { repeatOf: 'r1/opus-F1' }), 'opus-F3': judged('major', 'edge', 'small') },
+        { 'opus-F1': judged('minor', 'common', 'trivial', { repeatOf: third }), 'opus-F2': judged('major', 'edge', 'small') },
+      ],
+      override: req => {
+        if (req.label === 'review core r1 opus') return found(['P3', 'Old A', 'src/b.ts', 9], ['P2', 'Late save', 'src/a.ts', 3])
+        if (req.label === 'review core r2 opus') return found(['P3', 'Old B', 'src/b.ts', 9], ['P3', 'Old C', 'src/b.ts', 9], ['P2', 'Lost write', 'src/c.ts', 4])
+        if (req.label === 'review core r3 opus') return found(['P3', 'Old D', 'src/b.ts', 9], ['P2', 'Bad merge', 'src/d.ts', 2])
+        return undefined
+      },
+    })
+
+  it('keeps a residual whose kept ancestor it shares with a sibling when a later round repeats only the sibling', async () => {
+    const f = keptSiblings('r2/opus-F1')
+    const r = await runGranny(f.host, input())
+    expect(r.stages[0]).toMatchObject({ outcome: 'clean', rounds: 4 })
+    expect(r.stages[0]!.residual.map(x => x.title)).toEqual(['Old C', 'Old D'])
+    expect(prompt(f.calls, 'review core r4 opus').split('\n').slice(-2)).toEqual(['- src/b.ts:9 - Old C', '- src/b.ts:9 - Old D'])
+  })
+
+  it('keeps both residuals that repeat a kept finding when a later round repeats that kept finding', async () => {
+    const f = keptSiblings('r1/opus-F1')
+    const r = await runGranny(f.host, input())
+    expect(r.stages[0]).toMatchObject({ outcome: 'clean', rounds: 4 })
+    expect(r.stages[0]!.residual.map(x => x.title)).toEqual(['Old B', 'Old C', 'Old D'])
   })
 })

@@ -504,7 +504,7 @@ export function repeatedBy<T extends { labels: string[] }>(line: (label: string)
     const up = line(r)
     const below: T[] = []
     for (const e of entries) {
-      if (e.labels.some(l => up.includes(l))) hit.add(e)
+      if (up.includes(e.labels[0]!)) hit.add(e)
       else if (e.labels.some(l => line(l).includes(r))) below.push(e)
     }
     if (below.length === 1) hit.add(below[0]!)

@@ -161,6 +161,14 @@ describe('runJudge and the PR body', () => {
     expect(r.report).not.toContain('PR body is stale')
     expect(f.logs).toContain('1 finding(s) about the PR body set aside - not in the report: kimi-F1')
   })
+
+  it("ends the reviewer's prompt with what is not a finding, and no list of earlier findings", async () => {
+    const f = judgeHost({ findings: { kimi: [raw('F1', 'P3')] }, scores: [{ 'kimi-F1': classes('minor') }] })
+    await runJudge(f.host, { repo: REPO, config: ONE })
+    const text = f.calls.find(c => c.label.startsWith('review ') && c.label.endsWith(' kimi'))!.prompt
+    expect(text.split('\n').at(-1)).toStartWith('These are not findings, also when a rule or the plan asks for them, so leave them out:')
+    expect(text).not.toContain('Earlier review rounds')
+  })
 })
 
 describe('runJudge: the headings', () => {

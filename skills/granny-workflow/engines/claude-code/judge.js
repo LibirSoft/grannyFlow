@@ -569,7 +569,7 @@ function isPrBody(file, workDir, roots = []) {
     return body.test(path.replace(/^(?:\.\/)+/, ""));
   return roots.some((root) => {
     const top = `${slashed(root).replace(/\/+$/, "")}/`;
-    return top.length > 1 && path.startsWith(top) && body.test(path.slice(top.length));
+    return top.length > 1 && path.toLowerCase().startsWith(top.toLowerCase()) && body.test(path.slice(top.length));
   });
 }
 var isBlocker = (f) => /^\s*(p0|p1|critical|high)\b/i.test(String(f.severity ?? ""));

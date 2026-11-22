@@ -572,7 +572,7 @@ function isPrBody(file, workDir, roots = []) {
     return body.test(path.replace(/^(?:\.\/)+/, ""));
   return roots.some((root) => {
     const top = `${slashed(root).replace(/\/+$/, "")}/`;
-    return top.length > 1 && path.startsWith(top) && body.test(path.slice(top.length));
+    return top.length > 1 && path.toLowerCase().startsWith(top.toLowerCase()) && body.test(path.slice(top.length));
   });
 }
 var isBlocker = (f) => /^\s*(p0|p1|critical|high)\b/i.test(String(f.severity ?? ""));
@@ -1184,7 +1184,7 @@ function repeatedBy(line, entries, named) {
     const up = line(r);
     const below = [];
     for (const e of entries) {
-      if (e.labels.some((l) => up.includes(l)))
+      if (up.includes(e.labels[0]))
         hit.add(e);
       else if (e.labels.some((l) => line(l).includes(r)))
         below.push(e);
@@ -2809,14 +2809,22 @@ the last repair's deviations: ${deviations}` : ""}`;
       const node = new Map(entries.map((x) => [x.label, x]));
       const line = lineOf(earlier);
       const rootOf = (label) => line(label).at(-1);
-      const earlierOf = (f) => {
+      const chainOf = (f) => {
         const named = f.repeatOf === undefined ? undefined : node.get(f.repeatOf);
         if (!named)
           return;
         const root = rootOf(named.label);
         const chain = entries.filter((x) => (x.sent || isKept(x.finding)) && rootOf(x.label) === root);
         const newest = chain.some((x) => isKept(x.finding)) ? chain.reduce((a, b) => b.at > a.at || b.at === a.at && b.sent && !a.sent ? b : a) : named;
-        return { label: newest.label, finding: newest.finding };
+        return { named, newest };
+      };
+      const earlierOf = (f) => {
+        const read = chainOf(f);
+        if (!read)
+          return;
+        const { named, newest } = read;
+        const entry = newest.sent && !named.sent && !isKept(named.finding) && named.at >= newest.at ? named : newest;
+        return { label: entry.label, finding: entry.finding };
       };
       const blockers = found.filter(isBlocker);
       const judged = declined.size ? found : found.filter((f) => !isBlocker(f));
@@ -2829,7 +2837,7 @@ the last repair's deviations: ${deviations}` : ""}`;
       const declinedLabel = (f) => {
         if (f.repeatOf === undefined || declined.has(f.repeatOf))
           return f.repeatOf;
-        const read = earlierOf(f)?.label;
+        const read = chainOf(f)?.newest.label;
         return read !== undefined && declined.has(read) ? read : undefined;
       };
       const declinedBefore = (f) => isBlocker(f) ? f.repeatOf !== undefined && declined.has(f.repeatOf) : declinedLabel(f) !== undefined;

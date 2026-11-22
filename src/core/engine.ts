@@ -965,13 +965,20 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
       const node = new Map(entries.map(x => [x.label, x] as const))
       const line = lineOf(earlier)
       const rootOf = (label: string) => line(label).at(-1)!
-      const earlierOf = (f: Finding) => {
+      const chainOf = (f: Finding) => {
         const named = f.repeatOf === undefined ? undefined : node.get(f.repeatOf)
         if (!named) return undefined
         const root = rootOf(named.label)
         const chain = entries.filter(x => (x.sent || isKept(x.finding)) && rootOf(x.label) === root)
         const newest = chain.some(x => isKept(x.finding)) ? chain.reduce((a, b) => (b.at > a.at || (b.at === a.at && b.sent && !a.sent) ? b : a)) : named
-        return { label: newest.label, finding: newest.finding }
+        return { named, newest }
+      }
+      const earlierOf = (f: Finding) => {
+        const read = chainOf(f)
+        if (!read) return undefined
+        const { named, newest } = read
+        const entry = newest.sent && !named.sent && !isKept(named.finding) && named.at >= newest.at ? named : newest
+        return { label: entry.label, finding: entry.finding }
       }
       const blockers = found.filter(isBlocker)
       const judged = declined.size ? found : found.filter(f => !isBlocker(f))
@@ -983,7 +990,7 @@ export async function runGranny(host: Host, input: RunInput): Promise<RunResult>
       }
       const declinedLabel = (f: Finding) => {
         if (f.repeatOf === undefined || declined.has(f.repeatOf)) return f.repeatOf
-        const read = earlierOf(f)?.label
+        const read = chainOf(f)?.newest.label
         return read !== undefined && declined.has(read) ? read : undefined
       }
       const declinedBefore = (f: Finding) => (isBlocker(f) ? f.repeatOf !== undefined && declined.has(f.repeatOf) : declinedLabel(f) !== undefined)

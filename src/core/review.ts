@@ -114,7 +114,7 @@ export function isPrBody(file: unknown, workDir: string, roots: string[] = []): 
   if (!/^(?:\/|[a-z]:\/)/i.test(path)) return body.test(path.replace(/^(?:\.\/)+/, ''))
   return roots.some(root => {
     const top = `${slashed(root).replace(/\/+$/, '')}/`
-    return top.length > 1 && path.startsWith(top) && body.test(path.slice(top.length))
+    return top.length > 1 && path.toLowerCase().startsWith(top.toLowerCase()) && body.test(path.slice(top.length))
   })
 }
 
