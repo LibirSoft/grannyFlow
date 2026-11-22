@@ -829,7 +829,7 @@ ${text}${end}
 
 // src/core/prompts.ts
 var roundLabel = (round, f, loop) => `${loop ? `${loop.id}/` : ""}r${round}/${f.id}`;
-var judgeRouting = (findings) => findings.some(isBlocker) ? "P0/P1 findings are here only because a fixer declined findings in an earlier round: classify them like the rest. A P0/P1 goes to the implementer whatever you classify, unless its repeatOf names a finding the fixer declined - then your classification decides it." : "P0/P1 findings are not in this list: they go to the implementer without you.";
+var judgeRouting = (findings, comments = true) => findings.some(isBlocker) ? `P0/P1 findings are here only because a fixer declined findings in an earlier round: classify them like the rest. A P0/P1 goes to the implementer whatever you classify, unless ${comments ? "you set comment on it (then it is set aside) or " : ""}its repeatOf names a finding the fixer declined - then your classification decides it.` : "P0/P1 findings are not in this list: they go to the implementer without you.";
 var rubric = (task) => `Classify every finding with exactly these fields:
 - verdict: confirmed (the code shows the problem) | refuted (the code shows it is absent or not a problem) | unverified (you cannot tell either way).
 - impact, how bad IF it triggers: critical | major | moderate | minor | none.
@@ -1332,7 +1332,7 @@ function planJudgePrompt(p, plans, findings, earlier = []) {
 ${p.context ? `Design context:
 ` + p.context + `
 ` : ""}
-${judgeRouting(findings)}
+${judgeRouting(findings, false)}
 For each finding, open the cited plan line and the code, config or dependency it names, and check that it is real and correctly described. Classify impact by what the plan would cause if implemented as written; evidence is the plan's path:line plus the repo path:line that shows the problem. ${JUDGE_DUPES}
 ${rubric("the goal of the plan")}
 ${judgeHistory(earlier)}

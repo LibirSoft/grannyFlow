@@ -23,9 +23,9 @@ export interface Overruled {
 
 export const roundLabel = (round: number, f: Pick<Finding, 'id'>, loop?: EarlierRound['loop']) => `${loop ? `${loop.id}/` : ''}r${round}/${f.id}`
 
-const judgeRouting = (findings: Finding[]): string =>
+const judgeRouting = (findings: Finding[], comments = true): string =>
   findings.some(isBlocker)
-    ? 'P0/P1 findings are here only because a fixer declined findings in an earlier round: classify them like the rest. A P0/P1 goes to the implementer whatever you classify, unless its repeatOf names a finding the fixer declined - then your classification decides it.'
+    ? `P0/P1 findings are here only because a fixer declined findings in an earlier round: classify them like the rest. A P0/P1 goes to the implementer whatever you classify, unless ${comments ? 'you set comment on it (then it is set aside) or ' : ''}its repeatOf names a finding the fixer declined - then your classification decides it.`
     : 'P0/P1 findings are not in this list: they go to the implementer without you.'
 
 const rubric = (task: string) => `Classify every finding with exactly these fields:
@@ -679,7 +679,7 @@ export function judgeRetryNote(problems: Array<{ id: string; why: string }> | nu
 export function planJudgePrompt(p: PromptContext, plans: string[], findings: Finding[], earlier: EarlierRound[] = []): string {
   return `You are the JUDGE classifying the findings of a plan review. Repo ${p.repo}, branch ${p.branch}, plan ${plans.join(', ')}. Implementation has not started. Do not edit anything.
 ${p.context ? 'Design context:\n' + p.context + '\n' : ''}
-${judgeRouting(findings)}
+${judgeRouting(findings, false)}
 For each finding, open the cited plan line and the code, config or dependency it names, and check that it is real and correctly described. Classify impact by what the plan would cause if implemented as written; evidence is the plan's path:line plus the repo path:line that shows the problem. ${JUDGE_DUPES}
 ${rubric('the goal of the plan')}
 ${judgeHistory(earlier)}

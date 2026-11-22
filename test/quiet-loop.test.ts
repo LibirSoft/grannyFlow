@@ -287,6 +287,42 @@ describe('findings about code comments', () => {
     expect(f.logs).toContain('core r2: 1 finding(s) about code comments set aside - not sent, not kept: opus-F1')
   })
 
+  it('keeps a set-aside comment out of the next round: the known list and EARLIER DECISIONS do not name it', async () => {
+    const f = fakeHost({
+      scores: [{ 'opus-F1': judged('major', 'edge', 'small'), 'opus-F2': judged('minor', 'common', 'trivial', { comment: true }), 'opus-F3': judged('minor', 'common', 'trivial') }, { 'opus-F1': judged('minor', 'common', 'trivial') }],
+      override: req => {
+        if (req.label === 'review core r1 opus') return found(['P2', 'Late save', 'src/a.ts', 3], ['P3', 'Stale doc comment on save', 'src/a.ts', 1], ['P3', 'Odd name', 'src/b.ts', 2])
+        if (req.label === 'review core r2 opus') return found(['P3', 'Save still racy', 'src/a.ts', 4])
+        return undefined
+      },
+    })
+    await runGranny(f.host, input())
+    expect(prompt(f.calls, 'review core r2 opus')).toContain('Odd name')
+    expect(prompt(f.calls, 'review core r2 opus')).not.toContain('Stale doc comment on save')
+    expect(prompt(f.calls, 'judge core r2')).toContain('r1/opus-F3')
+    expect(prompt(f.calls, 'judge core r2')).not.toContain('Stale doc comment on save')
+  })
+
+  it('keeps the residual a labelled repeat names, in a round that has another finding', async () => {
+    const f = fakeHost({
+      scores: [{ 'opus-F1': judged('major', 'edge', 'small'), 'opus-F2': judged('minor', 'common', 'trivial') }, { 'opus-F1': judged('minor', 'common', 'trivial', { repeatOf: 'r1/opus-F2', comment: true }), 'opus-F2': judged('moderate', 'edge', 'small') }],
+      override: req => {
+        if (req.label === 'review core r1 opus') return found(['P2', 'Late save', 'src/a.ts', 3], ['P3', 'Long doc line', 'src/m.rs', 19])
+        if (req.label === 'review core r2 opus') return found(['P3', 'Doc comment on parse is long', 'src/m.rs', 18], ['P2', 'Lost write', 'src/b.ts', 7])
+        return undefined
+      },
+    })
+    const r = await runGranny(f.host, input())
+    expect(r.stages[0]).toMatchObject({ outcome: 'residual-only', rounds: 2 })
+    expect(r.stages[0]!.residual.map(x => x.title)).toEqual(['Long doc line', 'Lost write'])
+  })
+
+  it('tells a judge that sees a P0/P1 that the comment label sets it aside, and not the plan judge', () => {
+    const p1 = [f0('a', { severity: 'P1' })]
+    expect(judgePrompt(P, 'abc', p1)).toContain('A P0/P1 goes to the implementer whatever you classify, unless you set comment on it (then it is set aside) or its repeatOf names a finding the fixer declined - then your classification decides it.')
+    expect(planJudgePrompt(P, ['/p.md'], p1)).toContain('A P0/P1 goes to the implementer whatever you classify, unless its repeatOf names a finding the fixer declined - then your classification decides it.')
+  })
+
   it('still sends a P0/P1 that skips the judge by rule 1', async () => {
     const f = fakeHost({
       scores: [{ 'opus-F1': judged('minor', 'common', 'trivial', { comment: true }) }],
