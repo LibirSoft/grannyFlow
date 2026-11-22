@@ -74,7 +74,7 @@ When the user asks to read the last review: the newest file in `<repo>/<workDir>
 
 `<repo>/<workDir>/reviews/<date>-<branch>.md`, by default under `.granny/reviews/`, which git ignores through the excludes.
 
-A finding filed on the PR body (`<workDir>/PR-BODY.md`) is set aside before the tagging and is not in the report.
+A finding filed on the PR body (`<workDir>/PR-BODY.md`) is set aside before the tagging and is not in the report. Nor is a finding the judge labels `comment`, one about a code comment or doc comment itself: it is set aside right after the tagging, before duplicates are merged, and a finding the judge marked as its duplicate stands on its own under its own title ([config.md](config.md#judge-routing)).
 
 Its reviewers are told what is not a finding, as in a run: the end of an agent, command or opencode reviewer's prompt (a command or opencode reviewer's just before the bullet form) says to leave out code comments and doc comments, commit messages and the commit history, the pull request description and how the work was done ([config.md](config.md#what-a-reviewer-is-told-to-leave-out)). They get no list of earlier findings; a judge run has one review. A Codex reviewer gets no prompt from granny and is not told.
 

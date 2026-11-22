@@ -667,7 +667,8 @@ describe('skill docs', () => {
 
   it('documents the not-code scope and rule 11 in the config reference, the tag docs and the Cursor protocol', () => {
     const table = read('references/config.md').split('### The decision table')[1]!.split('\n### ')[0]!
-    expect(table).toContain('| `not-code` (not about the code or what it does: a code comment or doc comment')
+    expect(table).toContain('| `not-code` (not about the code or what it does: a commit message or the commit history; the PR description; how the work was done')
+    expect(table).not.toContain('a code comment or doc comment that is wrong')
     expect(table).toContain('11. (Checked after rule 5 and before rule 6; numbered last so that the rules above keep their numbers.) `scope` `not-code` → residual, `not about the code or what it does`')
     expect(table).toContain('`refuted`, `other-stage` and `not-code` findings always stay residual')
     const cursor = read('references/cursor.md')
@@ -680,6 +681,26 @@ describe('skill docs', () => {
     }
     expect(read('references/tags.md')).toContain('a finding the judge scopes `not-code`')
     expect(readRoot('CHANGELOG.md').split('\n## ')[1]!).toContain('a fourth scope, `not-code`, and rule 11')
+  })
+
+  it('documents the comment label and its set-aside where the PR-body set-aside is described', () => {
+    const config = read('references/config.md')
+    const routing = config.split('### Judge routing')[1]!.split('\n### ')[0]!
+    expect(routing).toContain('`<stage> r<n>: <k> finding(s) about code comments set aside - not sent, not kept: <ids>`')
+    expect(routing).toContain('a P0/P1 that skips the judge (step 1) is never labelled and is still sent by rule 1')
+    expect(routing).toContain('A finding whose `duplicateOf` names a labelled one stands on its own, under its own title.')
+    expect(config.split('### The decision table')[1]!.split('\n### ')[0]).toContain('- `comment`: optional, and only when the prompt has a COMMENT section')
+    expect(config.split('## Review trail')[1]!.split('\n## ')[0]).toContain('which carry `comment: true`')
+    expect(config.split('## Judge runs')[1]!.split('\n## ')[0]).toContain('finding(s) about code comments set aside - not in the report')
+    const cursor = read('references/cursor.md')
+    expect(cursor.split('\n').find(line => line.startsWith('4. **Judge**'))).toContain('Set aside every finding it labels `comment: true` before anything below')
+    expect(readFileSync(join(skill, 'engines/cursor/agents/granny-judge.md'), 'utf8')).toContain('When the prompt has a COMMENT section, set `comment` to true')
+    expect(read('references/judge.md')).toContain('Nor is a finding the judge labels `comment`')
+    expect(read('references/tags.md')).toContain('A finding the judge labels `comment`, one about a code comment, is set aside before any rule')
+    expect(read('SKILL.md')).toContain('a finding the judge labels as about a code comment is set aside before that')
+    expect(readRoot('README.md')).toContain('so is one the judge labels as about a code comment')
+    expect(read('references/prompts.md')).toContain('COMMENT - set comment to true on a finding about a code comment or doc comment itself')
+    expect(readRoot('CHANGELOG.md').split('\n## ')[1]!).toContain('Findings about code comments are set aside, on a built-in `comment` label.')
   })
 
   it('documents the hold on a repeat of a kept finding where the ratchet is described', () => {
