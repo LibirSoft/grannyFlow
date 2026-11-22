@@ -76,7 +76,7 @@ When the user asks to read the last review: the newest file in `<repo>/<workDir>
 
 A finding filed on the PR body (`<workDir>/PR-BODY.md`) is set aside before the tagging and is not in the report.
 
-Its reviewers are told what is not a finding, as in a run: the last lines of an agent, command or opencode reviewer's prompt say to leave out code comments and doc comments, commit messages and the commit history, the pull request description and how the work was done ([config.md](config.md#what-a-reviewer-is-told-to-leave-out)). They get no list of earlier findings; a judge run has one review. A Codex reviewer gets no prompt from granny and is not told.
+Its reviewers are told what is not a finding, as in a run: the end of an agent, command or opencode reviewer's prompt (a command or opencode reviewer's just before the bullet form) says to leave out code comments and doc comments, commit messages and the commit history, the pull request description and how the work was done ([config.md](config.md#what-a-reviewer-is-told-to-leave-out)). They get no list of earlier findings; a judge run has one review. A Codex reviewer gets no prompt from granny and is not told.
 
 The heading is the tagging agent's call, through its classification and not the reviewer's severity:
 
